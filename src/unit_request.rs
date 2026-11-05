@@ -1486,13 +1486,13 @@ mod stopped_tests {
         shell: &'a crate::shell::Fake,
         policy: &'a crate::config::Policy,
     ) -> Fleet<'a> {
-        Fleet {
-            ledger,
+        Fleet::cold(
             shell,
+            ledger,
             policy,
-            home: "/".into(),
-            hosts: vec![crate::hosts::Host::local()],
-        }
+            "/".into(),
+            vec![crate::hosts::Host::local()],
+        )
     }
 
     fn claimed(ledger: &Ledger, host: &str, session: &str, revision: u64) {

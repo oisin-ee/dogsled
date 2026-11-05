@@ -220,13 +220,13 @@ impl Fixture {
             )
             .unwrap(),
         );
-        let fleet = Fleet {
-            shell: &self.source,
-            ledger: &self.ledger,
-            policy: &self.policy,
-            home: "/home".into(),
-            hosts: vec![Host::local()],
-        };
+        let fleet = Fleet::cold(
+            &self.source,
+            &self.ledger,
+            &self.policy,
+            "/home".into(),
+            vec![Host::local()],
+        );
         Observers::default()
             .compose(&fleet, &mut input, NOW, reports)
             .unwrap();

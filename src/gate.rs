@@ -28,7 +28,8 @@ pub struct Findings {
     pub landed_dirty: BTreeSet<String>,
 }
 
-pub fn findings(
+#[cfg(test)]
+fn findings(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
     owner: &str,
@@ -110,17 +111,18 @@ pub(crate) fn findings_from(
 
 pub fn notices(
     ledger: &Ledger,
-    shell: &dyn crate::shell::Shell,
+    published: &crate::observation::Published,
     owner: &str,
 ) -> Result<Vec<Notice>> {
-    let Some(report) = crate::sweep::latest(ledger)? else {
+    let status: crate::commands::Status = crate::observation::read::view(published, "status")?;
+    let Some(report) = status.sweep else {
         return Ok(Vec::new());
     };
     let Findings {
         failures,
         holds,
         landed_dirty,
-    } = findings(ledger, shell, owner, &report)?;
+    } = crate::observation::read::findings(published, owner)?;
     let mut notices = Vec::new();
     if !failures.is_empty() {
         notices.push(Notice {

@@ -31,13 +31,13 @@ impl Fixture {
     }
 
     fn fleet(&self) -> Fleet<'_> {
-        Fleet {
-            shell: &self.shell,
-            ledger: &self.ledger,
-            policy: &self.policy,
-            home: "/home".into(),
-            hosts: vec![self.host.clone()],
-        }
+        Fleet::cold(
+            &self.shell,
+            &self.ledger,
+            &self.policy,
+            "/home".into(),
+            vec![self.host.clone()],
+        )
     }
 
     fn sample(&self, now: u64) {
@@ -415,10 +415,13 @@ fn gated_refresh(
         entered,
         resume: std::sync::Mutex::new(release),
     };
-    let fleet = Fleet {
-        shell: &shell,
-        ..fixture.fleet()
-    };
+    let fleet = Fleet::cold(
+        &shell,
+        fixture.fleet().ledger,
+        fixture.fleet().policy,
+        fixture.fleet().home,
+        fixture.fleet().hosts,
+    );
     std::thread::scope(|scope| {
         let pending =
             scope.spawn(|| ingestion.refresh(&fleet, &fixture.host, now, Vec::new(), wait));
@@ -735,8 +738,9 @@ fn unavailable_peer_retains_known_capability_until_a_downgraded_epoch_recovers()
         ingestion.source.as_ref().unwrap().availability,
         Availability::Available
     );
+    let actions = crate::observation::captured_actions(&fleet, 20_100).unwrap();
     let error = crate::commands::place_with(
-        &fleet,
+        &actions,
         Some(&fixture.host.id),
         "downgraded-job",
         20_100,

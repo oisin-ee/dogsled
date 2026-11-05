@@ -1,7 +1,9 @@
 //! One prompt-context formatter for Pi, Claude Code, and Codex.
 
-use crate::commands::{Status, fleet};
+use crate::commands::Status;
+use crate::error::Result;
 use crate::gate::Findings;
+use crate::observation::{Published, display::Display, read};
 use clap::ValueEnum;
 use serde::Serialize;
 
@@ -36,17 +38,41 @@ pub enum Event {
 pub fn format(
     harness: Harness,
     event: Event,
-    status: &Status,
+    published: &Published,
     owner: Option<&str>,
+) -> Result<String> {
+    let status: Status = read::view(published, "status")?;
+    let board = owner
+        .map(|owner| read::board(published, Some(owner)))
+        .transpose()?;
+    let found = owner
+        .map(|owner| read::findings(published, owner))
+        .transpose()?
+        .unwrap_or_default();
+    let display: Display = read::view(published, "status_display")?;
+    Ok(text(
+        harness,
+        event,
+        &status,
+        board.as_ref(),
+        &display,
+        &found,
+    ))
+}
+
+fn text(
+    harness: Harness,
+    event: Event,
+    status: &Status,
+    board: Option<&crate::board::Board>,
+    display: &Display,
     found: &Findings,
 ) -> String {
     if status.hosts.iter().all(|host| host.sampled_ms.is_none()) && status.sweep.is_none() {
         return String::new();
     }
-    let mut text = owner.map_or_else(String::new, |owner| {
-        crate::board::build(status, Some(owner), crate::ledger::now_ms()).owner_lines()
-    });
-    let mut rows = fleet(status);
+    let mut text = board.map_or_else(String::new, crate::board::Board::owner_lines);
+    let mut rows = display.fleet(crate::ledger::now_ms());
     if let Some(sweep) = &status.sweep
         && (!found.failures.is_empty() || !found.holds.is_empty())
     {
@@ -78,6 +104,25 @@ mod tests {
     use super::*;
     use crate::commands::brief;
     use crate::hosts::{Host, HostReport};
+
+    fn format(
+        harness: Harness,
+        event: Event,
+        status: &Status,
+        owner: Option<&str>,
+        found: &Findings,
+    ) -> String {
+        let board =
+            owner.map(|owner| crate::board::build(status, Some(owner), crate::ledger::now_ms()));
+        text(
+            harness,
+            event,
+            status,
+            board.as_ref(),
+            &Display::capture(status),
+            found,
+        )
+    }
 
     fn status() -> Status {
         Status {

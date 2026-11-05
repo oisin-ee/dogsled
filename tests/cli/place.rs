@@ -9,13 +9,14 @@ fn saved_grant(attempt: &Value) -> Value {
     }
 }
 
-pub(super) fn interrupted_placement(boundary: &str) -> (Rig, PathBuf, String) {
+pub(super) fn interrupted_placement(boundary: &str) -> (Rig, PathBuf, String, Background) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let (rig, repo) = place_rig(&format!(
         "{boundary}-{}",
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
+    let observer = placement_observer(&rig);
     let out = rig
         .cmd(&[
             "place",
@@ -39,7 +40,7 @@ pub(super) fn interrupted_placement(boundary: &str) -> (Rig, PathBuf, String) {
         .unwrap()
         .to_owned();
     assert!(rig.has_admission(&id));
-    (rig, repo, id)
+    (rig, repo, id, observer)
 }
 
 fn queue_interrupted(rig: &Rig, id: &str) {
@@ -52,8 +53,10 @@ fn queue_interrupted(rig: &Rig, id: &str) {
 
 #[test]
 fn cancellation_rejects_another_requests_saved_disposition() {
-    let (rig, _, id) = interrupted_placement("placement-result-saved");
-    let (other, _, other_id) = interrupted_placement("placement-result-saved");
+    let (rig, _, id, observer) = interrupted_placement("placement-result-saved");
+    let (other, _, other_id, other_observer) = interrupted_placement("placement-result-saved");
+    drop(observer);
+    drop(other_observer);
     queue_interrupted(&rig, &id);
     let mut admission = rig.admission(&id);
     admission["placement"]["saved"]["disposition"] =
@@ -80,7 +83,7 @@ fn cancellation_rejects_another_requests_saved_disposition() {
 
 #[test]
 fn cancellation_after_resume_completion_is_too_late_with_pending_ticket() {
-    let (rig, _, id) = interrupted_placement("placement-result-saved");
+    let (rig, _, id, _observer) = interrupted_placement("placement-result-saved");
     queue_interrupted(&rig, &id);
     let (code, result) = rig.json(&["place", "--resume", &id]);
     assert_eq!(code, 0, "{result}");
@@ -93,7 +96,8 @@ fn cancellation_after_resume_completion_is_too_late_with_pending_ticket() {
 
 #[test]
 fn cancellation_after_placement_result_saved_is_too_late() {
-    let (rig, _, id) = interrupted_placement("placement-result-saved");
+    let (rig, _, id, observer) = interrupted_placement("placement-result-saved");
+    drop(observer);
     queue_interrupted(&rig, &id);
     let (code, cancelled) = rig.json(&["cancel", "cancel-ticket"]);
     assert_eq!(code, 2, "{cancelled}");
@@ -162,7 +166,7 @@ fn state_bytes_except(path: &Path, excluded_tables: &[&str]) -> Vec<(PathBuf, Ve
             files.push((path, rows.join("\n").into_bytes()));
         } else if path.is_dir() {
             files.extend(state_bytes_except(&path, excluded_tables));
-        } else {
+        } else if path.is_file() {
             files.push((path.clone(), fs::read(path).unwrap()));
         }
     }
@@ -171,7 +175,8 @@ fn state_bytes_except(path: &Path, excluded_tables: &[&str]) -> Vec<(PathBuf, Ve
 }
 
 fn lookup_fixture(case: &str) -> (Rig, String, Value) {
-    let (rig, _, id) = interrupted_placement("placement-preparation-received");
+    let (rig, _, id, observer) = interrupted_placement("placement-preparation-received");
+    drop(observer);
     let admission = rig.admission(&id);
     let grant = saved_grant(&admission);
     let mut transport = grant["envelope"].clone();
@@ -356,7 +361,7 @@ fn queued_placement_accepts_symlinked_repository_root() {
 #[test]
 fn cancellation_basis_refuses_invalid_operation_or_request_without_releasing_claim() {
     for case in ["operation", "request"] {
-        let (rig, _, id) = interrupted_placement("placement-preparation-received");
+        let (rig, _, id, _observer) = interrupted_placement("placement-preparation-received");
         let mut intent: Value = serde_json::from_str(&rig.disposition_request(&id)).unwrap();
         let mut basis = json!({"operation_id":"cancel-operation","request_id":id});
         basis[if case == "operation" {
@@ -507,7 +512,7 @@ fn lost_placement_reply(marker: &str) {
     let (rig, repo) = place_rig(marker);
     real_preparation_peer(&rig);
     fs::write(rig.dir.join(marker), "").unwrap();
-    rig.ingest_peers();
+    let _observer = peer_observer(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -581,7 +586,7 @@ fn review_verified_absent_preparation_resends_original_delivery() {
     real_preparation_peer(&rig);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replacen("  *'host prepare '*|*'host prepared '*)", "  *'host prepare '*|*'host prepared '*)\n    case \"$*\" in *'host prepare '*) if test ! -f \"$RIG/failed-before-receipt\"; then touch \"$RIG/failed-before-receipt\"; exit 255; fi ;; esac", 1));
-    rig.ingest_peers();
+    let _observer = peer_observer(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -627,6 +632,7 @@ fn review_verified_absent_preparation_resends_original_delivery() {
 fn review_failed_preparation_finishes_matching_failure_disposition() {
     let (rig, repo) = place_rig("failure-recorded-resume");
     fs::write(rig.dir.join("setup-fails"), "").unwrap();
+    let _observer = placement_observer(&rig);
     let out = rig
         .cmd(&[
             "place",
@@ -696,7 +702,7 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
         &script.replace("DOGSLED_STATE=", "HOME=\"$RIG/alias-home\" DOGSLED_STATE="),
     );
     fs::write(rig.dir.join("lose-preparation"), "").unwrap();
-    rig.ingest_peers();
+    let _observer = peer_observer(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -742,7 +748,8 @@ fn lost_release_ack_resumes_without_preparing_again() {
 #[test]
 fn concurrent_cli_resume_and_service_replay_once() {
     use std::io::Write as _;
-    let (rig, _, id) = interrupted_placement("placement-preparation-received");
+    let (rig, _, id, observer) = interrupted_placement("placement-preparation-received");
+    drop(observer);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     let original = rig.admission(&id);
     let grant = rig.preparation_record("state", "grant", &id).read();
@@ -809,11 +816,13 @@ fn concurrent_cli_resume_and_service_replay_once() {
 fn branchless_completed_resume_skips_repository_capacity_and_preparation() {
     let rig = Rig::short("branchless-resume");
     rig.snapshot("state", rig.origin_ms, 0.0, 8);
+    let observer = placement_observer(&rig);
     let (code, placed) = rig.json(&["place", "--host", "local"]);
     assert_eq!(code, 0, "{placed}");
     assert!(placed["path"].is_null());
     assert!(placed["pane_id"].is_null());
     let id = placed["request_id"].as_str().unwrap();
+    drop(observer);
     let excluded_tables = [
         "host_snapshot",
         "host_snapshot_probe_agents_by_status",
@@ -845,7 +854,8 @@ fn resume_refuses_unknown_or_changed_requests_without_effects() {
         "claim",
         "incomplete",
     ] {
-        let (rig, _, id) = interrupted_placement("placement-preparation-received");
+        let (rig, _, id, observer) = interrupted_placement("placement-preparation-received");
+        drop(observer);
         let mut resume_id = id.clone();
         let mut args = vec!["place", "--resume"];
         match case {
@@ -907,7 +917,16 @@ case "$*" in
  *) echo 'must not reserve after report deadline' >&2; exit 2 ;;
 esac
 "#);
-    rig.ingest_peers();
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts
+                    .iter()
+                    .any(|host| host["id"] == "8103" && host["failure"] == "deadline")
+            })
+    });
     assert!(!rig.log("ssh.log").contains("host reserve"));
     let (code, error) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 2, "{error}");
@@ -990,7 +1009,7 @@ fn placement_request_is_recorded_before_reservation() {
     let go = Fifo::new(&rig.dir, "reserve.go");
     let _ready = ready.hold();
     let mut release = go.hold();
-    rig.ingest_peers();
+    let _observer = peer_observer(&rig);
     let mut child = rig.start(&["place", "--host", "netcup"]);
     assert!(read_fifo_within(ready.path(), "reserve ingress", PROCESS_DEADLINE).is_some());
     let files = rig.admissions().as_array().unwrap().clone();
@@ -1022,7 +1041,7 @@ fn lost_reply_replay(after_ttl: bool) {
     });
     real_reservation_peer(&rig, false);
     fs::write(rig.dir.join("lose-reply"), "").unwrap();
-    rig.ingest_peers();
+    let observer = peer_observer(&rig);
     let (code, queued) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 1, "{queued}");
     let ticket = rig.tickets()[0].clone();
@@ -1033,6 +1052,7 @@ fn lost_reply_replay(after_ttl: bool) {
     assert_eq!(original["reservation"], hold[0]);
     let retry = ticket["retry"]["next_ms"].as_u64().unwrap();
     let later = if after_ttl { retry + 100_000 } else { retry };
+    drop(observer);
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
     rig.snapshot("peer-state", later, 1000.0, 16);
     let output = rig.run(&["serve", "--once"]);
@@ -1071,7 +1091,7 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
     repository(&repo);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
-    rig.ingest_peers();
+    let _observer = peer_observer(&rig);
     let (code, queued) = rig.json(&[
         "place",
         "--host",
@@ -1170,7 +1190,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (rig, repo) = place_rig("cancel-pending-release");
     real_preparation_peer(&rig);
     fs::write(rig.dir.join("lose-release"), "").unwrap();
-    rig.ingest_peers();
+    let observer = peer_observer(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -1189,6 +1209,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (code, cancellation) = rig.json(&["cancel", &ticket]);
     assert_eq!(code, 2, "{cancellation}");
     assert_eq!(cancellation["status"], "too_late");
+    drop(observer);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["state"], "admitted");
@@ -1482,7 +1503,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
     let mut snapshot = peer.read("remote.json");
     snapshot.as_object_mut().unwrap().remove("placement_replay");
     peer.put("remote.json", &snapshot);
-    peer.ingest_peers();
+    let _peer_observer = peer_observer(&peer);
     let (code, error) = peer.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 2, "{error}");
     assert!(!peer.log("ssh.log").contains("host reserve"));
@@ -1492,7 +1513,7 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
     unsupported.peer();
     let script = fs::read_to_string(unsupported.dir.join("bin/ssh")).unwrap();
     unsupported.script("ssh", &script.replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", "  *'host reserve'*) cat \"$RIG/reserve.json\" ;;"));
-    unsupported.ingest_peers();
+    let _unsupported_observer = peer_observer(&unsupported);
     let (code, error) = unsupported.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 2, "{error}");
     assert!(
@@ -1509,8 +1530,10 @@ fn reservation_replay_rejects_changed_identity_and_old_peer() {
 #[test]
 fn retired_placement_cannot_repair_capacity_through_delayed_delivery() {
     let (rig, repo) = place_rig("placement-retired");
+    let observer = placement_observer(&rig);
     let (code, placed) = place(&rig, &repo, "retired", None);
     assert_eq!(code, 0, "{placed}");
+    drop(observer);
     let id = placed["reservation"].as_str().unwrap();
     let grant_path = rig.preparation_record("state", "grant", id);
     let grant = grant_path.read();
@@ -1603,6 +1626,51 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+pub(super) fn peer_observer(rig: &Rig) -> Background {
+    let sampled = rig.read("remote.json")["sampled_ms"].clone();
+    let observer = rig.serve();
+    wait_publication(rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts.iter().any(|host| {
+                    host["id"] == "8103"
+                        && host["target"] == "netcup-dev"
+                        && host["sampled_ms"] == sampled
+                })
+            })
+    });
+    observer
+}
+
+/// Crash/replay fixtures neutralize only the host's real CPU load, not other capacity checks.
+pub(super) fn placement_observer(rig: &Rig) -> Background {
+    let config = rig.dir.join("config.toml");
+    let mut policy: toml::Table = if config.exists() {
+        toml::from_str(&fs::read_to_string(config).unwrap()).unwrap()
+    } else {
+        toml::Table::new()
+    };
+    policy.insert("free_core_fraction_min".into(), toml::Value::Integer(0));
+    rig.config(&toml::to_string(&policy).unwrap());
+    let disk = rig.host()["probe"]["disk_free_percent"].as_f64().unwrap();
+    rig.script("df", &format!("#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 10000 0 {} 0%% /\n'\n", disk * 100.0));
+    let observer = rig.serve();
+    wait_publication(rig, |frame| {
+        let host = &frame["views"]["hosts"]["data"][0];
+        host["id"] == "local"
+            && host["service"] == "up"
+            && host["job_validity"] == 2
+            && frame["local"]["host"]["request_validity"] == 1
+            && frame["local"]["host"]["placement_replay"] == 3
+            && host["headroom"]["eligible"] == true
+            && host["sampled_ms"]
+                .as_u64()
+                .is_some_and(|sampled| sampled >= rig.origin_ms)
+    });
+    observer
+}
+
 /// A real repository with a `dogsled.toml` setup, and a fake Herdr whose `worktree open`
 /// opens the main checkout's workspace w7 as the anchor on first use.
 pub(super) fn place_rig(name: &str) -> (Rig, PathBuf) {
@@ -1660,6 +1728,10 @@ esac
 /// Each call starts with no reservations, so admission never decides a test's outcome.
 fn place(rig: &Rig, repo: &Path, branch: &str, base: Option<&str>) -> (i32, Value) {
     rig.put_reservations(&json!([]));
+    wait_publication(rig, |frame| {
+        let host = &frame["views"]["hosts"]["data"][0];
+        host["probe"]["reservations"] == json!([]) && host["headroom"]["eligible"] == true
+    });
     let mut args = vec![
         "place",
         "--branch",
@@ -1680,6 +1752,7 @@ fn locks(repo: &Path) -> String {
 #[test]
 fn place_creates_a_locked_worktree_runs_setup_opens_it_and_records_the_anchor() {
     let (rig, repo) = place_rig("place-create");
+    let _observer = placement_observer(&rig);
     // The caller works in another linked worktree's subdirectory; placement uses the main checkout.
     git(
         &repo,
@@ -1738,6 +1811,7 @@ fn place_runs_setup_from_the_base_revision_instead_of_the_main_checkout() {
     git(&repo, &["commit", "-q", "-am", "new setup"]);
     let base = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["checkout", "-q", "main"]);
+    let _observer = placement_observer(&rig);
 
     let (code, placed) = place(&rig, &repo, "from-new-setup", Some(base.trim()));
     assert_eq!(code, 0, "{placed}");
@@ -1757,6 +1831,7 @@ fn place_skips_setup_when_the_base_revision_has_no_repository_config() {
     git(&repo, &["commit", "-q", "-m", "remove repository config"]);
     let base = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["checkout", "-q", "main"]);
+    let _observer = placement_observer(&rig);
 
     let (code, placed) = place(&rig, &repo, "from-no-config", Some(base.trim()));
     assert_eq!(code, 0, "{placed}");
@@ -1769,6 +1844,7 @@ fn place_skips_setup_when_the_base_revision_has_no_repository_config() {
 #[test]
 fn place_bases_new_branches_reuses_existing_ones_and_refuses_foreign_work() {
     let (rig, repo) = place_rig("place-branches");
+    let _observer = placement_observer(&rig);
     let first = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "second"]);
     assert_eq!(place(&rig, &repo, "from-base", Some("HEAD~1")).0, 0);
@@ -1846,6 +1922,7 @@ fn place_bases_new_branches_reuses_existing_ones_and_refuses_foreign_work() {
 #[test]
 fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation() {
     let (rig, repo) = place_rig("place-setup-fails");
+    let _observer = placement_observer(&rig);
     fs::write(rig.dir.join("setup-fails"), "").unwrap();
     let (code, error) = place(&rig, &repo, "feat/x", None);
     assert_eq!(code, 2, "{error}");
@@ -1891,6 +1968,7 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
 #[test]
 fn repository_and_host_config_errors_are_explicit() {
     let (rig, repo) = place_rig("place-config");
+    let observer = placement_observer(&rig);
     fs::write(
         repo.join("dogsled.toml"),
         "[worktree]\nsetup = [\"echo {base}\"]\n",
@@ -1906,8 +1984,16 @@ fn repository_and_host_config_errors_are_explicit() {
     assert!(error["error"].as_str().unwrap().contains("unknown field"));
     assert!(!repo.join(".worktrees/feat-x").exists());
     // The host hooks moved to the repository.
+    drop(observer);
     rig.config("[hooks]\nprepare = ['true']\n");
-    let (code, error) = place(&rig, &repo, "feat/x", None);
+    rig.put_reservations(&json!([]));
+    let (code, error) = rig.json(&[
+        "place",
+        "--repo",
+        repo.to_str().unwrap(),
+        "--branch",
+        "feat/x",
+    ]);
     assert_eq!(code, 2);
     assert!(error["error"].as_str().unwrap().contains("unknown field"));
 }

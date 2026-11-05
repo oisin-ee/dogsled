@@ -75,9 +75,13 @@ impl Observers {
             return Ok(());
         }
         self.discovered = Some(Instant::now());
-        let discovered =
-            Fleet::discover(fleet.shell, fleet.ledger, fleet.policy, fleet.home.clone())?;
-        self.hosts = discovered.hosts;
+        let discovered = crate::hosts::ObserverFleet::discover(
+            fleet.shell,
+            fleet.ledger,
+            fleet.policy,
+            fleet.home.clone(),
+        )?;
+        self.hosts = discovered.0.hosts;
         self.workers.retain(|id, worker| {
             self.hosts
                 .iter()
@@ -226,13 +230,7 @@ fn poll(
 ) {
     ledger.budget = crate::budget::Budget::default();
     let shell = System::default();
-    let fleet = Fleet {
-        shell: &shell,
-        ledger: &ledger,
-        policy,
-        home,
-        hosts: vec![host.clone()],
-    };
+    let fleet = Fleet::producer(&shell, &ledger, policy, home, vec![host.clone()]);
     let mut ingestion = Ingestion::default();
     loop {
         if shared

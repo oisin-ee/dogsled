@@ -361,6 +361,10 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
+    /// Project initialized stored fixture rows without observation or mutation.
+    #[cfg(debug_assertions)]
+    #[command(hide = true)]
+    Project,
     Inbox {
         terminal: String,
         #[arg(long)]

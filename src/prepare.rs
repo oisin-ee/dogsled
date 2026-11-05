@@ -601,7 +601,7 @@ pub struct LookupReply {
 
 pub fn lookup(fleet: &Fleet, query: &LookupRequest) -> Result<LookupState> {
     let host = &query.placement.envelope.host;
-    if *fleet.find(&host.id)? != *host {
+    if crate::hosts::command_host(fleet, &host.id)? != *host {
         return Err(crate::unit_transport::conflict(
             "preparation lookup host changed",
         ));
@@ -801,7 +801,7 @@ pub fn historical_on_host(
 }
 
 pub fn lookup_historical(fleet: &Fleet, host: &Host, id: &str) -> Result<disposition::Historical> {
-    if *fleet.find(&host.id)? != *host {
+    if crate::hosts::command_host(fleet, &host.id)? != *host {
         return Err(worktree::refuse("retirement host changed"));
     }
     let query = HistoricalQuery {
@@ -834,7 +834,7 @@ pub fn lookup_historical(fleet: &Fleet, host: &Host, id: &str) -> Result<disposi
 }
 
 pub fn lookup_preparation(fleet: &Fleet, query: &PreparationLookup) -> Result<LookupState> {
-    if *fleet.find(&query.host.id)? != query.host {
+    if crate::hosts::command_host(fleet, &query.host.id)? != query.host {
         return Err(crate::unit_transport::conflict(
             "preparation lookup host changed",
         ));

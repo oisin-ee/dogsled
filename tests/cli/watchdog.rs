@@ -419,6 +419,14 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
         "ssh",
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/ssh.log\"\ncat \"$RIG/plan.json\"\n",
     );
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     assert_eq!(rig.json(&["doctor", "--host", "netcup"]).1, plan);
     assert!(rig.log("ssh.log").contains("host doctor"));
 }

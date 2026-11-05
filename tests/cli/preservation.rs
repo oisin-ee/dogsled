@@ -772,6 +772,7 @@ case "$*" in
   *) echo unexpected >&2; exit 2 ;;
 esac
 "#);
+    let publisher = super::observation::resolved(&rig);
     let out = rig.run(&["close", "w2:p1", "--host", "8103"]);
     assert!(!out.status.success());
     assert!(!tree.exists(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -782,10 +783,13 @@ esac
         "origin close must send its recorded item"
     );
     assert!(rig.items()[0]["closed_ms"].is_null());
+    drop(publisher);
     fs::create_dir(&tree).unwrap();
     super::close::git(&tree, &["init", "-q", "-b", "main"]);
     fs::write(tree.join("replacement"), b"new owner\n").unwrap();
     let replacement = fs::read(tree.join(".git/HEAD")).unwrap();
+    let _publisher = super::observation::resolved(&rig);
+    assert!(rig.items()[0]["closed_ms"].is_null());
     let (code, replay) = rig.json(&["close", "w2:p1", "--host", "8103"]);
     assert_eq!(code, 0, "{replay}");
     assert_eq!(replay, original);
@@ -1301,6 +1305,7 @@ fn p2_remote_restore_uses_selected_host_only() {
         "ssh",
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/ssh.log"
+printf '%s %s\n' "${DOGSLED_TEST_ROLE:-actor}" "$*" >> "$RIG/ssh-roles.log"
 for remote do :; done
 if test -f "$RIG/unsupported"; then echo 'recovery unsupported' >&2; exit 2; fi
 DOGSLED_STATE="$RIG/peer-state" sh -c "$remote"
@@ -1310,15 +1315,26 @@ DOGSLED_STATE="$RIG/peer-state" sh -c "$remote"
         "remote_command = ['{}']\n",
         env!("CARGO_BIN_EXE_dogsled")
     ));
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     let to = rig.dir.join("remote-destination");
     let (code, result) = restore(&rig, &repo, &snapshot, &to, &["--host", "netcup"]);
     assert_eq!(code, 0, "{result}");
     assert!(to.exists());
     assert!(rig.log("ssh.log").contains("host recovery restore"));
     assert_eq!(
-        rig.log("ssh.log").lines().count(),
+        rig.log("ssh-roles.log")
+            .lines()
+            .filter(|line| line.starts_with("actor "))
+            .count(),
         1,
-        "no fleet search or other peer"
+        "one restore effect, no actor fleet search or other peer"
     );
     assert!(rig.log("ssh.log").contains("netcup"));
     assert_eq!(

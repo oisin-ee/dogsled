@@ -197,7 +197,9 @@ pub fn retire(
             let captured = audit(&saved)?;
             if captured.request_id != id
                 || captured.reason != reason
-                || selected.is_some_and(|host| fleet.find(host).ok() != Some(&captured.host))
+                || selected.is_some_and(|host| {
+                    crate::hosts::command_host(fleet, host).ok().as_ref() != Some(&captured.host)
+                })
             {
                 return Err(conflict(
                     "retirement expectation changed; replay the saved operation",
@@ -308,11 +310,12 @@ fn select_host(fleet: &Fleet, admission: Option<&Value>, selected: Option<&str>)
         }
     }
     let host = if let Some(selected) = selected {
-        fleet.find(selected)?.clone()
+        crate::hosts::command_host(fleet, selected)?
     } else {
         recorded.clone().unwrap_or_else(Host::local)
     };
-    if recorded.as_ref().is_some_and(|recorded| recorded != &host) || *fleet.find(&host.id)? != host
+    if recorded.as_ref().is_some_and(|recorded| recorded != &host)
+        || crate::hosts::command_host(fleet, &host.id)? != host
     {
         return Err(conflict("retirement selected host changed"));
     }
@@ -364,7 +367,7 @@ fn finish(fleet: &Fleet, intent: &mut Intent) -> Result<()> {
     if current != intent.request {
         return Err(conflict("retirement originating request changed"));
     }
-    if captured.host != *fleet.find(&captured.host.id)? {
+    if captured.host != crate::hosts::command_host(fleet, &captured.host.id)? {
         return Err(conflict("retirement transport host changed"));
     }
     if let Some(ack) = &intent.acknowledgement {

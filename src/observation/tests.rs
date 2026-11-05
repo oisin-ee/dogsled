@@ -1,3 +1,4 @@
+mod actions;
 mod context_fixture;
 mod local;
 mod peer;

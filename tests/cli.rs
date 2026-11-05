@@ -571,6 +571,7 @@ const CONTRACT: &str = "End every turn with exactly one of: done (whole task com
 
 const HERDR_SCRIPT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"
+printf '%s %s\n' "${DOGSLED_TEST_ROLE:-actor}" "$*" >> "$RIG/herdr-roles.log"
 # The line Herdr types for `agent start`: the kind, then each argument shell-quoted.
 # A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
 if test "$1 $2" = 'agent start'; then
@@ -809,8 +810,10 @@ esac
 
     fn script(&self, name: &str, text: &str) {
         let path = self.dir.join("bin").join(name);
-        fs::write(&path, text).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        let temporary = path.with_extension("next");
+        fs::write(&temporary, text).unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(temporary, path).unwrap();
     }
 
     fn config(&self, text: &str) {
@@ -823,6 +826,16 @@ esac
         }
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
         cmd.env("DOGSLED_BIN", env!("CARGO_BIN_EXE_dogsled"));
+        cmd.env(
+            "DOGSLED_TEST_ROLE",
+            if args.first() == Some(&"serve")
+                || args.windows(2).any(|pair| pair == ["state", "project"])
+            {
+                "observer"
+            } else {
+                "actor"
+            },
+        );
         cmd.args(args);
         if args.windows(2).any(|w| w == ["host", "reserve"]) && !args.contains(&"--owner") {
             cmd.args(["--owner", "w1:p1", "--owner-host", "origin"]);
@@ -2053,6 +2066,21 @@ fn wait_publication_at(rig: &Rig, state: &Path, ready: impl Fn(&Value) -> bool) 
     let deadline = Instant::now() + PROCESS_DEADLINE;
     let mut last = String::new();
     loop {
+        if std::os::unix::net::SocketAddr::from_pathname(state.join("observation.sock")).is_err() {
+            // The production client owns secure fallback-path resolution for long states.
+            let output = rig
+                .cmd(&["observation", "current"])
+                .env("DOGSLED_STATE", state)
+                .output()
+                .unwrap();
+            if output.status.success()
+                && let Ok(frame) = serde_json::from_slice::<Value>(&output.stdout)
+                && ready(&frame)
+            {
+                return frame;
+            }
+            last = String::from_utf8_lossy(&output.stderr).into_owned();
+        }
         if let Ok(mut socket) =
             std::os::unix::net::UnixStream::connect(state.join("observation.sock"))
         {
@@ -2198,6 +2226,7 @@ fn place_reserves_most_headroom_and_respects_host_pin() {
     rig.peer();
     rig.ingest_peers();
     rig.snapshot("state", now(), 0.0, 2);
+    let _publisher = observation::seeded(&rig);
     let (code, placed) = rig.json(&["place"]);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "8103");
@@ -2218,7 +2247,9 @@ fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
     rig.ingest_peers();
     rig.snapshot("state", now(), 0.0, 2);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let observer = observation::seeded(&rig);
     let (code, placed) = rig.json(&["place"]);
+    drop(observer);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "local");
     rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 860 140 86%% /\n'\n");
@@ -2242,13 +2273,16 @@ fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
 fn full_is_exit_one_with_durable_queue() {
     let rig = Rig::new("full");
     rig.snapshot("state", now(), 3.0, 2);
+    let publisher = observation::seeded(&rig);
     let output = rig.run(&["place"]);
     assert_eq!(output.status.code(), Some(1));
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["queued"], true);
     assert!(value["ticket"].is_string());
     assert_eq!(rig.tickets()[0]["state"], "pending");
+    drop(publisher);
     rig.snapshot("state", 0, 0.0, 2);
+    let _publisher = observation::seeded(&rig);
     assert_eq!(rig.json(&["place"]).0, 1);
 }
 
@@ -2256,6 +2290,7 @@ fn full_is_exit_one_with_durable_queue() {
 fn concurrent_placement_rechecks_capacity_under_host_lock() {
     let rig = Rig::new("concurrent-place");
     rig.snapshot("state", now(), 2.0, 2);
+    let _publisher = observation::seeded(&rig);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| rig.json(&["place"]).0))
@@ -2271,8 +2306,13 @@ fn concurrent_placement_rechecks_capacity_under_host_lock() {
 fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     let rig = Rig::new("reservation");
     rig.snapshot("state", now(), 2.0, 2);
+    let publisher = observation::seeded(&rig);
     assert_eq!(rig.json(&["place"]).0, 0);
-    assert!(!rig.log("herdr.log").contains("agent list"));
+    assert!(
+        !rig.log("herdr-roles.log")
+            .lines()
+            .any(|line| line == "actor agent list")
+    );
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
@@ -2280,6 +2320,7 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     assert_eq!(rig.json(&["place"]).0, 1);
     let queued = rig.tickets()[0]["id"].as_str().unwrap().to_owned();
     assert!(rig.run(&["cancel", &queued]).status.success());
+    drop(publisher);
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
     rig.put_reservations(&json!([{"id":"expired","created_ms":now()-90_001}]));
@@ -2529,6 +2570,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     rig.peer();
     rig.config("remote_command = ['custom', 'dogsled']\n");
     rig.ingest_peers();
+    let observer = place::peer_observer(&rig);
     let (code, placed) = rig.json(&[
         "place",
         "--host",
@@ -2540,6 +2582,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         "--repo",
         repo.to_str().unwrap(),
     ]);
+    drop(observer);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["path"], "/remote/tree");
     let ssh = rig.log("ssh.log");

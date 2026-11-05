@@ -74,6 +74,7 @@ pub(crate) struct Server {
     thread: Option<JoinHandle<()>>,
     lock: File,
     path: PathBuf,
+    state: PathBuf,
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
 }
@@ -94,7 +95,8 @@ impl Server {
             stop: None,
             thread: None,
             lock,
-            path: state.join(SOCKET),
+            path: super::socket_path(state, SOCKET)?,
+            state: state.to_owned(),
             interests: super::peers::Interests::default(),
             dirty: None,
         })
@@ -113,6 +115,7 @@ impl Server {
         if self.thread.is_some() {
             return Err(Error::Invalid("observation endpoint already bound".into()));
         }
+        self.path = super::socket_path(&self.state, SOCKET)?;
         let path = &self.path;
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
@@ -267,7 +270,19 @@ async fn connection(
         if let Some(host) = request.host
             && let Some(dirty) = dirty.as_ref()
         {
-            let token = dirty.retry_peer(host);
+            let frame = receiver.borrow().clone();
+            let Some(frame) = frame else {
+                return failure(&socket, "unavailable", "observation unavailable").await;
+            };
+            let reports: Vec<crate::hosts::HostReport> =
+                super::read::view(&frame.published, "hosts")?;
+            let Some(selected) = reports
+                .into_iter()
+                .find(|report| report.host.id == host || report.host.label == host)
+            else {
+                return failure(&socket, "unknown_host", &format!("unknown host {host}")).await;
+            };
+            let token = dirty.retry_peer(selected.host.id);
             let mut bytes = serde_json::to_vec(&RetryAck { retry_token: token })?;
             bytes.push(b'\n');
             return write(&socket, &bytes).await;
@@ -352,18 +367,19 @@ async fn updated(
 /// This client has only a socket path. It cannot discover, derive, lock, or repair state.
 #[derive(Debug, Clone)]
 pub(crate) struct Client {
-    path: PathBuf,
+    state: PathBuf,
 }
 
 impl Client {
     pub fn at(state: &Path) -> Self {
         Self {
-            path: state.join(SOCKET),
+            state: state.to_owned(),
         }
     }
 
-    fn open(&self, operation: Operation) -> Result<UnixStream> {
-        let mut socket = UnixStream::connect(&self.path).map_err(|error| {
+    fn connect(&self) -> Result<UnixStream> {
+        let path = super::socket_path(&self.state, SOCKET)?;
+        UnixStream::connect(path).map_err(|error| {
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
@@ -372,7 +388,11 @@ impl Client {
             } else {
                 unavailable(&error)
             }
-        })?;
+        })
+    }
+
+    fn open(&self, operation: Operation) -> Result<UnixStream> {
+        let mut socket = self.connect()?;
         socket
             .set_write_timeout(Some(TIMEOUT))
             .map_err(|error| unavailable(&error))?;
@@ -395,7 +415,7 @@ impl Client {
     }
 
     pub fn retry(&self, host: &str) -> Result<String> {
-        let mut socket = UnixStream::connect(&self.path).map_err(|error| unavailable(&error))?;
+        let mut socket = self.connect()?;
         socket.set_write_timeout(Some(TIMEOUT))?;
         socket.set_read_timeout(Some(TIMEOUT))?;
         serde_json::to_writer(
@@ -412,6 +432,9 @@ impl Client {
         BufReader::new(socket)
             .take(MAX_FRAME_BYTES as u64 + 1)
             .read_line(&mut line)?;
+        if let Ok(failure) = serde_json::from_str::<Failure>(&line) {
+            return Err(Error::Invalid(failure.error.message));
+        }
         let ack: RetryAck = serde_json::from_str(&line).map_err(|_| {
             Error::Invalid("observation unavailable: invalid retry acknowledgment".into())
         })?;
@@ -419,7 +442,7 @@ impl Client {
     }
 
     pub fn peer(&self, request: super::peers::Request) -> Result<super::peers::Export> {
-        let mut socket = UnixStream::connect(&self.path).map_err(|error| unavailable(&error))?;
+        let mut socket = self.connect()?;
         socket.set_read_timeout(Some(TIMEOUT))?;
         socket.set_write_timeout(Some(TIMEOUT))?;
         serde_json::to_writer(

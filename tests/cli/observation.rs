@@ -6,6 +6,7 @@ use std::sync::mpsc;
 /// A supplied wire publication, not an observer. Its data deliberately differs from the
 /// local inputs, so a reader that reconstructs even one section fails these assertions.
 pub(super) struct Supplied {
+    path: PathBuf,
     updates: mpsc::Sender<Option<Value>>,
     requests: mpsc::Receiver<Value>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -13,7 +14,19 @@ pub(super) struct Supplied {
 
 impl Supplied {
     pub(super) fn start(rig: &Rig, mut frame: Value) -> Self {
-        let listener = UnixListener::bind(rig.dir.join("state/observation.sock")).unwrap();
+        let path = rig.dir.join("state/observation.sock");
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            use std::os::unix::fs::FileTypeExt as _;
+            assert!(metadata.file_type().is_socket(), "{}", path.display());
+            assert_eq!(
+                std::os::unix::net::UnixStream::connect(&path)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::ConnectionRefused
+            );
+            fs::remove_file(&path).unwrap();
+        }
+        let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let (updates, incoming) = mpsc::channel();
         let (requests, received) = mpsc::channel();
@@ -46,6 +59,7 @@ impl Supplied {
             }
         });
         Self {
+            path,
             updates,
             requests: received,
             thread: Some(thread),
@@ -76,7 +90,46 @@ impl Drop for Supplied {
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
         }
+        fs::remove_file(&self.path).unwrap();
     }
+}
+
+/// Capacity fixtures publish the producer's projection of the exact seeded rows that
+/// reserve revalidates. No live sampler may replace those rows during this guard.
+pub(super) fn resolved(rig: &Rig) -> Supplied {
+    let publisher = seeded(rig);
+    let (code, frame) = rig.json(&["observation", "current"]);
+    assert_eq!(code, 0, "{frame}");
+    assert!(
+        frame["gaps"].as_array().unwrap().is_empty(),
+        "resolve projection gap: {}",
+        frame["gaps"]
+    );
+    for domain in ["hosts", "agents", "findings"] {
+        assert!(
+            !frame["views"][domain]["data"].is_null(),
+            "{domain}: {frame}"
+        );
+    }
+    publisher
+}
+
+pub(super) fn seeded(rig: &Rig) -> Supplied {
+    let mut command = rig.cmd(&["state", "project"]);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(), &rig.read("machines.json")).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let frame: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let publisher = Supplied::start(rig, frame);
+    wait_publication(rig, |frame| {
+        frame["views"]["hosts"]["data"][0]["probe"] == rig.host()["probe"]
+    });
+    publisher
 }
 
 #[path = "../fixtures/observation/load.rs"]
@@ -115,6 +168,49 @@ pub(super) fn publication(revision: u64) -> Value {
 
 mod readers {
     use super::*;
+
+    #[test]
+    fn stored_projection_uses_only_read_only_herdr_and_preserves_seeded_capacity_and_store_bytes() {
+        for (load, eligible) in [(0.0, true), (3.0, false)] {
+            let rig = Rig::short(&format!("stored-project-{eligible}"));
+            rig.snapshot("state", now(), load, 2);
+            let database = rig.database();
+            database
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .unwrap();
+            let before = fs::read(rig.dir.join("state/state.db")).unwrap();
+            for name in ["git", "ssh", "df"] {
+                rig.script(
+                    name,
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/projection-probes.log\"\nexit 97\n",
+                );
+            }
+            let publisher = seeded(&rig);
+            let (_, frame) = rig.json(&["observation", "current"]);
+            assert_eq!(
+                frame["views"]["hosts"]["data"][0]["probe"],
+                rig.host()["probe"]
+            );
+            assert_eq!(
+                frame["views"]["hosts"]["data"][0]["headroom"]["eligible"],
+                eligible
+            );
+            let reads = rig.log("herdr.log");
+            assert!(reads.lines().any(|line| line == "agent list"), "{reads}");
+            assert!(reads.lines().any(|line| line == "pane list"), "{reads}");
+            assert!(
+                reads
+                    .lines()
+                    .all(|line| matches!(line, "agent list" | "pane list")
+                        || line.starts_with("pane process-info --pane ")),
+                "{reads}"
+            );
+            assert_eq!(rig.log("projection-probes.log"), "");
+            assert_eq!(fs::read(rig.dir.join("state/state.db")).unwrap(), before);
+            drop(publisher);
+            drop(database);
+        }
+    }
 
     fn isolate(rig: &Rig) -> Vec<fs::File> {
         for command in ["git", "herdr", "ssh"] {

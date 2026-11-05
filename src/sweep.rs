@@ -215,10 +215,11 @@ pub fn pass(node: &crate::node::Node<'_>, now: u64) -> Result<()> {
 /// done, clean, and pushed, close exactly as `dogsled close` would. Orphans that stay are
 /// recorded for status and check-ins. Local handoff runs here only when the handoff lane is
 /// not already running it, so a long close never stalls this lane.
-pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
+pub fn children(fleet: &crate::hosts::ActionFleet, now: u64) -> Result<()> {
     crate::unit_request::refresh(fleet, crate::unit_request::Scope::All)?;
     crate::done::handoff_if_free(fleet.ledger, fleet.shell, now)?;
-    crate::items::handoffs(fleet.ledger, &fleet.status(now)?)?;
+    let reports = fleet.reports()?;
+    crate::items::handoffs(fleet.ledger, &reports)?;
     let items: Vec<Item> = crate::items::list(fleet.ledger)?
         .into_iter()
         .filter(|i| i.closed_ms.is_none() && i.kind == "agent")
@@ -229,7 +230,6 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
         .collect();
     let mut kept = Vec::new();
     if !items.is_empty() {
-        let reports = fleet.status(now)?;
         let classified = classify(fleet, &items.iter().collect::<Vec<_>>());
         landing(fleet, &classified.owned, &reports, now)?;
         for (item, custody, note) in classified.orphaned {
@@ -267,7 +267,7 @@ pub fn children(fleet: &Fleet, now: u64) -> Result<()> {
         .iter()
         .any(|i| i.untold().is_some() || i.closed_ms.is_none())
     {
-        tell(fleet, &fleet.status(now)?, now)?;
+        tell(fleet, &reports, now)?;
     }
     if kept.is_empty() && previous.is_empty() {
         return Ok(());
@@ -773,6 +773,7 @@ mod liveness_tests {
     use super::*;
     use crate::hosts::Host;
     use crate::node::Snapshot;
+    use crate::observation::captured_actions;
     use crate::shell::Fake;
     use serde_json::json;
 
@@ -781,13 +782,13 @@ mod liveness_tests {
         let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let shell = Fake::new();
         let policy = crate::config::Policy::default();
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![Host::local()],
-        };
+        let fleet = Fleet::cold(
+            &shell,
+            &ledger,
+            &policy,
+            "/home".into(),
+            vec![Host::local()],
+        );
         let agent = json!({"pane":"w99:p1","agent":"pi","state":"idle","terminal_id":"child","completion_seq":2,"done":true});
         let snapshot: Snapshot = serde_json::from_value(json!({"sampled_ms":1000,"probe":{
             "host":"local","label":"local","load1":0,"cores":4,"busy":0,
@@ -821,7 +822,7 @@ mod liveness_tests {
             .on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle","terminal_id":"child","completion_seq":2}]}}"#)
             .on("herdr workspace list", r#"{"result":{"workspaces":[]}}"#)
             .on("herdr pane close w99:p1", "{}");
-        let reports = fleet.status(61_000).unwrap();
+        let reports = captured_actions(&fleet, 61_000).unwrap().reports().unwrap();
         assert_eq!(reports[0].service, "down");
         assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
         assert!(
@@ -832,7 +833,7 @@ mod liveness_tests {
         assert!(shell.calls.lock().unwrap().is_empty());
         ledger
             .with_lock("service", || {
-                let reports = fleet.status(61_000)?;
+                let reports = captured_actions(&fleet, 61_000)?.reports()?;
                 assert_eq!(reports[0].service, "up");
                 assert_eq!(reports[0].sampled_ms, Some(1000));
                 assert!(!reports[0].headroom.as_ref().unwrap().eligible);
@@ -871,7 +872,10 @@ mod liveness_tests {
                 .count(),
             1
         );
-        assert_eq!(fleet.status(61_000).unwrap()[0].service, "down");
+        assert_eq!(
+            captured_actions(&fleet, 61_000).unwrap().reports().unwrap()[0].service,
+            "down"
+        );
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 }

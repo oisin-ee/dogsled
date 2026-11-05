@@ -335,30 +335,37 @@ pub(crate) fn remember_owner(
     owner: &str,
     origin_host: Option<&str>,
 ) -> Result<()> {
+    store::write(ledger, |tx| remember_owner_in(tx, id, owner, origin_host))
+}
+
+pub(crate) fn remember_owner_in(
+    tx: &Transaction<'_>,
+    id: &str,
+    owner: &str,
+    origin_host: Option<&str>,
+) -> Result<()> {
     crate::jobs::validate_id(id)?;
-    store::write(ledger, |tx| {
-        let existing: Option<(String, Option<String>)> = tx
-            .query_row(
-                "SELECT owner, owner_host FROM job_validity WHERE id = ?1 AND owner IS NOT NULL",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if existing.as_ref().is_some_and(|(saved, origin)| {
-            saved != owner
-                || origin
-                    .as_deref()
-                    .zip(origin_host)
-                    .is_some_and(|(a, b)| a != b)
-        }) {
-            return Err(crate::error::Error::Invalid("request owner changed".into()));
-        }
-        tx.execute(
-            "UPDATE job_validity SET owner = ?2, owner_host = COALESCE(owner_host, ?3) WHERE id = ?1",
-            rusqlite::params![id, owner, origin_host],
-        )?;
-        Ok(())
-    })
+    let existing: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT owner, owner_host FROM job_validity WHERE id = ?1 AND owner IS NOT NULL",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if existing.as_ref().is_some_and(|(saved, origin)| {
+        saved != owner
+            || origin
+                .as_deref()
+                .zip(origin_host)
+                .is_some_and(|(a, b)| a != b)
+    }) {
+        return Err(crate::error::Error::Invalid("request owner changed".into()));
+    }
+    tx.execute(
+        "UPDATE job_validity SET owner = ?2, owner_host = COALESCE(owner_host, ?3) WHERE id = ?1",
+        rusqlite::params![id, owner, origin_host],
+    )?;
+    Ok(())
 }
 
 pub(crate) struct RequestOwner {

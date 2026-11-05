@@ -169,7 +169,7 @@ pub fn hook(
     harness: &str,
     event: HookEvent,
     now: u64,
-    board: Option<&crate::board::Board>,
+    published: Option<&crate::observation::Published>,
 ) -> Result<()> {
     let pane = own_pane(None)?;
     let records = claim_for(ledger, shell, &pane, harness, now)?;
@@ -180,12 +180,20 @@ pub fn hook(
         Ok(())
     };
     if event == HookEvent::Stop {
-        let notices = crate::gate::notices(ledger, shell, &pane)?;
-        let empty = crate::board::Board {
-            hosts: Vec::new(),
-            rows: Vec::new(),
+        let (board, notices) = match published {
+            Some(published) => (
+                crate::observation::read::board(published, Some(&pane))?,
+                crate::gate::notices(ledger, published, &pane)?,
+            ),
+            None => (
+                crate::board::Board {
+                    hosts: Vec::new(),
+                    rows: Vec::new(),
+                },
+                Vec::new(),
+            ),
         };
-        crate::gate::deliver(ledger, board.unwrap_or(&empty), &pane, &notices, emit)?;
+        crate::gate::deliver(ledger, &board, &pane, &notices, emit)?;
     } else {
         emit(None)?;
     }
@@ -508,22 +516,21 @@ pub(crate) fn notification_failures(
 
 /// Where `send` delivers: an agent pane on a host, with its terminal.
 #[derive(Debug, Clone)]
-pub struct Target<'a> {
-    pub host: &'a Host,
+pub struct Target {
+    pub host: Host,
     pub agent: Agent,
 }
 
 /// The one agent named `target` (a pane id or an agent name) on `host`, or on any host.
-pub fn resolve<'a>(
-    fleet: &'a Fleet,
+pub fn resolve(
+    fleet: &crate::hosts::ActionFleet,
     target: &str,
     host: Option<&str>,
-    now: u64,
-) -> Result<Target<'a>> {
+) -> Result<Target> {
     let pinned = host.map(|h| fleet.find(h)).transpose()?;
     let mut found = Vec::new();
     let mut finished = None;
-    for report in fleet.status(now)? {
+    for report in fleet.reports()? {
         if pinned.is_some_and(|h| h.id != report.host.id) {
             continue;
         }
@@ -537,7 +544,7 @@ pub fn resolve<'a>(
         let Some(probe) = report.probe else { continue };
         for agent in probe.agent_panes {
             if agent.pane == target || agent.name.as_deref() == Some(target) {
-                found.push((fleet.find(&report.host.id)?, agent));
+                found.push((report.host.clone(), agent));
             }
         }
     }
@@ -603,7 +610,7 @@ pub fn send(
         put_checked(fleet.ledger, fleet.shell, record, None)?
     } else {
         fleet.remote_setup(
-            target.host,
+            &target.host,
             &[
                 "inbox-put".into(),
                 "--record".into(),
@@ -659,12 +666,12 @@ pub fn reconcile(fleet: &Fleet, now: u64) -> Result<()> {
             .push(s.id.clone());
     }
     for ((host, terminal), ids) in by_target {
-        let result = match fleet.find(&host) {
+        let result = match crate::hosts::command_host(fleet, &host) {
             Ok(h) if h.is_local() => states(fleet.ledger, &terminal, &ids),
             Ok(h) => {
                 let mut args = vec!["inbox-state".into(), terminal.clone()];
                 args.extend(ids.iter().cloned());
-                fleet.remote::<Vec<Outcome>>(h, &args)
+                fleet.remote::<Vec<Outcome>>(&h, &args)
             }
             // A host missing from this fleet view is asked again later.
             Err(e) => Err(e),
@@ -965,14 +972,18 @@ impl Listing {
 }
 
 /// The service's inbox lane: maintain this host's inboxes, then follow up what it sent.
-pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
+pub fn tick(fleet: &crate::hosts::ActionFleet, now: u64) -> Result<()> {
     crate::unit_request::refresh(fleet, crate::unit_request::Scope::All)?;
-    let live: Vec<String> = crate::host_store::snapshot(fleet.ledger)?
-        .map(|s| {
-            s.probe
+    let live: Vec<String> = fleet
+        .reports()?
+        .into_iter()
+        .find(|report| report.host.is_local())
+        .and_then(|report| report.probe)
+        .map(|probe| {
+            probe
                 .agent_panes
                 .into_iter()
-                .filter_map(|a| a.terminal_id)
+                .filter_map(|agent| agent.terminal_id)
                 .collect()
         })
         .unwrap_or_default();
@@ -1006,7 +1017,18 @@ pub fn send_to(
     text: String,
     now: u64,
 ) -> Result<Sent> {
-    let to = resolve(fleet, target, host, now)?;
+    let to = if host.is_none_or(|host| fleet.find(host).is_ok_and(crate::hosts::Host::is_local))
+        && crate::items::list(fleet.ledger)?.iter().any(|item| {
+            item.host == crate::hosts::LOCAL && item.pane == target && item.closed_ms.is_none()
+        }) {
+        Target {
+            host: crate::hosts::Host::local(),
+            agent: local_agent(fleet.shell, target)?,
+        }
+    } else {
+        let actions = crate::hosts::ActionFleet::from_fleet(fleet)?;
+        resolve(&actions, target, host)?
+    };
     send(fleet, &to, caller(fleet.shell), kind, text, now)
 }
 
@@ -1307,11 +1329,6 @@ fn notify_custodian(
     put_checked(ledger, shell, record, Some(custodian)).map(|_| true)
 }
 
-/// Whether this host has sent records whose outcome it does not know yet.
-pub fn pending(ledger: &Ledger) -> Result<bool> {
-    Ok(outbox(ledger)?.iter().any(|s| s.state.open()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,13 +1500,13 @@ mod tests {
         let rig = Rig::new(&["replacement_owner"]);
         let shell = crate::shell::Fake::new();
         let policy = crate::config::Policy::default();
-        let fleet = Fleet {
-            ledger: &rig.ledger,
-            shell: &shell,
-            policy: &policy,
-            home: "/".into(),
-            hosts: vec![crate::hosts::Host::local()],
-        };
+        let fleet = Fleet::cold(
+            &shell,
+            &rig.ledger,
+            &policy,
+            "/".into(),
+            vec![crate::hosts::Host::local()],
+        );
         claim(&rig.ledger, "replacement_owner", &Rig::reader(), 0).unwrap();
         for event in [
             "reply-gone-1",
@@ -1532,13 +1549,13 @@ mod tests {
         let shell = crate::shell::Fake::new();
         shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w1:p0","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}"#);
         let policy = crate::config::Policy::default();
-        let fleet = Fleet {
-            ledger: &rig.ledger,
-            shell: &shell,
-            policy: &policy,
-            home: "/".into(),
-            hosts: vec![crate::hosts::Host::local()],
-        };
+        let fleet = Fleet::cold(
+            &shell,
+            &rig.ledger,
+            &policy,
+            "/".into(),
+            vec![crate::hosts::Host::local()],
+        );
         claim(&rig.ledger, "term_owner", &Rig::reader(), 0).unwrap();
         let snapshot: crate::node::Snapshot =
             crate::host_store::snapshot(&rig.ledger).unwrap().unwrap();

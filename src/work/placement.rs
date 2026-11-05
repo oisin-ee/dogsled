@@ -602,7 +602,8 @@ fn observe(
                 .host
                 .as_ref()
                 .is_none_or(|h| *h != transport.envelope.host))
-            || *fleet.find(&transport.envelope.host.id)? != transport.envelope.host)
+            || crate::hosts::command_host(fleet, &transport.envelope.host.id)?
+                != transport.envelope.host)
     {
         return Err(conflict("selected placement host or target changed"));
     }
@@ -684,7 +685,7 @@ pub(super) fn retained(
         validate_saved(request, saved)?;
         validate_ack(saved, acknowledgement.as_ref())?;
         let host = &saved.prepared.grant.envelope.host;
-        if fleet.find(&host.id)? != host {
+        if crate::hosts::command_host(fleet, &host.id)? != *host {
             return Err(conflict("retained placement host changed"));
         }
         if attempt.finished_ms.is_some() && progress.version == crate::node::PLACEMENT_VERSION {
@@ -777,7 +778,11 @@ fn save_phase(
     Ok(())
 }
 
-pub(super) fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+pub(super) fn perform(
+    fleet: &crate::hosts::ActionFleet,
+    request: &Request,
+    now: u64,
+) -> Result<Option<Value>> {
     record(fleet.ledger, request)?;
     let mut selected_now = false;
     loop {

@@ -11,6 +11,14 @@ use serde_json::json;
 
 mod reconcile;
 
+fn actions<'a>(fleet: &Fleet<'a>, now: u64) -> crate::hosts::ActionFleet<'a> {
+    crate::observation::captured_actions(fleet, now).unwrap()
+}
+
+fn reports(fleet: &Fleet<'_>, now: u64) -> Vec<crate::hosts::HostReport> {
+    actions(fleet, now).reports().unwrap()
+}
+
 fn cancellation_value(ledger: &Ledger, id: &str) -> serde_json::Value {
     serde_json::to_value(crate::job_store::cancellation(ledger, id).unwrap()).unwrap()
 }
@@ -277,14 +285,8 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
             memory_reserve_bytes: 0,
             ..Policy::default()
         };
-        let fleet = Fleet {
-            ledger: &ledger,
-            shell: &shell,
-            policy: &policy,
-            home: "/".into(),
-            hosts: vec![Host::local()],
-        };
-        work::tick(&fleet, 100).unwrap();
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
+        work::tick(&actions(&fleet, 100), 100).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
         if pending {
             let saved = cancellation_value(&ledger, "missing-cancel");
@@ -313,13 +315,7 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
         memory_reserve_bytes: 0,
         ..Policy::default()
     };
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     let held = || {
         (0..HELD)
             .filter(|index| {
@@ -337,7 +333,7 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
             .collect::<Vec<_>>()
     };
 
-    work::tick(&fleet, 100).unwrap();
+    work::tick(&actions(&fleet, 100), 100).unwrap();
     let unrelated = work::queue(&ledger)
         .unwrap()
         .into_iter()
@@ -354,11 +350,11 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     );
 
     for _ in 0..HELD.div_ceil(work::REPAIR_BATCH) {
-        work::tick(&fleet, 100).unwrap();
+        work::tick(&actions(&fleet, 100), 100).unwrap();
     }
     assert_eq!(held(), HELD);
     let settled = written();
-    work::tick(&fleet, 100).unwrap();
+    work::tick(&actions(&fleet, 100), 100).unwrap();
     assert_eq!(written(), settled, "unchanged evidence is not retried");
     let holds = crate::holds::local(&ledger, "local", 100, 0).unwrap();
     let reported = holds
@@ -370,7 +366,7 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     let mut changed = crate::admissions::get(&ledger, "held-0").unwrap().unwrap();
     changed.error = Some("changed evidence".into());
     crate::admissions::put(&ledger, "held-0", &changed).unwrap();
-    work::tick(&fleet, 100).unwrap();
+    work::tick(&actions(&fleet, 100), 100).unwrap();
     let after = written();
     assert_ne!(after[0], settled[0], "changed evidence is retried");
     assert_eq!(after[1..], settled[1..]);
@@ -456,18 +452,12 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
         memory_reserve_bytes: 0,
         ..Policy::default()
     };
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     for id in ["first", "second"] {
         work::enqueue(&ledger, place_request(&ledger, id), false, 100).unwrap();
     }
-    work::tick(&fleet, 100).unwrap();
+    work::tick(&actions(&fleet, 100), 100).unwrap();
     let tickets = work::queue(&ledger).unwrap();
     assert_eq!(tickets[0].state, "admitted");
     assert_eq!(tickets[1].state, "pending");
@@ -486,7 +476,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     .unwrap();
     // A working owner hears too: its reader delivers at the next step.
     shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"owner","agent":"claude","agent_status":"working","terminal_id":"term_owner"}]}}"#);
-    work::tick(&fleet, 101).unwrap();
+    work::tick(&actions(&fleet, 101), 101).unwrap();
     assert!(work::queue(&ledger).unwrap()[0].notified);
     let told = crate::inbox::received(&ledger, "term_owner").unwrap();
     assert_eq!(told.len(), 1);
@@ -498,7 +488,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
             tickets[0].id
         )
     );
-    work::tick(&fleet, 102).unwrap();
+    work::tick(&actions(&fleet, 102), 102).unwrap();
     assert_eq!(
         crate::inbox::received(&ledger, "term_owner").unwrap().len(),
         1
@@ -508,7 +498,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     let mut refreshed = snapshot(90_100);
     refreshed.probe.agent_panes[0].state = "working".into();
     crate::host_store::put_snapshot(&ledger, &refreshed).unwrap();
-    work::tick(&fleet, 90_100).unwrap();
+    work::tick(&actions(&fleet, 90_100), 90_100).unwrap();
     assert_eq!(work::queue(&ledger).unwrap()[1].state, "admitted");
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -519,13 +509,7 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     items::record(
         &ledger,
         Item {
@@ -544,13 +528,13 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
     let mut current = snapshot(100);
     current.probe.panes.clear();
     crate::host_store::put_snapshot(&ledger, &current).unwrap();
-    items::reconcile(&ledger, &fleet.status(200).unwrap(), 200).unwrap();
+    items::reconcile(&ledger, &reports(&fleet, 200), 200).unwrap();
     assert!(items::list(&ledger).unwrap()[0].closed_ms.is_none());
     current.sampled_ms = 200;
     crate::host_store::put_snapshot(&ledger, &current).unwrap();
-    items::reconcile(&ledger, &fleet.status(30_201).unwrap(), 30_201).unwrap();
+    items::reconcile(&ledger, &reports(&fleet, 30_201), 30_201).unwrap();
     assert!(items::list(&ledger).unwrap()[0].closed_ms.is_none());
-    items::reconcile(&ledger, &fleet.status(201).unwrap(), 201).unwrap();
+    items::reconcile(&ledger, &reports(&fleet, 201), 201).unwrap();
     assert_eq!(items::list(&ledger).unwrap()[0].closed_ms, Some(201));
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -561,13 +545,7 @@ fn released_completion_time_is_kept_when_the_item_closes_later() {
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     let request = place_request(&ledger, "released");
     let launch = json!({
         "id": "released", "validity": request.validity, "action": request.action,
@@ -594,7 +572,7 @@ fn released_completion_time_is_kept_when_the_item_closes_later() {
         },
     )
     .unwrap();
-    work::tick(&fleet, 600).unwrap();
+    work::tick(&actions(&fleet, 600), 600).unwrap();
     let attempt = crate::admissions::get(&ledger, "released")
         .unwrap()
         .unwrap();
@@ -630,16 +608,11 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
         memory_reserve_bytes: 0,
         ..Policy::default()
     };
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
+    let selected = actions(&fleet, 100);
     let request = place_request(&ledger, "captured-placement");
-    assert!(work::perform(&fleet, &request, 100).unwrap().is_some());
+    assert!(work::perform(&selected, &request, 100).unwrap().is_some());
     let before = crate::admissions::value(&ledger, "captured-placement").unwrap();
     let saved = before.clone().unwrap();
     assert_eq!(saved["request"], serde_json::to_value(&request).unwrap());
@@ -653,21 +626,27 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
         let mut changed = serde_json::to_value(&request).unwrap();
         changed[field] = json!("changed");
         let changed: Request = serde_json::from_value(changed).unwrap();
-        assert!(work::perform(&fleet, &changed, 101).is_err(), "{field}");
+        assert!(
+            work::perform(&actions(&fleet, 100), &changed, 101).is_err(),
+            "{field}"
+        );
         assert_eq!(
             crate::admissions::value(&ledger, "captured-placement").unwrap(),
             before
         );
         assert_eq!(crate::job_store::reservations(&ledger).unwrap(), hold);
     }
-    let redirected = Fleet {
-        hosts: vec![Host {
+    let redirected = Fleet::cold(
+        fleet.shell,
+        fleet.ledger,
+        fleet.policy,
+        fleet.home,
+        vec![Host {
             target: Some("different-target".into()),
             ..Host::local()
         }],
-        ..fleet
-    };
-    assert!(work::perform(&redirected, &request, 101).is_err());
+    );
+    assert!(work::perform(&actions(&redirected, 101), &request, 101).is_err());
     assert_eq!(
         crate::admissions::value(&ledger, "captured-placement").unwrap(),
         before
@@ -685,25 +664,28 @@ fn placement_resume_skips_its_own_ticket_but_unreserved_work_waits() {
         memory_reserve_bytes: 0,
         ..Policy::default()
     };
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     let request = place_request(&ledger, "resume-own-ticket");
     work::enqueue(&ledger, request.clone(), false, 100).unwrap();
     assert!(!work::waits_behind(&fleet, &request).unwrap());
-    let result = work::submit(&fleet, &request, 100).unwrap().unwrap();
+    let result = work::submit(&actions(&fleet, 100), &request, 100)
+        .unwrap()
+        .unwrap();
     let other = place_request(&ledger, "other-pending");
     work::enqueue(&ledger, other.clone(), false, 101).unwrap();
     assert!(work::waits_behind(&fleet, &request).unwrap());
-    assert_eq!(work::submit(&fleet, &request, 101).unwrap(), Some(result));
+    assert_eq!(
+        work::submit(&actions(&fleet, 100), &request, 101).unwrap(),
+        Some(result)
+    );
     let newcomer = place_request(&ledger, "unreserved-newcomer");
     let before = crate::job_store::reservations(&ledger).unwrap();
-    assert!(work::submit(&fleet, &newcomer, 101).unwrap().is_none());
+    assert!(
+        work::submit(&actions(&fleet, 100), &newcomer, 101)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(crate::job_store::reservations(&ledger).unwrap(), before);
     let resumed = work::resume_placement(&ledger, &newcomer.id).unwrap();
     assert_eq!(
@@ -719,13 +701,7 @@ fn placement_admission_never_downgrades_missing_or_newer_progress() {
     let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
     let shell = Fake::new();
     let policy = Policy::default();
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     let request = place_request(&ledger, "no-downgrade");
     for progress in [
         json!(null),
@@ -735,7 +711,7 @@ fn placement_admission_never_downgrades_missing_or_newer_progress() {
             json!({"request":request,"host":null,"launch":null,"error":null,"placement":progress});
         crate::admissions::put_value(&ledger, "no-downgrade", &record).unwrap();
         let saved = crate::admissions::value(&ledger, "no-downgrade").unwrap();
-        assert!(work::perform(&fleet, &request, 100).is_err());
+        assert!(work::perform(&actions(&fleet, 100), &request, 100).is_err());
         assert_eq!(
             crate::admissions::value(&ledger, "no-downgrade").unwrap(),
             saved
@@ -774,13 +750,13 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
         label: "peer".into(),
         target: Some("peer-ssh".into()),
     };
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local(), peer.clone()],
-    };
+    let fleet = Fleet::cold(
+        &shell,
+        &ledger,
+        &policy,
+        "/".into(),
+        vec![Host::local(), peer.clone()],
+    );
     // Local has room for every local ticket in this test.
     let mut roomy = snapshot(100);
     roomy.probe.cores = 8;
@@ -806,12 +782,16 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
     }
     // A new request for local still waits behind the pending local ticket.
     assert!(
-        work::submit(&fleet, &pinned(&ledger, "local-new", "local"), 100)
-            .unwrap()
-            .is_none(),
+        work::submit(
+            &actions(&fleet, 100),
+            &pinned(&ledger, "local-new", "local"),
+            100
+        )
+        .unwrap()
+        .is_none(),
         "a pending ticket for the same host is still ahead of it"
     );
-    work::tick(&fleet, 100).unwrap();
+    work::tick(&actions(&fleet, 100), 100).unwrap();
     let states: Vec<_> = work::queue(&ledger)
         .unwrap()
         .into_iter()
@@ -826,15 +806,23 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
         ]
     );
     // With nothing pending for local, a local request runs at once while the peer's queue waits.
-    let placed = work::submit(&fleet, &pinned(&ledger, "local-now", "local"), 100)
-        .unwrap()
-        .unwrap();
+    let placed = work::submit(
+        &actions(&fleet, 100),
+        &pinned(&ledger, "local-now", "local"),
+        100,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(placed["host"]["id"], "local");
     // A request that may use any host still waits behind the peer's tickets.
     assert!(
-        work::submit(&fleet, &place_request(&ledger, "anywhere"), 100)
-            .unwrap()
-            .is_none()
+        work::submit(
+            &actions(&fleet, 100),
+            &place_request(&ledger, "anywhere"),
+            100
+        )
+        .unwrap()
+        .is_none()
     );
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -848,18 +836,12 @@ fn submit_waits_behind_pending_tickets_even_with_room() {
         memory_reserve_bytes: 0,
         ..Policy::default()
     };
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     crate::host_store::put_snapshot(&ledger, &snapshot(100)).unwrap();
     let ahead = work::enqueue(&ledger, place_request(&ledger, "ahead"), false, 100).unwrap();
     // The host has room, but a ticket waits ahead: the new request must queue.
     assert!(
-        work::submit(&fleet, &place_request(&ledger, "late"), 100)
+        work::submit(&actions(&fleet, 100), &place_request(&ledger, "late"), 100)
             .unwrap()
             .is_none()
     );
@@ -872,7 +854,7 @@ fn submit_waits_behind_pending_tickets_even_with_room() {
     );
     work::cancel(&ledger, &ahead).unwrap();
     // With nothing ahead it is placed at once.
-    let placed = work::submit(&fleet, &place_request(&ledger, "next"), 100)
+    let placed = work::submit(&actions(&fleet, 100), &place_request(&ledger, "next"), 100)
         .unwrap()
         .unwrap();
     assert_eq!(placed["host"]["id"], "local");

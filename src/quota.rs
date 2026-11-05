@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::backoff::Backoff;
 use crate::config::Policy;
 use crate::error::{Error, Result};
-use crate::hosts::Fleet;
+use crate::hosts::ObserverFleet;
 use crate::ledger::Ledger;
 use crate::shell::Shell;
 
@@ -670,7 +670,7 @@ fn push(
     home: &str,
     snapshot: &Snapshot,
 ) -> Result<()> {
-    let fleet = Fleet::discover(shell, ledger, policy, home.into())
+    let fleet = ObserverFleet::discover(shell, ledger, policy, home.into())
         .map_err(|_| Error::Invalid("quota host discovery failed".into()))?;
     let input = serde_json::to_vec(snapshot)?;
     let mut failed = false;

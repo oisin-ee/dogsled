@@ -259,7 +259,13 @@ impl Server {
             let mut ledger = context.ledger.clone();
             ledger.budget = budget;
             let shell = System { budget };
-            let fleet = Fleet::discover(&shell, &ledger, &context.policy, context.home.clone())?;
+            let fleet = Fleet::cold(
+                &shell,
+                &ledger,
+                &context.policy,
+                context.home.clone(),
+                vec![crate::hosts::Host::local()],
+            );
             call(&fleet)
         })
         .await

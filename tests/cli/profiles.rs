@@ -24,6 +24,7 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
         &json!({"description":"Read-only review","model":"alias/sol","thinking":"medium",
             "prompt":"prompt.md","accepts":["base"],"pi_args":[],"role":"reader"}),
     );
+    let _observer = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&[
         "agent",
         "--profile",
@@ -115,7 +116,9 @@ fn an_ambiguous_launch_is_reconciled_with_backoff_without_repeating_the_task() {
             "  'agent start'*) if ! test -f \"$RIG/started-once\"; then touch \"$RIG/started-once\"; echo 'timed out waiting for agent startup' >&2; exit 1; fi; printf '{}\\n' ;;\n  ",
         ),
     );
+    let observer = super::place::placement_observer(&rig);
     let (code, queued) = rig.json(&["agent", "--name", "w", "--message", "go"]);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     assert_eq!(queued["queued"], true);
     assert!(
@@ -157,6 +160,7 @@ fn a_3kb_task_launches_on_a_line_herdr_accepts() {
     let rig = Rig::new("long-task");
     rig.snapshot("state", now(), 0.0, 8);
     let task = "word ".repeat(600);
+    let _observer = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&["agent", "--name", "long", "--message", &task]);
     assert_eq!(code, 0, "{result}");
     let log = rig.log("herdr.log");
@@ -170,6 +174,7 @@ fn a_3kb_task_launches_on_a_line_herdr_accepts() {
 fn a_multiline_task_goes_through_a_file() {
     let rig = Rig::new("multiline-task");
     rig.snapshot("state", now(), 0.0, 8);
+    let _observer = super::place::placement_observer(&rig);
     // A multi-line task goes through a file: Herdr refuses an argument with a newline.
     let mut cmd = rig.cmd(&["agent", "--name", "multi", "--message-file", "-", "--json"]);
     let mut child = cmd
@@ -206,6 +211,7 @@ fn a_3kb_task_is_typed_as_a_short_line_for_every_kind() {
         let rig = Rig::new(&format!("typed-{kind}"));
         rig.snapshot("state", now(), 0.0, 8);
         let task = "word ".repeat(600);
+        let _observer = super::place::placement_observer(&rig);
         let (code, result) = rig.json(&[
             "agent",
             "--kind",
@@ -235,6 +241,7 @@ fn quotes_backticks_and_newlines_reach_the_task_file_unchanged() {
     for kind in ["pi", "claude", "codex"] {
         let rig = Rig::new(&format!("exact-{kind}"));
         rig.snapshot("state", now(), 0.0, 8);
+        let _observer = super::place::placement_observer(&rig);
         let (code, result) = rig.json(&[
             "agent",
             "--kind",
@@ -279,6 +286,20 @@ fn a_peer_launch_is_not_refused_for_a_long_caller_path() {
         .status()
         .unwrap();
     assert!(copy.success());
+    let mut command = rig.cmd(&["serve", "--interval", "3600"]);
+    command.env("DOGSLED_STATE", &deep);
+    let _observer = Rig::background(command);
+    wait_publication_at(&rig, &deep, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts.iter().any(|host| {
+                    host["id"] == "8103"
+                        && host["target"] == "netcup-dev"
+                        && host["sampled_ms"] == rig.read("remote.json")["sampled_ms"]
+                })
+            })
+    });
     let task = "word ".repeat(600);
     let out = rig
         .cmd(&[

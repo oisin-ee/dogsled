@@ -210,6 +210,7 @@ fn ask_works_with_dirty_work_and_open_children_and_does_not_close_input() {
         .output()
         .unwrap();
     assert!(out.status.success());
+    let _publisher = super::observation::resolved(&rig);
     let (code, sent) = rig.json(&["send", "worker", "--message", "Yes, expand scope"]);
     assert_eq!(code, 0, "{sent}");
     assert_eq!(rig.inbox("term_child")[0]["text"], "Yes, expand scope");

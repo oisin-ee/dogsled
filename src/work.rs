@@ -2,7 +2,12 @@
 
 mod placement;
 
-fn placement(fleet: &Fleet, request: &Request, host: Option<&str>, now: u64) -> Result<Placement> {
+fn placement(
+    fleet: &ActionFleet,
+    request: &Request,
+    host: Option<&str>,
+    now: u64,
+) -> Result<Placement> {
     let validity = request_validity(fleet.ledger, request)?;
     let placed = commands::place_with(fleet, host, &request.id, now, validity, Some(request))
         .map_err(prelaunch_error)?;
@@ -20,7 +25,7 @@ use crate::checkout::Repository;
 use crate::commands::{self, Placement};
 use crate::diagnostic::Cause;
 use crate::error::{Error, Result};
-use crate::hosts::{Fleet, Host};
+use crate::hosts::{ActionFleet, Fleet, Host};
 use crate::items::{self, Item};
 use crate::jobs::{self, Job};
 use crate::ledger::{Ledger, new_id};
@@ -550,20 +555,26 @@ pub(crate) fn launch_validity(ledger: &Ledger, launch: &Launch) -> Result<Option
 }
 
 fn record_request_validity(ledger: &Ledger, request: &Request) -> Result<()> {
-    if let Action::Job { validity, .. } = &request.action
-        && !queued_request(ledger, &request.id)?
-    {
-        if jobs::request_validity(ledger, &request.id)?.is_none() {
-            jobs::check_validity(ledger, validity.as_ref())?;
+    let incoming = match &request.action {
+        Action::Job { validity, .. } if !queued_request(ledger, &request.id)? => {
+            if jobs::request_validity(ledger, &request.id)?.is_none() {
+                jobs::check_validity(ledger, validity.as_ref())?;
+            }
+            Some(*validity)
         }
-        jobs::record_request_validity(ledger, &request.id, *validity)?;
-    }
-    crate::job_store::remember_owner(
-        ledger,
-        &request.id,
-        &request.owner,
-        request.owner_host.as_deref(),
-    )
+        _ => None,
+    };
+    crate::store::write(ledger, |tx| {
+        if let Some(validity) = incoming {
+            jobs::record_request_validity_in(tx, &request.id, validity)?;
+        }
+        crate::job_store::remember_owner_in(
+            tx,
+            &request.id,
+            &request.owner,
+            request.owner_host.as_deref(),
+        )
+    })
 }
 
 /// Check a request against this host's clock. A request that may not start new execution
@@ -650,10 +661,14 @@ fn defer(
     hosts: &[crate::hosts::HostReport],
     now: u64,
 ) -> Result<()> {
-    let pinned = request.host.as_deref().map(|h| fleet.find(h)).transpose()?;
+    let pinned = request
+        .host
+        .as_deref()
+        .map(|h| crate::hosts::command_host(fleet, h))
+        .transpose()?;
     let reason = hosts
         .iter()
-        .filter(|h| pinned.is_none_or(|p| p.id == h.host.id))
+        .filter(|h| pinned.as_ref().is_none_or(|p| p.id == h.host.id))
         .map(|h| {
             let reason = h
                 .headroom
@@ -1279,7 +1294,7 @@ fn release_cancelled(fleet: &Fleet, saved: &mut Cancellation) -> Result<()> {
                 ["host"]
                 .clone(),
         )?;
-    if *fleet.find(&host.id)? != host {
+    if crate::hosts::command_host(fleet, &host.id)? != host {
         return Err(crate::unit_transport::conflict(
             "cancelled host target changed",
         ));
@@ -2345,16 +2360,32 @@ pub(crate) fn line_budget_error(kind: &str, len: usize) -> Error {
 /// A new request runs now only when no ticket that could take one of its hosts waits ahead of
 /// it; otherwise the caller enqueues it, and admission serves the queue in order. `None` means
 /// queue it.
-pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+#[cfg(test)]
+pub fn submit(fleet: &ActionFleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    submit_using(fleet, request, now, || submit_selected(fleet, request, now))
+}
+
+/// Commands keep known-result replay and queueing independent of observation.
+pub(crate) fn submit_current(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    submit_using(fleet, request, now, || {
+        if let Some(result) = retained_admission(fleet, request, now)? {
+            return Ok(Some(result));
+        }
+        submit_selected(&ActionFleet::from_fleet(fleet)?, request, now)
+    })
+}
+
+fn submit_using(
+    fleet: &Fleet,
+    request: &Request,
+    now: u64,
+    perform: impl FnOnce() -> Result<Option<Value>>,
+) -> Result<Option<Value>> {
     record_request_validity(fleet.ledger, request)?;
     launch_test_barrier("PLACEMENT_BEFORE_ADMISSION")?;
     crate::admissions::lock(fleet.ledger, &request.id, || {
         allow_admission(fleet.ledger, request)?;
-        if !placement::reserved(fleet.ledger, request)? && waits_behind(fleet, request)? {
-            placement::record(fleet.ledger, request)?;
-            return Ok(None);
-        }
-        let result = perform_locked(fleet, request, now);
+        let result = perform();
         if let Err(error) = &result
             && matches!(request.action, Action::Job { .. })
             && !matches!(error, Error::Launch(_))
@@ -2368,6 +2399,14 @@ pub fn submit(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value
         }
         result
     })
+}
+
+fn submit_selected(fleet: &ActionFleet, request: &Request, now: u64) -> Result<Option<Value>> {
+    if !placement::reserved(fleet.ledger, request)? && waits_behind(fleet, request)? {
+        placement::record(fleet.ledger, request)?;
+        return Ok(None);
+    }
+    perform_locked(fleet, request, now)
 }
 
 /// The hosts a request may use: its pinned host, or every host.
@@ -2420,7 +2459,7 @@ pub(crate) struct Attempt {
 }
 
 #[cfg(test)]
-pub fn perform(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+pub fn perform(fleet: &ActionFleet, request: &Request, now: u64) -> Result<Option<Value>> {
     jobs::validate_id(&request.id)?;
     crate::admissions::lock(fleet.ledger, &request.id, || {
         perform_locked(fleet, request, now)
@@ -2478,21 +2517,48 @@ pub(crate) fn admission_completion(ledger: &Ledger, id: &str) -> Result<Option<u
     )
 }
 
-fn retained_admission(fleet: &Fleet, request: &Request) -> Result<Option<Value>> {
+fn retained_admission(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
     if !matches!(request.action, Action::Job { .. }) {
         let attempt = crate::admissions::get(fleet.ledger, &request.id)?;
-        if let Some(attempt) = attempt {
+        if let Some(mut attempt) = attempt {
             if attempt.request != serde_json::to_value(request)? {
                 return Err(crate::unit_transport::conflict("admission request changed"));
+            }
+            if attempt
+                .host
+                .as_ref()
+                .is_some_and(|host| fleet.find(&host.id).is_err())
+            {
+                // Replay still validates its recorded transport against the selected source.
+                return Ok(None);
             }
             if matches!(request.action, Action::Place) {
                 if let Some(result) = placement::retained(fleet, &attempt, request)? {
                     return Ok(Some(result));
                 }
-            } else if matches!(request.action, Action::Agent { .. })
-                && let Some(result) = attempt.result
-            {
-                return Ok(Some(result));
+            } else if matches!(request.action, Action::Agent { .. }) {
+                if let Some(result) = attempt.result.clone() {
+                    return Ok(Some(result));
+                }
+                if let (Some(host), Some(launch)) = (&attempt.host, &attempt.launch)
+                    && host.is_local()
+                {
+                    // Selection is complete. Recover finish() without acquiring a fleet view.
+                    record_request_validity(fleet.ledger, request)?;
+                    admission_completion(fleet.ledger, &request.id)?;
+                    allow_admission(fleet.ledger, request)?;
+                    check_request_validity(fleet.ledger, request)?;
+                    if let Some(unit) = &attempt.unit
+                        && (unit.committed.is_none() || unit.abandoned.is_some())
+                    {
+                        return Err(crate::unit_transport::conflict("request is not committed"));
+                    }
+                    let result = finish(fleet, request, host, launch, now);
+                    let result =
+                        record_launch_outcome(fleet.ledger, &request.id, &mut attempt, result)?;
+                    save_result(fleet.ledger, &request.id, attempt, &result)?;
+                    return Ok(Some(result));
+                }
             }
         }
     }
@@ -2507,10 +2573,25 @@ fn restored_request(ledger: &Ledger, request: &Request) -> Result<Request> {
     Ok(request)
 }
 
-pub(crate) fn perform_locked(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+pub(crate) fn perform_current_locked(
+    fleet: &Fleet,
+    request: &Request,
+    now: u64,
+) -> Result<Option<Value>> {
+    if let Some(result) = retained_admission(fleet, request, now)? {
+        return Ok(Some(result));
+    }
+    perform_locked(&ActionFleet::from_fleet(fleet)?, request, now)
+}
+
+pub(crate) fn perform_locked(
+    fleet: &ActionFleet,
+    request: &Request,
+    now: u64,
+) -> Result<Option<Value>> {
     record_request_validity(fleet.ledger, request)?;
     admission_completion(fleet.ledger, &request.id)?;
-    if let Some(result) = retained_admission(fleet, request)? {
+    if let Some(result) = retained_admission(fleet, request, now)? {
         return Ok(Some(result));
     }
     // Admission checks the request's age before it places, prepares, or dispatches
@@ -2635,7 +2716,7 @@ fn save_result(ledger: &Ledger, id: &str, mut attempt: Attempt, result: &Value) 
     Ok(())
 }
 
-fn begin(fleet: &Fleet, request: &Request, now: u64) -> Result<Option<Value>> {
+fn begin(fleet: &ActionFleet, request: &Request, now: u64) -> Result<Option<Value>> {
     let mut attempt = Attempt {
         ordinary_release: None,
         request: serde_json::to_value(request)?,
@@ -3042,7 +3123,7 @@ fn interrupted_admission(ledger: &Ledger, ticket: &Ticket) -> Result<Ticket> {
     })
 }
 
-fn admit(fleet: &Fleet, now: u64) -> Result<()> {
+fn admit(fleet: &ActionFleet, now: u64) -> Result<()> {
     // Hosts that had no room for an earlier ticket in this pass. A later ticket that can use
     // only these hosts waits, so it cannot pass an earlier one; any other ticket is still served.
     let mut full: Vec<String> = Vec::new();
@@ -3249,8 +3330,11 @@ pub(crate) fn release_unstarted_jobs(fleet: &Fleet) -> Result<()> {
                 .and_then(|value| value.pointer("/host/id").and_then(Value::as_str))
                 .map(str::to_owned)
                 .or(crate::job_store::selection(fleet.ledger, &request.id)?);
-            let host = fleet.find(selected.as_deref().unwrap_or(crate::hosts::LOCAL))?;
-            let ack = fleet.release_unstarted(host, &proof)?;
+            let host = crate::hosts::command_host(
+                fleet,
+                selected.as_deref().unwrap_or(crate::hosts::LOCAL),
+            )?;
+            let ack = fleet.release_unstarted(&host, &proof)?;
             if ack.request != proof {
                 return Err(crate::unit_transport::conflict(
                     "unstarted acknowledgement changed",
@@ -3298,10 +3382,10 @@ pub(crate) fn settled(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
     Ok(false)
 }
 
-pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
+pub fn tick(fleet: &ActionFleet, now: u64) -> Result<()> {
     reconcile_finished(fleet.ledger)?;
     crate::launch::release_owned(fleet)?;
-    let reports = fleet.status(now)?;
+    let reports = fleet.reports()?;
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {
         crate::preparation_retirement::recover(fleet)?;
@@ -3356,23 +3440,23 @@ pub fn tick(fleet: &Fleet, now: u64) -> Result<()> {
     release_unstarted_jobs(fleet)
 }
 
-pub fn job_host<'a>(fleet: &'a Fleet<'_>, id: &str, now: u64) -> Result<&'a Host> {
+pub fn job_host(fleet: &Fleet<'_>, id: &str) -> Result<Host> {
     jobs::validate_id(id)?;
     if jobs::get(fleet.ledger, id).is_ok() {
-        return fleet.find("local");
+        return crate::hosts::command_host(fleet, "local");
     }
     if let Some(item) = items::list(fleet.ledger)?
         .iter()
         .find(|i| i.kind == "job" && i.id == id)
     {
-        return fleet.find(&item.host);
+        return crate::hosts::request_host(fleet, &item.id, &item.host);
     }
     if let Some(job) = crate::launch::retained_job(fleet.ledger, id)? {
-        return fleet.find(&job.host);
+        return crate::hosts::request_host(fleet, &job.id, &job.host);
     }
-    for host in fleet.status(now)? {
+    for host in ActionFleet::from_fleet(fleet)?.reports()? {
         if host.jobs.iter().any(|j| j.id == id) {
-            return fleet.find(&host.host.id);
+            return Ok(host.host);
         }
     }
     Err(Error::Refused {

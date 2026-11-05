@@ -346,8 +346,18 @@ impl<'a> Node<'a> {
 
     /// Collection never waits for prompts, notifications, or cleanup. Return the exact
     /// persisted sample so publication cannot accidentally reread a newer reservation write.
+    #[cfg(test)]
     pub(crate) fn tick(&self, now: u64) -> Result<Snapshot> {
-        let mut probe = observed_probe(self.ledger, self.shell, self.home)?;
+        self.tick_with_terminals(now, probe::terminals(self.shell)?)
+    }
+
+    pub(crate) fn tick_with_terminals(
+        &self,
+        now: u64,
+        terminals: probe::Terminals,
+    ) -> Result<Snapshot> {
+        let probe = probe::local_with_terminals(self.shell, self.home, terminals)?;
+        let mut probe = observe_probe(self.ledger, self.shell, probe)?;
         self.ledger.with_lock("host", || {
             let previous: Option<Snapshot> = crate::host_store::snapshot(self.ledger)?;
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
@@ -693,7 +703,10 @@ pub(crate) fn expire_grants(ledger: &Ledger, now: u64) -> Result<()> {
 
 /// Observe the same lifecycle facts for publication and host-side close verification.
 pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<Probe> {
-    let mut probe = probe::local(shell, home)?;
+    observe_probe(ledger, shell, probe::local(shell, home)?)
+}
+
+fn observe_probe(ledger: &Ledger, shell: &dyn Shell, mut probe: Probe) -> Result<Probe> {
     // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
     // Reading the last snapshot without the lock is safe: writes replace it atomically.
     let last: Option<Snapshot> = crate::host_store::snapshot(ledger)?;

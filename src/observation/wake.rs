@@ -20,10 +20,11 @@ pub(crate) const BRANCHES: u8 = 8;
 
 /// Best-effort post-commit notification. Never wait for the service or run collection.
 pub(crate) fn notify(ledger: &Ledger) {
-    if let Ok(socket) = UnixDatagram::unbound()
+    if let Ok(path) = crate::observation::socket_path(&ledger.dir, SOCKET)
+        && let Ok(socket) = UnixDatagram::unbound()
         && socket.set_nonblocking(true).is_ok()
     {
-        let _ = socket.send_to(b"ledger", ledger.dir.join(SOCKET));
+        let _ = socket.send_to(b"ledger", path);
     }
 }
 
@@ -114,7 +115,7 @@ pub(super) struct Commits {
 
 impl Commits {
     pub(super) fn start(ledger: &Ledger, dirty: Dirty) -> Result<Self> {
-        let path = ledger.dir.join(SOCKET);
+        let path = crate::observation::socket_path(&ledger.dir, SOCKET)?;
         match std::fs::remove_file(&path) {
             Ok(()) => (),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -293,13 +294,26 @@ mod tests {
                 published_ms: 1,
                 sources: Sources::default(),
                 local: Domains::new(),
-                views: Domains::new(),
+                views: BTreeMap::from([(
+                    "hosts".into(),
+                    json!({"data":[{
+                    "id":"peer","label":"peer-label","target":"peer-ssh",
+                    "service":"up","reachable":true,"jobs":[]
+                }],"gaps":[]}),
+                )]),
                 gaps: Vec::new(),
             })
             .unwrap();
         let client = ipc::Client::at(&state);
-        let first = client.retry("peer").unwrap();
+        let first = client.retry("peer-label").unwrap();
         let second = client.retry("peer").unwrap();
+        assert!(
+            client
+                .retry("unknown")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown host unknown")
+        );
         assert_eq!(first, second);
         assert_eq!(dirty.take_peers(), BTreeSet::from(["peer".into()]));
         assert_eq!(dirty.take_peer("peer"), Some(first.clone()));
