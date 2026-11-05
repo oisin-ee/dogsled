@@ -138,6 +138,47 @@ pub(super) fn branch_exists(rig: &Rig, branch: &str) -> bool {
 }
 
 #[test]
+fn native_close_forwards_its_declared_setup_budget_instead_of_the_generic_call_budget() {
+    let (rig, _) = close_rig("close-mcp-budget");
+    rig.peer();
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts
+                    .iter()
+                    .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+            })
+    });
+    item(&rig, "8103");
+    rig.script(
+        "ssh",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+printf '%s\n' '{"pane":"w2:p1","worktree":null,"pane_closed":true}'
+"#,
+    );
+    let mut client = super::mcp::Client::start(&rig);
+    let (closed, error) = client.call("close", &json!({"pane":"w2:p1","host":"netcup"}));
+    assert!(!error, "{closed}");
+    let log = rig.log("ssh.log");
+    let call = log
+        .lines()
+        .find(|line| line.contains("host close w2:p1"))
+        .unwrap();
+    let args: Vec<_> = call.split_whitespace().collect();
+    let budget: u64 = args
+        .windows(2)
+        .find(|pair| pair[0] == "--budget-ms")
+        .unwrap()[1]
+        .trim_matches('\'')
+        .parse()
+        .unwrap();
+    assert!(budget > 30_000 && budget <= 600_000, "{call}");
+}
+
+#[test]
 fn mcp_disconnect_finishes_preservation_and_owner_retry_replays_the_result() {
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::process::Stdio;
