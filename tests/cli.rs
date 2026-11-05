@@ -654,9 +654,9 @@ impl Rig {
         self
     }
 
-    fn new(name: &str) -> Self {
-        // A rig's sockets live in it, and Darwin limits a socket path to 104 bytes, which a
-        // macOS `$TMPDIR` alone nearly fills. `/tmp` keeps every rig socket short.
+    /// A rig's sockets live in it, and Darwin limits a socket path to 104 bytes, which a
+    /// macOS `$TMPDIR` alone nearly fills. `/tmp` keeps every rig socket short.
+    fn directory(name: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name: String = name.chars().take(16).collect();
@@ -669,7 +669,11 @@ impl Rig {
         for child in ["bin", "state", "home"] {
             fs::create_dir_all(dir.join(child)).unwrap();
         }
-        let dir = dir.canonicalize().unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn new(name: &str) -> Self {
+        let dir = Self::directory(name);
         let rig = Self {
             dir,
             service: std::sync::Mutex::new(None),
