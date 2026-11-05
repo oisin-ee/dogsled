@@ -120,4 +120,13 @@ Delivery is blocked by the enabled commit gate. The complete retry passed 738 ro
 
 On 6 November 2026 the user authorized diagnosis and repair. All 10 tests pass in isolation, with the staged history changes in place. The history diff does not cause them. Back-dating the CLI fixture host snapshots by 31s, past `STALE_MS` of 30s, reproduces 7 of them exactly. The local suite ran at more than four times its CI duration under load averages of 34–46 on 12 cores. The remaining 3 are timing races (`launch_retry`, `jobs`, `lifecycle`); the fixture unit owns the proof of their causes.
 
+Main moved under this plan. `a469f9a`, `7e64a46`, and `262c8cf` (observation publication) already provide several of the planned session-boundary outcomes:
+- `Conversation.session` keys;
+- serve-owned per-pane detail workers in `src/observation/details.rs`;
+- `try_conversation` I/O error propagation;
+- `Content::{Available, Unavailable, Failed}`;
+- session-keyed browser caching that rejects late responses.
+
+The history writer is re-applying its records onto that architecture at `31bf5a2`. Before dispatch, rescope the session-boundary brief and the activity protocol to main's `observation::details::Session` and `DetailSession` key. Do not introduce a second `SessionStamp` registry. Gaps that remain on main are `Client::agent_list` defaulting to `[]` and cross-epoch display rules; re-verify each against main before it enters a brief.
+
 Unit `fix/cli-fixture-contention` repairs the CLI fixtures from `origin/main`. It does not change production freshness, hooks, or test budgets. After it lands, the history unit rebases onto the exact landed base and runs one commit with hooks enabled. Preserve the four staged files and the worker checkout until then. Dependent implementation remains pending. No release, installation, or fleet rollout is authorized by this plan.
