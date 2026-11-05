@@ -216,6 +216,194 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
 }
 
 #[test]
+fn collection_prunes_expired_reservations_without_rewriting_live_rows() {
+    let fixture = Fixture::new();
+    let reservations = [
+        crate::ledger::Reservation {
+            id: "expired".into(),
+            created_ms: 0,
+        },
+        crate::ledger::Reservation {
+            id: "live".into(),
+            created_ms: 100_000,
+        },
+    ];
+    fixture.seed_job("live");
+    crate::job_store::put_reservations(&fixture.ledger, &reservations).unwrap();
+    // Audit real table deletes: rewriting a live row can resurrect a release committed
+    // between the collector's read and write, even though its final value is identical.
+    crate::store::write(&fixture.ledger, |tx| {
+        tx.execute_batch(
+            "CREATE TABLE reservation_deletes (id TEXT NOT NULL);
+             CREATE TRIGGER audit_reservation_delete AFTER DELETE ON placements
+             BEGIN INSERT INTO reservation_deletes VALUES (OLD.id); END;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut collector = Collector::default();
+    let collection = collector.collect(&fixture.node(), 100_100);
+    collection.sample.unwrap();
+    assert_eq!(collection.input.gaps, []);
+    assert_eq!(
+        collection.input.local["host"]["probe"]["reservations"],
+        json!([reservations[1]])
+    );
+    assert_eq!(
+        crate::job_store::reservations(&fixture.ledger).unwrap(),
+        reservations[1..]
+    );
+    let deleted = crate::store::read(&fixture.ledger, |tx| {
+        let mut statement = tx.prepare("SELECT id FROM reservation_deletes ORDER BY id")?;
+        Ok(statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    })
+    .unwrap();
+    assert_eq!(
+        deleted,
+        ["expired"],
+        "collection must not rewrite live reservations"
+    );
+}
+
+#[test]
+fn reservation_pruning_preserves_committed_clears_releases_and_creations() {
+    for clear in [false, true] {
+        let fixture = Fixture::new();
+        let now = 100_100;
+        let old = [
+            crate::ledger::Reservation {
+                id: "released".into(),
+                created_ms: 100_000,
+            },
+            crate::ledger::Reservation {
+                id: "renewed".into(),
+                created_ms: 0,
+            },
+        ];
+        crate::job_store::put_reservations(&fixture.ledger, &old).unwrap();
+        let read = fixture
+            .ledger
+            .reservations(now, fixture.policy.reservation_ttl_ms)
+            .unwrap();
+        assert_eq!(read, old[..1]);
+        let committed = [
+            crate::ledger::Reservation {
+                id: "renewed".into(),
+                created_ms: now,
+            },
+            crate::ledger::Reservation {
+                id: "new".into(),
+                created_ms: now,
+            },
+            crate::ledger::Reservation {
+                id: "expired".into(),
+                created_ms: 0,
+            },
+        ];
+        // Finish the normal mutation path on another thread after the collector's read
+        // and before its prune. No sleeps, timing assumptions, or production test hooks.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    if clear {
+                        crate::job_store::put_reservations(&fixture.ledger, &[]).unwrap();
+                    } else {
+                        crate::job_store::release_reservation(&fixture.ledger, "released").unwrap();
+                    }
+                    crate::job_store::put_reservations(&fixture.ledger, &committed).unwrap();
+                })
+                .join()
+                .unwrap();
+        });
+        fixture.node().prune_reservations(now).unwrap();
+        assert_eq!(
+            crate::job_store::reservations(&fixture.ledger).unwrap(),
+            committed[..2]
+        );
+        fixture.seed_job("renewed");
+        fixture.seed_job("new");
+        let collection = Collector::default().collect(&fixture.node(), now);
+        collection.sample.unwrap();
+        assert_eq!(collection.input.gaps, []);
+        let frame = Publisher::new().unwrap().replace(collection.input).unwrap();
+        assert_eq!(
+            frame.local["host"]["probe"]["reservations"],
+            json!(committed[..2])
+        );
+        assert!(
+            !frame.local["host"]["holds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hold| hold["request_id"] == "released")
+        );
+    }
+}
+
+#[test]
+fn reservation_commits_refresh_probe_holds_and_headroom_without_resampling() {
+    let fixture = Fixture::new();
+    let mut collector = Collector::default();
+    let mut publisher = Publisher::new().unwrap();
+    collector.collect(&fixture.node(), 100).sample.unwrap();
+    fixture
+        .shell
+        .on("read /proc/stat", "cpu 110 20 30 500 50 6 7 8 9 10");
+    let original = publisher
+        .replace(collector.collect(&fixture.node(), 120).input)
+        .unwrap();
+    let calls = fixture.shell.calls.lock().unwrap().len();
+    let reservations = [crate::ledger::Reservation {
+        id: "committed".into(),
+        created_ms: 150,
+    }];
+    fixture.seed_job("committed");
+    crate::job_store::put_reservations(&fixture.ledger, &reservations).unwrap();
+    let created = publisher
+        .replace(collector.refresh(&fixture.node(), 200, false).input)
+        .unwrap();
+    assert_eq!(
+        created.local["host"]["probe"]["reservations"],
+        json!(reservations)
+    );
+    assert!(
+        created.local["headroom"]["headroom"].as_f64().unwrap()
+            < original.local["headroom"]["headroom"].as_f64().unwrap()
+    );
+    assert!(
+        created.local["host"]["holds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hold| hold["code"] == "capacity")
+    );
+    crate::job_store::put_reservations(&fixture.ledger, &[]).unwrap();
+    let released = publisher
+        .replace(collector.refresh(&fixture.node(), 300, false).input)
+        .unwrap();
+    assert_eq!(released.local["host"]["probe"]["reservations"], json!([]));
+    assert_eq!(released.local["headroom"], original.local["headroom"]);
+    assert!(
+        !released.local["host"]["holds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hold| hold["code"] == "capacity")
+    );
+    assert_eq!(crate::job_store::reservations(&fixture.ledger).unwrap(), []);
+    assert_eq!(released.local["host"]["sampled_ms"], 120);
+    assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls);
+    assert_eq!(crate::node::samples(&fixture.ledger).unwrap().len(), 2);
+    assert_eq!(original.local["host"]["probe"]["reservations"], json!([]));
+    assert_eq!(
+        created.local["host"]["probe"]["reservations"],
+        json!(reservations)
+    );
+}
+
+#[test]
 fn ledger_refresh_reuses_terminal_sample_and_preserves_failed_sample_gaps() {
     let fixture = Fixture::new();
     let mut collector = Collector::default();
