@@ -17,9 +17,27 @@ pub struct BlockedPrompt {
     pub options: Vec<PromptOption>,
 }
 
+/// A pane is unique only within its fleet host.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AgentAddress {
+    pub host: String,
+    pub pane: String,
+}
+
+impl AgentAddress {
+    #[must_use]
+    pub fn local(pane: impl Into<String>) -> Self {
+        Self {
+            host: "local".into(),
+            pane: pane.into(),
+        }
+    }
+}
+
 /// One agent in the list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentView {
+    pub host: String,
     pub pane: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

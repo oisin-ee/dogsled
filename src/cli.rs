@@ -736,6 +736,13 @@ pub enum HostCommand {
         command: RecoveryCommand,
     },
     Snapshot,
+    /// Forward one portal detail request to this host's serve publication.
+    #[command(hide = true)]
+    AgentDetail {
+        pane: String,
+        #[arg(long)]
+        input: String,
+    },
     /// Export host-owned observer facts, optionally waiting for a new local revision.
     Observation {
         #[arg(long)]

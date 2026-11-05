@@ -413,7 +413,7 @@ fn detail_readers_use_session_qualified_publication_without_observation() {
     );
     let expected = &content["detail"];
     for field in ["conversation", "screen"] {
-        let (status, headers, data) = portal.get(&format!("/api/agents/w1:p1/{field}"));
+        let (status, headers, data) = portal.get(&format!("/api/agents/local/w1:p1/{field}"));
         assert_eq!(status, 200, "{data}");
         assert_eq!(data, expected[field]["data"]);
         supplied.interest("w1:p1", true);
@@ -424,7 +424,7 @@ fn detail_readers_use_session_qualified_publication_without_observation() {
             content["revision"].to_string()
         );
     }
-    let (mut events, status, _) = Http::open(portal.port, "/api/agents/w1:p1/events");
+    let (mut events, status, _) = Http::open(portal.port, "/api/agents/local/w1:p1/events");
     assert_eq!(status, 200);
     let (kind, data) = events.event();
     let data: Value = serde_json::from_str(&data).unwrap();

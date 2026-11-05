@@ -312,6 +312,7 @@
         {
           "agent": "pi",
           "cwd": "/fixture/context/worker",
+          "host": "local",
           "name": "worker",
           "pane": "w2:p1",
           "repository": "github.com/fixture/context",
@@ -817,6 +818,7 @@
           {
             "agent": "pi",
             "cwd": "/fixture/context/worker",
+            "host": "local",
             "name": "worker",
             "pane": "w2:p1",
             "repository": "github.com/fixture/context",

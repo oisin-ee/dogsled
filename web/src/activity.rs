@@ -207,7 +207,10 @@ fn valid(view: &ActivityView) -> bool {
 
 /// Follow the selected pane's activity. Changing `session` clears detail until a frame for
 /// the new session arrives. Heartbeats and activity frames never refresh history.
-pub fn use_live_activity(pane: String, session: Signal<Option<DetailSession>>) -> Signal<Live> {
+pub fn use_live_activity(
+    address: portal_types::agents::AgentAddress,
+    session: Signal<Option<DetailSession>>,
+) -> Signal<Live> {
     let mut live = use_signal(|| Live::Pending);
     let mut expiry = use_signal(|| None::<(u64, u64)>);
     // Changing a receipt replaces the sleeping future; duplicate frames do not touch it.
@@ -220,7 +223,7 @@ pub fn use_live_activity(pane: String, session: Signal<Option<DetailSession>>) -
             }
         }
     });
-    use_resource(use_reactive(&pane, move |pane| {
+    use_resource(use_reactive(&address, move |address| {
         let selected = session();
         live.set(Live::Pending);
         expiry.set(None);
@@ -234,16 +237,16 @@ pub fn use_live_activity(pane: String, session: Signal<Option<DetailSession>>) -
                         expiry.set(None);
                         return Err(Gap::SessionMismatch);
                     }
-                    if let Some((next, ttl)) = state.frame(view, &pane, &selected)? {
+                    if let Some((next, ttl)) = state.frame(view, &address.pane, &selected)? {
                         expiry.set(ttl.map(|ttl| (state.revision, ttl)));
                         live.set(next);
                     }
                     Ok(())
                 };
                 // GET establishes the current serve epoch before opening this stream.
-                let result = match crate::api::fetch_activity(&pane).await {
+                let result = match crate::api::fetch_activity(&address).await {
                     Ok(view) => match apply(view) {
-                        Ok(()) => crate::api::watch_activity(&pane, apply).await,
+                        Ok(()) => crate::api::watch_activity(&address, apply).await,
                         Err(gap) => Err(gap),
                     },
                     Err(gap) => Err(gap),

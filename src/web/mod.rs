@@ -288,13 +288,16 @@ async fn stream(
 }
 
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let activity_write = request.uri().path().starts_with("/api/agents/")
-        && (request.uri().path().ends_with("/activity")
-            || request.uri().path().ends_with("/activity/producer"))
-        && matches!(
-            *request.method(),
-            axum::http::Method::POST | axum::http::Method::PUT
-        );
+    // Host-qualified activity routes retain the producer's bearer-only boundary.
+    let segments: Vec<_> = request.uri().path().split('/').collect();
+    let activity_write = matches!(
+        segments.as_slice(),
+        ["", "api", "agents", _, _, "activity"]
+            | ["", "api", "agents", _, _, "activity", "producer"]
+    ) && matches!(
+        *request.method(),
+        axum::http::Method::POST | axum::http::Method::PUT
+    );
     if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
         return activity::failure(crate::observation::live_activity::error(
             portal_types::agents::ActivityCode::Unauthorized,

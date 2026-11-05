@@ -61,16 +61,312 @@ const ALLOWED_KEYS: &[&str] = &[
 /// The lines of a screen the portal reads.
 const SCREEN_LINES: u32 = 200;
 
+/// SSH carries only published detail or a bounded activity command, never foreign paths.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(
+    tag = "operation",
+    content = "body",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum PeerOperation {
+    Conversation,
+    Screen,
+    Event,
+    Activity,
+    Register(portal_types::agents::RegisterProducer),
+    Publish(portal_types::agents::PublishActivity),
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PeerReply {
+    status: u16,
+    body: Value,
+}
+
+pub(crate) fn peer_command(
+    pane: String,
+    input: &str,
+    ledger: crate::ledger::Ledger,
+) -> crate::error::Result<PeerReply> {
+    let operation: PeerOperation = serde_json::from_str(input)?;
+    let state = AppState::new(
+        tokio::sync::watch::channel(super::PortalState::default()).1,
+        7465,
+        None,
+        super::guard::Token::new(String::new()),
+        ledger,
+    );
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(peer_read(state, pane, operation))
+}
+
+/// Execute on the named peer, with the same serve-owned read boundary as local HTTP.
+async fn peer_read(
+    state: AppState,
+    pane: String,
+    operation: PeerOperation,
+) -> crate::error::Result<PeerReply> {
+    let client = ipc::Client::at(&state.web.dir);
+    let response = match operation {
+        PeerOperation::Conversation => {
+            detail_response(
+                state,
+                pane,
+                |detail| matches!(detail.conversation, Content::Pending),
+                |detail| &detail.conversation,
+            )
+            .await
+        }
+        PeerOperation::Screen => {
+            detail_response(
+                state,
+                pane,
+                |detail| matches!(detail.screen, Content::Pending),
+                |detail| &detail.screen,
+            )
+            .await
+        }
+        PeerOperation::Event => {
+            let subscription = client.detail(&pane)?;
+            let current = subscription.current();
+            if current.publication.found {
+                Json(serde_json::from_str::<Value>(&agent_event(
+                    &current.publication,
+                    &pane,
+                )?)?)
+                .into_response()
+            } else {
+                not_found(&pane)
+            }
+        }
+        PeerOperation::Activity => match client.activity(&pane) {
+            Ok(view) => Json(view).into_response(),
+            Err(error) => super::activity::failure(error),
+        },
+        PeerOperation::Register(body) => activity_command(
+            &client,
+            &pane,
+            crate::observation::live_activity::Command::Register(body),
+        ),
+        PeerOperation::Publish(body) => activity_command(
+            &client,
+            &pane,
+            crate::observation::live_activity::Command::Publish(body),
+        ),
+    };
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(
+        response.into_body(),
+        crate::observation::details::CODEC.wire_limit(),
+    )
+    .await
+    .map_err(|error| crate::error::Error::Invalid(error.to_string()))?;
+    Ok(PeerReply {
+        status,
+        body: serde_json::from_slice(&bytes)?,
+    })
+}
+
+fn activity_command(
+    client: &ipc::Client,
+    pane: &str,
+    command: crate::observation::live_activity::Command,
+) -> Response {
+    match client.activity_command(pane, command) {
+        Ok(ack) => Json(ack).into_response(),
+        Err(error) => super::activity::failure(error),
+    }
+}
+
+fn peer_call(
+    state: &AppState,
+    host: &str,
+    pane: &str,
+    operation: &PeerOperation,
+) -> crate::error::Result<PeerReply> {
+    let launch = state
+        .leads
+        .as_ref()
+        .ok_or_else(|| crate::error::Error::Invalid("peer transport unavailable".into()))?;
+    let policy = crate::config::load(&launch.config_path)?;
+    let fleet = crate::hosts::ActionFleet::current(
+        launch.shell.as_ref(),
+        &state.web,
+        &policy,
+        launch.home.clone(),
+    )?;
+    let target = fleet.find(host)?;
+    let started = Instant::now();
+    let mut reply: PeerReply = fleet.remote(
+        target,
+        &[
+            "agent-detail".into(),
+            pane.into(),
+            "--input".into(),
+            serde_json::to_string(operation)?,
+        ],
+    )?;
+    if reply.status == 200 && matches!(operation, PeerOperation::Activity) {
+        let mut view: portal_types::agents::ActivityView =
+            serde_json::from_value(reply.body.clone())?;
+        if let portal_types::agents::ActivityDetail::Available { valid_for_ms, .. } =
+            &mut view.detail
+        {
+            *valid_for_ms = valid_for_ms
+                .saturating_sub(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        }
+        reply.body = serde_json::to_value(view)?;
+    }
+    Ok(reply)
+}
+
+fn peer_error(host: &str, error: &crate::error::Error) -> Response {
+    (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("host {host}: {}", crate::hosts::unreachable(crate::hosts::Failure::of(error)))}))).into_response()
+}
+
+pub(super) async fn peer_response(
+    state: AppState,
+    host: String,
+    pane: String,
+    operation: PeerOperation,
+) -> Response {
+    let label = host.clone();
+    match tokio::task::spawn_blocking(move || peer_call(&state, &host, &pane, &operation)).await {
+        Ok(Ok(mut reply)) => {
+            let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
+            if status.is_server_error() {
+                reply.body["error"] = json!(format!("host {label}: agent detail unavailable"));
+            }
+            (status, [("cache-control", "no-store")], Json(reply.body)).into_response()
+        }
+        Ok(Err(error)) => peer_error(&label, &error),
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": format!("host {label}: peer transport unavailable")})),
+        )
+            .into_response(),
+    }
+}
+
+async fn machine_action(
+    state: AppState,
+    host: String,
+    operation: &'static str,
+    args: Vec<String>,
+) -> Response {
+    let label = host.clone();
+    let outcome = tokio::task::spawn_blocking(move || -> crate::error::Result<()> {
+        let launch = state
+            .leads
+            .as_ref()
+            .ok_or_else(|| crate::error::Error::Invalid("peer transport unavailable".into()))?;
+        let policy = crate::config::load(&launch.config_path)?;
+        let fleet = crate::hosts::ActionFleet::current(
+            launch.shell.as_ref(),
+            &state.web,
+            &policy,
+            launch.home.clone(),
+        )?;
+        let target = fleet.find(&host)?;
+        let mut command = vec![
+            "--machine".into(),
+            target.label.clone(),
+            "agent".into(),
+            operation.into(),
+        ];
+        command.extend(args);
+        launch.shell.run_ok("herdr", &command)?;
+        Ok(())
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => StatusCode::ACCEPTED.into_response(),
+        Ok(Err(error)) => peer_error(&label, &error),
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": format!("host {label}: peer transport unavailable")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Reconcile a remote stream when the board receives a publication, not through another observer.
+pub(super) async fn peer_events(
+    state: AppState,
+    host: String,
+    pane: String,
+    operation: PeerOperation,
+    event: &'static str,
+) -> Response {
+    let initial = peer_response(state.clone(), host.clone(), pane.clone(), operation.clone()).await;
+    if !initial.status().is_success() {
+        return initial;
+    }
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    let stop = state.stop.clone();
+    let mut portal = state.portal.clone();
+    let reader = state.clone();
+    tokio::spawn(async move {
+        let mut response = initial;
+        loop {
+            let failed = !response.status().is_success();
+            let Ok(bytes) = axum::body::to_bytes(
+                response.into_body(),
+                crate::observation::details::CODEC.wire_limit(),
+            )
+            .await
+            else {
+                break;
+            };
+            let payload = String::from_utf8_lossy(&bytes).into_owned();
+            if sender
+                .send((if failed { "error" } else { event }, payload))
+                .await
+                .is_err()
+                || failed
+            {
+                break;
+            }
+            tokio::select! {
+                () = stop.cancelled() => break,
+                () = sender.closed() => break,
+                changed = portal.changed() => if changed.is_err() { break; },
+            }
+            response = peer_response(
+                reader.clone(),
+                host.clone(),
+                pane.clone(),
+                operation.clone(),
+            )
+            .await;
+        }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).map(|(event, data)| {
+        Ok::<_, std::convert::Infallible>(
+            axum::response::sse::Event::default()
+                .event(event)
+                .data(data),
+        )
+    });
+    axum::response::sse::Sse::new(state.until_shutdown(stream))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
 /// The routes of the agent API.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/agents", get(list))
-        .route("/api/agents/{pane}/conversation", get(conversation))
-        .route("/api/agents/{pane}/screen", get(screen))
-        .route("/api/agents/{pane}/prompt", post(prompt))
-        .route("/api/agents/{pane}/keys", post(keys))
-        .route("/api/agents/{pane}/focus", post(focus))
-        .route("/api/agents/{pane}/events", get(events))
+        .route("/api/agents/{host}/{pane}/conversation", get(conversation))
+        .route("/api/agents/{host}/{pane}/screen", get(screen))
+        .route("/api/agents/{host}/{pane}/prompt", post(prompt))
+        .route("/api/agents/{host}/{pane}/keys", post(keys))
+        .route("/api/agents/{host}/{pane}/focus", post(focus))
+        .route("/api/agents/{host}/{pane}/events", get(events))
         .route("/api/leads", post(create_lead))
         .route("/api/repos", get(repos))
 }
@@ -200,6 +496,7 @@ fn view_of(
     blocked: Option<portal_types::agents::BlockedPrompt>,
 ) -> AgentView {
     AgentView {
+        host: crate::hosts::LOCAL.into(),
         pane: agent["pane_id"].as_str().unwrap_or_default().to_owned(),
         name: agent["name"].as_str().map(str::to_owned),
         title,
@@ -215,7 +512,13 @@ fn view_of(
 }
 
 /// One agent's turns, captured by serve for this connection's interest.
-async fn conversation(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+async fn conversation(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
+    if host != crate::hosts::LOCAL {
+        return peer_response(state, host, pane, PeerOperation::Conversation).await;
+    }
     detail_response(
         state,
         pane,
@@ -226,7 +529,13 @@ async fn conversation(State(state): State<AppState>, Path(pane): Path<String>) -
 }
 
 /// The last published screen, including its native revision.
-async fn screen(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+async fn screen(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
+    if host != crate::hosts::LOCAL {
+        return peer_response(state, host, pane, PeerOperation::Screen).await;
+    }
     detail_response(
         state,
         pane,
@@ -306,16 +615,19 @@ fn stamped(mut response: Response, publication: &DetailFrame) -> Response {
 /// Send a prompt to an agent.
 async fn prompt(
     State(state): State<AppState>,
-    Path(pane): Path<String>,
+    Path((host, pane)): Path<(String, String)>,
     Json(body): Json<PromptBody>,
 ) -> Response {
-    let Some(socket) = socket(&state) else {
-        return no_socket();
-    };
     let text = body.text.trim();
     if text.is_empty() {
         return refuse("the prompt is empty");
     }
+    if host != crate::hosts::LOCAL {
+        return machine_action(state, host, "prompt", vec![pane, text.into()]).await;
+    }
+    let Some(socket) = socket(&state) else {
+        return no_socket();
+    };
     match socket.agent_prompt(&pane, text) {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => error_response(&error),
@@ -325,12 +637,9 @@ async fn prompt(
 /// Send key presses to an agent. Only the allowed keys are accepted.
 async fn keys(
     State(state): State<AppState>,
-    Path(pane): Path<String>,
+    Path((host, pane)): Path<(String, String)>,
     Json(body): Json<KeysBody>,
 ) -> Response {
-    let Some(socket) = socket(&state) else {
-        return no_socket();
-    };
     if body.keys.is_empty() {
         return refuse("no key was given");
     }
@@ -348,6 +657,14 @@ async fn keys(
             key.clone()
         });
     }
+    if host != crate::hosts::LOCAL {
+        let mut args = vec![pane];
+        args.extend(keys);
+        return machine_action(state, host, "send-keys", args).await;
+    }
+    let Some(socket) = socket(&state) else {
+        return no_socket();
+    };
     match socket.agent_send_keys(&pane, &keys) {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => error_response(&error),
@@ -355,7 +672,13 @@ async fn keys(
 }
 
 /// Focus an agent.
-async fn focus(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+async fn focus(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
+    if host != crate::hosts::LOCAL {
+        return machine_action(state, host, "focus", vec![pane]).await;
+    }
     let Some(socket) = socket(&state) else {
         return no_socket();
     };
@@ -366,7 +689,13 @@ async fn focus(State(state): State<AppState>, Path(pane): Path<String>) -> Respo
 }
 
 /// Forward serve-owned detail changes. The observation connection owns the interest.
-async fn events(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+async fn events(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
+    if host != crate::hosts::LOCAL {
+        return peer_events(state, host, pane, PeerOperation::Event, "agent").await;
+    }
     let client = ipc::Client::at(&state.web.dir);
     let selected = pane.clone();
     let mut subscription = match tokio::task::spawn_blocking(move || client.detail(&selected)).await
@@ -765,6 +1094,286 @@ mod tests {
         serde_json::from_slice(&body).expect("the payload")
     }
 
+    struct PeerFixture {
+        state: AppState,
+        shell: Arc<crate::shell::Fake>,
+        _publisher: crate::observation::Publisher,
+        server: Option<ipc::Server>,
+    }
+
+    impl PeerFixture {
+        fn new() -> Self {
+            let mut state = state(None);
+            let shell = Arc::new(crate::shell::Fake::new());
+            let config_path = state.web.dir.join("config.toml");
+            std::fs::create_dir_all(&state.web.dir).unwrap();
+            std::fs::write(
+                &config_path,
+                "remote_command = ['mise', 'x', '--', 'dogsled']\n",
+            )
+            .unwrap();
+            state = state.with_leads(crate::web::LeadLaunch {
+                config_path,
+                home: "/home/test".into(),
+                shell: shell.clone(),
+            });
+            let mut publisher = crate::observation::Publisher::new().unwrap();
+            publisher.replace(crate::observation::Publication {
+                published_ms: 1,
+                sources: crate::observation::Sources::default(),
+                local: crate::observation::Domains::new(),
+                views: crate::observation::Domains::from([("hosts".into(), json!({"data": [{
+                    "id":"peer-id", "label":"netcup", "target":"netcup-dev", "service":"up", "reachable":true,
+                    "sampled_ms":1, "probe":null, "headroom":null, "error":null, "jobs":[]
+                }], "gaps": []}))]),
+                gaps: vec![],
+            }).unwrap();
+            let mut server = ipc::Server::new(&state.web.dir).unwrap();
+            server.bind(publisher.subscribe()).unwrap();
+            Self {
+                state,
+                shell,
+                _publisher: publisher,
+                server: Some(server),
+            }
+        }
+
+        fn command(&self, pane: &str, operation: &PeerOperation) -> String {
+            let policy = crate::config::Policy::default();
+            let fleet = crate::hosts::Fleet::cold(
+                self.shell.as_ref(),
+                &self.state.web,
+                &policy,
+                "/home/test".into(),
+                vec![],
+            );
+            let target = crate::hosts::Host {
+                id: "peer-id".into(),
+                label: "netcup".into(),
+                target: Some("netcup-dev".into()),
+            };
+            format!(
+                "ssh {}",
+                fleet
+                    .remote_argv(
+                        &target,
+                        &[
+                            "agent-detail".into(),
+                            pane.into(),
+                            "--input".into(),
+                            serde_json::to_string(operation).unwrap()
+                        ]
+                    )
+                    .join(" ")
+            )
+        }
+    }
+
+    impl Drop for PeerFixture {
+        fn drop(&mut self) {
+            self.state.stop.cancel();
+            self.server.take();
+            std::fs::remove_dir_all(&self.state.web.dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_conversation_and_actions_target_the_named_peer() {
+        let fixture = PeerFixture::new();
+        fixture.shell.on(&fixture.command("w1:p1", &PeerOperation::Conversation),
+            &json!({"status":200,"body":{"pane":"w1:p1","session":"peer-session","turns":[],"truncated":false}}).to_string());
+        let local = agent_server();
+        let mut state = fixture.state.clone();
+        state.agents = Arc::new(std::sync::OnceLock::from(Some(Arc::new(local.client()))));
+        let response = call(
+            state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/conversation", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["session"], "peer-session");
+        for (route, body, command) in [
+            (
+                "prompt",
+                Some(r#"{"text":"go on"}"#),
+                "herdr --machine netcup agent prompt w1:p1 go on",
+            ),
+            (
+                "keys",
+                Some(r#"{"keys":["enter","CTRL+C"]}"#),
+                "herdr --machine netcup agent send-keys w1:p1 enter ctrl+c",
+            ),
+            ("focus", None, "herdr --machine netcup agent focus w1:p1"),
+        ] {
+            fixture.shell.on(command, "{}");
+            let response = call(
+                state.clone(),
+                request(
+                    Method::POST,
+                    &format!("/api/agents/netcup/w1:p1/{route}"),
+                    body,
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "{route}");
+        }
+        assert_eq!(local.methods(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn remote_screen_activity_and_streams_forward_peer_publications() {
+        let fixture = PeerFixture::new();
+        let activity = json!({"version":1,"pane":"w1:p1","epoch":"peer-serve","revision":2,
+            "session":"peer-session","coarse_state":"working","producer":{"generation":1,"id":"producer"},
+            "detail":{"availability":"available","sequence":1,"received_at_ms":1,"valid_for_ms":5000,
+                "state":{"phase":"thinking","active_tools":[]}}});
+        for (operation, body) in [
+            (
+                PeerOperation::Screen,
+                json!({"pane":"w1:p1","session":"peer-session","text":"remote screen","revision":3}),
+            ),
+            (PeerOperation::Activity, activity),
+            (
+                PeerOperation::Event,
+                json!({"kind":"pane.agent_status_changed","pane":"w1:p1","state":"working",
+                "session":{"availability":"available","key":"peer-session"}}),
+            ),
+        ] {
+            fixture.shell.on(
+                &fixture.command("w1:p1", &operation),
+                &json!({"status":200,"body":body}).to_string(),
+            );
+        }
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/screen", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["text"], "remote screen");
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/activity", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = body_json(response).await;
+        assert_eq!(payload["session"], "peer-session");
+        assert!(payload["detail"]["valid_for_ms"].as_u64().unwrap() <= 5000);
+        for (route, event) in [("events", "agent"), ("activity/events", "activity")] {
+            let response = call(
+                fixture.state.clone(),
+                request(
+                    Method::GET,
+                    &format!("/api/agents/netcup/w1:p1/{route}"),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut stream = response.into_body().into_data_stream();
+            let bytes = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(frame.contains(&format!("event: {event}")), "{frame}");
+            assert!(frame.contains("peer-session"), "{frame}");
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_activity_producer_commands_keep_bearer_and_peer_correlation() {
+        let fixture = PeerFixture::new();
+        let mut state = fixture.state.clone();
+        state.token = crate::web::guard::Token::new("secret".into());
+        let registration = portal_types::agents::RegisterProducer {
+            version: 1,
+            epoch: None,
+            expected_generation: 0,
+            producer_id: "producer".into(),
+            evidence: portal_types::agents::ProducerEvidence {
+                session_file: "/peer/session".into(),
+                session_id: "native-id".into(),
+            },
+        };
+        let update = portal_types::agents::PublishActivity {
+            version: 1,
+            epoch: "peer-serve".into(),
+            generation: 1,
+            producer_id: "producer".into(),
+            session: "peer-session".into(),
+            sequence: 1,
+            payload: portal_types::agents::ProducerPayload::Closed,
+        };
+        for (method, route, body, operation) in [
+            (
+                Method::POST,
+                "activity/producer",
+                serde_json::to_string(&registration).unwrap(),
+                PeerOperation::Register(registration),
+            ),
+            (
+                Method::PUT,
+                "activity",
+                serde_json::to_string(&update).unwrap(),
+                PeerOperation::Publish(update),
+            ),
+        ] {
+            fixture.shell.on(
+                &fixture.command("w1:p1", &operation),
+                &json!({"status":200,"body":{"epoch":"peer-serve","session":"peer-session"}})
+                    .to_string(),
+            );
+            let mut request = request(
+                method,
+                &format!("/api/agents/netcup/w1:p1/{route}"),
+                Some(&body),
+            );
+            request.headers_mut().insert(
+                axum::http::header::AUTHORIZATION,
+                "Bearer secret".parse().unwrap(),
+            );
+            let response = call(state.clone(), request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body_json(response).await["epoch"], "peer-serve");
+        }
+    }
+
+    #[tokio::test]
+    async fn unreachable_peer_errors_name_the_host_without_ssh_text() {
+        let fixture = PeerFixture::new();
+        fixture.shell.on_output(
+            &fixture.command("w1:p1", &PeerOperation::Conversation),
+            crate::shell::Output {
+                status: 255,
+                stdout: String::new(),
+                stderr: "ssh: connect: Connection refused; secret-token".into(),
+            },
+        );
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/conversation", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await["error"],
+            "host netcup: unreachable: connection refused"
+        );
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/unknown/w1:p1/conversation", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await["error"],
+            "host unknown: unreachable: other"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_closes_an_idle_agent_subscription() {
         let server = agent_server();
@@ -773,7 +1382,7 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state.clone(),
-            request(Method::GET, "/api/agents/w1:p1/events", None),
+            request(Method::GET, "/api/agents/local/w1:p1/events", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -894,7 +1503,7 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state,
-            request(Method::GET, "/api/agents/w1:p1/screen", None),
+            request(Method::GET, "/api/agents/local/w1:p1/screen", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -912,7 +1521,7 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state,
-            request(Method::GET, "/api/agents/w9:p9/conversation", None),
+            request(Method::GET, "/api/agents/local/w9:p9/conversation", None),
         )
         .await;
         let status = response.status();
@@ -952,7 +1561,7 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state,
-            request(Method::GET, "/api/agents/w1:p1/conversation", None),
+            request(Method::GET, "/api/agents/local/w1:p1/conversation", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1013,7 +1622,7 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state,
-            request(Method::GET, "/api/agents/w1:p1/conversation", None),
+            request(Method::GET, "/api/agents/local/w1:p1/conversation", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1032,7 +1641,7 @@ mod tests {
             with_socket(&server),
             request(
                 Method::POST,
-                "/api/agents/w1:p1/prompt",
+                "/api/agents/local/w1:p1/prompt",
                 Some(r#"{"text":"go on"}"#),
             ),
         )
@@ -1048,7 +1657,7 @@ mod tests {
             with_socket(&server),
             request(
                 Method::POST,
-                "/api/agents/w1:p1/prompt",
+                "/api/agents/local/w1:p1/prompt",
                 Some(r#"{"text":"  "}"#),
             ),
         )
@@ -1064,7 +1673,7 @@ mod tests {
             with_socket(&server),
             request(
                 Method::POST,
-                "/api/agents/w1:p1/keys",
+                "/api/agents/local/w1:p1/keys",
                 Some(r#"{"keys":["enter"]}"#),
             ),
         )
@@ -1080,7 +1689,7 @@ mod tests {
             with_socket(&server),
             request(
                 Method::POST,
-                "/api/agents/w1:p1/keys",
+                "/api/agents/local/w1:p1/keys",
                 Some(r#"{"keys":["Ctrl+C"]}"#),
             ),
         )
@@ -1103,7 +1712,7 @@ mod tests {
                 with_socket(&server),
                 request(
                     Method::POST,
-                    "/api/agents/w1:p1/keys",
+                    "/api/agents/local/w1:p1/keys",
                     Some(&format!(r#"{{"keys":["{key}"]}}"#)),
                 ),
             )
@@ -1125,7 +1734,7 @@ mod tests {
             with_socket(&server),
             request(
                 Method::POST,
-                "/api/agents/w1:p1/keys",
+                "/api/agents/local/w1:p1/keys",
                 Some(r#"{"keys":[]}"#),
             ),
         )
@@ -1138,7 +1747,7 @@ mod tests {
         let server = agent_server();
         let response = call(
             with_socket(&server),
-            request(Method::POST, "/api/agents/w1:p1/focus", None),
+            request(Method::POST, "/api/agents/local/w1:p1/focus", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -1153,7 +1762,7 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state.clone(),
-            request(Method::GET, "/api/agents/w2:p1/events", None),
+            request(Method::GET, "/api/agents/local/w2:p1/events", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);

@@ -57,7 +57,7 @@ pub fn QuestionForm(
     #[props(default)] requested: Option<String>,
     on_done: EventHandler<String>,
 ) -> Element {
-    let selected = use_context::<Signal<Option<String>>>();
+    let selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
     let mut pending = use_signal(Vec::<Pending>::new);
     let mut opened = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
@@ -81,7 +81,14 @@ pub fn QuestionForm(
     let list = pending();
     let current = match requested.as_deref() {
         Some(id) => list.iter().find(|item| item.id == id),
-        None => current_form(&list, opened().as_deref(), selected().as_deref()),
+        None => current_form(
+            &list,
+            opened().as_deref(),
+            selected()
+                .as_ref()
+                .filter(|address| address.host == "local")
+                .map(|address| address.pane.as_str()),
+        ),
     }
     .cloned();
     let count = list.len();

@@ -370,9 +370,11 @@ pub(crate) fn derive(
     insert(views, "active_jobs", Some(active_jobs), &gaps)?;
     scoped_views(views, status.as_ref(), local, &reports, &jobs, &gaps)?;
     insert(views, "findings", local.findings.as_ref(), &gaps)?;
-    agents_view(views, local, &gaps)?;
+    let agents = fleet_agents(local, &reports, input.published_ms);
+    agents_view(views, agents.as_ref(), &gaps)?;
     let portal = portal(
         local,
+        agents,
         board.as_ref(),
         status.as_ref(),
         &gaps,
@@ -447,13 +449,41 @@ fn sidebar_views(
     Ok(())
 }
 
-fn agents_view(views: &mut super::Domains, local: &LocalInputs, gaps: &[Gap]) -> Result<()> {
+fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option<Vec<AgentView>> {
+    let mut agents = local.agents.clone()?;
+    for report in reports.iter().filter(|report| !report.host.is_local()) {
+        if let Some(probe) = &report.probe {
+            agents.extend(probe.agent_panes.iter().map(|agent| AgentView {
+                host: report.host.label.clone(),
+                pane: agent.pane.clone(),
+                name: agent.name.clone(),
+                title: None,
+                agent: agent.agent.clone(),
+                state: if report.fresh(now) {
+                    agent.state.clone()
+                } else {
+                    "unknown".into()
+                },
+                cwd: agent.cwd.clone(),
+                repository: agent.repository.clone(),
+                blocked: None,
+            }));
+        }
+    }
+    Some(agents)
+}
+
+fn agents_view(
+    views: &mut super::Domains,
+    agents: Option<&Vec<AgentView>>,
+    gaps: &[Gap],
+) -> Result<()> {
     let gaps: Vec<_> = gaps
         .iter()
         .filter(|gap| matches!(gap.domain.as_str(), "agents" | "terminals"))
         .cloned()
         .collect();
-    insert(views, "agents", local.agents.as_ref(), &gaps)
+    insert(views, "agents", agents, &gaps)
 }
 
 fn scoped_views(
@@ -519,6 +549,7 @@ fn scoped_views(
 
 fn portal(
     local: &LocalInputs,
+    agents: Option<Vec<AgentView>>,
     board: Option<&Board>,
     status: Option<&Status>,
     gaps: &[Gap],
@@ -549,7 +580,7 @@ fn portal(
         revision: 0,
         published_ms,
         board: portal_board,
-        agents: local.agents.clone(),
+        agents,
         inbox,
         gaps: gaps.to_vec(),
     }

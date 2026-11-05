@@ -163,6 +163,14 @@ test("registration freezes evidence and publishes only compact facts, coalesced 
     r.calls.map((c) => c.method),
     ["GET", "POST", "PUT"],
   );
+  assert.deepEqual(
+    r.calls.map((call) => call.path),
+    [
+      "/api/agents/local/pane/activity",
+      "/api/agents/local/pane/activity/producer",
+      "/api/agents/local/pane/activity",
+    ],
+  );
   assert.deepEqual(r.calls[1]?.body.evidence, evidence);
   assert.equal(r.calls[1]?.body.expected_generation, 2);
   assert.equal(r.calls[1]?.body.epoch, "serve");
