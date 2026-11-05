@@ -773,9 +773,24 @@ mod liveness_tests {
     use super::*;
     use crate::hosts::Host;
     use crate::node::Snapshot;
-    use crate::observation::captured_actions;
     use crate::shell::Fake;
     use serde_json::json;
+
+    fn captured_reports(fleet: &Fleet<'_>, running: bool, now: u64) -> Result<Vec<HostReport>> {
+        let node = fleet.node();
+        let source = crate::observation::collect::host(
+            &node,
+            crate::host_store::snapshot(fleet.ledger)?,
+            running,
+            now,
+        )?;
+        Ok(vec![crate::hosts::cached_report(
+            &Host::local(),
+            source.into(),
+            now,
+            &node.thresholds,
+        )])
+    }
 
     #[test]
     fn old_running_snapshot_closes_done_child_but_free_service_lock_skips_it() {
@@ -822,7 +837,7 @@ mod liveness_tests {
             .on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w99:p1","agent":"pi","agent_status":"idle","terminal_id":"child","completion_seq":2}]}}"#)
             .on("herdr workspace list", r#"{"result":{"workspaces":[]}}"#)
             .on("herdr pane close w99:p1", "{}");
-        let reports = captured_actions(&fleet, 61_000).unwrap().reports().unwrap();
+        let reports = captured_reports(&fleet, false, 61_000).unwrap();
         assert_eq!(reports[0].service, "down");
         assert_eq!(finish(&fleet, &item, &reports, 61_000), None);
         assert!(
@@ -833,7 +848,7 @@ mod liveness_tests {
         assert!(shell.calls.lock().unwrap().is_empty());
         ledger
             .with_lock("service", || {
-                let reports = captured_actions(&fleet, 61_000)?.reports()?;
+                let reports = captured_reports(&fleet, true, 61_000)?;
                 assert_eq!(reports[0].service, "up");
                 assert_eq!(reports[0].sampled_ms, Some(1000));
                 assert!(!reports[0].headroom.as_ref().unwrap().eligible);
@@ -873,7 +888,7 @@ mod liveness_tests {
             1
         );
         assert_eq!(
-            captured_actions(&fleet, 61_000).unwrap().reports().unwrap()[0].service,
+            captured_reports(&fleet, false, 61_000).unwrap()[0].service,
             "down"
         );
         std::fs::remove_dir_all(ledger.dir).unwrap();

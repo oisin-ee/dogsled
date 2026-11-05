@@ -323,6 +323,11 @@ fn report(code: &str, host: &str, resource: String, owner: &str, id: &str, pane:
 
 impl Hold {
     fn with_reason(mut self, reason: &str) -> Self {
+        if self.code == "unreadable" && self.owner_pane.is_none() && self.owner == "unrecorded" {
+            self.reason.push_str("; ");
+            self.reason.push_str(reason);
+            return self;
+        }
         if let Some(rule) = RULES.iter().find(|rule| {
             rule.evidence
                 .iter()
@@ -596,13 +601,15 @@ fn job_commands(
     }
 }
 
-fn owner_hold(owners: &Owners, host: &str, code: &str, resource: String, id: &str) -> Result<Hold> {
-    let (owner, origin) = owners
+fn owner_hold(owners: &Owners, host: &str, code: &str, resource: String, id: &str) -> Hold {
+    let Some((owner, origin)) = owners
         .get(id)
         .filter(|(owner, _)| !owner.is_empty() && owner != "unrecorded" && owner != id)
-        .ok_or_else(|| {
-            crate::error::Error::Invalid(format!("resource {resource} has no recorded owner pane"))
-        })?;
+    else {
+        let reason =
+            format!("resource {resource} has no recorded owner pane; no release is proven");
+        return report("unreadable", host, resource, "unrecorded", id, "").with_reason(&reason);
+    };
     let mut hold = report(code, host, resource, owner, id, "");
     hold.owner_pane = Some(owner.clone());
     if matches!(
@@ -615,7 +622,7 @@ fn owner_hold(owners: &Owners, host: &str, code: &str, resource: String, id: &st
     ) {
         hold.command_host = origin.into();
     }
-    Ok(hold)
+    hold
 }
 
 /// The host reports existing claims; it never decides whether to release them.
@@ -646,7 +653,7 @@ pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<H
         }
     }
     let owned =
-        |code: &str, resource: String, id: &str| owner_hold(&owners, host, code, resource, id);
+        |code: &str, resource: String, id: &str| Ok(owner_hold(&owners, host, code, resource, id));
     for (id, reason) in invalid {
         holds.push(
             owned(

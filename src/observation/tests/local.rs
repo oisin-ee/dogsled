@@ -152,7 +152,7 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
     let input = collection.input;
     assert_eq!(input.gaps, []);
     assert!(input.views.is_empty(), "fleet projections belong to O6");
-    assert_eq!(input.local.len(), 5);
+    assert_eq!(input.local.len(), 6);
     assert_eq!(
         input.local["terminals"]["agents"],
         input.local["host"]["probe"]["agent_panes"]
@@ -503,9 +503,13 @@ fn cold_collection_failure_is_not_empty_success() {
     let collection = Collector::default().collect(&fixture.node(), 100);
     assert!(collection.sample.is_err());
     let input = collection.input;
-    assert_eq!(input.local.len(), 1);
+    assert_eq!(input.local.len(), 2);
     assert_eq!(input.local["todos"], json!([]));
-    assert_eq!(input.sources.local, BTreeMap::from([("todos".into(), 100)]));
+    assert_eq!(input.local["sidebar_preferences"], json!({}));
+    assert_eq!(
+        input.sources.local,
+        BTreeMap::from([("todos".into(), 100), ("sidebar_preferences".into(), 100)])
+    );
     assert_eq!(input.gaps.len(), 4);
     for domain in ["host", "headroom", "status", "terminals"] {
         assert!(input.gaps.iter().any(|gap| gap.domain == domain));
@@ -513,38 +517,102 @@ fn cold_collection_failure_is_not_empty_success() {
 }
 
 #[test]
+fn preferences_stay_fresh_when_host_capture_fails() {
+    let fixture = Fixture::new();
+    let mut collector = Collector::default();
+    collector.collect(&fixture.node(), 100).sample.unwrap();
+    let saved = crate::sidebar::model::Saved {
+        focus: crate::sidebar::model::Panel::Todos,
+        collapsed: vec![crate::sidebar::model::Panel::Agents],
+        fold_open: true,
+        selected_card: Some("child".into()),
+    };
+    crate::sidebar::model::save(&fixture.ledger, "owner", &saved).unwrap();
+    fixture.fail_probe();
+    let collection = collector.collect(&fixture.node(), 200);
+    assert!(collection.sample.is_err());
+    assert_eq!(collection.input.sources.local["host"], 100);
+    assert_eq!(collection.input.sources.local["sidebar_preferences"], 200);
+    assert_eq!(
+        collection.input.local["sidebar_preferences"]["owner"],
+        serde_json::to_value(saved).unwrap()
+    );
+    assert!(
+        !collection
+            .input
+            .gaps
+            .iter()
+            .any(|gap| gap.domain == "sidebar_preferences")
+    );
+}
+
+#[test]
+fn failed_preferences_capture_retains_last_value_without_failing_other_domains() {
+    let fixture = Fixture::new();
+    let saved = crate::sidebar::model::Model::default().saved();
+    crate::sidebar::model::save(&fixture.ledger, "owner", &saved).unwrap();
+    let mut collector = Collector::default();
+    let original = collector.collect(&fixture.node(), 100);
+    original.sample.unwrap();
+    crate::store::write(&fixture.ledger, |tx| {
+        tx.execute(
+            "ALTER TABLE sidebar_state RENAME TO unavailable_sidebar_state",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let failed = collector.collect(&fixture.node(), 200);
+    failed.sample.unwrap();
+    assert_eq!(
+        failed.input.local["sidebar_preferences"],
+        original.input.local["sidebar_preferences"]
+    );
+    assert_eq!(failed.input.sources.local["sidebar_preferences"], 100);
+    assert_eq!(failed.input.sources.local["host"], 200);
+    assert_eq!(failed.input.sources.local["todos"], 200);
+    assert_eq!(failed.input.gaps.len(), 1);
+    assert_eq!(failed.input.gaps[0].domain, "sidebar_preferences");
+    assert_eq!(
+        failed.input.gaps[0].availability,
+        super::super::Availability::Failed
+    );
+}
+
+#[test]
 fn failed_host_capture_still_imports_and_publishes_todos() {
     let fixture = Fixture::new();
     fixture.seed_todo();
-    let pending = crate::prepare::Pending {
-        request_id: "ownerless".into(),
-        tree: crate::cleanup::Tree {
-            repo: "/execution-host/repository".into(),
-            path: "/execution-host/checkout".into(),
-            branch: "pending-branch".into(),
-            head: String::new(),
-            identity: None,
-        },
-    };
-    crate::preparation_store::put_pending(&fixture.ledger, &[pending]).unwrap();
+    crate::store::write(&fixture.ledger, |tx| {
+        tx.execute(
+            "ALTER TABLE service_lanes RENAME TO unavailable_service_lanes",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(crate::board::cached_todos(&fixture.ledger).unwrap(), []);
     let collection = Collector::default().collect(&fixture.node(), 100);
     collection.sample.unwrap();
     let mut publisher = Publisher::new().unwrap();
     let frame = publisher.replace(collection.input).unwrap();
-    assert_eq!(frame.local.len(), 2);
+    assert_eq!(frame.local.len(), 3);
     assert_eq!(frame.local["terminals"]["agents"][0]["pane"], "worker");
     assert_eq!(frame.local["todos"][0]["revision"], 7);
     assert_eq!(frame.local["todos"][0]["pane"], "worker");
     assert_eq!(
         frame.sources.local,
-        BTreeMap::from([("todos".into(), 100), ("terminals".into(), 100)])
+        BTreeMap::from([
+            ("todos".into(), 100),
+            ("terminals".into(), 100),
+            ("sidebar_preferences".into(), 100)
+        ])
     );
     assert_eq!(frame.gaps.len(), 3);
     for domain in ["host", "headroom", "status"] {
         let gap = frame.gaps.iter().find(|gap| gap.domain == domain).unwrap();
         assert_eq!(gap.availability, super::super::Availability::Failed);
-        assert!(gap.detail.contains("has no recorded owner pane"));
+        assert!(gap.detail.contains("no such table: service_lanes"));
     }
     assert_eq!(
         crate::board::cached_todos(&fixture.ledger).unwrap().len(),

@@ -129,6 +129,10 @@ fn publication(fleet: &Fleet<'_>, shell: &StoredOnly, now: u64) -> Result<Arc<Pu
         views: Domains::new(),
         gaps: Vec::new(),
     };
+    input.local.insert(
+        "sidebar_preferences".into(),
+        serde_json::to_value(super::sidebar::preferences(fleet.ledger)?)?,
+    );
     input.local.extend(terminals.local);
     input.sources.local.extend(terminals.sources.local);
     input.gaps.extend(terminals.gaps);

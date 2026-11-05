@@ -10,6 +10,7 @@ pub(crate) mod peers;
 pub(crate) mod peers_runtime;
 pub(crate) mod project;
 pub(crate) mod read;
+pub(crate) mod sidebar;
 mod socket;
 #[cfg(debug_assertions)]
 pub(crate) mod stored;
@@ -222,7 +223,21 @@ pub(crate) fn captured_actions_with_terminals<'a>(
     now: u64,
     terminals: Option<crate::probe::Terminals>,
 ) -> Result<crate::hosts::ActionFleet<'a>> {
-    let reports = crate::hosts::ObserverFleet(fleet.clone()).status(now)?;
+    // Use the same stored producer sources as `state project`, without discovery or lanes.
+    let mut reports = Vec::new();
+    for host in &fleet.hosts {
+        let cached = if host.is_local() {
+            crate::hosts::Cached::from(collect::host(
+                &fleet.node(),
+                crate::host_store::snapshot(fleet.ledger)?,
+                true,
+                now,
+            )?)
+        } else {
+            crate::host_store::peer(fleet.ledger, &host.id)?.unwrap_or_default()
+        };
+        reports.push(fleet.cached_report(host, cached, now));
+    }
     let status = collect::status(fleet.ledger, reports.clone(), now)?;
     let mut input = Publication {
         published_ms: now,
@@ -240,6 +255,10 @@ pub(crate) fn captured_actions_with_terminals<'a>(
         views: Domains::new(),
         gaps: Vec::new(),
     };
+    input.local.insert(
+        "sidebar_preferences".into(),
+        serde_json::to_value(sidebar::preferences(fleet.ledger)?)?,
+    );
     if let Some(terminals) = terminals {
         input
             .local

@@ -144,6 +144,11 @@ impl Fixture {
                 ("terminals".into(), serde_json::to_value(terminals).unwrap()),
                 ("status".into(), serde_json::to_value(status).unwrap()),
                 ("todos".into(), json!([todo])),
+                (
+                    "sidebar_preferences".into(),
+                    serde_json::to_value(super::super::sidebar::preferences(&self.ledger).unwrap())
+                        .unwrap(),
+                ),
             ]),
             views: Domains::new(),
             gaps: vec![],

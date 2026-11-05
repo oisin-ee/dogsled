@@ -82,6 +82,10 @@ impl Ledger {
         }
     }
 
+    pub(crate) fn lock_path(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.lock"))
+    }
+
     fn lock_file(&self, name: &str) -> Result<File> {
         fs::create_dir_all(&self.dir)?;
         Ok(OpenOptions::new()
@@ -89,7 +93,7 @@ impl Ledger {
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.dir.join(format!("{name}.lock")))?)
+            .open(self.lock_path(name))?)
     }
 
     /// Acquire a lifetime lock without waiting for another owner.
@@ -104,7 +108,7 @@ impl Ledger {
 
     pub fn with_lock<T>(&self, name: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let lock = self.lock_file(name)?;
-        let operation = format!("lock {}", self.dir.join(format!("{name}.lock")).display());
+        let operation = format!("lock {}", self.lock_path(name).display());
         let end = std::time::Instant::now() + self.budget.remaining(&operation)?;
         loop {
             match lock.try_lock() {
@@ -124,27 +128,6 @@ impl Ledger {
         // Preserve unlock errors on ordinary completion; Drop also unlocks on unwind.
         lock.0.unlock()?;
         result
-    }
-
-    /// Observe a lock without waiting or creating it. The file's existence is not liveness.
-    pub fn locked(&self, name: &str) -> Result<bool> {
-        let lock = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.dir.join(format!("{name}.lock")))
-        {
-            Ok(lock) => lock,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error.into()),
-        };
-        match lock.try_lock() {
-            Ok(()) => {
-                lock.unlock()?;
-                Ok(false)
-            }
-            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
-            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-        }
     }
 
     pub fn reservations(&self, now: u64, ttl: u64) -> Result<Vec<Reservation>> {

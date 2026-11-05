@@ -1,10 +1,8 @@
 //! What the sidebar knows: cards, todo rows, and the owner's selection, fold, and scroll state.
 //! Nothing here draws or blocks. The reader thread builds [`Data`]; input mutates [`Model`].
 
-use crate::board::{Board, Group, Row, TodoSections, TodoStatus};
+use crate::board::{Group, TodoSections, TodoStatus};
 use crate::commands::HostState;
-use crate::config::Thresholds;
-use crate::hosts::HostReport;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -28,7 +26,7 @@ impl Panel {
 }
 
 /// The colour family of a card's state bar and pill.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tone {
     ToLand,
     Alert,
@@ -37,7 +35,7 @@ pub enum Tone {
     Queued,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Card {
     pub id: String,
     pub kind: String,
@@ -56,49 +54,6 @@ pub struct Card {
 }
 
 impl Card {
-    pub fn from_row(row: &Row) -> Self {
-        let (pill, tone) = if row.group == Group::ToLand {
-            ("to land", Tone::ToLand)
-        } else {
-            // The board publishes the lifecycle display name of an agent, so the sidebar
-            // shows the same word the lifecycle owner publishes.
-            match row.state.as_str() {
-                "stalled" => ("stalled", Tone::Alert),
-                "blocked" => ("blocked", Tone::Alert),
-                "working" => ("working", Tone::Busy),
-                "running" => ("running", Tone::Busy),
-                "unavailable" => ("unavailable", Tone::Alert),
-                "unknown" => ("unknown", Tone::Alert),
-                "idle" => ("idle", Tone::Idle),
-                "done" => ("done", Tone::Idle),
-                "queued" => ("queued", Tone::Queued),
-                "starting" => ("starting", Tone::Queued),
-                state if state.starts_with("exit ") => ("failed", Tone::Alert),
-                _ if row.group == Group::Attention => ("blocked", Tone::Alert),
-                _ => ("queued", Tone::Queued),
-            }
-        };
-        let harness = row.what.split(" · ").next().unwrap_or(&row.what);
-        Self {
-            id: row.id.clone(),
-            kind: row.kind.clone(),
-            name: row.name.clone(),
-            harness: harness.to_owned(),
-            host: row.host.clone(),
-            pane: row.pane.clone(),
-            group: row.group,
-            pill: pill.to_owned(),
-            tone,
-            ahead: row.ahead.filter(|n| *n > 0),
-            age_ms: row.age_ms,
-            activity: row
-                .activity
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
-        }
-    }
-
     /// `pi · netcup`, `job · local`.
     pub fn subtitle(&self) -> String {
         format!("{} · {}", self.harness, self.host)
@@ -134,56 +89,12 @@ pub struct HostRow {
 }
 
 impl HostRow {
-    pub fn from_report(report: &HostReport, limits: &Thresholds, now: u64) -> Self {
-        let brief = crate::commands::HostBrief::of(report);
-        let memory = report.probe.as_ref().map(|p| {
-            let free = p.memory.total_bytes.saturating_sub(p.memory.used_bytes) as f64;
-            // The admission rule: the reserve for every held reservation plus the new agent.
-            let need = limits
-                .memory_reserve_bytes
-                .saturating_mul(p.reservations.len() as u64 + 1) as f64;
-            let level = if free < need {
-                Level::Bad
-            } else if free < need * 1.1 {
-                Level::Warn
-            } else {
-                Level::Ok
-            };
-            (
-                p.memory.used_bytes as f64 / (p.memory.total_bytes.max(1) as f64),
-                level,
-            )
-        });
-        let disk = report.probe.as_ref().map(|p| {
-            let min = limits.disk_free_min_percent;
-            let level = if p.disk_free_percent < min {
-                Level::Bad
-            } else if p.disk_free_percent < 2.0 * min {
-                Level::Warn
-            } else {
-                Level::Ok
-            };
-            (p.disk_free_percent, level)
-        });
-        Self {
-            label: brief.label,
-            load: brief.load,
-            state: brief.state,
-            measured: brief.measured,
-            memory,
-            disk,
-            silent_ms: (brief.state == HostState::Unreachable)
-                .then(|| report.sampled_ms.map(|sampled| now.saturating_sub(sampled)))
-                .flatten(),
-        }
-    }
-
     pub fn unreachable(&self) -> bool {
         self.state == HostState::Unreachable
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Data {
     pub cards: Vec<Card>,
     pub todos: Option<TodoSections>,
@@ -192,17 +103,6 @@ pub struct Data {
 }
 
 impl Data {
-    /// Groups in board order (to land, attention, running, waiting); newest first within one.
-    pub fn from_board(board: &Board, todos: Option<TodoSections>, hosts: Vec<HostRow>) -> Self {
-        let mut cards: Vec<Card> = board.rows.iter().map(Card::from_row).collect();
-        cards.sort_by(|a, b| a.group.cmp(&b.group).then(a.age_ms.cmp(&b.age_ms)));
-        Self {
-            cards,
-            todos,
-            hosts,
-        }
-    }
-
     /// A host that stopped answering: its last cards stay, dimmed.
     pub fn is_stale(&self, host: &str) -> bool {
         self.hosts
@@ -596,23 +496,23 @@ fn step(index: usize, delta: isize, len: usize) -> usize {
         .min(len.saturating_sub(1))
 }
 
-pub fn load(ledger: &crate::ledger::Ledger, owner: &str) -> Option<Saved> {
-    crate::store::read(ledger, |tx| crate::web_store::board::sidebar(tx, owner))
-        .ok()
-        .flatten()
-}
-
-pub fn save(ledger: &crate::ledger::Ledger, owner: &str, saved: &Saved) {
-    // A sidebar that cannot remember its folds still works.
-    let _ = crate::store::write(ledger, |tx| {
+pub fn save(
+    ledger: &crate::ledger::Ledger,
+    owner: &str,
+    saved: &Saved,
+) -> crate::error::Result<()> {
+    crate::store::write(ledger, |tx| {
         crate::web_store::board::put_sidebar(tx, owner, saved)
-    });
+    })
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::board::{TodoItem, TodoSection};
+    use crate::board::{Board, Row, TodoItem, TodoSection};
+    use crate::config::Thresholds;
+    use crate::hosts::HostReport;
+    use crate::observation::sidebar::host;
 
     pub fn row(id: &str, group: Group, state: &str, age_ms: u64) -> Row {
         Row {
@@ -848,14 +748,22 @@ pub mod tests {
     fn saved_state_round_trips_through_the_ledger() {
         let dir = std::env::temp_dir().join(crate::ledger::new_id());
         let ledger = crate::ledger::Ledger::new(dir.clone());
-        assert_eq!(load(&ledger, "w1:p1"), None);
+        assert!(
+            crate::observation::sidebar::preferences(&ledger)
+                .unwrap()
+                .is_empty()
+        );
         let mut model = model();
         model.focus = Panel::Todos;
         model.fold_open = true;
         model.toggle_collapse(Panel::Agents);
-        save(&ledger, "w1:p1", &model.saved());
+        save(&ledger, "w1:p1", &model.saved()).unwrap();
         assert!(dir.join("state.db").exists());
-        let restored = Model::from_saved(load(&ledger, "w1:p1"));
+        let restored = Model::from_saved(
+            crate::observation::sidebar::preferences(&ledger)
+                .unwrap()
+                .remove("w1:p1"),
+        );
         assert_eq!(restored.focus, Panel::Todos);
         assert!(restored.fold_open && restored.is_collapsed(Panel::Agents));
         std::fs::remove_dir_all(dir).unwrap();
@@ -902,12 +810,12 @@ pub mod tests {
     fn host_rows_use_the_admission_thresholds() {
         let now = 1_000 + 2 * 60_000;
         // Two reservations' worth is held (one reservation plus the new agent): need 6 GiB.
-        let ok = HostRow::from_report(&report(30, 40.0, true, true), &limits(), now);
+        let ok = host(&report(30, 40.0, true, true), &limits(), now);
         assert_eq!((ok.load.as_str(), ok.state), ("8/16", HostState::Eligible));
         assert_eq!(ok.memory.map(|m| m.1), Some(Level::Ok));
         assert_eq!(ok.disk.map(|d| d.1), Some(Level::Ok));
         // 48 - 41 = 7 GiB free: within 10% of the 6 GiB need is 6.6 GiB, so 7 is fine; 42 -> 6 GiB.
-        let edge = HostRow::from_report(&report(41, 29.0, true, false), &limits(), now);
+        let edge = host(&report(41, 29.0, true, false), &limits(), now);
         assert_eq!(edge.memory.map(|m| m.1), Some(Level::Ok));
         assert_eq!(
             edge.disk.map(|d| d.1),
@@ -915,9 +823,9 @@ pub mod tests {
             "below 2x the 15% minimum"
         );
         assert_eq!(edge.state, HostState::NoHeadroom);
-        let warn = HostRow::from_report(&report(41, 15.0, true, false), &limits(), now);
+        let warn = host(&report(41, 15.0, true, false), &limits(), now);
         assert_eq!(warn.disk.map(|d| d.1), Some(Level::Warn));
-        let close = HostRow::from_report(&report(41, 14.9, true, false), &limits(), now);
+        let close = host(&report(41, 14.9, true, false), &limits(), now);
         assert_eq!(
             close.disk.map(|d| d.1),
             Some(Level::Bad),
@@ -927,24 +835,20 @@ pub mod tests {
         let mut near = report(41, 40.0, true, false);
         near.probe.as_mut().unwrap().memory.used_bytes = 41 * GIB + GIB / 2;
         assert_eq!(
-            HostRow::from_report(&near, &limits(), now)
-                .memory
-                .map(|m| m.1),
+            host(&near, &limits(), now).memory.map(|m| m.1),
             Some(Level::Warn)
         );
         let mut past = report(41, 40.0, true, false);
         past.probe.as_mut().unwrap().memory.used_bytes = 43 * GIB;
         assert_eq!(
-            HostRow::from_report(&past, &limits(), now)
-                .memory
-                .map(|m| m.1),
+            host(&past, &limits(), now).memory.map(|m| m.1),
             Some(Level::Bad)
         );
     }
 
     #[test]
     fn an_unreachable_host_reports_how_long_it_has_been_silent() {
-        let row = HostRow::from_report(
+        let row = host(
             &report(10, 40.0, false, false),
             &limits(),
             1_000 + 2 * 60_000,
@@ -954,7 +858,7 @@ pub mod tests {
         let mut data = Data::default();
         data.hosts.push(row);
         assert!(data.is_stale("netcup") && !data.is_stale("local"));
-        let live = HostRow::from_report(&report(10, 40.0, true, true), &limits(), 5_000);
+        let live = host(&report(10, 40.0, true, true), &limits(), 5_000);
         assert_eq!(live.silent_ms, None);
     }
 
