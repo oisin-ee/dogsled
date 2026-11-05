@@ -27,7 +27,7 @@ struct Context {
     policy: Policy,
     ledger: Ledger,
     home: String,
-    /// Leads reload it on every call, so a long-lived server sees `repo add`.
+    /// Leads reload it on every call, so a long-lived server sees host policy changes.
     config_path: std::path::PathBuf,
 }
 

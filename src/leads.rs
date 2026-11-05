@@ -279,15 +279,6 @@ pub(crate) fn peer(
 ) -> crate::error::Result<serde_json::Value> {
     routing::peer(context, input)
 }
-/// GitHub slug checkout resolution is supplied by the leads-anywhere unit.
-fn registered(
-    _context: &CreateContext<'_>,
-    _selector: &str,
-) -> crate::error::Result<serde_json::Value> {
-    Err(crate::error::Error::Invalid(
-        "GitHub lead checkout resolution is unavailable".into(),
-    ))
-}
 
 /// Advance one saved phase per effect. `record` mirrors what is saved.
 fn launch(context: &CreateContext<'_>, record: &mut Record) -> crate::error::Result<()> {
