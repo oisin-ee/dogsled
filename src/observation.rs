@@ -6,6 +6,7 @@ pub(crate) mod details;
 pub(crate) mod diagnostics;
 pub(crate) mod display;
 pub(crate) mod ipc;
+pub(crate) mod live_activity;
 pub(crate) mod peers;
 pub(crate) mod peers_runtime;
 pub(crate) mod project;
@@ -77,6 +78,8 @@ pub(crate) struct Frame {
     /// One newline-delimited frame, serialized before making this revision visible.
     pub bytes: Arc<[u8]>,
     pub details: BTreeMap<String, Arc<details::Payload>>,
+    pub activity: BTreeMap<String, Arc<[u8]>>,
+    pub activity_measured: std::time::Instant,
 }
 
 /// The single producer owns revision assignment. Watch retains only the latest value.
@@ -84,6 +87,7 @@ pub(crate) struct Frame {
 pub(crate) struct Publisher {
     epoch: String,
     details: details::Payloads,
+    activity: BTreeMap<String, portal_types::agents::ActivityView>,
     sender: watch::Sender<Option<Arc<Frame>>>,
 }
 
@@ -103,8 +107,17 @@ impl Publisher {
         Ok(Self {
             epoch,
             details: details::Payloads::default(),
+            activity: BTreeMap::new(),
             sender: watch::channel(None).0,
         })
+    }
+
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    pub fn activity(&mut self, activity: BTreeMap<String, portal_types::agents::ActivityView>) {
+        self.activity = activity;
     }
 
     pub fn details(&mut self, details: details::Payloads) {
@@ -172,10 +185,24 @@ impl Publisher {
         if bytes.len() > ipc::MAX_FRAME_BYTES {
             return Err(Error::Invalid("observation publication too large".into()));
         }
+        let activity = self
+            .activity
+            .iter()
+            .map(|(pane, activity)| {
+                let mut activity = activity.clone();
+                activity.epoch.clone_from(&self.epoch);
+                activity.revision = revision;
+                let mut bytes = serde_json::to_vec(&activity)?;
+                bytes.push(b'\n');
+                Ok((pane.clone(), Arc::from(bytes)))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
         self.sender.send_replace(Some(Arc::new(Frame {
             published: Arc::clone(&published),
             bytes: bytes.into(),
             details: self.details.snapshot(),
+            activity,
+            activity_measured: std::time::Instant::now(),
         })));
         Ok(published)
     }

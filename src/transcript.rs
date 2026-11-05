@@ -100,3 +100,36 @@ fn find(
     }
     Some(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pi_header_evidence_requires_a_complete_regular_session_file() {
+        let directory = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("session.jsonl");
+        let path = file.to_str().unwrap();
+        for invalid in [
+            "",
+            "{}\n",
+            "{\"type\":\"session\",\"id\":\"\"}\n",
+            "{\"type\":\"session\",\"id\":\"a\"}",
+            "malformed\n",
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            assert!(pi_session_id(path).is_err());
+        }
+        std::fs::write(&file, "{\"type\":\"session\",\"id\":\"a\"}\n").unwrap();
+        assert_eq!(pi_session_id(path).unwrap(), "a");
+        let link = directory.join("link.jsonl");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(pi_session_id(link.to_str().unwrap()).is_err());
+        assert!(pi_session_id(directory.to_str().unwrap()).is_err());
+        std::fs::write(&file, "x".repeat(MAX_HEADER as usize + 1)).unwrap();
+        assert!(pi_session_id(path).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(pi_session_id(path).is_err());
+    }
+}

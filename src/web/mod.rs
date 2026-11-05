@@ -1,6 +1,7 @@
 //! Guarded portal API. One observation subscription supplies board, agents and inbox.
 //! Requests select projections; they never observe or derive state.
 
+pub mod activity;
 pub mod agents;
 pub mod assets;
 pub mod board;
@@ -236,6 +237,7 @@ fn router(state: AppState) -> Router {
         .route("/api/board", get(board))
         .route("/api/stream", get(stream))
         .merge(agents::router())
+        .merge(activity::router())
         .merge(inbox::routes())
         .merge(questions::routes())
         .merge(reviews::routes())
@@ -286,6 +288,19 @@ async fn stream(
 }
 
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let activity_write = request.uri().path().starts_with("/api/agents/")
+        && (request.uri().path().ends_with("/activity")
+            || request.uri().path().ends_with("/activity/producer"))
+        && matches!(
+            *request.method(),
+            axum::http::Method::POST | axum::http::Method::PUT
+        );
+    if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
+        return activity::failure(crate::observation::live_activity::error(
+            portal_types::agents::ActivityCode::Unauthorized,
+            "activity mutations require bearer authentication",
+        ));
+    }
     if let Some(response) = guard::check(
         request.method(),
         request.headers(),
