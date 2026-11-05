@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
 
 // Todo publication uses stdin through the real process API, not ExtensionAPI.exec. The board
@@ -103,6 +103,8 @@ function rig() {
 	const components = new Map<string, any>();
 	const ctx = { mode: "tui", hasUI: true, cwd: process.cwd(), sessionManager: manager, isIdle: () => true, ui: { theme: plain,
 		setWidget: (...args: any[]) => {
+			// This fixture observes the board, not the independent pi-todo widget.
+			if (args[0] !== "dogsled") { drawn(); return; }
 			components.get(args[0])?.dispose?.();
 			widgets.push(args);
 			const component = typeof args[1] === "function" ? args[1]({ terminal: { rows: 24 }, requestRender() { drawn(); } }, plain) : undefined;
@@ -111,10 +113,10 @@ function rig() {
 			drawn();
 		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
-	const next = () => new Promise<void>(resolve => { drawn = resolve; });
+	const next = () => new Promise<void>(resolve => { drawn = () => { drawn = () => {}; resolve(); }; });
 	/** Resolves once `check` holds after a widget or notice; frames arrive from another process. */
 	const until = (check: () => boolean) => new Promise<void>(resolve => {
-		const poll = () => { if (check()) resolve(); else drawn = poll; };
+		const poll = () => { if (check()) { drawn = () => {}; resolve(); } else drawn = poll; };
 		poll();
 	});
 	const frame = (line: unknown) => appendFileSync(frames, `${JSON.stringify(line)}\n`);
@@ -143,6 +145,54 @@ function rig() {
 			return result;
 		} };
 }
+
+test("the extension publishes real activity through PortalClient with bearer auth and native evidence", async t => {
+	withPane(t);
+	const state = mkdtempSync(join(tmpdir(), "dogsled-activity-token-"));
+	mkdirSync(join(state, "web"));
+	writeFileSync(join(state, "web", "token"), "fixture-token\n");
+	const previous = process.env["DOGSLED_STATE"];
+	process.env["DOGSLED_STATE"] = state;
+	t.after(() => {
+		if (previous === undefined) delete process.env["DOGSLED_STATE"]; else process.env["DOGSLED_STATE"] = previous;
+		rmSync(state, { recursive: true, force: true });
+	});
+	let first!: () => void;
+	let thinking!: () => void;
+	let closed!: () => void;
+	const firstPublication = new Promise<void>(resolve => { first = resolve; });
+	const thinkingPublication = new Promise<void>(resolve => { thinking = resolve; });
+	const closure = new Promise<void>(resolve => { closed = resolve; });
+	const publications: any[] = [];
+	t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+		assert.match(String(url), /\/api\/agents\/w1%3Ap1\/activity(?:\/producer)?$/);
+		assert.equal((init.headers as Record<string, string>)["authorization"], "Bearer fixture-token");
+		if (init.method === "GET") return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", producer: { generation: 0 } });
+		const body = JSON.parse(String(init.body));
+		if (init.method === "POST") assert.deepEqual(body.evidence, { session_file: "/native/session.jsonl", session_id: "session" });
+		else {
+			publications.push(body.payload);
+			if (body.payload.state?.phase === "idle") first();
+			if (body.payload.state?.phase === "thinking") thinking();
+			if (body.payload.kind === "closed") closed();
+		}
+		return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", generation: 1,
+			producer_id: body.producer_id, session: "native-key", sequence: body.sequence ?? 0, heartbeat_ms: 5000, ttl_ms: 15000 });
+	});
+	const r = rig();
+	t.mock.method(r.ctx.sessionManager, "getSessionFile", () => "/native/session.jsonl");
+	await r.invoke("session_start");
+	await firstPublication;
+	await r.invoke("agent_start");
+	await r.invoke("message_update", { message: { role: "assistant" }, assistantMessageEvent: {
+		type: "thinking_delta", contentIndex: 0, delta: "private reasoning that must not leave Pi",
+	} });
+	await thinkingPublication;
+	await r.invoke("session_shutdown");
+	await closure;
+	assert.equal(JSON.stringify(publications).includes("private reasoning"), false);
+	assert.deepEqual(publications.at(-1), { kind: "closed" });
+});
 
 function withPane(t: { after: (fn: () => void) => void }) {
 	const herdr = process.env["HERDR_ENV"];
@@ -439,6 +489,8 @@ test("Alt+W and /work expand the same above-editor widget without an overlay or 
 	assert.deepEqual(r.widget().render(100), compact);
 	const drawn = r.next();
 	t.mock.timers.tick(10_000);
+	// Unchanged observations do not redraw on a timer; deliver the next publication.
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
 	await drawn;
 	assert.equal(historyReads(), 0);
 	await r.invoke("session_shutdown");
@@ -471,17 +523,17 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	await r.until(r.showsBoard);
 	let confirmed!: () => void;
 	const finished = new Promise<void>(resolve => { confirmed = resolve; });
-	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
+	Object.assign(r.ctx.ui, {
 		confirm: async (_title: string, _body: string, options: { signal: AbortSignal }) => {
 			signal = options.signal;
 			await r.invoke("session_shutdown");
 			confirmed();
 			return true;
 		},
-	} };
-	await r.commands.get("work").handler("", ctx);
+	});
+	await r.commands.get("work").handler("", r.ctx);
 	r.widget().render(100);
-	await r.shortcuts.get("alt+s").handler(ctx);
+	await r.shortcuts.get("alt+s").handler(r.ctx);
 	await finished;
 	assert.equal(signal?.aborted, true);
 	assert.equal(r.calls.some(args => args[1] === "stop"), false);

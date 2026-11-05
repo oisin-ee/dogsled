@@ -1,5 +1,6 @@
 //! The dogsled web portal: a Dioxus page that shows the board, live from `/api/stream`.
 
+pub mod activity;
 mod agent_view;
 mod api;
 mod app;

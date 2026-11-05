@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
 use portal_types::agents::{
-    AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
+    ActivityView, AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
 };
 use portal_types::{BoardView, PortalEvent};
 use serde::de::DeserializeOwned;
@@ -93,6 +93,55 @@ pub async fn fetch_conversation(pane: &str) -> Result<Option<Conversation>, Stri
         return Ok(None);
     }
     read_json(response).await.map(Some)
+}
+
+/// Read a complete activity snapshot, separately from transcript and lifecycle reads.
+pub async fn fetch_activity(pane: &str) -> Result<ActivityView, crate::activity::Gap> {
+    use crate::activity::Gap;
+    let response = Request::get(&format!("{BASE}/api/agents/{}/activity", encode(pane)))
+        .header("Cache-Control", "no-cache")
+        .send()
+        .await
+        .map_err(|_| Gap::Disconnected)?;
+    if !response.ok() {
+        return Err(Gap::Disconnected);
+    }
+    response.json().await.map_err(|_| Gap::Invalid)
+}
+
+/// Follow only activity. Subscribe to error events explicitly: EventSource reconnecting
+/// errors must clear detail too, even while the browser intends to reconnect.
+pub async fn watch_activity(
+    pane: &str,
+    mut on_frame: impl FnMut(ActivityView) -> Result<(), crate::activity::Gap>,
+) -> Result<(), crate::activity::Gap> {
+    use crate::activity::Gap;
+    let mut source = EventSource::new(&format!(
+        "{BASE}/api/agents/{}/activity/events",
+        encode(pane)
+    ))
+    .map_err(|_| Gap::Disconnected)?;
+    let activity = source
+        .subscribe("activity")
+        .map_err(|_| Gap::Disconnected)?;
+    let errors = source.subscribe("error").map_err(|_| Gap::Disconnected)?;
+    let mut stream = futures_util::stream::select(
+        activity.map(|item| (false, item)),
+        errors.map(|item| (true, item)),
+    );
+    while let Some((error, item)) = stream.next().await {
+        if error {
+            return Err(Gap::Disconnected);
+        }
+        let (_, message) = item.map_err(|_| Gap::Disconnected)?;
+        let text = message.data().as_string().ok_or(Gap::Invalid)?;
+        if text.len() > 128 * 1024 {
+            return Err(Gap::Invalid);
+        }
+        let view = serde_json::from_str::<ActivityView>(&text).map_err(|_| Gap::Invalid)?;
+        on_frame(view)?;
+    }
+    Err(Gap::Disconnected)
 }
 
 /// Read the terminal of the agent in `pane`.
