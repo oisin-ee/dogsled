@@ -5,9 +5,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use dioxus_primitives::scroll_area::ScrollDirection;
 use dioxus_sdk_time::{sleep, use_interval};
-use portal_types::BoardView;
 use portal_types::agents::AgentView as Agent;
 use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
+use portal_types::{BoardView, PortalEvent};
 
 use crate::agent_view::{AgentView, Draft};
 use crate::api;
@@ -107,7 +107,7 @@ pub struct InboxItem {
     pub age_ms: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct InboxState {
     snapshot: Option<InboxView>,
     error: Option<String>,
@@ -197,11 +197,71 @@ impl DeepLink {
     }
 }
 
+/// One reducer owns all browser projections and their connection status.
+#[derive(Clone, Default)]
+struct PortalState {
+    board: Option<BoardView>,
+    board_error: Option<String>,
+    agents: Vec<Agent>,
+    agent_error: Option<String>,
+    inbox: InboxState,
+    paused: bool,
+}
+
+impl PortalState {
+    fn update(&mut self, result: Result<PortalEvent, String>, now: u64) {
+        let result = result.and_then(|event| match event {
+            PortalEvent::Snapshot(snapshot) => Ok(snapshot),
+            PortalEvent::Status(status) => Err(status.error),
+        });
+        match result {
+            Ok(snapshot) => {
+                let gaps = snapshot
+                    .gaps
+                    .iter()
+                    .map(|gap| gap.detail.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let missing = || {
+                    if gaps.is_empty() {
+                        "observation unavailable".to_owned()
+                    } else {
+                        gaps.clone()
+                    }
+                };
+                match snapshot.board {
+                    Some(view) => {
+                        self.board = Some(view);
+                        self.board_error = None;
+                    }
+                    None => self.board_error = Some(missing()),
+                }
+                match snapshot.agents {
+                    Some(agents) => {
+                        self.agents = agents;
+                        self.agent_error = None;
+                    }
+                    None => self.agent_error = Some(missing()),
+                }
+                self.inbox.update(snapshot.inbox.ok_or_else(missing), now);
+                self.paused = !snapshot.gaps.is_empty();
+            }
+            Err(message) => {
+                self.paused = true;
+                self.board_error = Some(message.clone());
+                self.agent_error = Some(message.clone());
+                self.inbox.update(Err(message), now);
+            }
+        }
+    }
+}
+
 #[component]
 pub fn App() -> Element {
-    let mut board = use_signal(|| None::<BoardView>);
-    let mut board_error = use_signal(|| None::<String>);
-    let mut stream_paused = use_signal(|| false);
+    let mut publication = use_signal(PortalState::default);
+    let board = use_memo(move || publication.read().board.clone());
+    let board_error = use_memo(move || publication.read().board_error.clone());
+    let stream_paused = use_memo(move || publication.read().paused);
     let mut panel = use_context_provider(|| Signal::new(LeadPanel::Chat));
     let mut width = use_context_provider(|| ConsoleWidth(Signal::new(1440))).0;
     use_effect(move || {
@@ -226,9 +286,9 @@ pub fn App() -> Element {
             "window.removeEventListener('resize', window.__consoleResizeHandler); delete window.__consoleResizeHandler;",
         );
     });
-    let mut agents = use_signal(Vec::<Agent>::new);
-    let mut agent_error = use_signal(|| None::<String>);
-    let mut inbox_state = use_signal(InboxState::default);
+    let agents = use_memo(move || publication.read().agents.clone());
+    let agent_error = use_memo(move || publication.read().agent_error.clone());
+    let inbox_state = use_memo(move || publication.read().inbox.clone());
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
     let mut selected = use_context_provider(|| Signal::new(link.pane.clone()));
@@ -237,40 +297,10 @@ pub fn App() -> Element {
     use_context_provider(|| Signal::new(Conversations::default()));
 
     use_future(move || async move {
-        let (board_result, inbox_result) =
-            futures_util::future::join(api::fetch_board(), api::fetch_inbox()).await;
-        match board_result {
-            Ok(view) => board.set(Some(view)),
-            Err(message) => board_error.set(Some(message)),
-        }
-        inbox_state.write().update(inbox_result, clock_ms());
         loop {
-            let result = api::watch(
-                |view| {
-                    board.set(Some(view));
-                    board_error.set(None);
-                },
-                |result| inbox_state.write().update(result, clock_ms()),
-                |paused| stream_paused.set(paused),
-            )
-            .await;
-            stream_paused.set(true);
+            let result = api::watch(|event| publication.write().update(event, clock_ms())).await;
             if let Err(message) = result {
-                board_error.set(Some(message));
-            }
-            sleep(RETRY).await;
-        }
-    });
-
-    // Herdr supplies live leads only. Pending items come exclusively from inbox.
-    use_future(move || async move {
-        loop {
-            match api::fetch_agents().await {
-                Ok(value) => {
-                    agents.set(value);
-                    agent_error.set(None);
-                }
-                Err(message) => agent_error.set(Some(message)),
+                publication.write().update(Err(message), clock_ms());
             }
             sleep(RETRY).await;
         }
@@ -516,6 +546,73 @@ fn age(ms: u64) -> String {
 mod shell_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn portal_publications_and_status_keep_stream_order() -> Result<(), serde_json::Error> {
+        use portal_types::{PortalAvailability, PortalSnapshot, PortalStatus};
+
+        let snapshot = |revision| {
+            PortalEvent::Snapshot(Box::new(PortalSnapshot {
+                version: 1,
+                epoch: "serve".to_owned(),
+                revision,
+                published_ms: revision,
+                board: Some(BoardView {
+                    hosts: vec![],
+                    repos: vec![],
+                    generated_ms: revision,
+                }),
+                agents: Some(vec![]),
+                inbox: Some(InboxView::default()),
+                gaps: vec![],
+            }))
+        };
+        let disconnected = || {
+            PortalEvent::Status(PortalStatus {
+                observation: PortalAvailability::Disconnected,
+                error: "observation publisher disconnected".to_owned(),
+            })
+        };
+        let mut state = PortalState::default();
+        // Exercise the same decoder and reducer as the one-name browser stream.
+        let apply = |state: &mut PortalState, event: PortalEvent, now| {
+            let bytes = serde_json::to_vec(&event)?;
+            state.update(Ok(serde_json::from_slice(&bytes)?), now);
+            Ok::<(), serde_json::Error>(())
+        };
+        apply(&mut state, disconnected(), 1)?;
+        assert!(state.paused);
+        assert!(state.board.is_none());
+        apply(&mut state, snapshot(2), 2)?;
+        assert!(!state.paused);
+        assert!(state.board_error.is_none());
+        assert!(state.agent_error.is_none());
+        assert_eq!(state.inbox.count(), Some(0));
+        assert_eq!(
+            state.board.as_ref().map(|board| board.generated_ms),
+            Some(2)
+        );
+        let retained = state.clone();
+        apply(&mut state, disconnected(), 3)?;
+        assert!(state.paused);
+        assert!(state.board_error.is_some());
+        assert!(state.agent_error.is_some());
+        assert_eq!(state.board, retained.board);
+        assert_eq!(state.agents, retained.agents);
+        assert_eq!(state.inbox.snapshot, retained.inbox.snapshot);
+        assert_eq!(state.inbox.received_ms, 2);
+        assert_eq!(state.inbox.count(), None);
+        apply(&mut state, snapshot(4), 4)?;
+        assert!(!state.paused);
+        assert!(state.board_error.is_none());
+        assert!(state.agent_error.is_none());
+        assert_eq!(state.inbox.count(), Some(0));
+        assert_eq!(
+            state.board.as_ref().map(|board| board.generated_ms),
+            Some(4)
+        );
+        Ok(())
+    }
 
     #[test]
     fn inbox_uses_server_count_metadata_ages_and_worker_selection() -> Result<(), serde_json::Error>

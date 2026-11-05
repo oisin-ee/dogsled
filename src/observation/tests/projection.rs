@@ -330,7 +330,7 @@ fn all_views_share_one_capture_and_published_revision() {
 }
 
 #[test]
-fn published_owner_board_matches_existing_reader_including_enrichment() {
+fn published_owner_board_preserves_captured_enrichment() {
     let mut fixture = Fixture::new();
     let agent = &mut fixture.local.probe.as_mut().unwrap().agent_panes[0];
     agent.done = true;
@@ -356,15 +356,11 @@ fn published_owner_board_matches_existing_reader_including_enrichment() {
     let status: Status = serde_json::from_value(input.local["status"].clone()).unwrap();
     let todos: Vec<crate::board::TodoSections> =
         serde_json::from_value(input.local["todos"].clone()).unwrap();
-    let mut reader = crate::board::build(&status, Some("owner"), NOW);
-    crate::board::enrich(
-        &mut reader,
-        &status,
-        &todos,
-        &fixture.ledger,
-        &fixture.shell,
-    )
-    .unwrap();
+    let mut expected = crate::board::build(&status, Some("owner"), NOW);
+    let messages =
+        crate::store::read(&fixture.ledger, crate::web_store::inbox::all_records).unwrap();
+    let captured = crate::board::capture_enrichment(&expected, &status, messages, &fixture.shell);
+    crate::board::enrich_captured(&mut expected, &status, &todos, &captured);
     let local = project::Projector::default().inputs(&fixture.fleet(), &input);
     project::derive(
         &local,
@@ -375,7 +371,7 @@ fn published_owner_board_matches_existing_reader_including_enrichment() {
     .unwrap();
     assert_eq!(
         input.views["boards"]["data"]["owner"],
-        serde_json::to_value(reader).unwrap()
+        serde_json::to_value(expected).unwrap()
     );
     let row = input.views["boards"]["data"]["owner"]["rows"]
         .as_array()
