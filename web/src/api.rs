@@ -175,14 +175,12 @@ pub async fn send_prompt(pane: &str, text: &str) -> Result<(), String> {
 }
 
 /// The repositories a lead can start in.
-pub async fn fetch_repos() -> Result<Vec<portal_types::agents::RepoChoice>, String> {
+pub async fn fetch_repos() -> Result<portal_types::agents::RepoList, String> {
     let response = Request::get(&format!("{BASE}/api/repos"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
-    read_json::<portal_types::agents::RepoList>(response)
-        .await
-        .map(|list| list.repos)
+    read_json::<portal_types::agents::RepoList>(response).await
 }
 
 /// Start a lead in `repo` with its first prompt. The result is the lead's pane.

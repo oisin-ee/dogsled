@@ -264,35 +264,14 @@ pub(crate) fn create(
         workspace: record.workspace,
     })
 }
-
-/// The registered repository, checked against its local checkout. Stage 1 never clones,
-/// creates a worktree, or changes branches.
+/// GitHub slug checkout resolution is supplied by the leads-anywhere unit.
 fn registered(
-    context: &CreateContext<'_>,
-    selector: &str,
+    _context: &CreateContext<'_>,
+    _selector: &str,
 ) -> crate::error::Result<crate::checkout::Repository> {
-    let policy = crate::config::load(context.config_path)?;
-    let repo = crate::repos::resolve(&policy.repos, context.home, selector)?;
-    let path = crate::repos::checkout_path(context.home, repo)?;
-    let display = path.display().to_string();
-    let found = crate::checkout::discover(context.shell, &display, context.home, false)?
-        .ok_or_else(|| {
-            crate::error::Error::Invalid(format!("{display} is not a repository checkout"))
-        })?;
-    let canonical = |path: &str| std::fs::canonicalize(path).ok();
-    if canonical(&found.path).is_none() || canonical(&found.path) != canonical(&display) {
-        return Err(crate::error::Error::Invalid(format!(
-            "{display} is not the main checkout of {}",
-            repo.origin
-        )));
-    }
-    if !crate::repos::same_origin(&found.origin, &repo.origin) {
-        return Err(crate::error::Error::Invalid(format!(
-            "{display} has origin {}, not the registered {}",
-            found.origin, repo.origin
-        )));
-    }
-    Ok(found)
+    Err(crate::error::Error::Invalid(
+        "GitHub lead checkout resolution is unavailable".into(),
+    ))
 }
 
 /// Advance one saved phase per effect. `record` mirrors what is saved.

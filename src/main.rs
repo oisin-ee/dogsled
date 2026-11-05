@@ -219,8 +219,8 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     );
     match cli.command {
         Command::Quota(args) => quota_command(&ledger, &args, cli.json)?,
-        Command::Repo(command) => {
-            repo_command(&shell, &home, &config_path, &policy, command, cli.json)?;
+        Command::Repo(cli::RepoCommand::List) => {
+            repo_command(&observation::ipc::Client::at(&ledger.dir), cli.json)?;
         }
         Command::Lead(args) => lead_command(&node, &config_path, args, cli.json)?,
         Command::Serve { interval, once } => service::serve(
@@ -324,32 +324,10 @@ fn lead_command(
     })
 }
 
-fn repo_command(
-    shell: &dyn shell::Shell,
-    home: &str,
-    config_path: &std::path::Path,
-    policy: &config::Policy,
-    command: cli::RepoCommand,
-    json: bool,
-) -> Result<()> {
-    match command {
-        cli::RepoCommand::Add { path } => {
-            let path = path.map_or_else(
-                || std::env::current_dir().map(|path| path.display().to_string()),
-                Ok,
-            )?;
-            let repo = repos::add(shell, home, config_path, &path)?;
-            print(json, &repo, || repos::render(std::slice::from_ref(&repo)))
-        }
-        cli::RepoCommand::Remove { selector } => {
-            let repo = repos::remove(config_path, &selector)?;
-            print(json, &repo, || repos::render(std::slice::from_ref(&repo)))
-        }
-        cli::RepoCommand::List => {
-            let repos = repos::list(policy);
-            print(json, &repos, || repos::render(repos))
-        }
-    }
+fn repo_command(client: &observation::ipc::Client, json: bool) -> Result<()> {
+    let list: portal_types::agents::RepoList =
+        observation::read::view(&client.current()?, "repos")?;
+    print(json, &list, || repos::render(&list))
 }
 
 /// Route commands after fleet discovery, keeping their adapters with their owners.
@@ -565,6 +543,10 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         return Ok(ExitCode::SUCCESS);
     }
     match &cli.command {
+        Command::Repo(cli::RepoCommand::List) => {
+            repo_command(&client, cli.json)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Status {
             watch, line, brief, ..
         } => {

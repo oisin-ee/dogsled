@@ -137,6 +137,68 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn catalogue_failed_refresh_publishes_previous_repos_and_error() {
+    use super::super::{project, read};
+    use crate::hosts::{Fleet, Host};
+    let fixture = Fixture::new();
+    let command = "gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate";
+    fixture.shell.on(command, r#"[{"full_name":"owner/repo","description":"Kept","pushed_at":"2026-11-01T00:00:00Z","private":false,"archived":false}]"#);
+    let fleet = Fleet::producer(
+        &fixture.shell,
+        &fixture.ledger,
+        &fixture.policy,
+        "/home".into(),
+        vec![Host::local()],
+    );
+    let mut collector = Collector::default();
+    let mut projector = project::Projector::default();
+    let mut publisher = Publisher::new().unwrap();
+    let mut publish = |collector: &mut Collector, now| {
+        let mut input = collector.refresh(&fixture.node(), now, false).input;
+        let captured = projector.inputs(&fleet, &input);
+        project::derive(
+            &captured,
+            collector.reports(),
+            &fixture.node().thresholds,
+            &mut input,
+        )
+        .unwrap();
+        let frame = publisher.replace(input).unwrap();
+        read::view::<portal_types::agents::RepoList>(&frame, "repos").unwrap()
+    };
+    let first = publish(&mut collector, 100);
+    assert_eq!(first.repos[0].slug, "owner/repo");
+    fixture.shell.on_output(
+        command,
+        Output {
+            status: 1,
+            stdout: String::new(),
+            stderr: "GitHub authentication failed".into(),
+        },
+    );
+    assert_eq!(publish(&mut collector, 3_600_099), first);
+    let failed = publish(&mut collector, 3_600_100);
+    assert_eq!(failed.repos, first.repos);
+    assert!(
+        failed
+            .error
+            .unwrap()
+            .contains("GitHub authentication failed")
+    );
+    assert_eq!(
+        fixture
+            .shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.as_str() == command)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
     let fixture = Fixture::new();
     fixture.seed_todo();
@@ -152,7 +214,7 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
     let input = collection.input;
     assert_eq!(input.gaps, []);
     assert!(input.views.is_empty(), "fleet projections belong to O6");
-    assert_eq!(input.local.len(), 6);
+    assert_eq!(input.local.len(), 7);
     assert_eq!(
         input.local["terminals"]["agents"],
         input.local["host"]["probe"]["agent_panes"]
@@ -492,7 +554,15 @@ fn failed_collection_retains_values_and_times_then_recovers() {
         .on("herdr agent list", r#"{"result":{"agents":[]}}"#);
     let recovered = collector.collect(&fixture.node(), 300).input;
     assert_eq!(recovered.gaps, []);
-    assert!(recovered.sources.local.values().all(|time| *time == 300));
+    assert_eq!(recovered.sources.local["repos"], 100);
+    assert!(
+        recovered
+            .sources
+            .local
+            .iter()
+            .filter(|(domain, _)| domain.as_str() != "repos")
+            .all(|(_, time)| *time == 300)
+    );
     assert_eq!(recovered.local["host"]["sampled_ms"], 300);
 }
 
@@ -503,12 +573,16 @@ fn cold_collection_failure_is_not_empty_success() {
     let collection = Collector::default().collect(&fixture.node(), 100);
     assert!(collection.sample.is_err());
     let input = collection.input;
-    assert_eq!(input.local.len(), 2);
+    assert_eq!(input.local.len(), 3);
     assert_eq!(input.local["todos"], json!([]));
     assert_eq!(input.local["sidebar_preferences"], json!({}));
     assert_eq!(
         input.sources.local,
-        BTreeMap::from([("todos".into(), 100), ("sidebar_preferences".into(), 100)])
+        BTreeMap::from([
+            ("todos".into(), 100),
+            ("sidebar_preferences".into(), 100),
+            ("repos".into(), 100)
+        ])
     );
     assert_eq!(input.gaps.len(), 4);
     for domain in ["host", "headroom", "status", "terminals"] {
@@ -596,7 +670,7 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
     collection.sample.unwrap();
     let mut publisher = Publisher::new().unwrap();
     let frame = publisher.replace(collection.input).unwrap();
-    assert_eq!(frame.local.len(), 3);
+    assert_eq!(frame.local.len(), 4);
     assert_eq!(frame.local["terminals"]["agents"][0]["pane"], "worker");
     assert_eq!(frame.local["todos"][0]["revision"], 7);
     assert_eq!(frame.local["todos"][0]["pane"], "worker");
@@ -605,7 +679,8 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
         BTreeMap::from([
             ("todos".into(), 100),
             ("terminals".into(), 100),
-            ("sidebar_preferences".into(), 100)
+            ("sidebar_preferences".into(), 100),
+            ("repos".into(), 100)
         ])
     );
     assert_eq!(frame.gaps.len(), 3);
