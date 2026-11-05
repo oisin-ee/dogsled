@@ -568,8 +568,15 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
             all,
             open: false,
             toggle: false,
+            watch,
         } => {
             let owner = board::owner(owner.clone(), *all)?;
+            if *watch {
+                let owner =
+                    owner.ok_or_else(|| Error::Invalid("board --watch needs an owner".into()))?;
+                board::watch(&client, &owner, cli.json)?;
+                return Ok(ExitCode::SUCCESS);
+            }
             let board = observation::read::board(&client.current()?, owner.as_deref())?;
             print(cli.json, &board, || board.render())?;
             return Ok(ExitCode::SUCCESS);

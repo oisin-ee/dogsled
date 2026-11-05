@@ -96,6 +96,17 @@ pub(crate) fn findings(published: &Published, owner: &str) -> Result<crate::gate
     Ok(findings.remove(owner).unwrap_or_default())
 }
 
+/// The owner's jobs, finished ones included, with the host identities that label them.
+pub(crate) fn job_history(published: &Published, owner: &str) -> Result<Value> {
+    owned(
+        published,
+        "job_history",
+        Some(owner),
+        "empty_job_history",
+        "empty_job_history",
+    )
+}
+
 pub(crate) fn inventory(published: &Published, owner: Option<&str>) -> Result<Value> {
     owned(
         published,

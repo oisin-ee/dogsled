@@ -522,6 +522,18 @@
       },
       "gaps": []
     },
+    "empty_job_history": {
+      "data": {
+        "hosts": [
+          {
+            "id": "local",
+            "label": "local"
+          }
+        ],
+        "jobs": []
+      },
+      "gaps": []
+    },
     "empty_sidebar": {
       "data": {
         "cards": [],

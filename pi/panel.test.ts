@@ -70,7 +70,6 @@ test("openPanel runs the chosen action and reopens on the same tab until closed"
 	const calls: string[][] = [];
 	const exec = async (args: string[]) => {
 		calls.push(args);
-		if (args[0] === "board") return JSON.stringify(data.board);
 		if (args[0] === "machine" && args[1] === "list") return JSON.stringify(data.machines);
 		if (args[0] === "profiles") return JSON.stringify([{ ...data.profiles[0], prompt_path: prompt }]);
 		if (args[0] === "inbox") return JSON.stringify({ lines: data.inbox });
@@ -95,8 +94,10 @@ test("openPanel runs the chosen action and reopens on the same tab until closed"
 			notify: (text: string) => notices.push(text),
 		},
 	} as any;
-	await openPanel(ctx, exec, () => 100_000);
+	await openPanel(ctx, exec, () => ({ board: data.board }), () => 100_000);
 	assert.deepEqual(tabs, ["Status", "Status", "Profiles"]);
+	// Status is the session's subscription, never a second board read.
+	assert.ok(!calls.some(c => c[0] === "board"));
 	assert.ok(calls.some(c => c.join(" ") === "retry netcup --json"));
 	assert.equal(readFileSync(prompt, "utf8"), "old\nnew\n");
 	assert.deepEqual(notices, ["netcup is reachable", `Saved ${prompt}. New general children use it.`]);

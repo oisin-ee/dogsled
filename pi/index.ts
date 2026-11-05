@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text, Key } from "@earendil-works/pi-tui";
-import { type Board, clean, parseBoard, herdrAvailable } from "./board.ts";
+import { type Board, clean, herdrAvailable } from "./board.ts";
 import { WorkTodo, TodoPublisher } from "./work-todo.ts";
 import { UnitBridge } from "./unit-bridge.ts";
 import { workBoard, workText, type WorkState } from "./work.ts";
 import { type Details, InboxReader, MESSAGE_TYPE } from "./inbox.ts";
 import { openPanel } from "./panel.ts";
-import { loadJobHistory, type JobHistory } from "./work-history.ts";
+import type { JobHistory } from "./work-history.ts";
+import { Observation, type Observed } from "./observation.ts";
 import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor, type WorkData, type WorkTab } from "./work-panel.ts";
 import { registerInterview } from "./interview.ts";
 import { registerPlanMode } from "./plan-mode.ts";
@@ -115,6 +116,10 @@ export default function dogsled(pi: ExtensionAPI) {
 	let requestWorkRender: (() => void) | undefined;
 	let sideDisplay = false;
 	let publicationFailure: string | undefined;
+	// The session's one publication client. Board and history arrive as serve publishes them.
+	const observation = owner ? new Observation(binary, owner, observed => {
+		if (context) observe(context, observed);
+	}) : undefined;
 	const publisher = new TodoPublisher(owner ?? "", error => context?.ui.notify(`Todo publication failed: ${String(error)}`, "error"));
 	const todos = new WorkTodo(todo.work, () => {
 		if (context) { publishTodos(context); draw(context); }
@@ -134,6 +139,19 @@ export default function dogsled(pi: ExtensionAPI) {
 		publishTodos(ctx);
 	}
 
+	/** A frame replaces the board and history; unavailability is said once and keeps the last ones. */
+	function observe(ctx: ExtensionContext, observed: Observed): void {
+		if (observed.frame) {
+			failure = undefined;
+			board = observed.frame.board;
+			history = observed.frame.history;
+		} else {
+			if (observed.error !== failure) ctx.ui.notify(observed.error, "error");
+			failure = observed.error;
+		}
+		draw(ctx);
+	}
+
 	function state(): WorkState {
 		return { board, todo: todos.current, error: failure ?? todos.error };
 	}
@@ -148,7 +166,6 @@ export default function dogsled(pi: ExtensionAPI) {
 		workPanel = undefined;
 		workDetail = undefined;
 		detail = undefined;
-		history = { jobs: [] };
 		draw(ctx);
 	}
 
@@ -162,11 +179,8 @@ export default function dogsled(pi: ExtensionAPI) {
 		cursor = { tab, selected: undefined, history: false };
 		workPanel?.dispose();
 		workPanel = undefined;
-		const current = generation;
+		// History is already published with the board: expanding reads nothing.
 		draw(ctx);
-		// Draw immediately; remote history must not delay expansion or typing.
-		if (refresh) await refresh;
-		if (current === generation && workOpen) await update(ctx);
 	}
 
 	async function act(ctx: ExtensionContext, action: WorkAction | undefined): Promise<void> {
@@ -237,26 +251,9 @@ export default function dogsled(pi: ExtensionAPI) {
 				if (text !== publicationFailure) ctx.ui.notify(text, "warning");
 				publicationFailure = text;
 			}
-			if (current !== generation || sideDisplay) return;
-			try {
-				const next = parseBoard(JSON.parse(await exec(["board", "--json"])));
-				if (current !== generation) return;
-				failure = undefined;
-				board = next;
-				if (workOpen) {
-					const loaded = await loadJobHistory(exec, owner);
-					if (current !== generation) return;
-					if (workOpen) history = loaded;
-				}
-				draw(ctx);
-			} catch (error) {
-				// Say so once, not on every refresh; the last board stays on screen.
-				const text = String(error);
-				if (current !== generation) return;
-				if (text !== failure) ctx.ui.notify(text, "error");
-				failure = text;
-				draw(ctx);
-			}
+			// Resubscribe after the publisher went away. A live subscription costs nothing here.
+			// The side display draws nothing, but /dogsled reads the same subscription.
+			if (current === generation) observation?.start();
 		})().finally(() => { refresh = undefined; });
 		return refresh;
 	}
@@ -282,6 +279,7 @@ export default function dogsled(pi: ExtensionAPI) {
 		requestWorkRender = undefined;
 		workPanel?.dispose();
 		if (timer) clearInterval(timer);
+		observation?.stop();
 		generation++;
 		workAbort?.abort();
 		workAbort = undefined;
@@ -322,6 +320,8 @@ export default function dogsled(pi: ExtensionAPI) {
 		detail = undefined;
 		if (timer) clearInterval(timer);
 		timer = undefined;
+		observation?.stop();
+		history = { jobs: [] };
 		inbox.stop();
 		todos.stop();
 		await publisher.clear();
@@ -394,7 +394,7 @@ export default function dogsled(pi: ExtensionAPI) {
 			panelOpen = true;
 			draw(ctx);
 			try {
-				await openPanel(ctx, exec);
+				await openPanel(ctx, exec, () => ({ board, error: failure }));
 			} finally {
 				panelOpen = false;
 				draw(ctx);

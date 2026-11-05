@@ -246,6 +246,10 @@ fn closed_branch_has_no_cli_pane_but_keeps_portal_identity() {
 #[test]
 fn all_views_share_one_capture_and_published_revision() {
     let fixture = Fixture::new();
+    // Another owner's job: history is scoped by owner, not by host or id alone.
+    let mut foreign = item("foreign", "peer", "job");
+    foreign.owner_pane = "other".into();
+    crate::items::record(&fixture.ledger, foreign).unwrap();
     let mut input = fixture.input();
     let mut projector = project::Projector::default();
     let local = projector.inputs(&fixture.fleet(), &input);
@@ -270,6 +274,14 @@ fn all_views_share_one_capture_and_published_revision() {
             .unwrap(),
         );
     }
+    reports[1].jobs.push(
+        serde_json::from_value(json!({
+            "id":"foreign","cmd":["true"],"cwd":"/host-owned/foreign","host":"peer",
+            "owner":"other","pane":"peer-job","state":"exited","exit":0,
+            "started_ms":1,"ended_ms":2
+        }))
+        .unwrap(),
+    );
     project::derive(&local, reports, &(&fixture.policy).into(), &mut input).unwrap();
     assert!(input.gaps.is_empty(), "{:?}", input.gaps);
     for key in [
@@ -282,6 +294,7 @@ fn all_views_share_one_capture_and_published_revision() {
         "boards",
         "findings",
         "job_history",
+        "empty_job_history",
         "agents",
         "portal_board",
         "inbox",
@@ -312,7 +325,13 @@ fn all_views_share_one_capture_and_published_revision() {
         "host-qualified job identity"
     );
     assert_eq!(history["jobs"][0]["host"], "local");
+    let other = &input.views["job_history"]["data"]["other"]["jobs"];
+    assert_eq!(other.as_array().unwrap().len(), 1, "{other}");
+    assert_eq!(other[0]["id"], "foreign");
     assert_eq!(history["hosts"].as_array().unwrap().len(), 2);
+    let empty = &input.views["empty_job_history"]["data"];
+    assert_eq!(empty["jobs"], json!([]));
+    assert_eq!(empty["hosts"], history["hosts"]);
     let mut producer = Publisher::new().unwrap();
     let published = producer.replace(input).unwrap();
     let portal: portal_types::PortalSnapshot =

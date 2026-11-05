@@ -508,6 +508,12 @@ fn scoped_views(
         status.as_ref().map(|_| histories),
         gaps,
     )?;
+    insert(
+        views,
+        "empty_job_history",
+        status.as_ref().map(|_| json!({"jobs":[],"hosts":hosts})),
+        gaps,
+    )?;
     Ok(())
 }
 

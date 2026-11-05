@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { loadJobHistory } from "./work-history.ts";
+import { parseJobHistory } from "./work-history.ts";
 import { todoDisplay } from "./todo-fixture.test.ts";
 import { WorkPanel, workEntries, inspectEntry, runWorkAction, WorkDetail, type WorkAction, type WorkData, type WorkEntry } from "./work-panel.ts";
 
@@ -15,16 +15,15 @@ function data(): WorkData {
 	] }, todo: { revision: 1, session: "s", branch: null, display: todoDisplay() }, error: undefined, history: { jobs: [{ id: "done", host: "local", owner: "w1:p1", cmd: ["test"], state: "exited", ended_ms: 1, exit: 0 }] } };
 }
 
-test("history joins both recorded host and job id and rejects unrelated owners", async () => {
-	const calls: string[][] = [];
-	const result = await loadJobHistory(async args => {
-		calls.push(args);
-		return JSON.stringify(args[0] === "items" ? { items: [{ id: "same", host: "netcup", owner_pane: "w1:p1", kind: "job" }, { id: "other", host: "local", owner_pane: "w2:p1", kind: "job" }] }
-			: args[0] === "machine" ? [{ id: "netcup", label: "remote" }] : ["local", "netcup"].map(host => ({ id: "same", host, owner: "w1:p1", cmd: ["test"], state: "done", ended_ms: 1, exit: 0 })));
-	}, "w1:p1");
-	assert.deepEqual(result.jobs.map(job => job.host), ["netcup"]);
-	assert.deepEqual(calls[0], ["items", "--owner", "w1:p1", "--json"]);
-	assert.match((await loadJobHistory(async () => "{}", "owner")).error ?? "", /unavailable/);
+// Serve joins history on host and job id per owner (observation projection tests); Pi only
+// accepts the published shape.
+test("published history keeps host identities and rejects malformed projections", () => {
+	const job = { id: "same", host: "netcup", owner: "w1:p1", cmd: ["test"], state: "done", ended_ms: 1, exit: 0 };
+	assert.deepEqual(parseJobHistory({ jobs: [job], hosts: [{ id: "netcup", label: "remote", target: "remote.example" }] }),
+		{ jobs: [job], hosts: [{ id: "netcup", label: "remote" }] });
+	assert.throws(() => parseJobHistory({}), /Invalid Dogsled job history/);
+	assert.throws(() => parseJobHistory({ jobs: [{ ...job, cmd: "test" }], hosts: [] }), /Invalid Dogsled job history/);
+	assert.throws(() => parseJobHistory({ jobs: [], hosts: [{ id: 1 }] }), /Invalid Dogsled host identities/);
 });
 
 test("tabs preserve todo status and collapse completed job history without duplicate active rows", () => {
