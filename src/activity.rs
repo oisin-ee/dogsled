@@ -1,5 +1,8 @@
 //! Bounded, display-only transcript activity. Unknown formats fall back to pane text.
-use portal_types::agents::{BlockedPrompt, PromptOption, Role, Turn};
+use portal_types::agents::{
+    BlockedPrompt, PromptOption, Role, Source, TimeMeaning, Timestamp, ToolStatus, ToolSummary,
+    Turn,
+};
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -215,55 +218,100 @@ fn joined(parts: &[String]) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// The conversation in `agent`'s transcript, oldest turn first.
-///
-/// A turn is one message of the owner or of the agent. Tool calls, tool
-/// results and thinking are not turns. Claude writes one line per content
-/// block, and the blocks of one message share its id: they are one turn.
-///
-/// The transcript is read backwards until it gives the newest
-/// [`CONVERSATION_TURNS`] text turns, or [`CONVERSATION_BYTES`] are read. Tool
-/// output can be megabytes after the last text turn, so a fixed tail window
-/// is not enough.
+/// A bounded transcript snapshot. This is history, not evidence of live activity.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct History {
+    pub turns: Vec<Turn>,
+    pub truncated: bool,
+}
+
 #[cfg(test)]
-pub fn conversation(agent: &str, path: &str) -> Vec<Turn> {
+fn conversation(agent: &str, path: &str) -> History {
     try_conversation(agent, path).unwrap_or_default()
 }
 
 /// Detail publication preserves I/O failures instead of publishing empty success.
-pub(crate) fn try_conversation(agent: &str, path: &str) -> std::io::Result<Vec<Turn>> {
+pub(crate) fn try_conversation(agent: &str, path: &str) -> std::io::Result<History> {
     conversation_with_limit(agent, path, CONVERSATION_BYTES)
 }
 
+/// Read newest text and tool records independently, then restore transcript order.
+/// Claude's adjacent message blocks remain one text record, even across tool rows.
 pub(crate) fn conversation_with_limit(
     agent: &str,
     path: &str,
     limit: u64,
-) -> std::io::Result<Vec<Turn>> {
-    let mut newest: Vec<(Option<String>, Turn)> = Vec::new();
-    lines_backwards(path, limit, CHUNK_BYTES, |line| {
-        if let Ok(value) = serde_json::from_str::<Value>(line)
-            && let Some(found) = turn(agent, &value)
-        {
-            newest.push(found);
+) -> std::io::Result<History> {
+    let mut history = History::default();
+    let mut texts = 0;
+    let mut tools = 0;
+    let mut deliveries = std::collections::HashSet::new();
+    let cut = lines_backwards(path, limit, CHUNK_BYTES, |offset, line| {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return true;
+        };
+        for mut record in records(agent, &value, offset).into_iter().rev() {
+            if let Source::Dogsled { .. } = &record.source
+                && !deliveries.insert(record.id.clone())
+            {
+                continue;
+            }
+            if let Some(tool) = &mut record.tool {
+                if let Some(index) = history.turns.iter().position(|previous| {
+                    previous
+                        .tool
+                        .as_ref()
+                        .is_some_and(|old| old.call_id == tool.call_id)
+                }) {
+                    let previous = history.turns.remove(index);
+                    if let Some(result) = previous.tool {
+                        if result.status != ToolStatus::Unknown {
+                            tool.status = result.status;
+                        }
+                        if tool.name.is_none() {
+                            tool.name = result.name;
+                        }
+                    }
+                } else if tools == CONVERSATION_TOOLS {
+                    history.truncated = true;
+                    continue;
+                } else {
+                    tools += 1;
+                }
+            } else {
+                let group = (agent == "claude")
+                    .then(|| history.turns.iter().rposition(|t| t.tool.is_none()))
+                    .flatten()
+                    .filter(|&index| {
+                        history.turns.get(index).is_some_and(|previous| {
+                            previous.id == record.id
+                                && previous.role == record.role
+                                && previous.source == record.source
+                        })
+                    });
+                if let Some(index) = group {
+                    let previous = history.turns.remove(index);
+                    record.timestamp = record.timestamp.or(previous.timestamp);
+                    record.text = joined(&[record.text, previous.text]).unwrap_or_default();
+                } else {
+                    if texts == CONVERSATION_TURNS {
+                        history.truncated = true;
+                        return false;
+                    }
+                    texts += 1;
+                }
+            }
+            history.turns.push(record);
         }
-        newest.len() < CONVERSATION_TURNS
-    })?;
-    // The read runs newest first, and a conversation reads oldest first.
-    let mut turns: Vec<(Option<String>, Turn)> = Vec::new();
-    for (id, turn) in newest.into_iter().rev() {
-        if let Some(last) = turns.last_mut()
-            && let Some(id) = &id
-            && last.0.as_ref() == Some(id)
-            && last.1.role == turn.role
-        {
-            last.1.text = joined(&[last.1.text.clone(), turn.text]).unwrap_or_default();
-            continue;
-        }
-        turns.push((id, turn));
-    }
-    Ok(turns.into_iter().map(|(_, turn)| turn).collect())
+        true
+    });
+    history.truncated |= cut?;
+    history.turns.reverse();
+    Ok(history)
 }
+
+/// Tool rows cannot consume the text-message allowance.
+const CONVERSATION_TOOLS: usize = 400;
 
 /// The most text turns a conversation returns.
 const CONVERSATION_TURNS: usize = 200;
@@ -281,8 +329,8 @@ fn lines_backwards(
     path: &str,
     limit: u64,
     step: u64,
-    mut visit: impl FnMut(&str) -> bool,
-) -> std::io::Result<()> {
+    mut visit: impl FnMut(u64, &str) -> bool,
+) -> std::io::Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
     let floor = len.saturating_sub(limit);
@@ -300,7 +348,7 @@ fn lines_backwards(
         // The first line is complete at the start of the file, or at the read
         // limit when a newline comes just before it. Elsewhere the bytes before
         // the first newline end a line that starts earlier.
-        let whole = start == 0 || (start == floor && newline_before(&mut file, start));
+        let whole = start == 0 || (start == floor && newline_before(&mut file, start)?);
         let (head, lines) = if whole {
             (&[][..], &chunk[..])
         } else {
@@ -309,23 +357,27 @@ fn lines_backwards(
                 None => (&chunk[..], &[][..]),
             }
         };
+        let mut offset = start + u64::try_from(chunk.len()).map_err(std::io::Error::other)?;
         for line in lines.rsplit(|byte| *byte == b'\n') {
-            if !line.is_empty() && !visit(&String::from_utf8_lossy(line)) {
-                return Ok(());
+            offset =
+                offset.saturating_sub(u64::try_from(line.len()).map_err(std::io::Error::other)?);
+            if !line.is_empty() && !visit(offset, &String::from_utf8_lossy(line)) {
+                return Ok(true);
             }
+            offset = offset.saturating_sub(1);
         }
         carry = head.to_vec();
         end = start;
     }
-    Ok(())
+    Ok(floor > 0)
 }
 
 /// Whether the byte before `at` is a newline.
-fn newline_before(file: &mut std::fs::File, at: u64) -> bool {
+fn newline_before(file: &mut std::fs::File, at: u64) -> std::io::Result<bool> {
     let mut byte = [0];
-    file.seek(SeekFrom::Start(at - 1)).is_ok()
-        && file.read_exact(&mut byte).is_ok()
-        && byte[0] == b'\n'
+    file.seek(SeekFrom::Start(at - 1))?;
+    file.read_exact(&mut byte)?;
+    Ok(byte[0] == b'\n')
 }
 
 /// The task an agent was given: the first line of its first own message.
@@ -340,7 +392,7 @@ pub fn title(agent: &str, path: &str) -> Option<String> {
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
-        let Some((_, found)) = turn(agent, &value) else {
+        let Some(found) = turn(agent, &value, 0) else {
             continue;
         };
         if found.role != Role::User {
@@ -401,60 +453,209 @@ fn short(text: &str, max: usize) -> String {
     cut
 }
 
-/// One turn of a conversation, with the id that groups Claude's blocks.
-fn turn(agent: &str, value: &Value) -> Option<(Option<String>, Turn)> {
-    match agent {
-        "pi" => pi_turn(value),
-        "claude" => claude_turn(value),
-        "codex" => codex_turn(value),
-        _ => None,
-    }
-}
-
-/// A turn of a Pi transcript.
-fn pi_turn(value: &Value) -> Option<(Option<String>, Turn)> {
-    if value["type"] != "message" {
-        return None;
-    }
-    let message = &value["message"];
-    let role = match message["role"].as_str()? {
+/// Text content and metadata for one supported harness message.
+fn turn(agent: &str, value: &Value, offset: u64) -> Option<Turn> {
+    let (role, message) = match agent {
+        "pi" if value["type"] == "message" => {
+            (value["message"]["role"].as_str()?, &value["message"])
+        }
+        "claude" => (value["type"].as_str()?, &value["message"]),
+        "codex" if value["type"] == "response_item" && value["payload"]["type"] == "message" => {
+            (value["payload"]["role"].as_str()?, &value["payload"])
+        }
+        _ => return None,
+    };
+    let role = match role {
         "user" => Role::User,
         "assistant" => Role::Assistant,
         _ => return None,
     };
     let text = joined(&text_blocks(&message["content"]))?;
-    Some((None, Turn { role, text }))
+    let record = Turn {
+        role,
+        text,
+        ..envelope(agent, value, offset)
+    };
+    Some(record)
 }
 
-/// A turn of a Claude transcript.
-fn claude_turn(value: &Value) -> Option<(Option<String>, Turn)> {
-    let role = match value["type"].as_str()? {
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
-        _ => return None,
-    };
-    let message = &value["message"];
-    let text = joined(&text_blocks(&message["content"]))?;
-    let id = message["id"].as_str().map(str::to_owned);
-    Some((id, Turn { role, text }))
+fn string(value: &Value) -> Option<String> {
+    value.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
-/// A turn of a Codex transcript.
-fn codex_turn(value: &Value) -> Option<(Option<String>, Turn)> {
-    if value["type"] != "response_item" {
-        return None;
+fn milliseconds(value: &Value, meaning: TimeMeaning) -> Option<Timestamp> {
+    let ms = value.as_u64()?;
+    chrono::DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)?;
+    Some(Timestamp { ms, meaning })
+}
+
+fn recorded_time(value: &Value) -> Option<Timestamp> {
+    let time = chrono::DateTime::parse_from_rfc3339(value.as_str()?).ok()?;
+    Some(Timestamp {
+        ms: u64::try_from(time.timestamp_millis()).ok()?,
+        meaning: TimeMeaning::Recorded,
+    })
+}
+
+/// Native identity wins; the absolute byte offset remains stable as the tail grows.
+fn envelope(agent: &str, value: &Value, offset: u64) -> Turn {
+    let message = if agent == "codex" {
+        &value["payload"]
+    } else {
+        &value["message"]
+    };
+    let id = match agent {
+        "pi" => string(&value["id"]).or_else(|| string(&message["id"])),
+        "claude" => string(&message["id"]).or_else(|| string(&value["uuid"])),
+        _ => string(&message["id"]).or_else(|| string(&value["id"])),
     }
-    let payload = &value["payload"];
-    if payload["type"] != "message" {
-        return None;
+    .unwrap_or_else(|| format!("{agent}:offset:{offset}"));
+    let timestamp = (agent == "pi")
+        .then(|| milliseconds(&message["timestamp"], TimeMeaning::Message))
+        .flatten()
+        .or_else(|| recorded_time(&value["timestamp"]));
+    let assistant =
+        message["role"] == "assistant" || (agent == "claude" && value["type"] == "assistant");
+    Turn {
+        id,
+        role: Role::Context,
+        text: String::new(),
+        source: Source::Harness {
+            harness: agent.to_owned(),
+            model: assistant.then(|| string(&message["model"])).flatten(),
+            provider: assistant.then(|| string(&message["provider"])).flatten(),
+        },
+        timestamp,
+        tool: None,
     }
-    let role = match payload["role"].as_str()? {
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
+}
+
+/// Displayed extension messages are context, never messages from the owner.
+fn custom_records(value: &Value, offset: u64) -> Vec<Turn> {
+    if value["display"] != true {
+        return Vec::new();
+    }
+    let Some(custom_type) = string(&value["customType"]) else {
+        return Vec::new();
+    };
+    if custom_type == "dogsled"
+        && let Some(records) = value["details"]["records"].as_array()
+    {
+        return records
+            .iter()
+            .filter_map(|record| {
+                let id = string(&record["id"])?;
+                let sender = string(&record["sender"])?;
+                let delivery_kind = string(&record["kind"])?;
+                let text = record["text"].as_str()?.to_owned();
+                Some(Turn {
+                    id,
+                    role: Role::Context,
+                    text,
+                    source: Source::Dogsled {
+                        sender,
+                        delivery_kind,
+                    },
+                    timestamp: milliseconds(&record["created_ms"], TimeMeaning::Created),
+                    tool: None,
+                })
+            })
+            .collect();
+    }
+    joined(&text_blocks(&value["content"]))
+        .map(|text| Turn {
+            text,
+            source: Source::Custom { custom_type },
+            ..envelope("pi", value, offset)
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Convert only supported call/result metadata. No arguments or result content leave here.
+fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option<Turn> {
+    let (call_id, name, status) = match (agent, block["type"].as_str()) {
+        ("pi", Some("toolCall")) | ("claude", Some("tool_use")) => (
+            string(&block["id"])?,
+            string(&block["name"]),
+            ToolStatus::Unknown,
+        ),
+        ("pi", _) if block["role"] == "toolResult" => (
+            string(&block["toolCallId"])?,
+            string(&block["toolName"]),
+            result_status(&block["isError"]),
+        ),
+        ("claude", Some("tool_result")) => (
+            string(&block["tool_use_id"])?,
+            None,
+            result_status(&block["is_error"]),
+        ),
+        ("codex", Some("function_call")) => (
+            string(&block["call_id"])?,
+            string(&block["name"]),
+            ToolStatus::Unknown,
+        ),
+        ("codex", Some("function_call_output")) => {
+            (string(&block["call_id"])?, None, ToolStatus::Completed)
+        }
         _ => return None,
     };
-    let text = joined(&text_blocks(&payload["content"]))?;
-    Some((None, Turn { role, text }))
+    let mut record = envelope(agent, value, offset);
+    record.id = format!("{}:tool:{call_id}", record.id);
+    record.role = Role::Tool;
+    record.tool = Some(ToolSummary {
+        call_id,
+        name: name.map(|name| short(&plain(&name), 120)),
+        status,
+    });
+    Some(record)
+}
+
+fn result_status(error: &Value) -> ToolStatus {
+    if error == true {
+        ToolStatus::Error
+    } else {
+        ToolStatus::Completed
+    }
+}
+
+fn records(agent: &str, value: &Value, offset: u64) -> Vec<Turn> {
+    if agent == "pi" && value["type"] == "custom_message" {
+        return custom_records(value, offset);
+    }
+    let message = match agent {
+        "pi" if value["type"] == "message" => &value["message"],
+        "claude" if matches!(value["type"].as_str(), Some("user" | "assistant")) => {
+            &value["message"]
+        }
+        "codex" if value["type"] == "response_item" => &value["payload"],
+        _ => return Vec::new(),
+    };
+    let mut text = turn(agent, value, offset);
+    let mut found = Vec::new();
+    if let Some(blocks) = message["content"].as_array() {
+        for block in blocks {
+            if matches!(
+                block["type"].as_str(),
+                Some("text" | "input_text" | "output_text")
+            ) && let Some(turn) = text.take()
+            {
+                found.push(turn);
+            }
+            if (agent != "pi" || message["role"] == "assistant")
+                && let Some(tool) = tool_record(agent, value, block, offset)
+            {
+                found.push(tool);
+            }
+        }
+    }
+    if let Some(text) = text {
+        found.push(text);
+    }
+    if let Some(tool) = tool_record(agent, value, message, offset) {
+        found.push(tool);
+    }
+    found
 }
 
 /// The prompt a blocked agent shows on its screen, if it shows one.
@@ -647,6 +848,7 @@ fn codex(value: &Value) -> Option<Step> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write as _;
     #[test]
     fn harness_activity_extracts_tool_calls_and_messages() {
         assert!(pi(&json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"cat /tmp/hang.fifo"}}]}})).unwrap().detail().contains("cat /tmp/hang.fifo"));
@@ -731,22 +933,16 @@ mod tests {
             json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{}}]}}),
             json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"fixed"}]}}),
         ]);
-        let turns = conversation("pi", &path);
+        let turns = conversation("pi", &path).turns;
         assert_eq!(
-            turns,
-            vec![
-                Turn {
-                    role: Role::User,
-                    text: "fix the bug".into()
-                },
-                Turn {
-                    role: Role::Assistant,
-                    text: "on it".into()
-                },
-                Turn {
-                    role: Role::Assistant,
-                    text: "fixed".into()
-                },
+            turns
+                .iter()
+                .map(|turn| (turn.role, turn.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Role::User, "fix the bug"),
+                (Role::Assistant, "on it"),
+                (Role::Assistant, "fixed")
             ]
         );
     }
@@ -758,7 +954,7 @@ mod tests {
             json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"second"}]}}),
             json!({"type":"user","message":{"content":"next"}}),
         ]);
-        let turns = conversation("claude", &path);
+        let turns = conversation("claude", &path).turns;
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, Role::Assistant);
         assert_eq!(turns[0].text, "first\n\nsecond");
@@ -772,7 +968,7 @@ mod tests {
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}),
             json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}),
         ]);
-        let turns = conversation("codex", &path);
+        let turns = conversation("codex", &path).turns;
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, Role::User);
         assert_eq!(turns[1].role, Role::Assistant);
@@ -791,9 +987,395 @@ mod tests {
         }
         let path = transcript(&lines);
         assert!(std::fs::metadata(&path).expect("size").len() > 2 * 1024 * 1024);
-        let turns = conversation("pi", &path);
+        let turns = conversation("pi", &path).turns;
         let texts: Vec<_> = turns.iter().map(|turn| turn.text.as_str()).collect();
         assert_eq!(texts, ["check the portal", "looking"]);
+    }
+
+    #[test]
+    fn pi_preserves_native_identity_message_time_and_per_message_models() {
+        let path = transcript(&[
+            json!({"type":"message","id":"owner","timestamp":"2026-11-04T12:00:00Z","message":{"role":"user","timestamp":42,"content":"request"}}),
+            json!({"type":"message","id":"first","message":{"role":"assistant","timestamp":43,"model":"model-a","provider":"provider-a","content":[{"type":"text","text":"first"}]}}),
+            json!({"type":"model_change","modelId":"not-message-provenance","provider":"other"}),
+            json!({"type":"message","id":"second","message":{"role":"assistant","timestamp":44,"model":"model-b","provider":"provider-b","content":[{"type":"text","text":"second"}]}}),
+            json!({"type":"message","id":"unknown","timestamp":"invalid","message":{"role":"assistant","timestamp":-1,"content":[{"type":"text","text":"unknown"}]}}),
+            json!({"type":"message","id":"recorded","timestamp":"1970-01-01T00:00:01.234Z","message":{"role":"assistant","content":"recorded"}}),
+        ]);
+        let history = conversation("pi", &path);
+        assert!(!history.truncated);
+        let turns = history.turns;
+        assert_eq!(turns[0].id, "owner");
+        assert_eq!(
+            turns[0].timestamp,
+            Some(Timestamp {
+                ms: 42,
+                meaning: TimeMeaning::Message
+            })
+        );
+        assert_eq!(
+            turns[1].source,
+            Source::Harness {
+                harness: "pi".into(),
+                model: Some("model-a".into()),
+                provider: Some("provider-a".into())
+            }
+        );
+        assert_eq!(
+            turns[2].source,
+            Source::Harness {
+                harness: "pi".into(),
+                model: Some("model-b".into()),
+                provider: Some("provider-b".into())
+            }
+        );
+        assert_eq!(turns[3].timestamp, None);
+        assert_eq!(
+            turns[3].source,
+            Source::Harness {
+                harness: "pi".into(),
+                model: None,
+                provider: None
+            }
+        );
+        assert_eq!(
+            turns[4].timestamp,
+            Some(Timestamp {
+                ms: 1234,
+                meaning: TimeMeaning::Recorded
+            })
+        );
+        assert_eq!(milliseconds(&json!(u64::MAX), TimeMeaning::Message), None);
+        assert_eq!(milliseconds(&json!(1.5), TimeMeaning::Message), None);
+        assert_eq!(recorded_time(&json!("before time")), None);
+    }
+
+    #[test]
+    fn claude_and_codex_keep_envelope_time_without_inventing_model_metadata() {
+        for (agent, lines) in [
+            (
+                "claude",
+                vec![
+                    json!({"type":"user","uuid":"native-user","timestamp":"1970-01-01T00:00:03+00:00","message":{"content":"request"}}),
+                    json!({"type":"assistant","uuid":"block-a","timestamp":"1970-01-01T00:00:02Z","message":{"id":"native-assistant","model":"claude-recorded","content":[{"type":"text","text":"part one"}]}}),
+                    json!({"type":"assistant","uuid":"block-b","timestamp":"1970-01-01T00:00:04Z","message":{"id":"native-assistant","model":"claude-recorded","content":[{"type":"text","text":"part two"}]}}),
+                ],
+            ),
+            (
+                "codex",
+                vec![
+                    json!({"type":"response_item","timestamp":"1970-01-01T00:00:03Z","payload":{"type":"message","id":"native-user","role":"user","content":[{"type":"input_text","text":"request"}]}}),
+                    json!({"type":"response_item","timestamp":"1970-01-01T00:00:02Z","payload":{"type":"message","id":"native-assistant","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}),
+                ],
+            ),
+        ] {
+            let path = transcript(&lines);
+            let turns = conversation(agent, &path).turns;
+            assert_eq!(turns.len(), 2);
+            assert_eq!(turns[0].id, "native-user");
+            assert_eq!(turns[1].id, "native-assistant");
+            assert_eq!(
+                turns[0].timestamp,
+                Some(Timestamp {
+                    ms: 3000,
+                    meaning: TimeMeaning::Recorded
+                })
+            );
+            assert_eq!(
+                turns[1].timestamp,
+                Some(Timestamp {
+                    ms: 2000,
+                    meaning: TimeMeaning::Recorded
+                })
+            );
+            assert_eq!(
+                turns[1].source,
+                Source::Harness {
+                    harness: agent.into(),
+                    model: (agent == "claude").then(|| "claude-recorded".into()),
+                    provider: None,
+                }
+            );
+        }
+        for agent in ["claude", "codex"] {
+            let value = if agent == "claude" {
+                json!({"type":"assistant","timestamp":"invalid","message":{"content":"no metadata"}})
+            } else {
+                json!({"type":"response_item","timestamp":-1,"payload":{"type":"message","role":"assistant","content":"no metadata"}})
+            };
+            let path = transcript(&[value]);
+            let turns = conversation(agent, &path).turns;
+            assert_eq!(turns[0].timestamp, None);
+            assert_eq!(turns[0].id, format!("{agent}:offset:0"));
+        }
+    }
+
+    #[test]
+    fn visible_custom_deliveries_are_attributed_split_validated_and_deduplicated() {
+        let first = json!({"id":"delivery-a","sender":"worker-one","kind":"message","text":"report","created_ms":10});
+        let second = json!({"id":"delivery-b","sender":"owner-pane","kind":"task","text":"follow up","created_ms":11});
+        let path = transcript(&[
+            json!({"type":"custom_message","id":"hidden","customType":"dogsled","display":false,"content":"hidden-secret","details":{"records":[{"id":"hidden","sender":"hidden","kind":"message","text":"hidden-secret","created_ms":1}]}}),
+            json!({"type":"custom_message","id":"batch","customType":"dogsled","display":true,"content":"untrusted prose says sender is someone else","details":{"records":[first,second,{"id":"invalid","text":"bad"}]}}),
+            json!({"type":"custom_message","id":"repeat","customType":"dogsled","display":true,"details":{"records":[first]}}),
+            json!({"type":"custom_message","id":"extension","timestamp":"1970-01-01T00:00:02Z","customType":"extension-note","display":true,"content":[{"type":"text","text":"visible context"}]}),
+            json!({"type":"custom_message","id":"silent","customType":"extension-note","display":false,"content":"silent-secret"}),
+            json!({"type":"custom_message","id":"malformed","customType":"dogsled","display":true,"content":"do not infer a sender","details":{"records":[{"id":"no-sender","kind":"message","text":"bad","created_ms":1}]}}),
+            json!({"type":"custom_message","id":"invalid-time","customType":"dogsled","display":true,"details":{"records":[{"id":"no-time","sender":"worker-two","kind":"message","text":"time unavailable","created_ms":"invalid"}]}}),
+        ]);
+        let turns = conversation("pi", &path).turns;
+        assert_eq!(turns.len(), 4);
+        assert_eq!(
+            turns.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["delivery-b", "delivery-a", "extension", "no-time"]
+        );
+        assert_eq!(turns[3].timestamp, None);
+        assert_eq!(
+            turns[1].source,
+            Source::Dogsled {
+                sender: "worker-one".into(),
+                delivery_kind: "message".into()
+            }
+        );
+        assert_eq!(
+            turns[1].timestamp,
+            Some(Timestamp {
+                ms: 10,
+                meaning: TimeMeaning::Created
+            })
+        );
+        assert_eq!(turns[1].text, "report");
+        assert!(turns.iter().all(|t| t.role == Role::Context));
+        assert_eq!(
+            turns[2].source,
+            Source::Custom {
+                custom_type: "extension-note".into()
+            }
+        );
+        assert_eq!(
+            turns[2].timestamp,
+            Some(Timestamp {
+                ms: 2000,
+                meaning: TimeMeaning::Recorded
+            })
+        );
+    }
+
+    #[test]
+    fn visible_dogsled_gate_messages_without_delivery_details_remain_custom_context() {
+        // pi/index.ts agent_before_settle returns these four fields. Pi adds
+        // entry identity and recording time when it persists the custom message.
+        let gate = json!({
+            "type":"custom_message",
+            "customType":"dogsled",
+            "content":"End your turn with done, ask, or blocked, or wait for your children.",
+            "display":true,
+            "id":"gate-entry",
+            "parentId":"previous-entry",
+            "timestamp":"1970-01-01T00:00:02Z"
+        });
+        let mut hidden = gate.clone();
+        hidden["display"] = json!(false);
+        let path = transcript(&[gate, hidden]);
+        let history = conversation("pi", &path);
+        assert!(!history.truncated);
+        assert_eq!(history.turns.len(), 1);
+        let record = &history.turns[0];
+        assert_eq!(record.id, "gate-entry");
+        assert_eq!(record.role, Role::Context);
+        assert_eq!(
+            record.source,
+            Source::Custom {
+                custom_type: "dogsled".into()
+            }
+        );
+        assert_eq!(
+            record.timestamp,
+            Some(Timestamp {
+                ms: 2000,
+                meaning: TimeMeaning::Recorded
+            })
+        );
+        assert_eq!(
+            record.text,
+            "End your turn with done, ask, or blocked, or wait for your children."
+        );
+        assert_eq!(record.tool, None);
+    }
+
+    #[test]
+    fn recorded_tools_correlate_results_without_exposing_payloads_or_claiming_live_work() {
+        for (agent, lines) in [
+            (
+                "pi",
+                vec![
+                    json!({"type":"message","id":"call-entry","message":{"role":"assistant","timestamp":10,"content":[{"type":"text","text":"checking"},{"type":"toolCall","id":"a","name":"read","arguments":{"secret":"raw-arguments"}},{"type":"thinking","thinking":"raw-reasoning"}]}}),
+                    json!({"type":"message","message":{"role":"toolResult","toolCallId":"a","toolName":"read","isError":true,"content":[{"type":"text","text":"raw-output"}]}}),
+                    json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"b","name":"write","arguments":{}}]}}),
+                ],
+            ),
+            (
+                "claude",
+                vec![
+                    json!({"type":"assistant","message":{"id":"call-entry","content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"a","name":"read","input":{"secret":"raw-arguments"}},{"type":"thinking","thinking":"raw-reasoning"}]}}),
+                    json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"raw-output"}]}}),
+                    json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"b","name":"write","input":{}}]}}),
+                ],
+            ),
+            (
+                "codex",
+                vec![
+                    json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"checking"}]}}),
+                    json!({"type":"response_item","payload":{"id":"call-entry","type":"function_call","call_id":"a","name":"read","arguments":"raw-arguments"}}),
+                    json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":"raw-output"}}),
+                    json!({"type":"response_item","payload":{"type":"reasoning","summary":"raw-reasoning"}}),
+                    json!({"type":"response_item","payload":{"type":"function_call","call_id":"b","name":"write","arguments":"{}"}}),
+                ],
+            ),
+        ] {
+            let path = transcript(&lines);
+            let history = conversation(agent, &path);
+            let turns = history.turns;
+            assert_eq!(turns.len(), 3, "{agent}");
+            assert_eq!(turns[0].text, "checking");
+            let summary = turns[1].tool.as_ref().expect("tool summary");
+            assert_eq!(summary.call_id, "a");
+            assert_eq!(summary.name.as_deref(), Some("read"));
+            assert_eq!(
+                summary.status,
+                if agent == "codex" {
+                    ToolStatus::Completed
+                } else {
+                    ToolStatus::Error
+                }
+            );
+            assert!(turns[1].id.starts_with("call-entry:tool:"));
+            assert_eq!(
+                turns[2].tool.as_ref().expect("unmatched call").status,
+                ToolStatus::Unknown
+            );
+            assert!(
+                turns[1..]
+                    .iter()
+                    .all(|turn| turn.role == Role::Tool && turn.text.is_empty())
+            );
+            let wire = serde_json::to_string(&turns).expect("wire");
+            for secret in ["raw-arguments", "raw-output", "raw-reasoning"] {
+                assert!(!wire.contains(secret), "{agent} leaked {secret}");
+            }
+        }
+    }
+
+    #[test]
+    fn unmatched_results_preserve_only_known_metadata() {
+        for (agent, line, name, status) in [
+            (
+                "pi",
+                json!({"type":"message","id":"result","message":{"role":"toolResult","toolCallId":"orphan","toolName":"read","isError":false,"timestamp":5,"content":"private-output"}}),
+                Some("read"),
+                ToolStatus::Completed,
+            ),
+            (
+                "claude",
+                json!({"type":"user","uuid":"result","timestamp":"1970-01-01T00:00:00.005Z","message":{"content":[{"type":"tool_result","tool_use_id":"orphan","is_error":true,"content":"private-output"}]}}),
+                None,
+                ToolStatus::Error,
+            ),
+            (
+                "codex",
+                json!({"type":"response_item","id":"result","timestamp":"1970-01-01T00:00:00.005Z","payload":{"type":"function_call_output","call_id":"orphan","output":"private-output"}}),
+                None,
+                ToolStatus::Completed,
+            ),
+        ] {
+            let path = transcript(&[line]);
+            let history = conversation(agent, &path);
+            assert_eq!(history.turns.len(), 1);
+            let record = &history.turns[0];
+            let tool = record.tool.as_ref().expect("orphan result");
+            assert_eq!(tool.name.as_deref(), name);
+            assert_eq!(tool.status, status);
+            assert_eq!(record.id, "result:tool:orphan");
+            assert_eq!(record.timestamp.as_ref().map(|time| time.ms), Some(5));
+            assert_eq!(record.text, "");
+        }
+    }
+
+    #[test]
+    fn claude_grouping_survives_tool_rows_and_stays_at_the_first_text_block() {
+        let path = transcript(&[
+            json!({"type":"assistant","message":{"id":"same","content":[{"type":"text","text":"first"}]}}),
+            json!({"type":"assistant","message":{"id":"same","content":[{"type":"tool_use","id":"a","name":"read","input":{}}]}}),
+            json!({"type":"assistant","timestamp":"1970-01-01T00:00:00.005Z","message":{"id":"same","content":[{"type":"text","text":"second"}]}}),
+        ]);
+        let turns = conversation("claude", &path).turns;
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].id, "same");
+        assert_eq!(turns[0].text, "first\n\nsecond");
+        assert_eq!(
+            turns[0].timestamp,
+            Some(Timestamp {
+                ms: 5,
+                meaning: TimeMeaning::Recorded
+            })
+        );
+        assert_eq!(turns[1].role, Role::Tool);
+    }
+
+    #[test]
+    fn tools_have_an_independent_bound_and_cannot_evict_useful_text() {
+        let mut lines = vec![
+            json!({"type":"message","id":"useful","message":{"role":"user","content":"useful text"}}),
+        ];
+        for index in 0..CONVERSATION_TOOLS + 5 {
+            lines.push(json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":format!("call-{index}"),"name":"read","arguments":{}}]}}));
+            lines.push(json!({"type":"message","message":{"role":"toolResult","toolCallId":format!("call-{index}"),"toolName":"read","isError":false,"content":[{"type":"text","text":"x".repeat(8192)}]}}));
+        }
+        let path = transcript(&lines);
+        let history = conversation("pi", &path);
+        assert!(history.truncated);
+        assert_eq!(history.turns.len(), CONVERSATION_TOOLS + 1);
+        assert_eq!(history.turns[0].text, "useful text");
+        assert!(
+            history.turns[1..]
+                .iter()
+                .all(|t| t.tool.as_ref().expect("tool").status == ToolStatus::Completed)
+        );
+    }
+
+    #[test]
+    fn text_bound_and_absolute_offset_identity_are_stable_across_appends() {
+        let lines: Vec<_> = (0..=CONVERSATION_TURNS)
+            .map(|index| json!({"type":"message","message":{"role":"user","content":format!("message {index}")}}))
+            .collect();
+        let path = transcript(&lines);
+        let before = conversation("pi", &path);
+        assert!(before.truncated);
+        assert_eq!(before.turns.len(), CONVERSATION_TURNS);
+        assert_eq!(before.turns[0].text, "message 1");
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("file"),
+            "{}",
+            json!({"type":"message","message":{"role":"assistant","content":"appended"}})
+        )
+        .expect("append");
+        let after = conversation("pi", &path);
+        assert_eq!(before.turns[1].id, after.turns[0].id);
+        assert_eq!(before.turns[199].id, after.turns[198].id);
+    }
+
+    #[test]
+    fn byte_limit_exposes_incomplete_history_without_reading_a_cut_tool_record() {
+        let path = transcript(&[
+            json!({"type":"message","message":{"role":"user","content":"outside read bound"}}),
+            json!({"type":"message","message":{"role":"toolResult","toolCallId":"huge","toolName":"read","isError":false,"content":[{"type":"text","text":"x".repeat(usize::try_from(CONVERSATION_BYTES).expect("limit"))}]}}),
+        ]);
+        let history = conversation("pi", &path);
+        assert!(history.truncated);
+        assert_eq!(history.turns, Vec::new());
     }
 
     #[test]
@@ -803,7 +1385,7 @@ mod tests {
         let path = path.to_string_lossy().into_owned();
         for step in [1, 3, 7, 64] {
             let mut seen = Vec::new();
-            lines_backwards(&path, u64::MAX, step, |line| {
+            lines_backwards(&path, u64::MAX, step, |_, line| {
                 seen.push(line.to_owned());
                 true
             })
@@ -815,7 +1397,7 @@ mod tests {
             );
         }
         let mut seen = Vec::new();
-        lines_backwards(&path, 30, 7, |line| {
+        lines_backwards(&path, 30, 7, |_, line| {
             seen.push(line.to_owned());
             true
         })
@@ -826,7 +1408,7 @@ mod tests {
             "a line that starts at the limit is whole"
         );
         let mut seen = Vec::new();
-        lines_backwards(&path, 20, 7, |line| {
+        lines_backwards(&path, 20, 7, |_, line| {
             seen.push(line.to_owned());
             true
         })
@@ -837,7 +1419,10 @@ mod tests {
     #[test]
     fn backward_lines_report_an_unreadable_source() {
         let directory = std::env::temp_dir();
-        assert!(lines_backwards(&directory.to_string_lossy(), 100, 10, |_| true).is_err());
+        assert!(lines_backwards(&directory.to_string_lossy(), 100, 10, |_, _| true).is_err());
+        assert!(try_conversation("pi", &directory.to_string_lossy()).is_err());
+        let missing = directory.join(crate::ledger::new_id());
+        assert!(try_conversation("pi", &missing.to_string_lossy()).is_err());
     }
 
     #[test]
@@ -872,9 +1457,9 @@ mod tests {
     #[test]
     fn the_conversation_of_an_unknown_harness_or_a_missing_file_is_empty() {
         let path = transcript(&[json!({"type":"message","message":{"role":"user","content":"x"}})]);
-        assert_eq!(conversation("other", &path), Vec::new());
+        assert_eq!(conversation("other", &path).turns, Vec::new());
         assert_eq!(
-            conversation("pi", "/nonexistent/transcript.jsonl"),
+            conversation("pi", "/nonexistent/transcript.jsonl").turns,
             Vec::new()
         );
     }

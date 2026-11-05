@@ -915,7 +915,9 @@ mod tests {
             request(Method::GET, "/api/agents/w9:p9/conversation", None),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let status = response.status();
+        let payload = body_json(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{payload}");
     }
 
     #[tokio::test]
@@ -923,8 +925,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("web-{}.jsonl", crate::ledger::new_id()));
         let mut text = String::new();
         for line in [
-            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "fix it"}]}}),
-            json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}}),
+            json!({"type": "message", "id":"request-id", "message": {"role": "user", "timestamp":10, "content": [{"type": "text", "text": "fix it"}]}}),
+            json!({"type": "message", "id":"reply-id", "message": {"role": "assistant", "timestamp":11, "model":"recorded-model", "provider":"recorded-provider", "content": [{"type": "text", "text": "done"},{"type":"toolCall","id":"read-id","name":"read","arguments":{"secret":"not public"}}]}}),
+            json!({"type":"message","message":{"role":"toolResult","toolCallId":"read-id","toolName":"read","isError":true,"content":[{"type":"text","text":"private output"}]}}),
+            json!({"type":"custom_message","customType":"dogsled","display":true,"details":{"records":[{"id":"delivery-id","sender":"worker-pane","kind":"message","text":"worker report","created_ms":12}]}}),
         ] {
             text.push_str(&line.to_string());
             text.push('\n');
@@ -955,11 +959,70 @@ mod tests {
         let payload = body_json(response).await;
         assert_eq!(payload["pane"], "w1:p1");
         let turns = payload["turns"].as_array().expect("the turns");
-        assert_eq!(turns.len(), 2);
+        assert_eq!(turns.len(), 4);
         assert_eq!(turns[0]["role"], "user");
         assert_eq!(turns[0]["text"], "fix it");
+        assert_eq!(turns[0]["id"], "request-id");
+        assert_eq!(turns[0]["timestamp"], json!({"ms":10,"meaning":"message"}));
         assert_eq!(turns[1]["role"], "assistant");
         assert_eq!(turns[1]["text"], "done");
+        assert_eq!(turns[1]["id"], "reply-id");
+        assert_eq!(
+            turns[1]["source"],
+            json!({"kind":"harness","harness":"pi","model":"recorded-model","provider":"recorded-provider"})
+        );
+        assert_eq!(turns[2]["role"], "tool");
+        assert_eq!(
+            turns[2]["tool"],
+            json!({"call_id":"read-id","name":"read","status":"error"})
+        );
+        assert_eq!(turns[2]["text"], "");
+        assert_eq!(turns[3]["role"], "context");
+        assert_eq!(turns[3]["id"], "delivery-id");
+        assert_eq!(
+            turns[3]["source"],
+            json!({"kind":"dogsled","sender":"worker-pane","delivery_kind":"message"})
+        );
+        assert_eq!(turns[3]["timestamp"], json!({"ms":12,"meaning":"created"}));
+        assert_eq!(payload["truncated"], false);
+        assert_ne!(payload["session"].as_str().expect("session key"), "");
+        let wire = payload.to_string();
+        assert!(!wire.contains("not public"));
+        assert!(!wire.contains("private output"));
+    }
+
+    #[tokio::test]
+    async fn the_conversation_endpoint_preserves_truncation() {
+        let path = std::env::temp_dir().join(format!("web-{}.jsonl", crate::ledger::new_id()));
+        let mut text = String::new();
+        for index in 0..201 {
+            text.push_str(&json!({"type":"message","id":format!("message-{index}"),"message":{"role":"user","content":"request"}}).to_string());
+            text.push('\n');
+        }
+        std::fs::write(&path, text).expect("the transcript");
+        let server = fake::Server::start(move |method, _| match method {
+            "agent.list" => json!({"result":{"type":"agent_list","agents":[{
+                "pane_id":"w1:p1","agent":"pi","agent_status":"idle",
+                "agent_session":{"kind":"path","value":path}
+            }]}}),
+            "pane.read" => json!({"result":{"type":"pane_read","read":{"text":"","revision":0}}}),
+            other => panic!("unexpected method {other}"),
+        });
+        let state = with_socket(&server);
+        let _fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
+        let response = call(
+            state,
+            request(Method::GET, "/api/agents/w1:p1/conversation", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = body_json(response).await;
+        let turns = payload["turns"].as_array().expect("turns");
+        assert_eq!(turns.len(), 200);
+        assert_eq!(turns[0]["id"], "message-1");
+        assert_eq!(payload["truncated"], true);
+        assert_ne!(payload["session"].as_str().expect("session key"), "");
     }
 
     #[tokio::test]

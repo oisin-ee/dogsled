@@ -673,14 +673,15 @@ impl Capture {
             self.transcript_reads += 1;
         }
         let content = match (|| -> Result<Conversation> {
-            let turns = crate::activity::try_conversation(
+            let history = crate::activity::try_conversation(
                 agent.agent.as_deref().unwrap_or_default(),
                 path,
             )?;
             Ok(Conversation {
                 pane: agent.pane.clone(),
-                turns,
                 session: serde_json::to_string(session)?,
+                turns: history.turns,
+                truncated: history.truncated,
             })
         })() {
             Ok(conversation) => Content::Available(conversation),
