@@ -40,6 +40,12 @@ impl Fixture {
         }
     }
 
+    fn sample(&self, now: u64) {
+        let report: crate::node::SnapshotReport =
+            serde_json::from_value(input(now).local["host"].clone()).unwrap();
+        crate::host_store::put_snapshot(&self.ledger, &report.snapshot.unwrap()).unwrap();
+    }
+
     fn request(&self, request: &peers::Request) -> String {
         let args = [
             "observation".into(),
@@ -194,6 +200,7 @@ fn missing_mark_branch_observation_is_host_owned_and_guarded_on_import() {
     }
     let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
     let mut branches = peers::Branches::default();
+    fixture.sample(100);
     assert_eq!(branches.observe(&node, &[], 100).unwrap(), []);
     let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
     assert!(item.branch.as_ref().unwrap().landed);
@@ -251,6 +258,7 @@ fn failed_branch_observation_retains_success_and_measurement_time() {
     );
     let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
     let mut branches = peers::Branches::default();
+    fixture.sample(100);
     branches
         .observe(&node, std::slice::from_ref(&checked), 100)
         .unwrap();
@@ -263,6 +271,7 @@ fn failed_branch_observation_retains_success_and_measurement_time() {
             stderr: "cannot observe branch".into(),
         },
     );
+    fixture.sample(3_600_100);
     let gaps = branches.observe(&node, &[checked], 3_600_100).unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].availability, Availability::Failed);
@@ -297,7 +306,7 @@ fn stale_peers_keep_original_measurement_and_cannot_become_eligible() {
         .unwrap();
     assert_eq!(ingestion.source.unwrap().availability, Availability::Stale);
     let calls = fixture.shell.calls.lock().unwrap().len();
-    let report = fleet.status(31_002).unwrap().remove(0);
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 31_002);
     assert_eq!(report.sampled_ms, Some(100));
     assert!(!report.fresh(31_002));
     assert!(!report.headroom.unwrap().eligible);
@@ -324,7 +333,7 @@ fn unsupported_peer_export_does_not_downgrade_or_break_status() {
         ingestion.source.unwrap().availability,
         Availability::Unsupported
     );
-    let report = fleet.status(101).unwrap().remove(0);
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 101);
     assert!(!report.reachable);
     assert_eq!(
         fixture.shell.calls.lock().unwrap().len(),
@@ -371,7 +380,12 @@ fn native_export_recovers_after_a_temporary_legacy_fallback() {
         .refresh(&fleet, &fixture.host, 10_100, Vec::new(), false)
         .unwrap();
     assert_eq!(ingestion.source.as_ref().unwrap().epoch, "legacy");
-    assert_eq!(fleet.status(10_100).unwrap()[0].sampled_ms, Some(10_100));
+    assert_eq!(
+        fleet
+            .cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 10_100)
+            .sampled_ms,
+        Some(10_100)
+    );
     let recovered = peers::Export::of(&publisher.replace(input(20_100)).unwrap());
     fixture
         .shell
@@ -380,7 +394,12 @@ fn native_export_recovers_after_a_temporary_legacy_fallback() {
         .refresh(&fleet, &fixture.host, 20_100, Vec::new(), false)
         .unwrap();
     assert_eq!(ingestion.source.as_ref().unwrap().epoch, recovered.epoch);
-    assert_eq!(fleet.status(20_100).unwrap()[0].sampled_ms, Some(20_100));
+    assert_eq!(
+        fleet
+            .cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 20_100)
+            .sampled_ms,
+        Some(20_100)
+    );
     assert_eq!(
         fixture.shell.calls.lock().unwrap().as_slice(),
         &[
@@ -435,7 +454,7 @@ fn failed_peer_refresh_never_doubles_ssh_and_keeps_original_failure() {
             ingestion
                 .refresh(&fleet, &fixture.host, now, Vec::new(), false)
                 .unwrap();
-            let report = fleet.status(now).unwrap().remove(0);
+            let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), now);
             assert!(!report.reachable);
             assert_eq!(report.failure, Some(failure));
             assert_eq!(report.error, Some(failure.to_string()));
@@ -452,6 +471,369 @@ fn failed_peer_refresh_never_doubles_ssh_and_keeps_original_failure() {
             );
         }
     }
+}
+
+fn branch_input(sampled_ms: u64, checked: crate::drop::Checked, measured_ms: u64) -> Publication {
+    let mut value = input(sampled_ms);
+    value.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked,
+            measured_ms,
+        }])
+        .unwrap(),
+    );
+    value
+}
+
+fn record_missing_peer(fixture: &Fixture, checked: &crate::drop::Checked) {
+    crate::items::record(
+        &fixture.ledger,
+        crate::items::Item {
+            id: checked.item.clone(),
+            kind: "agent".into(),
+            host: fixture.host.id.clone(),
+            pane: "gone".into(),
+            owner_pane: "owner".into(),
+            closed_ms: Some(1),
+            branch: Some(checked.branch.clone()),
+            ..crate::items::Item::default()
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn missing_mark_interests_and_imports_require_fresh_peer_facts_and_resume() {
+    let fixture = Fixture::new();
+    let checked = check();
+    record_missing_peer(&fixture, &checked);
+    let fleet = fixture.fleet();
+    let mut publisher = Publisher::new().unwrap();
+    let initial = peers::Export::of(&publisher.replace(input(100)).unwrap());
+    fixture.answer(&initial);
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fleet, &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    let checks = peers::interests(&fixture.ledger, &fixture.host.id, 101).unwrap();
+    assert_eq!(checks, vec![checked.clone()]);
+    let request = peers::Request {
+        epoch: Some(initial.epoch.clone()),
+        local_revision: Some(initial.local_revision),
+        interests: checks.clone(),
+        wait: true,
+    };
+    let mut measured = checked.clone();
+    measured.branch.ahead = 7;
+    let fresh = branch_input(101, measured, 101);
+    let fresh = peers::Export::of(&publisher.replace(fresh).unwrap());
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&fresh).unwrap(),
+    );
+    ingestion
+        .refresh(&fleet, &fixture.host, 101, checks, true)
+        .unwrap();
+    let successful = crate::items::list(&fixture.ledger).unwrap();
+    assert_eq!(successful[0].branch_checked_ms, Some(101));
+    assert_eq!(successful[0].branch.as_ref().unwrap().ahead, 7);
+    assert!(
+        fixture
+            .shell
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&fixture.request(&request))
+    );
+
+    let stale_now = 3_600_102;
+    assert_eq!(
+        peers::interests(&fixture.ledger, &fixture.host.id, stale_now).unwrap(),
+        []
+    );
+    let stale_request = peers::Request {
+        epoch: Some(fresh.epoch.clone()),
+        local_revision: Some(fresh.local_revision),
+        interests: Vec::new(),
+        wait: true,
+    };
+    let mut stale = input(101);
+    let mut unexpected = checked.clone();
+    unexpected.branch.landed = true;
+    unexpected.branch.ahead = 0;
+    stale.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked: unexpected,
+            measured_ms: stale_now,
+        }])
+        .unwrap(),
+    );
+    let stale = peers::Export::of(&publisher.replace(stale).unwrap());
+    fixture.shell.on(
+        &fixture.request(&stale_request),
+        &serde_json::to_string(&stale).unwrap(),
+    );
+    // Even a caller supplying obsolete interests cannot make refresh send them.
+    ingestion
+        .refresh(
+            &fleet,
+            &fixture.host,
+            stale_now,
+            vec![checked.clone()],
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap(),
+        serde_json::to_value(&successful).unwrap()
+    );
+    assert_eq!(
+        fixture.shell.calls.lock().unwrap().last(),
+        Some(&fixture.request(&stale_request))
+    );
+    assert!(
+        ingestion
+            .gaps()
+            .iter()
+            .any(|gap| gap.domain == "branches" && gap.availability == Availability::Stale)
+    );
+
+    resume_peer_checks(
+        &fixture,
+        &mut publisher,
+        &mut ingestion,
+        stale,
+        checked,
+        stale_now + 10_000,
+    );
+}
+
+fn resume_peer_checks(
+    fixture: &Fixture,
+    publisher: &mut Publisher,
+    ingestion: &mut peers::Ingestion,
+    stale: peers::Export,
+    checked: crate::drop::Checked,
+    resumed_now: u64,
+) {
+    let request = peers::Request {
+        epoch: Some(stale.epoch),
+        local_revision: Some(stale.local_revision),
+        interests: Vec::new(),
+        wait: true,
+    };
+    let recovered = peers::Export::of(&publisher.replace(input(resumed_now)).unwrap());
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&recovered).unwrap(),
+    );
+    ingestion
+        .refresh(
+            &fixture.fleet(),
+            &fixture.host,
+            resumed_now,
+            Vec::new(),
+            true,
+        )
+        .unwrap();
+    let checks = peers::interests(&fixture.ledger, &fixture.host.id, resumed_now).unwrap();
+    assert_eq!(checks.len(), 1);
+    let request = peers::Request {
+        epoch: Some(recovered.epoch),
+        local_revision: Some(recovered.local_revision),
+        interests: checks.clone(),
+        wait: true,
+    };
+    let mut resumed = input(resumed_now + 1);
+    let mut measured = checked;
+    measured.branch.ahead = 9;
+    resumed.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked: measured,
+            measured_ms: resumed_now + 1,
+        }])
+        .unwrap(),
+    );
+    let resumed = peers::Export::of(&publisher.replace(resumed).unwrap());
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&resumed).unwrap(),
+    );
+    ingestion
+        .refresh(
+            &fixture.fleet(),
+            &fixture.host,
+            resumed_now + 1,
+            checks,
+            true,
+        )
+        .unwrap();
+    let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
+    assert_eq!(item.branch_checked_ms, Some(resumed_now + 1));
+    assert_eq!(item.branch.unwrap().ahead, 9);
+    assert!(
+        !ingestion
+            .gaps()
+            .iter()
+            .any(|gap| gap.availability == Availability::Stale)
+    );
+}
+
+#[test]
+fn local_missing_mark_checks_preserve_items_while_local_facts_are_stale() {
+    let fixture = Fixture::new();
+    let checked = check();
+    crate::items::record(
+        &fixture.ledger,
+        crate::items::Item {
+            id: checked.item.clone(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "gone".into(),
+            owner_pane: "owner".into(),
+            closed_ms: Some(1),
+            branch: Some(checked.branch),
+            ..crate::items::Item::default()
+        },
+    )
+    .unwrap();
+    fixture.sample(100);
+    let original = serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap();
+    let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
+    let mut branches = peers::Branches::default();
+    let gaps = branches.observe(&node, &[], 30_101).unwrap();
+    assert!(
+        gaps.iter()
+            .any(|gap| gap.domain == "branches" && gap.availability == Availability::Stale)
+    );
+    assert_eq!(branches.gaps(), gaps);
+    assert!(fixture.shell.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap(),
+        original
+    );
+}
+
+fn marked_item(fixture: &Fixture, host: &str) -> crate::done::Mark {
+    let checked = check();
+    crate::items::record(
+        &fixture.ledger,
+        crate::items::Item {
+            id: checked.item.clone(),
+            kind: "agent".into(),
+            host: host.into(),
+            pane: "gone".into(),
+            owner_pane: "owner".into(),
+            closed_ms: Some(1),
+            branch: Some(checked.branch.clone()),
+            ..crate::items::Item::default()
+        },
+    )
+    .unwrap();
+    serde_json::from_value(json!({"pane":"gone","item":checked.item,"marked_ms":1,"closed_ms":2,"branch":checked.branch})).unwrap()
+}
+
+#[test]
+fn marked_items_are_not_missing_mark_interests_or_check_timestamp_updates() {
+    let fixture = Fixture::new();
+    let mark = marked_item(&fixture, "local");
+    crate::host_store::put_marks(
+        &fixture.ledger,
+        &BTreeMap::from([(crate::done::key(&mark), mark)]),
+    )
+    .unwrap();
+    fixture.sample(100);
+    assert_eq!(peers::interests(&fixture.ledger, "local", 100).unwrap(), []);
+    for reference in ["refs/heads/retained", "refs/remotes/origin/retained"] {
+        fixture.shell.on_output(
+            &format!("git -C /execution-only/repo show-ref --verify --quiet {reference}"),
+            Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+    }
+    let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
+    let mut branches = peers::Branches::default();
+    assert_eq!(branches.observe(&node, &[], 100).unwrap(), []);
+    assert!(
+        !fixture.shell.calls.lock().unwrap().is_empty(),
+        "the marked branch really was observed"
+    );
+    let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
+    assert_eq!(item.branch_checked_ms, None);
+    assert!(
+        crate::done::list(&fixture.ledger).unwrap()[0]
+            .branch
+            .as_ref()
+            .unwrap()
+            .landed
+    );
+}
+
+#[test]
+fn local_mark_arriving_between_interest_and_import_is_guarded_atomically() {
+    let fixture = Fixture::new();
+    let mark = marked_item(&fixture, "local");
+    fixture.sample(100);
+    let interests = peers::interests(&fixture.ledger, "local", 100).unwrap();
+    assert_eq!(interests.len(), 1);
+    crate::host_store::put_marks(
+        &fixture.ledger,
+        &BTreeMap::from([(crate::done::key(&mark), mark)]),
+    )
+    .unwrap();
+    let mut checked = interests.into_iter().next().unwrap();
+    checked.branch.landed = true;
+    assert!(
+        !peers::import(
+            &fixture.ledger,
+            "local",
+            &[peers::BranchObservation {
+                checked,
+                measured_ms: 100
+            }]
+        )
+        .unwrap()
+    );
+    let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
+    assert_eq!(item.branch_checked_ms, None);
+    assert!(!item.branch.unwrap().landed);
+}
+
+#[test]
+fn peer_marks_correlate_with_results_from_the_same_export() {
+    let fixture = Fixture::new();
+    let mark = marked_item(&fixture, &fixture.host.id);
+    let mut input = input(100);
+    input.local.get_mut("host").unwrap()["handoffs"] = json!([mark]);
+    input.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked: check(),
+            measured_ms: 100,
+        }])
+        .unwrap(),
+    );
+    let mut publisher = Publisher::new().unwrap();
+    let export = peers::Export::of(&publisher.replace(input).unwrap());
+    fixture.answer(&export);
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    assert_eq!(
+        peers::interests(&fixture.ledger, &fixture.host.id, 100).unwrap(),
+        []
+    );
+    assert_eq!(
+        crate::items::list(&fixture.ledger).unwrap()[0].branch_checked_ms,
+        None
+    );
 }
 
 #[test]

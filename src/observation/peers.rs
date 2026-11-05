@@ -166,13 +166,61 @@ pub(crate) struct Branches {
     results: BTreeMap<String, BranchObservation>,
     attempted: BTreeMap<String, (crate::done::Branch, u64)>,
     failures: BTreeMap<String, String>,
+    stale: bool,
+}
+
+fn cached_fresh(cached: &Cached, now: u64) -> bool {
+    cached.available
+        && cached.reachable
+        && cached.running.unwrap_or(true)
+        && cached
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.fresh(now))
 }
 
 pub(crate) fn interests(ledger: &Ledger, host: &str, now: u64) -> Result<Vec<Checked>> {
+    let fresh = if host == crate::hosts::LOCAL {
+        crate::host_store::snapshot(ledger)?.is_some_and(|snapshot| snapshot.fresh(now))
+    } else {
+        crate::host_store::peer(ledger, host)?
+            .as_ref()
+            .is_some_and(|cached| cached_fresh(cached, now))
+    };
+    if fresh {
+        missing(ledger, host, now)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn stale_branches() -> Gap {
+    Gap {
+        domain: "branches".into(),
+        availability: Availability::Stale,
+        detail: "branch observation requires fresh execution-host facts".into(),
+    }
+}
+
+fn has_mark(item: &crate::items::Item, marks: &[crate::done::Mark]) -> bool {
+    marks.iter().any(|mark| {
+        mark.item
+            .as_deref()
+            .map_or(mark.pane == item.pane, |id| id == item.id)
+    })
+}
+
+fn missing(ledger: &Ledger, host: &str, now: u64) -> Result<Vec<Checked>> {
+    let marks = if host == crate::hosts::LOCAL {
+        crate::done::list(ledger)?
+    } else {
+        crate::host_store::peer(ledger, host)?.map_or_else(Vec::new, |cached| cached.handoffs)
+    };
     Ok(crate::items::list(ledger)?
         .into_iter()
         .filter(|item| {
             item.host == host
+                && !has_mark(item, &marks)
                 && item.kind == "agent"
                 && item.closed_ms.is_some()
                 && item.dropped_ms.is_none()
@@ -201,7 +249,13 @@ impl Branches {
         now: u64,
     ) -> Result<Vec<Gap>> {
         let mut requested = interests.to_vec();
-        requested.extend(self::interests(node.ledger, crate::hosts::LOCAL, now)?);
+        requested.extend(missing(node.ledger, crate::hosts::LOCAL, now)?);
+        self.stale = (!requested.is_empty() || !self.results.is_empty())
+            && !crate::host_store::snapshot(node.ledger)?
+                .is_some_and(|snapshot| snapshot.fresh(now));
+        if self.stale {
+            requested.clear();
+        }
         let marks = crate::done::list(node.ledger)?;
         requested.extend(
             marks
@@ -269,6 +323,7 @@ impl Branches {
                 availability: Availability::Failed,
                 detail: detail.clone(),
             })
+            .chain(self.stale.then(stale_branches))
             .collect()
     }
 
@@ -313,9 +368,18 @@ impl Ingestion {
     }
 
     pub fn gaps(&self) -> Vec<Gap> {
-        self.export
+        let mut gaps = self
+            .export
             .as_ref()
-            .map_or_else(Vec::new, |export| export.gaps.clone())
+            .map_or_else(Vec::new, |export| export.gaps.clone());
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.availability == Availability::Stale)
+        {
+            gaps.push(stale_branches());
+        }
+        gaps
     }
 
     fn accept(
@@ -473,7 +537,14 @@ impl Ingestion {
         let request = Request {
             epoch: self.export.as_ref().map(|value| value.epoch.clone()),
             local_revision: self.export.as_ref().map(|value| value.local_revision),
-            interests: checks,
+            interests: if previous
+                .as_ref()
+                .is_some_and(|cached| cached_fresh(cached, now))
+            {
+                checks
+            } else {
+                Vec::new()
+            },
             wait,
         };
         let received = self.receive(fleet, host, &request, now);
@@ -520,10 +591,16 @@ impl Ingestion {
             crate::host_store::put_peer(fleet.ledger, &host.id, &cached)?;
         }
         self.cached = Some(cached.clone());
-        if cached.available
-            && let Ok((_, branches)) = received
+        if cached_fresh(&cached, now)
+            && let Ok((report, branches)) = received
         {
-            for branch in branches {
+            let marks = report.map_or_else(Vec::new, |report| report.handoffs);
+            let items = crate::items::list(fleet.ledger)?;
+            for branch in branches.into_iter().filter(|branch| {
+                !items
+                    .iter()
+                    .any(|item| item.id == branch.checked.item && has_mark(item, &marks))
+            }) {
                 self.local_changed |=
                     import(fleet.ledger, &host.id, std::slice::from_ref(&branch))?;
             }

@@ -151,6 +151,13 @@ impl Observers {
             if source.availability == Availability::Available && !report.fresh(now) {
                 source.availability = Availability::Stale;
             }
+            if source.availability == Availability::Stale {
+                input.gaps.push(Gap {
+                    domain: format!("peer:{}:branches", host.id),
+                    availability: Availability::Stale,
+                    detail: "branch observation requires fresh execution-host facts".into(),
+                });
+            }
             if source.availability != Availability::Available {
                 input.gaps.push(Gap {
                     domain: format!("peer:{}", host.id),
@@ -158,11 +165,25 @@ impl Observers {
                     detail: report.condition(),
                 });
             }
-            input.gaps.extend(state.gaps.iter().map(|gap| Gap {
-                domain: format!("peer:{}:branches", host.id),
-                availability: gap.availability.clone(),
-                detail: "peer branch observation failed".into(),
-            }));
+            input.gaps.extend(
+                state
+                    .gaps
+                    .iter()
+                    .filter(|gap| {
+                        gap.availability != Availability::Stale
+                            || source.availability != Availability::Stale
+                    })
+                    .map(|gap| Gap {
+                        domain: format!("peer:{}:branches", host.id),
+                        availability: gap.availability.clone(),
+                        detail: if gap.availability == Availability::Stale {
+                            "branch observation requires fresh execution-host facts"
+                        } else {
+                            "peer branch observation failed"
+                        }
+                        .into(),
+                    }),
+            );
             input.sources.peers.insert(host.id.clone(), source);
             reports.push(report);
         }
