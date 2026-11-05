@@ -88,23 +88,29 @@ impl RequestTab {
 
 #[component]
 pub fn AgentView(
+    host: String,
     pane: String,
     #[props(default)] review: Option<String>,
     #[props(default)] question: Option<String>,
     agent_count: usize,
 ) -> Element {
     rsx! {
-        AgentSession { key: "{pane}", pane, review, question, agent_count }
+        AgentSession { key: "{host}:{pane}", host, pane, review, question, agent_count }
     }
 }
 
 #[component]
 fn AgentSession(
+    host: String,
     pane: String,
     review: Option<String>,
     question: Option<String>,
     agent_count: usize,
 ) -> Element {
+    let address = wire::AgentAddress {
+        host: host.clone(),
+        pane: pane.clone(),
+    };
     let mut agent = use_signal(|| None::<wire::AgentView>);
     let mut board = use_signal(|| None::<BoardView>);
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
@@ -136,9 +142,9 @@ fn AgentSession(
     let mut draft = try_use_context::<Draft>().map_or(local_draft, |draft| draft.0);
 
     // Transcript I/O must start and render without waiting for the full agent list.
-    let transcript = use_conversation(pane.clone(), refresh, detail_session);
+    let transcript = use_conversation(address.clone(), refresh, detail_session);
 
-    let read_pane = pane.clone();
+    let read_pane = address.clone();
     use_resource(move || {
         let _ = refresh();
         let pane = read_pane.clone();
@@ -160,7 +166,7 @@ fn AgentSession(
         }
     });
 
-    let screen_pane = pane.clone();
+    let screen_pane = address.clone();
     use_resource(move || {
         let _ = refresh();
         let blocked = agent.read().as_ref().is_some_and(is_blocked);
@@ -222,19 +228,21 @@ fn AgentSession(
         }
     });
 
-    let event_pane = pane.clone();
+    let event_pane = address.clone();
     use_future(move || {
         let pane = event_pane.clone();
         async move {
             let result = api::watch_agent(&pane, |event| {
                 if detail_session.peek().as_ref() != Some(&event.session) {
                     match &event.session {
-                        wire::DetailSession::Available(session) => {
-                            conversations.write().select_session(&pane, session)
-                        }
-                        wire::DetailSession::Unavailable => {
-                            conversations.write().unavailable(&pane)
-                        }
+                        wire::DetailSession::Available(session) => conversations
+                            .write()
+                            .host_mut(&pane.host)
+                            .select_session(&pane.pane, session),
+                        wire::DetailSession::Unavailable => conversations
+                            .write()
+                            .host_mut(&pane.host)
+                            .unavailable(&pane.pane),
                     }
                     screen.set(None);
                     detail_session.set(Some(event.session.clone()));
@@ -256,7 +264,7 @@ fn AgentSession(
 
     use_interval(POLL, move |()| refresh += 1);
 
-    let send_pane = pane.clone();
+    let send_pane = address.clone();
     let send = move |prompt_reply: bool| {
         let pane = send_pane.clone();
         let text = draft();
@@ -301,7 +309,7 @@ fn AgentSession(
 
     let mut reply_send = send.clone();
     let mut conversation_send = send;
-    let key_pane = pane.clone();
+    let key_pane = address.clone();
     let send_key = move |key: String| {
         let pane = key_pane.clone();
         if busy() || !reachable() || !allowed_key(&key) {
@@ -318,9 +326,11 @@ fn AgentSession(
     let mut interrupt = send_key.clone();
     let current = agent();
     let retained = match detail_session.read().as_ref() {
-        Some(wire::DetailSession::Available(session)) => {
-            conversations.read().get_session(&pane, session).cloned()
-        }
+        Some(wire::DetailSession::Available(session)) => conversations
+            .read()
+            .host(&host)
+            .and_then(|cache| cache.get_session(&pane, session))
+            .cloned(),
         _ => None,
     };
     let transcript_loading = retained.is_none() && transcript.read().is_none();
@@ -334,14 +344,14 @@ fn AgentSession(
             .repos
             .iter()
             .flat_map(|repo| &repo.rows)
-            .find(|row| row.pane.as_deref() == Some(&pane))
+            .find(|row| row.host == host && row.pane.as_deref() == Some(&pane))
     });
     let todos: Vec<TodoView> = board_view.as_ref().map_or_else(Vec::new, |board| {
         board
             .repos
             .iter()
             .flat_map(|repo| &repo.todos)
-            .filter(|todo| todo.pane == pane)
+            .filter(|todo| host == "local" && todo.pane == pane)
             .cloned()
             .collect()
     });
@@ -374,8 +384,8 @@ fn AgentSession(
         &pane,
         review.as_deref(),
         question.as_deref(),
-        reviews().as_deref(),
-        questions().as_deref(),
+        reviews().filter(|_| host == "local").as_deref(),
+        questions().filter(|_| host == "local").as_deref(),
         current.as_ref().is_some_and(is_blocked),
     );
     let identity = pending
@@ -405,7 +415,7 @@ fn AgentSession(
         .to_owned();
     let disabled = busy() || metadata_loading() || !reachable() || current.is_none();
     let plan_open = tab == Tab::Pending && matches!(pending, Some(RequestTab::Review(_)));
-    let focus_pane = pane.clone();
+    let focus_pane = address.clone();
     let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
     use_effect(use_reactive(&identity, move |identity| {
         if !identity.is_empty() {
@@ -494,7 +504,7 @@ fn AgentSession(
                 }
             if tab == Tab::Conversation {
                 footer { class: "conversation-footer",
-                    LiveActivity { pane: pane.clone(), session: detail_session,
+                    LiveActivity { address: address.clone(), session: detail_session,
                         coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
                         connected: metadata_loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
@@ -875,13 +885,13 @@ fn platform_time(ms: u64) -> Option<(String, String, String)> {
 /// The subscription lives below the history component. Heartbeats cannot refresh Markdown.
 #[component]
 fn LiveActivity(
-    pane: String,
+    address: wire::AgentAddress,
     session: Signal<Option<wire::DetailSession>>,
     coarse: String,
     connected: bool,
     waiting: Option<String>,
 ) -> Element {
-    let live = use_live_activity(pane, session);
+    let live = use_live_activity(address, session);
     rsx! { ActivityRow { live: live(), coarse, connected, waiting } }
 }
 
@@ -1290,6 +1300,7 @@ mod tests {
     #[test]
     fn a_prompt_also_marks_an_agent_blocked() {
         let mut agent = wire::AgentView {
+            host: "local".into(),
             pane: "test".to_owned(),
             name: None,
             title: None,

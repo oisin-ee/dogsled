@@ -73,7 +73,7 @@ fn RepositoryPicker(
 
 #[component]
 pub(crate) fn NewLead() -> Element {
-    let mut selected = use_context::<Signal<Option<String>>>();
+    let mut selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
     let conversation = use_context::<NewConversation>();
     let mut composing = conversation.open;
     let hint = conversation.repository;

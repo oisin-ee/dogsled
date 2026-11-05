@@ -594,6 +594,12 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         Command::Items { .. } | Command::Ps { .. } => {
             return runtime::published_inventory(&client.current()?, cli.command, cli.json);
         }
+        Command::Host(HostCommand::AgentDetail { pane, input }) => {
+            let reply =
+                web::agents::peer_command(pane.clone(), input, Ledger::new(ledger::default_dir()))?;
+            print(true, &reply, String::new)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Host(HostCommand::Snapshot) => {
             let report: node::SnapshotReport =
                 observation::read::local(&client.current()?, "host")?;
@@ -1432,6 +1438,11 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
                 .peer(serde_json::from_str(&request)?)?,
             String::new,
         )?,
+        HostCommand::AgentDetail { .. } => {
+            return Err(Error::Invalid(
+                "agent detail requires the observation reader".into(),
+            ));
+        }
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
         HostCommand::Todos => print(
             true,

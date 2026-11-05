@@ -552,7 +552,10 @@ fn selected_agent(
     };
     agents
         .iter()
-        .find(|agent| agent["pane"].as_str() == Some(pane))
+        .find(|agent| {
+            agent["host"].as_str() == Some(crate::hosts::LOCAL)
+                && agent["pane"].as_str() == Some(pane)
+        })
         .map(|agent| serde_json::from_value(agent.clone()).map_err(Into::into))
         .transpose()
 }

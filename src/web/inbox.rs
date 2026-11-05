@@ -334,6 +334,7 @@ mod tests {
         let id = state.questions.create(body).await?;
         let pending = state.questions.list().await?;
         let agent = AgentView {
+            host: "local".into(),
             pane: "worker-pane".into(),
             name: Some("worker".into()),
             title: None,
