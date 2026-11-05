@@ -1,5 +1,15 @@
 # Bind conversation reads to native sessions
 
+> **Superseded on 6 November 2026.** `origin/main` already satisfies this brief through `a469f9a`, `7e64a46`, and `262c8cf`:
+> - serve-owned detail workers keyed by `observation::details::Session`;
+> - `Conversation.session` and `DetailSession`;
+> - `probe::agent_list` rejects malformed lists;
+> - absence comes from `publication.found`;
+> - `try_conversation` propagates I/O errors;
+> - the browser cache is keyed by session and rejects late responses.
+>
+> Do not dispatch this brief. The live-activity identity is being revised onto main's `Session` key; see `activity-protocol.md`.
+
 Status: ready after the history unit is accepted. The dispatch supplies its exact base and this document's committed revision.
 
 ## Outcome and owning causes
