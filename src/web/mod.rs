@@ -61,7 +61,7 @@ impl Default for PortalState {
 /// What the portal needs to start a lead. One-shot servers have none.
 #[derive(Debug, Clone)]
 pub struct LeadLaunch {
-    /// Reloaded for every lead, so `dogsled repo add` needs no portal restart.
+    /// Reloaded for every lead, so a host policy change needs no portal restart.
     pub config_path: std::path::PathBuf,
     pub home: String,
     pub shell: Arc<dyn crate::shell::Shell>,
