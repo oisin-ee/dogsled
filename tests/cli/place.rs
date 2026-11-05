@@ -1645,6 +1645,11 @@ pub(super) fn peer_observer(rig: &Rig) -> Background {
 
 /// Crash/replay fixtures neutralize only the host's real CPU load, not other capacity checks.
 pub(super) fn placement_observer(rig: &Rig) -> Background {
+    placement_observer_every(rig, "1")
+}
+
+/// An observer whose service lanes run at startup and then once per `interval` seconds.
+pub(super) fn placement_observer_every(rig: &Rig, interval: &str) -> Background {
     let config = rig.dir.join("config.toml");
     let mut policy: toml::Table = if config.exists() {
         toml::from_str(&fs::read_to_string(config).unwrap()).unwrap()
@@ -1655,7 +1660,7 @@ pub(super) fn placement_observer(rig: &Rig) -> Background {
     rig.config(&toml::to_string(&policy).unwrap());
     let disk = rig.host()["probe"]["disk_free_percent"].as_f64().unwrap();
     rig.script("df", &format!("#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 10000 0 {} 0%% /\n'\n", disk * 100.0));
-    let observer = rig.serve();
+    let observer = rig.serve_at(&rig.dir.join("state"), interval);
     wait_publication(rig, |frame| {
         let host = &frame["views"]["hosts"]["data"][0];
         host["id"] == "local"
