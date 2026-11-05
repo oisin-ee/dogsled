@@ -257,7 +257,15 @@ impl Subscription {
             return Err(fail("invalid subscription acknowledgement".into()));
         }
         // Bound the acknowledgement, but never time out halfway through an event line.
-        reader.get_ref().set_read_timeout(None)?;
+        // Darwin refuses socket options once Herdr has shut the connection down (EINVAL).
+        // Its buffered events are still readable and then end in EOF, so no read can block
+        // and the reader still delivers them before reporting the close.
+        match reader.get_ref().set_read_timeout(None) {
+            Err(error) if error.kind() != std::io::ErrorKind::InvalidInput => {
+                return Err(error.into());
+            }
+            _ => {}
+        }
         // Keep a socket handle so dropping the subscription interrupts its reader.
         let socket = reader.get_ref().try_clone()?;
         let (sender, receiver) = std::sync::mpsc::channel();
