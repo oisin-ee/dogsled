@@ -30,6 +30,15 @@ impl Fixture {
     }
 
     pub fn at(socket: Client, ledger: Ledger) -> Self {
+        Self::start(socket, ledger, false)
+    }
+
+    pub fn paused(socket: Client) -> Self {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        Self::start(socket, ledger, true)
+    }
+
+    fn start(socket: Client, ledger: Ledger, paused: bool) -> Self {
         let mut publisher = Publisher::new().unwrap();
         let mut collector = Collector::default();
         collector.client = Some(socket.clone());
@@ -57,13 +66,15 @@ impl Fixture {
             let mut ready = Some(ready);
             loop {
                 let _ = dirty.take();
-                let mut input = captured.lock().unwrap().clone();
-                producer
-                    .lock()
-                    .unwrap()
-                    .refresh(&mut input, &dirty)
-                    .unwrap();
-                publisher.replace(input).unwrap();
+                if !paused || ready.is_some() {
+                    let mut input = captured.lock().unwrap().clone();
+                    producer
+                        .lock()
+                        .unwrap()
+                        .refresh(&mut input, &dirty)
+                        .unwrap();
+                    publisher.replace(input).unwrap();
+                }
                 if let Some(ready) = ready.take() {
                     ready.send(()).unwrap();
                 }
