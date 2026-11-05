@@ -345,20 +345,24 @@ impl Server {
         annotations(read_only_hint = true)
     )]
     async fn status(&self, Parameters(args): Parameters<StatusArgs>) -> Result<String, String> {
-        self.call(move |fleet| {
-            let status = crate::commands::status(fleet)?;
+        let client = crate::observation::ipc::Client::at(&self.context.ledger.dir);
+        tokio::task::spawn_blocking(move || {
+            let published = client.current()?;
             let owner = if args.all {
                 None
             } else {
                 Some(crate::inbox::own_pane(None)?)
             };
-            Ok(serde_json::to_value(crate::board::build(
-                &status,
-                owner.as_deref(),
-                now_ms(),
-            ))?)
+            let board = crate::observation::read::board(&published, owner.as_deref())?;
+            let mut value = serde_json::to_value(board)?;
+            if !published.gaps.is_empty() {
+                value["gaps"] = serde_json::to_value(&published.gaps)?;
+            }
+            Ok::<_, crate::error::Error>(value.to_string())
         })
         .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.tool_message())
     }
 
     #[tool(

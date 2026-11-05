@@ -54,10 +54,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ObservationCommand,
     },
-    /// Read all hosts' snapshots, with a shared 10-second peer cache.
+    /// Read the published fleet status, or subscribe to replacements.
     Status {
         #[arg(long)]
         watch: bool,
+        /// Reserved for CLI compatibility; watch updates follow publications.
         #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
         #[arg(long, conflicts_with_all = ["brief", "json"])]

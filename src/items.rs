@@ -432,6 +432,10 @@ pub fn checked(
                 .find(|i| i.id == check.item && i.host == host)
                 && item.closed_ms.is_some()
                 && item.dropped_ms.is_none()
+                && (host != crate::hosts::LOCAL || tx.query_row(
+                    "SELECT NOT EXISTS (SELECT 1 FROM host_marks_entries WHERE owner='local' AND (item=?1 OR (item IS NULL AND pane=?2)))",
+                    rusqlite::params![item.id, item.pane], |row| row.get::<_, bool>(0),
+                )?)
                 && let Some(branch) = &mut item.branch
                 && branch.repo == check.branch.repo
                 && branch.name == check.branch.name

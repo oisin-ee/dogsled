@@ -6,7 +6,7 @@ use crate::herdr_socket::{Client, Next};
 use crate::ledger::Ledger;
 use crate::service::Event;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixDatagram;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
@@ -27,11 +27,42 @@ pub(crate) fn notify(ledger: &Ledger) {
     }
 }
 
+/// One pending canonical attempt per host. Enqueue and worker take share this lock.
+#[derive(Debug, Default)]
+pub(crate) struct PeerRetries(std::sync::Mutex<BTreeMap<String, String>>);
+
+impl PeerRetries {
+    pub(crate) fn enqueue(&self, host: String) -> String {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(host)
+            .or_insert_with(crate::ledger::new_id)
+            .clone()
+    }
+
+    fn hosts(&self) -> BTreeSet<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn take(&self, host: &str) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(host)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Dirty {
     pending: Arc<AtomicU8>,
     send: mpsc::Sender<Event>,
-    peers: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    peers: Arc<PeerRetries>,
 }
 
 impl Dirty {
@@ -43,21 +74,20 @@ impl Dirty {
         }
     }
 
-    pub(crate) fn retry_peer(&self, host: String) {
-        self.peers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(host);
+    pub(crate) fn retry_peer(&self, host: String) -> String {
+        let token = self.peers.enqueue(host);
         self.mark(PEERS);
+        token
     }
 
+    /// The service wakes these workers; only the worker removes its pending attempt.
     pub(crate) fn take_peers(&self) -> BTreeSet<String> {
-        std::mem::take(
-            &mut *self
-                .peers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        self.peers.hosts()
+    }
+
+    /// Shares the enqueue lock: arrivals after this take belong to the next attempt.
+    pub(crate) fn take_peer(&self, host: &str) -> Option<String> {
+        self.peers.take(host)
     }
 
     pub(crate) fn mark(&self, domains: u8) {
@@ -247,6 +277,40 @@ impl Drop for Herdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_ack_shares_only_the_pending_attempt() {
+        use crate::observation::{Domains, Publication, Publisher, Sources, ipc, peers};
+        let state = std::env::temp_dir().join(crate::ledger::new_id());
+        let (send, _receive) = mpsc::channel();
+        let dirty = Dirty::new(send);
+        let mut publisher = Publisher::new().unwrap();
+        let mut server = ipc::Server::new(&state).unwrap();
+        server.branches(peers::Interests::default(), dirty.clone());
+        server.bind(publisher.subscribe()).unwrap();
+        publisher
+            .replace(Publication {
+                published_ms: 1,
+                sources: Sources::default(),
+                local: Domains::new(),
+                views: Domains::new(),
+                gaps: Vec::new(),
+            })
+            .unwrap();
+        let client = ipc::Client::at(&state);
+        let first = client.retry("peer").unwrap();
+        let second = client.retry("peer").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(dirty.take_peers(), BTreeSet::from(["peer".into()]));
+        assert_eq!(dirty.take_peer("peer"), Some(first.clone()));
+        let third = client.retry("peer").unwrap();
+        assert_ne!(first, third);
+        assert_eq!(dirty.take_peer("peer"), Some(third));
+        assert_eq!(dirty.take_peer("peer"), None);
+        drop(server);
+        assert!(client.retry("peer").is_err());
+        std::fs::remove_dir_all(state).unwrap();
+    }
 
     #[test]
     fn dirty_domains_coalesce_and_preserve_a_change_during_collection() {

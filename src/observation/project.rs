@@ -66,9 +66,14 @@ impl LocalInputs {
         titles: &mut crate::web::agents::Titles,
     ) -> Self {
         let mut gaps = Vec::new();
+        let host_failed = input.gaps.iter().any(|gap| gap.domain == "host");
         let status = capture(
             "status",
-            domain::<Status>(&input.local, "status"),
+            if host_failed {
+                super::collect::status(fleet.ledger, Vec::new(), input.published_ms)
+            } else {
+                domain::<Status>(&input.local, "status")
+            },
             &mut gaps,
         );
         // Ages use the collection time. A peer-only wake must not alter local-derived views.
@@ -324,11 +329,36 @@ pub(crate) fn derive(
     views.clear();
     insert(views, "hosts", Some(&reports), &gaps)?;
     insert(views, "status", status.as_ref(), &gaps)?;
+    insert(
+        views,
+        "status_display",
+        status.as_ref().map(super::display::Display::capture),
+        &gaps,
+    )?;
     insert(views, "todos", local.todos.as_ref(), &gaps)?;
     let board = status
         .as_ref()
         .and_then(|status| enriched(status, None, local));
     insert(views, "board", board.as_ref(), &gaps)?;
+    let empty_board = board.as_ref().map(|board| Board {
+        hosts: board.hosts.clone(),
+        rows: Vec::new(),
+    });
+    insert(views, "empty_board", empty_board, &gaps)?;
+    insert(
+        views,
+        "inventory",
+        status
+            .as_ref()
+            .map(|status| json!({"items":status.items,"queue":status.queue})),
+        &gaps,
+    )?;
+    insert(
+        views,
+        "empty_inventory",
+        status.as_ref().map(|_| json!({"items":[],"queue":[]})),
+        &gaps,
+    )?;
     let sidebar: Vec<_> = reports
         .iter()
         .map(|report| crate::sidebar::model::HostRow::from_report(report, limits, local.now))
@@ -339,9 +369,37 @@ pub(crate) fn derive(
         .flat_map(|report| report.jobs.iter())
         .collect();
     insert(views, "jobs", Some(&jobs), &gaps)?;
+    let active_jobs: Vec<_> = jobs.iter().filter(|job| job.ended_ms.is_none()).collect();
+    insert(views, "active_jobs", Some(active_jobs), &gaps)?;
+    scoped_views(views, status.as_ref(), local, &reports, &jobs, &gaps)?;
+    insert(views, "findings", local.findings.as_ref(), &gaps)?;
+    insert(views, "agents", local.agents.as_ref(), &gaps)?;
+    let portal = portal(
+        local,
+        board.as_ref(),
+        status.as_ref(),
+        &gaps,
+        input.published_ms,
+    );
+    insert(views, "portal_board", portal.board.as_ref(), &gaps)?;
+    insert(views, "inbox", portal.inbox.as_ref(), &gaps)?;
+    insert(views, "portal", Some(portal), &gaps)?;
+    input.gaps = gaps;
+    Ok(())
+}
+
+fn scoped_views(
+    views: &mut super::Domains,
+    status: Option<&Status>,
+    local: &LocalInputs,
+    reports: &[HostReport],
+    jobs: &[&crate::jobs::Job],
+    gaps: &[Gap],
+) -> Result<()> {
     let hosts: Vec<_> = reports.iter().map(|report| report.host.clone()).collect();
     let mut boards = BTreeMap::new();
     let mut histories = BTreeMap::new();
+    let mut inventories = BTreeMap::new();
     if let Some(status) = &status {
         for owner in owners(status, local.todos.as_deref().unwrap_or_default()) {
             boards.insert(owner, enriched(status, Some(owner), local));
@@ -356,34 +414,50 @@ pub(crate) fn derive(
                 .filter(|job| owned.contains(&(job.host.as_str(), job.id.as_str())))
                 .collect();
             histories.insert(owner, json!({"jobs":history,"hosts":hosts}));
+            let items: Vec<_> = status
+                .items
+                .iter()
+                .filter(|item| item.owner_pane == owner)
+                .collect();
+            let queue: Vec<_> = status
+                .queue
+                .iter()
+                .filter(|ticket| ticket.request.owner == owner)
+                .collect();
+            inventories.insert(owner, Some(json!({"items":items,"queue":queue})));
         }
     }
-    insert(views, "boards", status.as_ref().map(|_| boards), &gaps)?;
-    insert(views, "findings", local.findings.as_ref(), &gaps)?;
+    insert(views, "boards", status.as_ref().map(|_| boards), gaps)?;
+    insert(
+        views,
+        "inventories",
+        status.as_ref().map(|_| inventories),
+        gaps,
+    )?;
     insert(
         views,
         "job_history",
         status.as_ref().map(|_| histories),
-        &gaps,
+        gaps,
     )?;
-    insert(views, "agents", local.agents.as_ref(), &gaps)?;
-    let portal = portal(local, board.as_ref(), &gaps, input.published_ms);
-    insert(views, "portal_board", portal.board.as_ref(), &gaps)?;
-    insert(views, "inbox", portal.inbox.as_ref(), &gaps)?;
-    insert(views, "portal", Some(portal), &gaps)?;
-    input.gaps = gaps;
     Ok(())
 }
 
 fn portal(
     local: &LocalInputs,
     board: Option<&Board>,
+    status: Option<&Status>,
     gaps: &[Gap],
     published_ms: u64,
 ) -> portal_types::PortalSnapshot {
-    let portal_board = board
-        .zip(local.todos.as_ref())
-        .map(|(board, todos)| crate::web::board::view(board, todos, local.now));
+    let portal_board = board.zip(local.todos.as_ref()).map(|(board, todos)| {
+        crate::web::board::view(
+            board,
+            status.map_or(&[][..], |status| status.items.as_slice()),
+            todos,
+            local.now,
+        )
+    });
     let inbox = match (
         &portal_board,
         &local.agents,

@@ -4,7 +4,7 @@ use crate::drop::Checked;
 use crate::hosts::{Fleet, Host};
 use crate::ledger::Ledger;
 use crate::node::Node;
-use crate::shell::{Fake, Output};
+use crate::shell::{Fake, Output, Shell};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -38,6 +38,12 @@ impl Fixture {
             home: "/home".into(),
             hosts: vec![self.host.clone()],
         }
+    }
+
+    fn sample(&self, now: u64) {
+        let report: crate::node::SnapshotReport =
+            serde_json::from_value(input(now).local["host"].clone()).unwrap();
+        crate::host_store::put_snapshot(&self.ledger, &report.snapshot.unwrap()).unwrap();
     }
 
     fn request(&self, request: &peers::Request) -> String {
@@ -194,6 +200,7 @@ fn missing_mark_branch_observation_is_host_owned_and_guarded_on_import() {
     }
     let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
     let mut branches = peers::Branches::default();
+    fixture.sample(100);
     assert_eq!(branches.observe(&node, &[], 100).unwrap(), []);
     let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
     assert!(item.branch.as_ref().unwrap().landed);
@@ -251,6 +258,7 @@ fn failed_branch_observation_retains_success_and_measurement_time() {
     );
     let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
     let mut branches = peers::Branches::default();
+    fixture.sample(100);
     branches
         .observe(&node, std::slice::from_ref(&checked), 100)
         .unwrap();
@@ -263,6 +271,7 @@ fn failed_branch_observation_retains_success_and_measurement_time() {
             stderr: "cannot observe branch".into(),
         },
     );
+    fixture.sample(3_600_100);
     let gaps = branches.observe(&node, &[checked], 3_600_100).unwrap();
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].availability, Availability::Failed);
@@ -297,7 +306,7 @@ fn stale_peers_keep_original_measurement_and_cannot_become_eligible() {
         .unwrap();
     assert_eq!(ingestion.source.unwrap().availability, Availability::Stale);
     let calls = fixture.shell.calls.lock().unwrap().len();
-    let report = fleet.status(31_002).unwrap().remove(0);
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 31_002);
     assert_eq!(report.sampled_ms, Some(100));
     assert!(!report.fresh(31_002));
     assert!(!report.headroom.unwrap().eligible);
@@ -306,6 +315,217 @@ fn stale_peers_keep_original_measurement_and_cannot_become_eligible() {
         calls,
         "status must not refresh the peer"
     );
+}
+
+#[test]
+fn explicit_retry_forces_a_peer_request_even_after_an_inflight_cache_write() {
+    let fixture = Fixture::new();
+    let mut publisher = Publisher::new().unwrap();
+    let initial = peers::Export::of(&publisher.replace(input(100)).unwrap());
+    fixture.answer(&initial);
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    let previous_calls = fixture.shell.calls.lock().unwrap().len();
+    // This recent cache represents a request completing after retry reset the ledger row.
+    // The explicit retry must not be swallowed by its TTL or backoff.
+    let mut cached = ingestion.cached.clone().unwrap();
+    cached.fetched_ms = 101;
+    cached.retry.fail(101, &fixture.host.id);
+    crate::host_store::put_peer(&fixture.ledger, &fixture.host.id, &cached).unwrap();
+    let recovered = peers::Export::of(&publisher.replace(input(102)).unwrap());
+    fixture.answer(&recovered);
+    ingestion.reset();
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 102, Vec::new(), false)
+        .unwrap();
+    assert_eq!(
+        fixture.shell.calls.lock().unwrap().len(),
+        previous_calls + 1
+    );
+    assert_eq!(ingestion.source.as_ref().unwrap().received_ms, 102);
+    assert_eq!(
+        ingestion
+            .cached
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .sampled_ms,
+        102
+    );
+}
+
+#[test]
+fn retry_receipt_window_keeps_the_latest_64_attempts() {
+    let mut previous = None;
+    for token in 0..65 {
+        let mut source: super::super::PeerSource = serde_json::from_value(
+            json!({"epoch":"peer","local_revision":1,"received_ms":100,"availability":"available"}),
+        )
+        .unwrap();
+        super::super::peers_runtime::receipt(
+            &mut source,
+            previous.as_ref(),
+            Some(token.to_string()),
+        );
+        previous = Some(source);
+    }
+    let source = previous.unwrap();
+    assert_eq!(source.retry_tokens.len(), 64);
+    assert!(!source.retry_tokens.contains(&"0".into()));
+    assert!(source.retry_tokens.contains(&"64".into()));
+    assert_eq!(source.received_ms, 100);
+}
+
+#[derive(Debug)]
+struct GatedPeer<'a> {
+    shell: &'a Fake,
+    entered: std::sync::mpsc::SyncSender<()>,
+    resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Shell for GatedPeer<'_> {
+    fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
+        self.entered
+            .send(())
+            .map_err(|_| crate::error::Error::Invalid("test peer entry closed".into()))?;
+        self.resume
+            .lock()
+            .unwrap()
+            .recv()
+            .map_err(|_| crate::error::Error::Invalid("test peer release closed".into()))?;
+        self.shell.run(program, args)
+    }
+}
+
+fn gated_refresh(
+    fixture: &Fixture,
+    ingestion: &mut peers::Ingestion,
+    now: u64,
+    wait: bool,
+    during: impl FnOnce(),
+) {
+    let (entered, receive) = std::sync::mpsc::sync_channel(0);
+    let (resume, release) = std::sync::mpsc::channel();
+    let shell = GatedPeer {
+        shell: &fixture.shell,
+        entered,
+        resume: std::sync::Mutex::new(release),
+    };
+    let fleet = Fleet {
+        shell: &shell,
+        ..fixture.fleet()
+    };
+    std::thread::scope(|scope| {
+        let pending =
+            scope.spawn(|| ingestion.refresh(&fleet, &fixture.host, now, Vec::new(), wait));
+        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        during();
+        resume.send(()).unwrap();
+        pending.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn retry_attempts_coalesce_before_take_and_split_during_inflight_refresh() {
+    let fixture = Fixture::new();
+    let queue = crate::service::wake::PeerRetries::default();
+    let mut publisher = Publisher::new().unwrap();
+    let initial = peers::Export::of(&publisher.replace(input(100)).unwrap());
+    fixture.answer(&initial);
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    let ordinary = peers::Request {
+        epoch: Some(initial.epoch),
+        local_revision: Some(initial.local_revision),
+        interests: Vec::new(),
+        wait: true,
+    };
+    let old = peers::Export::of(&publisher.replace(input(101)).unwrap());
+    fixture.shell.on(
+        &fixture.request(&ordinary),
+        &serde_json::to_string(&old).unwrap(),
+    );
+    let tokens = std::sync::Mutex::new(Vec::new());
+    gated_refresh(&fixture, &mut ingestion, 101, true, || {
+        for _ in 0..2 {
+            tokens
+                .lock()
+                .unwrap()
+                .push(queue.enqueue(fixture.host.id.clone()));
+        }
+        // Retry resets the ledger while the old request is still in flight.
+        let mut cached = crate::host_store::peer(&fixture.ledger, &fixture.host.id)
+            .unwrap()
+            .unwrap();
+        cached.fetched_ms = 0;
+        cached.retry.reset();
+        crate::host_store::put_peer(&fixture.ledger, &fixture.host.id, &cached).unwrap();
+    });
+    let tokens = tokens.into_inner().unwrap();
+    assert_eq!(tokens[0], tokens[1]);
+    assert_eq!(
+        ingestion.source.as_ref().unwrap().retry_tokens,
+        Vec::<String>::new()
+    );
+    assert_eq!(ingestion.cached.as_ref().unwrap().fetched_ms, 101);
+    let attempt = queue.take(&fixture.host.id).unwrap();
+    let answer = peers::Export::of(&publisher.replace(input(102)).unwrap());
+    fixture.answer(&answer);
+    ingestion.reset();
+    let calls = fixture.shell.calls.lock().unwrap().len();
+    let third = std::sync::Mutex::new(None);
+    gated_refresh(&fixture, &mut ingestion, 102, false, || {
+        *third.lock().unwrap() = Some(queue.enqueue(fixture.host.id.clone()));
+    });
+    assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls + 1);
+    let third = third.into_inner().unwrap().unwrap();
+    assert_ne!(attempt, third);
+    let mut first = ingestion.source.clone().unwrap();
+    super::super::peers_runtime::receipt(&mut first, None, Some(attempt));
+    assert!(
+        tokens
+            .iter()
+            .all(|token| first.retry_tokens.contains(token))
+    );
+    assert!(!first.retry_tokens.contains(&third));
+    assert_eq!(queue.take(&fixture.host.id), Some(third.clone()));
+    ingestion.reset();
+    let next = peers::Export::of(&publisher.replace(input(103)).unwrap());
+    fixture.answer(&next);
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 103, Vec::new(), false)
+        .unwrap();
+    assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls + 2);
+    let mut second = ingestion.source.clone().unwrap();
+    super::super::peers_runtime::receipt(&mut second, Some(&first), Some(third.clone()));
+    let request = peers::Request {
+        epoch: Some(next.epoch.clone()),
+        local_revision: Some(next.local_revision),
+        interests: Vec::new(),
+        wait: true,
+    };
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&next).unwrap(),
+    );
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 104, Vec::new(), true)
+        .unwrap();
+    let mut ordinary = ingestion.source.clone().unwrap();
+    super::super::peers_runtime::receipt(&mut ordinary, Some(&second), None);
+    assert!(
+        tokens
+            .iter()
+            .all(|token| ordinary.retry_tokens.contains(token))
+    );
+    assert!(ordinary.retry_tokens.contains(&third));
+    assert_eq!(ordinary.received_ms, second.received_ms);
 }
 
 #[test]
@@ -321,15 +541,63 @@ fn unsupported_peer_export_does_not_downgrade_or_break_status() {
         .refresh(&fleet, &fixture.host, 100, Vec::new(), false)
         .unwrap();
     assert_eq!(
-        ingestion.source.unwrap().availability,
+        ingestion.source.as_ref().unwrap().availability,
         Availability::Unsupported
     );
-    let report = fleet.status(101).unwrap().remove(0);
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 101);
     assert!(!report.reachable);
     assert_eq!(
         fixture.shell.calls.lock().unwrap().len(),
         1,
         "unsupported versions cannot fall back to an older protocol"
+    );
+    let mut good = peers::Export::of(&publisher.replace(input(200)).unwrap());
+    fixture.answer(&good);
+    ingestion.reset();
+    ingestion
+        .refresh(&fleet, &fixture.host, 200, Vec::new(), false)
+        .unwrap();
+    good.version += 1;
+    fixture.answer(&good);
+    ingestion.reset();
+    ingestion
+        .refresh(&fleet, &fixture.host, 201, Vec::new(), false)
+        .unwrap();
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 201);
+    assert_eq!(report.sampled_ms, Some(200));
+    assert!(!report.headroom.as_ref().unwrap().eligible);
+    let mut input = input(201);
+    input.local.insert(
+        "status".into(),
+        serde_json::to_value(
+            super::super::collect::status(&fixture.ledger, Vec::new(), 201).unwrap(),
+        )
+        .unwrap(),
+    );
+    input.local.insert("todos".into(), json!([]));
+    super::super::peers_runtime::peer_gaps(
+        &fixture.host,
+        &report,
+        ingestion.source.clone().unwrap(),
+        &ingestion.gaps(),
+        &mut input,
+        201,
+    );
+    let captured = super::super::project::Projector::default().inputs(&fleet, &input);
+    super::super::project::derive(&captured, vec![report], &fleet.thresholds(), &mut input)
+        .unwrap();
+    let frame = publisher.replace(input).unwrap();
+    assert_eq!(
+        frame.sources.peers[&fixture.host.id].availability,
+        Availability::Unsupported
+    );
+    assert_eq!(frame.views["status"]["data"]["hosts"][0]["sampled_ms"], 200);
+    assert!(
+        frame
+            .gaps
+            .iter()
+            .any(|gap| gap.domain == format!("peer:{}", fixture.host.id)
+                && gap.availability == Availability::Unsupported)
     );
 }
 
@@ -371,7 +639,12 @@ fn native_export_recovers_after_a_temporary_legacy_fallback() {
         .refresh(&fleet, &fixture.host, 10_100, Vec::new(), false)
         .unwrap();
     assert_eq!(ingestion.source.as_ref().unwrap().epoch, "legacy");
-    assert_eq!(fleet.status(10_100).unwrap()[0].sampled_ms, Some(10_100));
+    assert_eq!(
+        fleet
+            .cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 10_100)
+            .sampled_ms,
+        Some(10_100)
+    );
     let recovered = peers::Export::of(&publisher.replace(input(20_100)).unwrap());
     fixture
         .shell
@@ -380,7 +653,12 @@ fn native_export_recovers_after_a_temporary_legacy_fallback() {
         .refresh(&fleet, &fixture.host, 20_100, Vec::new(), false)
         .unwrap();
     assert_eq!(ingestion.source.as_ref().unwrap().epoch, recovered.epoch);
-    assert_eq!(fleet.status(20_100).unwrap()[0].sampled_ms, Some(20_100));
+    assert_eq!(
+        fleet
+            .cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 20_100)
+            .sampled_ms,
+        Some(20_100)
+    );
     assert_eq!(
         fixture.shell.calls.lock().unwrap().as_slice(),
         &[
@@ -390,6 +668,134 @@ fn native_export_recovers_after_a_temporary_legacy_fallback() {
             native
         ]
     );
+}
+
+#[test]
+fn unavailable_peer_retains_known_capability_until_a_downgraded_epoch_recovers() {
+    let fixture = Fixture::new();
+    let mut publisher = Publisher::new().unwrap();
+    let mut original = input(100);
+    original.local.get_mut("host").unwrap()["job_validity"] =
+        json!(crate::jobs::VALIDITY_PROTOCOL_VERSION);
+    let original = peers::Export::of(&publisher.replace(original).unwrap());
+    fixture.answer(&original);
+    let fleet = fixture.fleet();
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fleet, &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    let request = peers::Request {
+        epoch: Some(original.epoch.clone()),
+        local_revision: Some(original.local_revision),
+        ..peers::Request::default()
+    };
+    fixture.shell.on_output(
+        &fixture.request(&request),
+        Output {
+            status: 255,
+            stdout: String::new(),
+            stderr: "Connection refused".into(),
+        },
+    );
+    ingestion
+        .refresh(&fleet, &fixture.host, 10_100, Vec::new(), false)
+        .unwrap();
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 10_100);
+    assert_eq!(
+        report.job_validity,
+        Some(crate::jobs::VALIDITY_PROTOCOL_VERSION)
+    );
+    assert_eq!(report.sampled_ms, Some(100));
+    assert!(!report.headroom.unwrap().eligible);
+    assert_eq!(ingestion.source.as_ref().unwrap().epoch, original.epoch);
+    assert_eq!(
+        ingestion.source.as_ref().unwrap().local_revision,
+        original.local_revision
+    );
+    assert_eq!(
+        ingestion.source.as_ref().unwrap().availability,
+        Availability::Unavailable
+    );
+    let mut recovered = input(20_100);
+    recovered.local.get_mut("host").unwrap()["job_validity"] = json!(1);
+    let recovered = peers::Export::of(&Publisher::new().unwrap().replace(recovered).unwrap());
+    assert_ne!(recovered.epoch, original.epoch);
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&recovered).unwrap(),
+    );
+    ingestion
+        .refresh(&fleet, &fixture.host, 20_100, Vec::new(), false)
+        .unwrap();
+    let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), 20_100);
+    assert_eq!(report.job_validity, Some(1));
+    assert_eq!(report.sampled_ms, Some(20_100));
+    assert_eq!(ingestion.source.as_ref().unwrap().epoch, recovered.epoch);
+    assert_eq!(
+        ingestion.source.as_ref().unwrap().availability,
+        Availability::Available
+    );
+    let error = crate::commands::place_with(
+        &fleet,
+        Some(&fixture.host.id),
+        "downgraded-job",
+        20_100,
+        Some(crate::jobs::Validity::new(crate::ledger::now_ms())),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("host too old for job startup ownership")
+    );
+    assert!(
+        !fixture
+            .shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains("host reserve") || call.contains("host launch"))
+    );
+}
+
+#[test]
+fn known_capability_does_not_follow_a_reconfigured_transport_source() {
+    let fixture = Fixture::new();
+    let mut original = input(100);
+    original.local.get_mut("host").unwrap()["job_validity"] =
+        json!(crate::jobs::VALIDITY_PROTOCOL_VERSION);
+    let original = peers::Export::of(&Publisher::new().unwrap().replace(original).unwrap());
+    fixture.answer(&original);
+    peers::Ingestion::default()
+        .refresh(&fixture.fleet(), &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    let mut changed = fixture.host.clone();
+    changed.target = Some("replacement-target".into());
+    let argv = fixture.fleet().remote_argv(
+        &changed,
+        &[
+            "observation".into(),
+            "--request".into(),
+            serde_json::to_string(&peers::Request::default()).unwrap(),
+        ],
+    );
+    fixture.shell.on_output(
+        &format!("ssh {}", argv.join(" ")),
+        Output {
+            status: 255,
+            stdout: String::new(),
+            stderr: "Connection refused".into(),
+        },
+    );
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fixture.fleet(), &changed, 10_100, Vec::new(), false)
+        .unwrap();
+    let cached = ingestion.cached.unwrap();
+    assert_eq!(cached.job_validity, None);
+    assert!(cached.snapshot.is_none());
 }
 
 #[test]
@@ -435,7 +841,7 @@ fn failed_peer_refresh_never_doubles_ssh_and_keeps_original_failure() {
             ingestion
                 .refresh(&fleet, &fixture.host, now, Vec::new(), false)
                 .unwrap();
-            let report = fleet.status(now).unwrap().remove(0);
+            let report = fleet.cached_report(&fixture.host, ingestion.cached.clone().unwrap(), now);
             assert!(!report.reachable);
             assert_eq!(report.failure, Some(failure));
             assert_eq!(report.error, Some(failure.to_string()));
@@ -452,6 +858,369 @@ fn failed_peer_refresh_never_doubles_ssh_and_keeps_original_failure() {
             );
         }
     }
+}
+
+fn branch_input(sampled_ms: u64, checked: crate::drop::Checked, measured_ms: u64) -> Publication {
+    let mut value = input(sampled_ms);
+    value.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked,
+            measured_ms,
+        }])
+        .unwrap(),
+    );
+    value
+}
+
+fn record_missing_peer(fixture: &Fixture, checked: &crate::drop::Checked) {
+    crate::items::record(
+        &fixture.ledger,
+        crate::items::Item {
+            id: checked.item.clone(),
+            kind: "agent".into(),
+            host: fixture.host.id.clone(),
+            pane: "gone".into(),
+            owner_pane: "owner".into(),
+            closed_ms: Some(1),
+            branch: Some(checked.branch.clone()),
+            ..crate::items::Item::default()
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn missing_mark_interests_and_imports_require_fresh_peer_facts_and_resume() {
+    let fixture = Fixture::new();
+    let checked = check();
+    record_missing_peer(&fixture, &checked);
+    let fleet = fixture.fleet();
+    let mut publisher = Publisher::new().unwrap();
+    let initial = peers::Export::of(&publisher.replace(input(100)).unwrap());
+    fixture.answer(&initial);
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fleet, &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    let checks = peers::interests(&fixture.ledger, &fixture.host.id, 101).unwrap();
+    assert_eq!(checks, vec![checked.clone()]);
+    let request = peers::Request {
+        epoch: Some(initial.epoch.clone()),
+        local_revision: Some(initial.local_revision),
+        interests: checks.clone(),
+        wait: true,
+    };
+    let mut measured = checked.clone();
+    measured.branch.ahead = 7;
+    let fresh = branch_input(101, measured, 101);
+    let fresh = peers::Export::of(&publisher.replace(fresh).unwrap());
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&fresh).unwrap(),
+    );
+    ingestion
+        .refresh(&fleet, &fixture.host, 101, checks, true)
+        .unwrap();
+    let successful = crate::items::list(&fixture.ledger).unwrap();
+    assert_eq!(successful[0].branch_checked_ms, Some(101));
+    assert_eq!(successful[0].branch.as_ref().unwrap().ahead, 7);
+    assert!(
+        fixture
+            .shell
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&fixture.request(&request))
+    );
+
+    let stale_now = 3_600_102;
+    assert_eq!(
+        peers::interests(&fixture.ledger, &fixture.host.id, stale_now).unwrap(),
+        []
+    );
+    let stale_request = peers::Request {
+        epoch: Some(fresh.epoch.clone()),
+        local_revision: Some(fresh.local_revision),
+        interests: Vec::new(),
+        wait: true,
+    };
+    let mut stale = input(101);
+    let mut unexpected = checked.clone();
+    unexpected.branch.landed = true;
+    unexpected.branch.ahead = 0;
+    stale.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked: unexpected,
+            measured_ms: stale_now,
+        }])
+        .unwrap(),
+    );
+    let stale = peers::Export::of(&publisher.replace(stale).unwrap());
+    fixture.shell.on(
+        &fixture.request(&stale_request),
+        &serde_json::to_string(&stale).unwrap(),
+    );
+    // Even a caller supplying obsolete interests cannot make refresh send them.
+    ingestion
+        .refresh(
+            &fleet,
+            &fixture.host,
+            stale_now,
+            vec![checked.clone()],
+            true,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap(),
+        serde_json::to_value(&successful).unwrap()
+    );
+    assert_eq!(
+        fixture.shell.calls.lock().unwrap().last(),
+        Some(&fixture.request(&stale_request))
+    );
+    assert!(
+        ingestion
+            .gaps()
+            .iter()
+            .any(|gap| gap.domain == "branches" && gap.availability == Availability::Stale)
+    );
+
+    resume_peer_checks(
+        &fixture,
+        &mut publisher,
+        &mut ingestion,
+        stale,
+        checked,
+        stale_now + 10_000,
+    );
+}
+
+fn resume_peer_checks(
+    fixture: &Fixture,
+    publisher: &mut Publisher,
+    ingestion: &mut peers::Ingestion,
+    stale: peers::Export,
+    checked: crate::drop::Checked,
+    resumed_now: u64,
+) {
+    let request = peers::Request {
+        epoch: Some(stale.epoch),
+        local_revision: Some(stale.local_revision),
+        interests: Vec::new(),
+        wait: true,
+    };
+    let recovered = peers::Export::of(&publisher.replace(input(resumed_now)).unwrap());
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&recovered).unwrap(),
+    );
+    ingestion
+        .refresh(
+            &fixture.fleet(),
+            &fixture.host,
+            resumed_now,
+            Vec::new(),
+            true,
+        )
+        .unwrap();
+    let checks = peers::interests(&fixture.ledger, &fixture.host.id, resumed_now).unwrap();
+    assert_eq!(checks.len(), 1);
+    let request = peers::Request {
+        epoch: Some(recovered.epoch),
+        local_revision: Some(recovered.local_revision),
+        interests: checks.clone(),
+        wait: true,
+    };
+    let mut resumed = input(resumed_now + 1);
+    let mut measured = checked;
+    measured.branch.ahead = 9;
+    resumed.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked: measured,
+            measured_ms: resumed_now + 1,
+        }])
+        .unwrap(),
+    );
+    let resumed = peers::Export::of(&publisher.replace(resumed).unwrap());
+    fixture.shell.on(
+        &fixture.request(&request),
+        &serde_json::to_string(&resumed).unwrap(),
+    );
+    ingestion
+        .refresh(
+            &fixture.fleet(),
+            &fixture.host,
+            resumed_now + 1,
+            checks,
+            true,
+        )
+        .unwrap();
+    let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
+    assert_eq!(item.branch_checked_ms, Some(resumed_now + 1));
+    assert_eq!(item.branch.unwrap().ahead, 9);
+    assert!(
+        !ingestion
+            .gaps()
+            .iter()
+            .any(|gap| gap.availability == Availability::Stale)
+    );
+}
+
+#[test]
+fn local_missing_mark_checks_preserve_items_while_local_facts_are_stale() {
+    let fixture = Fixture::new();
+    let checked = check();
+    crate::items::record(
+        &fixture.ledger,
+        crate::items::Item {
+            id: checked.item.clone(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "gone".into(),
+            owner_pane: "owner".into(),
+            closed_ms: Some(1),
+            branch: Some(checked.branch),
+            ..crate::items::Item::default()
+        },
+    )
+    .unwrap();
+    fixture.sample(100);
+    let original = serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap();
+    let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
+    let mut branches = peers::Branches::default();
+    let gaps = branches.observe(&node, &[], 30_101).unwrap();
+    assert!(
+        gaps.iter()
+            .any(|gap| gap.domain == "branches" && gap.availability == Availability::Stale)
+    );
+    assert_eq!(branches.gaps(), gaps);
+    assert!(fixture.shell.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap(),
+        original
+    );
+}
+
+fn marked_item(fixture: &Fixture, host: &str) -> crate::done::Mark {
+    let checked = check();
+    crate::items::record(
+        &fixture.ledger,
+        crate::items::Item {
+            id: checked.item.clone(),
+            kind: "agent".into(),
+            host: host.into(),
+            pane: "gone".into(),
+            owner_pane: "owner".into(),
+            closed_ms: Some(1),
+            branch: Some(checked.branch.clone()),
+            ..crate::items::Item::default()
+        },
+    )
+    .unwrap();
+    serde_json::from_value(json!({"pane":"gone","item":checked.item,"marked_ms":1,"closed_ms":2,"branch":checked.branch})).unwrap()
+}
+
+#[test]
+fn marked_items_are_not_missing_mark_interests_or_check_timestamp_updates() {
+    let fixture = Fixture::new();
+    let mark = marked_item(&fixture, "local");
+    crate::host_store::put_marks(
+        &fixture.ledger,
+        &BTreeMap::from([(crate::done::key(&mark), mark)]),
+    )
+    .unwrap();
+    fixture.sample(100);
+    assert_eq!(peers::interests(&fixture.ledger, "local", 100).unwrap(), []);
+    for reference in ["refs/heads/retained", "refs/remotes/origin/retained"] {
+        fixture.shell.on_output(
+            &format!("git -C /execution-only/repo show-ref --verify --quiet {reference}"),
+            Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+    }
+    let node = Node::new(&fixture.shell, &fixture.ledger, &fixture.policy, "/home");
+    let mut branches = peers::Branches::default();
+    assert_eq!(branches.observe(&node, &[], 100).unwrap(), []);
+    assert!(
+        !fixture.shell.calls.lock().unwrap().is_empty(),
+        "the marked branch really was observed"
+    );
+    let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
+    assert_eq!(item.branch_checked_ms, None);
+    assert!(
+        crate::done::list(&fixture.ledger).unwrap()[0]
+            .branch
+            .as_ref()
+            .unwrap()
+            .landed
+    );
+}
+
+#[test]
+fn local_mark_arriving_between_interest_and_import_is_guarded_atomically() {
+    let fixture = Fixture::new();
+    let mark = marked_item(&fixture, "local");
+    fixture.sample(100);
+    let interests = peers::interests(&fixture.ledger, "local", 100).unwrap();
+    assert_eq!(interests.len(), 1);
+    crate::host_store::put_marks(
+        &fixture.ledger,
+        &BTreeMap::from([(crate::done::key(&mark), mark)]),
+    )
+    .unwrap();
+    let mut checked = interests.into_iter().next().unwrap();
+    checked.branch.landed = true;
+    assert!(
+        !peers::import(
+            &fixture.ledger,
+            "local",
+            &[peers::BranchObservation {
+                checked,
+                measured_ms: 100
+            }]
+        )
+        .unwrap()
+    );
+    let item = crate::items::list(&fixture.ledger).unwrap().remove(0);
+    assert_eq!(item.branch_checked_ms, None);
+    assert!(!item.branch.unwrap().landed);
+}
+
+#[test]
+fn peer_marks_correlate_with_results_from_the_same_export() {
+    let fixture = Fixture::new();
+    let mark = marked_item(&fixture, &fixture.host.id);
+    let mut input = input(100);
+    input.local.get_mut("host").unwrap()["handoffs"] = json!([mark]);
+    input.local.insert(
+        "branches".into(),
+        serde_json::to_value([peers::BranchObservation {
+            checked: check(),
+            measured_ms: 100,
+        }])
+        .unwrap(),
+    );
+    let mut publisher = Publisher::new().unwrap();
+    let export = peers::Export::of(&publisher.replace(input).unwrap());
+    fixture.answer(&export);
+    let mut ingestion = peers::Ingestion::default();
+    ingestion
+        .refresh(&fixture.fleet(), &fixture.host, 100, Vec::new(), false)
+        .unwrap();
+    assert_eq!(
+        peers::interests(&fixture.ledger, &fixture.host.id, 100).unwrap(),
+        []
+    );
+    assert_eq!(
+        crate::items::list(&fixture.ledger).unwrap()[0].branch_checked_ms,
+        None
+    );
 }
 
 #[test]

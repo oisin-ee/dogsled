@@ -57,6 +57,12 @@ fn rows(rig: &Rig) -> Vec<Value> {
 fn local_drop_deletes_local_and_origin_branches_and_settles_mark_and_board() {
     let (rig, repo) = rig("drop-local");
     mark(&rig);
+    let _serve = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == 1)
+    });
     assert_eq!(rows(&rig).len(), 1);
     let out = rig.run(&["drop", "i1"]);
     assert!(
@@ -73,6 +79,9 @@ fn local_drop_deletes_local_and_origin_branches_and_settles_mark_and_board() {
         git(&repo, &["ls-remote", "origin", "refs/heads/feat/x"]),
         ""
     );
+    wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["items"][0]["dropped_ms"].is_u64()
+    });
     assert_eq!(rows(&rig), [] as [Value; 0]);
     assert!(rig.items()[0]["dropped_ms"].is_u64());
     assert!(
@@ -115,6 +124,10 @@ fn drop_accepts_already_absent_branches() {
     git(&repo, &["branch", "-D", "feat/x"]);
     git(&repo, &["push", "origin", "--delete", "feat/x"]);
     assert_eq!(rig.json(&["drop", "i1"]).0, 0);
+    let _serve = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["items"][0]["dropped_ms"].is_u64()
+    });
     assert_eq!(rows(&rig), [] as [Value; 0]);
 }
 
@@ -206,6 +219,10 @@ fn missing_mark_and_missing_branch_leave_board_but_existing_branch_stays() {
         }
         let out = rig.run(&["serve", "--once", "--interval", "1"]);
         assert!(out.status.success(), "{out:?}");
+        let _serve = rig.serve();
+        wait_publication(&rig, |frame| {
+            frame["views"]["status"]["data"]["items"][0]["branch_checked_ms"].is_u64()
+        });
         assert_eq!(rows(&rig).is_empty(), gone);
         let item = &rig.items()[0];
         assert_eq!(item["branch"]["landed"], gone);
@@ -255,14 +272,14 @@ eval "$last"
         "remote_command = [{}]\n",
         serde_json::to_string(env!("CARGO_BIN_EXE_dogsled")).unwrap()
     ));
-    let observer = execution.start(&["serve", "--interval", "3600"]);
+    let observer = execution.serve();
     wait_publication(&execution, |frame| frame["local"]["host"].is_object());
     (execution, observer)
 }
 
-fn observe_branches(rig: &Rig, execution: &Rig) {
+fn observe_branches(rig: &Rig, execution: &Rig) -> Background {
     let before = rig.items();
-    let observer = rig.start(&["serve", "--interval", "3600"]);
+    let observer = rig.serve();
     wait_publication(execution, |frame| {
         frame["local"]["branches"]
             .as_array()
@@ -283,7 +300,7 @@ fn observe_branches(rig: &Rig, execution: &Rig) {
                 })
             })
     });
-    drop(observer);
+    observer
 }
 
 #[test]
@@ -299,6 +316,10 @@ fn remote_drop_uses_ssh_and_settles_origin_item() {
         git(&repo, &["ls-remote", "origin", "refs/heads/feat/x"]),
         ""
     );
+    let _serve = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["items"][0]["dropped_ms"].is_u64()
+    });
     assert_eq!(rows(&rig), [] as [Value; 0]);
 }
 
@@ -312,7 +333,7 @@ fn missing_mark_checks_batch_once_per_host_per_hour() {
     second["pane"] = json!("w2:p2");
     items.as_array_mut().unwrap().push(second);
     rig.put_items(&items);
-    observe_branches(&rig, &execution);
+    let origin = observe_branches(&rig, &execution);
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
         execution
@@ -330,9 +351,10 @@ fn missing_mark_checks_batch_once_per_host_per_hour() {
             .count(),
         1
     );
+    drop(origin);
     drop(observer);
     fs::write(execution.dir.join("clock"), (now() + 3_600_001).to_string()).unwrap();
-    let _observer = execution.start(&["serve", "--interval", "3600"]);
+    let _observer = execution.serve();
     wait_publication(&execution, |frame| {
         frame["local"]["host"]["sampled_ms"]
             .as_u64()
@@ -343,7 +365,7 @@ fn missing_mark_checks_batch_once_per_host_per_hour() {
         item["branch_checked_ms"] = json!(now() - 3_600_001);
     }
     rig.put_items(&items);
-    observe_branches(&rig, &execution);
+    let _origin = observe_branches(&rig, &execution);
     assert_eq!(rows(&rig).len(), 2);
     assert_eq!(
         execution
@@ -358,10 +380,18 @@ fn missing_mark_checks_batch_once_per_host_per_hour() {
 fn concurrent_status_reads_share_the_hourly_check() {
     let (rig, _) = rig("drop-concurrent");
     let (execution, _observer) = remote(&rig);
-    observe_branches(&rig, &execution);
-    let before = rig.log("ssh.log");
-    let mut first = rig.start(&["board", "--all", "--json"]);
-    let mut second = rig.start(&["board", "--all", "--json"]);
+    let git = execution.log("bin/git");
+    execution.script("git", &git.replacen("#!/bin/sh", "#!/bin/sh\nprintf '%s %s\\n' \"${DOGSLED_TEST_ROLE:-producer}\" \"$*\" >> \"$RIG/git-roles.log\"", 1));
+    let script = rig.log("bin/ssh");
+    rig.script("ssh", &script.replacen("#!/bin/sh", "#!/bin/sh\nprintf '%s %s\\n' \"${DOGSLED_TEST_ROLE:-producer}\" \"$*\" >> \"$RIG/ssh-roles.log\"", 1));
+    let _origin = observe_branches(&rig, &execution);
+    let reader = || {
+        let mut command = rig.cmd(&["board", "--all", "--json"]);
+        command.env("DOGSLED_TEST_ROLE", "reader");
+        Rig::background(command)
+    };
+    let mut first = reader();
+    let mut second = reader();
     assert!(first.wait().success());
     assert!(second.wait().success());
     assert_eq!(
@@ -371,10 +401,27 @@ fn concurrent_status_reads_share_the_hourly_check() {
             .count(),
         1
     );
+    let calls = rig.log("ssh-roles.log");
+    assert!(
+        calls.lines().any(|line| line.starts_with("producer ")),
+        "{calls}"
+    );
     assert_eq!(
-        rig.log("ssh.log"),
-        before,
-        "concurrent readers never observe branches"
+        calls
+            .lines()
+            .filter(|line| line.starts_with("reader "))
+            .count(),
+        0,
+        "readers must never invoke SSH, including branch observation: {calls}"
+    );
+    let branches = execution.log("git-roles.log");
+    assert_eq!(
+        branches
+            .lines()
+            .filter(|line| line.starts_with("reader "))
+            .count(),
+        0,
+        "readers must never invoke execution-host Git: {branches}"
     );
 }
 
@@ -384,7 +431,7 @@ fn failed_branch_check_keeps_item_unchanged_and_only_logs() {
     let (execution, _observer) = remote(&rig);
     let before = rig.items();
     execution.script("git", "#!/bin/sh\necho branch-check-failed >&2\nexit 2\n");
-    let mut observer = rig.start(&["serve", "--interval", "3600"]);
+    let mut observer = rig.serve();
     wait_publication(&execution, |frame| {
         frame["gaps"]
             .as_array()
@@ -398,6 +445,8 @@ fn failed_branch_check_keeps_item_unchanged_and_only_logs() {
     observer.owned.terminate();
     let (_, journal) = observer.output();
     assert!(journal.contains("peer:8103:branches"), "{journal}");
+    let _serve = rig.serve();
+    wait_publication(&rig, |frame| frame["views"]["board"]["data"].is_object());
     let out = rig.run(&["board", "--all", "--json"]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(rig.items(), before);
@@ -415,6 +464,12 @@ fn dropped_or_landed_item_is_hidden_even_with_a_stale_mark() {
         }
         rig.put_items(&items);
         mark(&rig);
+        let _serve = rig.serve();
+        wait_publication(&rig, |frame| {
+            frame["views"]["board"]["data"]["rows"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        });
         assert_eq!(rows(&rig), [] as [Value; 0]);
     }
 }
@@ -422,11 +477,39 @@ fn dropped_or_landed_item_is_hidden_even_with_a_stale_mark() {
 #[test]
 fn stale_host_or_existing_mark_does_not_trigger_missing_mark_check() {
     let (rig, _) = rig("drop-no-check");
-    rig.snapshot("state", now() - 31_000, 0.0, 8);
+    rig.peer();
+    let mut items = rig.items();
+    items[0]["host"] = json!("8103");
+    rig.put_items(&items);
+    rig.snapshot("remote.json", now() - 31_000, 0.0, 8);
+    rig.ingest_peers();
+    let observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["sources"]["peers"]["8103"]["availability"] == "stale"
+            && frame["gaps"].as_array().is_some_and(|gaps| {
+                gaps.iter().any(|gap| {
+                    gap["domain"] == "peer:8103:branches" && gap["availability"] == "stale"
+                })
+            })
+    });
     assert_eq!(rows(&rig).len(), 1);
     assert!(rig.items()[0]["branch_checked_ms"].is_null());
+    assert!(
+        !rig.log("ssh.log").contains("\"item\":\"i1\""),
+        "{}",
+        rig.log("ssh.log")
+    );
+    assert!(!rig.log("ssh.log").contains("host refresh-branches"));
+    drop(observer);
+    let (rig, _) = self::rig("drop-existing-mark");
     rig.snapshot("state", now(), 0.0, 8);
     mark(&rig);
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == 1)
+    });
     assert_eq!(rows(&rig).len(), 1);
     assert!(rig.items()[0]["branch_checked_ms"].is_null());
 }

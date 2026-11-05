@@ -84,7 +84,10 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
     rig.preparation_record("state", "claims", "").put(&claims);
     rig.put_validity("request-held", &rig.job_validity());
     rig.put_request_owner("request-held", "w1:p1", "local");
-    let (code, status) = rig.json(&["status"]);
+    let (code, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(code, 0, "{status}");
     let holds = status["holds"].as_array().unwrap();
     let held = holds
@@ -105,13 +108,23 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
         "dogsled retire-preparation request-held --host local --reason 'release reported historical preparation claim'"
     );
 
-    let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
+    let human = String::from_utf8(
+        {
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status"])
+        }
+        .stdout,
+    )
+    .unwrap();
     assert!(human.contains("Resource holds:"), "{human}");
     assert!(
         human.contains(held["next_command"].as_str().unwrap()),
         "{human}"
     );
-    let (code, board) = rig.json(&["board", "--all"]);
+    let (code, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     assert_eq!(code, 0, "{board}");
     let rows = board["rows"].as_array().unwrap();
     assert!(
@@ -122,6 +135,7 @@ fn resource_holds_name_the_resource_reason_and_next_command_without_releasing() 
                 .contains(held["next_command"].as_str().unwrap())),
         "{board}"
     );
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
     let mut mcp = super::mcp::Client::start(&rig);
     let (reply, error) = mcp.call("status", &json!({"all":true}));
     assert!(!error, "{reply}");
@@ -161,7 +175,10 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
             "outcome":"not_started"}),
     );
     rig.put_items(&json!([{"id":"branch-held","kind":"agent","host":"local","pane":"gone","owner_pane":"w1:p1","created_ms":1,"closed_ms":2,"branch":{"repo":"/tmp/repo","name":"feat/kept","ahead":1,"landed":false}}]));
-    let (code, status) = rig.json(&["status"]);
+    let (code, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(code, 0, "{status}");
     let holds = status["holds"].as_array().unwrap();
     for code in [
@@ -210,7 +227,10 @@ fn resource_holds_cover_replay_evidence_capacity_and_retained_branches() {
         rig.admission("place-held")["placement"]["phase"],
         "recorded"
     );
-    let (_, board) = rig.json(&["board", "--owner", "w1:p1"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--owner", "w1:p1"])
+    };
     assert!(
         board["rows"]
             .as_array()
@@ -238,7 +258,10 @@ fn peer_holds_are_routed_to_their_host_and_cached_when_it_is_unreachable() {
     }]);
     rig.put("remote.json", &remote);
     rig.ingest_peers();
-    let (code, status) = rig.json(&["status"]);
+    let (code, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(code, 0, "{status}");
     let hold = status["holds"]
         .as_array()
@@ -251,7 +274,10 @@ fn peer_holds_are_routed_to_their_host_and_cached_when_it_is_unreachable() {
     rig.expire_cache();
     rig.script("ssh", "#!/bin/sh\nexit 255\n");
     rig.ingest_peers();
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     let hold = status["holds"]
         .as_array()
         .unwrap()
@@ -301,7 +327,10 @@ fn stop_requests_a_pass_and_the_interval_never_runs_doctor() {
     assert_eq!(rig.state(&["sweeps"]).as_array().unwrap().len(), 1);
     // Successful removals remain visible in status, but never continue an agent turn.
     assert_eq!(gate(&rig, "w1:p1"), "");
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["sweep"]["results"], report["results"]);
 }
 
@@ -321,15 +350,32 @@ esac
 "#);
     gate(&rig, "w1:p1");
     assert!(serve(&rig).contains("dogsled sweep: failed:"));
-    let (code, status) = rig.json(&["status"]);
+    let (code, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(code, 0);
     let failure = status["sweep"]["failures"][0].as_str().unwrap();
     assert!(failure.contains("survey-unavailable"), "{status}");
     assert!(status["sweep"]["finished_ms"].is_u64());
-    let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
+    let human = String::from_utf8(
+        {
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status"])
+        }
+        .stdout,
+    )
+    .unwrap();
     assert!(human.contains("Last cleanup:"));
     assert!(human.contains(failure));
-    let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
+    let brief = String::from_utf8(
+        {
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status", "--brief"])
+        }
+        .stdout,
+    )
+    .unwrap();
     assert!(
         brief.contains("1 failures, 0 repository warnings"),
         "{brief}"
@@ -373,7 +419,10 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
     assert!(!log.contains("failed:"), "{log}");
     assert!(tree.join("build/generated").is_file());
     assert_eq!(rig.state(&["worktrees"]), registration);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["sweep"]["failures"], json!([]), "{status}");
     let hold = &status["sweep"]["unlinked"][0];
     assert_eq!(hold["removable"], false);
@@ -381,7 +430,14 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
     let detail = hold["detail"].as_str().unwrap();
     assert!(detail.contains(&reason), "{detail}");
     assert!(detail.contains("move or delete the directory yourself"));
-    let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
+    let human = String::from_utf8(
+        {
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status"])
+        }
+        .stdout,
+    )
+    .unwrap();
     assert!(
         human.contains(&format!("hold: {}", tree.display())),
         "{human}"
@@ -429,9 +485,19 @@ fn missing_configured_repository_stays_in_status_and_does_not_stop_other_cleanup
     );
     // No agent created a configured repository: the warning stays in status only.
     assert_eq!(gate(&rig, "w1:p1"), "");
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["sweep"]["repositories"][0]["id"], json!(missing));
-    let human = String::from_utf8(rig.run(&["status"]).stdout).unwrap();
+    let human = String::from_utf8(
+        {
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status"])
+        }
+        .stdout,
+    )
+    .unwrap();
     assert!(human.contains(missing.to_str().unwrap()));
 }
 

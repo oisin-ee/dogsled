@@ -230,6 +230,7 @@ impl Collector {
                 (Ok(headroom), status(node.ledger, vec![report], now))
             }
             Err(error) => {
+                self.unavailable(error);
                 let dependency =
                     || crate::error::Error::Invalid(format!("host collection failed: {error}"));
                 (Err(dependency()), Err(dependency()))
@@ -253,5 +254,31 @@ impl Collector {
             },
             sample,
         }
+    }
+
+    fn unavailable(&mut self, error: &crate::error::Error) {
+        let mut report = self.report.clone().unwrap_or_else(|| HostReport {
+            service_lanes: Vec::new(),
+            host: Host::local(),
+            service: "unavailable".into(),
+            reachable: true,
+            sampled_ms: None,
+            probe: None,
+            headroom: None,
+            error: None,
+            failure: None,
+            jobs: Vec::new(),
+            handoffs: Vec::new(),
+            holds: Vec::new(),
+            retry_ms: None,
+            job_validity: None,
+        });
+        report.service = "unavailable".into();
+        report.error = Some(format!("host observation unavailable: {error}"));
+        if let Some(headroom) = &mut report.headroom {
+            headroom.eligible = false;
+            headroom.reason.clone_from(&report.error);
+        }
+        self.report = Some(report);
     }
 }

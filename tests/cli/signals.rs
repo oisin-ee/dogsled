@@ -104,11 +104,21 @@ fn ask_reaches_owner_item_and_inbox_once_and_next_turn_clears_it() {
     let records = notes(&rig, "ask");
     assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(records[0]["text"], "Which branch should I use?");
+    let publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["boards"]["data"]["w1:p1"]["rows"][0]["activity"]
+            == "Which branch should I use?"
+    });
     assert_eq!(row(&rig)["group"], "attention");
     assert_eq!(row(&rig)["activity"], "Which branch should I use?");
+    drop(publisher);
     agents(&rig, "working", 12, "child-session", "owner-session");
     serve(&rig);
     assert!(rig.items()[0]["signal"].is_null());
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["boards"]["data"]["w1:p1"]["rows"][0]["state"] == "working"
+    });
     assert_ne!(row(&rig)["activity"], "Which branch should I use?");
     let mark = rig.state(&["done"]);
     let mark = mark.as_object().unwrap().values().next().unwrap();
@@ -126,13 +136,22 @@ fn blocked_reason_shows_under_needs_you_and_next_turn_clears_it() {
     assert_eq!(code, 0, "{event}");
     agents(&rig, "idle", 11, "child-session", "owner-session");
     serve(&rig);
+    let publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["boards"]["data"]["w1:p1"]["rows"][0]["state"] == "blocked"
+    });
     assert_eq!(row(&rig)["group"], "attention");
     assert_eq!(row(&rig)["state"], "blocked");
     assert_eq!(row(&rig)["activity"], "Credentials are unavailable");
     assert_eq!(notes(&rig, "blocked").len(), 1);
+    drop(publisher);
     agents(&rig, "working", 12, "child-session", "owner-session");
     serve(&rig);
     assert!(rig.items()[0]["signal"].is_null());
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["boards"]["data"]["w1:p1"]["rows"][0]["state"] == "working"
+    });
     assert_eq!(row(&rig)["state"], "working");
 }
 
@@ -312,7 +331,7 @@ fn remote_signal(name: &str) -> (Rig, Value) {
 }
 
 fn refresh_remote(rig: &Rig) {
-    let observer = rig.start(&["serve", "--interval", "3600"]);
+    let observer = rig.serve();
     wait_publication(rig, |frame| frame["sources"]["peers"]["8103"].is_object());
     let out = rig.run(&["retry", "netcup"]);
     assert!(
@@ -451,6 +470,15 @@ fn open_children_without_a_signal_show_waiting() {
             .find(|a| a["pane"] == "w2:p1")
             .unwrap();
         assert_eq!(child["lifecycle"], "waiting", "serve {pass}: {child}");
+        let _publisher = rig.serve();
+        wait_publication(&rig, |frame| {
+            frame["views"]["boards"]["data"]["w1:p1"]["rows"]
+                .as_array()
+                .is_some_and(|rows| {
+                    rows.iter()
+                        .any(|row| row["id"] == "child" && row["group"] == "running")
+                })
+        });
         assert_eq!(row(&rig)["group"], "running", "serve {pass}");
         assert!(items[0]["signal"].is_null(), "serve {pass}: {items}");
     }

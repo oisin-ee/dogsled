@@ -277,6 +277,16 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
         inbox[0]["text"].as_str().unwrap().contains(error),
         "{inbox}"
     );
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["queue"]
+            .as_array()
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|ticket| ticket["diagnostic"]["cause"] == "execution_directory_missing")
+            })
+    });
     let status = rig.run(&["status"]);
     assert!(status.status.success(), "{status:?}");
     let text = String::from_utf8(status.stdout).unwrap();

@@ -9,10 +9,24 @@ use portal_types::{
 
 /// The whole board as the API serves it: the hosts, the rows grouped by
 /// repository, and the todos that belong to each group.
-pub fn view(board: &board::Board, todos: &[board::TodoSections], generated_ms: u64) -> BoardView {
+pub fn view(
+    board: &board::Board,
+    items: &[crate::items::Item],
+    todos: &[board::TodoSections],
+    generated_ms: u64,
+) -> BoardView {
+    // Portal joins use pane identity, not the CLI promise that the pane can be opened.
+    let mut board = board.clone();
+    for row in &mut board.rows {
+        if row.state == "closed"
+            && let Some(item) = items.iter().find(|item| item.id == row.id)
+        {
+            row.pane = Some(item.pane.clone());
+        }
+    }
     BoardView {
         hosts: board.hosts.iter().map(HostView::from).collect(),
-        repos: group(board, todos),
+        repos: group(&board, todos),
         generated_ms,
     }
 }

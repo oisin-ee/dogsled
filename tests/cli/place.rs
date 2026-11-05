@@ -1636,7 +1636,7 @@ printf '%s\n' "$*" >> "$RIG/herdr.log"
 case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
   'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
-  'agent list') cat "$RIG/agents.json" ;;
+  'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
   'pane list') printf '%s\n' '{"result":{"panes":[{"pane_id":"w8:p1","terminal_id":"term_tree"}]}}' ;;
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}' ;;
   'agent start'*)

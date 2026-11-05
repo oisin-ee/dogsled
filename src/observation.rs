@@ -2,10 +2,13 @@
 //! clients receive complete publications without a shell, ledger, or fleet.
 
 pub(crate) mod collect;
+pub(crate) mod diagnostics;
+pub(crate) mod display;
 pub(crate) mod ipc;
 pub(crate) mod peers;
 pub(crate) mod peers_runtime;
 pub(crate) mod project;
+pub(crate) mod read;
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -27,6 +30,8 @@ pub(crate) struct PeerSource {
     pub epoch: String,
     pub local_revision: u64,
     pub received_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_tokens: Vec<String>,
     pub availability: Availability,
 }
 

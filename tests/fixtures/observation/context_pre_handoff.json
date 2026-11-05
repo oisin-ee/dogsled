@@ -1,0 +1,1169 @@
+{
+  "epoch": "context-pre-handoff",
+  "gaps": [],
+  "local": {
+    "headroom": {
+      "eligible": true,
+      "headroom": 7.0,
+      "host": "local",
+      "live_agents": 1
+    },
+    "host": {
+      "handoffs": [
+        {
+          "after": 0,
+          "marked_ms": 1,
+          "native_done": true,
+          "pane": "w2:p1",
+          "reply": {
+            "captured_ms": 1,
+            "done": true,
+            "seq": 1,
+            "text": "Finished"
+          },
+          "sealed": 1,
+          "session": "worker-session"
+        }
+      ],
+      "holds": [],
+      "job_validity": 2,
+      "jobs": [],
+      "placement_replay": 3,
+      "probe": {
+        "agent_panes": [
+          {
+            "agent": "pi",
+            "agent_session": "worker-session",
+            "completion_seq": 1,
+            "cwd": "/fixture/context/worker",
+            "done": true,
+            "handoff": "recorded",
+            "lifecycle": "done",
+            "name": "worker",
+            "pane": "w2:p1",
+            "repository": "github.com/fixture/context",
+            "signal": null,
+            "stalled_since_ms": null,
+            "state": "idle",
+            "state_change_seq": 1,
+            "state_since_ms": 10000,
+            "terminal_id": "term_worker",
+            "transcript": null,
+            "transcript_modified": null,
+            "worktree": {
+              "ahead": 2,
+              "base": "5fc2dec4f6afe2b119ae56279a5ab3801025db68",
+              "branch": "feat/x",
+              "dirty": false,
+              "head": "c222478b5f14c09c9c0aa7921c3c0afc7ce17707",
+              "landed": false,
+              "path": "/fixture/context/worker"
+            }
+          }
+        ],
+        "agents": {
+          "by_status": {
+            "idle": 1
+          },
+          "total": 1
+        },
+        "busy": 0.125,
+        "cores": 8,
+        "cpu_ticks": {
+          "busy": 171,
+          "total": 621
+        },
+        "disk_free_percent": 50.0,
+        "host": "local",
+        "label": "local",
+        "load1": 1.0,
+        "memory": {
+          "pressure_level": null,
+          "total_bytes": 8589934592,
+          "used_bytes": 1073741824
+        },
+        "panes": [],
+        "reservations": []
+      },
+      "request_validity": 1,
+      "running": true,
+      "sampled_ms": 10000,
+      "service_lanes": []
+    },
+    "status": {
+      "holds": [
+        {
+          "code": "checkout",
+          "command_argv": [
+            "dogsled",
+            "close",
+            "w2:p1",
+            "--host",
+            "local"
+          ],
+          "command_host": "local",
+          "host": "local",
+          "next_command": "dogsled close w2:p1 --host local",
+          "owner": "w9:p9",
+          "owner_pane": "w9:p9",
+          "reason": "open child retains its resources",
+          "request_id": "theirs",
+          "resource": "checkout /fixture/context/worker"
+        }
+      ],
+      "hosts": [
+        {
+          "error": null,
+          "handoffs": [
+            {
+              "after": 0,
+              "marked_ms": 1,
+              "native_done": true,
+              "pane": "w2:p1",
+              "reply": {
+                "captured_ms": 1,
+                "done": true,
+                "seq": 1,
+                "text": "Finished"
+              },
+              "sealed": 1,
+              "session": "worker-session"
+            }
+          ],
+          "headroom": {
+            "eligible": true,
+            "headroom": 7.0,
+            "host": "local",
+            "live_agents": 1
+          },
+          "holds": [],
+          "id": "local",
+          "job_validity": 2,
+          "jobs": [],
+          "label": "local",
+          "probe": {
+            "agent_panes": [
+              {
+                "agent": "pi",
+                "agent_session": "worker-session",
+                "completion_seq": 1,
+                "cwd": "/fixture/context/worker",
+                "done": true,
+                "handoff": "recorded",
+                "lifecycle": "done",
+                "name": "worker",
+                "pane": "w2:p1",
+                "repository": "github.com/fixture/context",
+                "signal": null,
+                "stalled_since_ms": null,
+                "state": "idle",
+                "state_change_seq": 1,
+                "state_since_ms": 10000,
+                "terminal_id": "term_worker",
+                "transcript": null,
+                "transcript_modified": null,
+                "worktree": {
+                  "ahead": 2,
+                  "base": "5fc2dec4f6afe2b119ae56279a5ab3801025db68",
+                  "branch": "feat/x",
+                  "dirty": false,
+                  "head": "c222478b5f14c09c9c0aa7921c3c0afc7ce17707",
+                  "landed": false,
+                  "path": "/fixture/context/worker"
+                }
+              }
+            ],
+            "agents": {
+              "by_status": {
+                "idle": 1
+              },
+              "total": 1
+            },
+            "busy": 0.125,
+            "cores": 8,
+            "cpu_ticks": {
+              "busy": 171,
+              "total": 621
+            },
+            "disk_free_percent": 50.0,
+            "host": "local",
+            "label": "local",
+            "load1": 1.0,
+            "memory": {
+              "pressure_level": null,
+              "total_bytes": 8589934592,
+              "used_bytes": 1073741824
+            },
+            "panes": [],
+            "reservations": []
+          },
+          "reachable": true,
+          "sampled_ms": 10000,
+          "service": "up",
+          "service_lanes": []
+        }
+      ],
+      "items": [
+        {
+          "closed_ms": null,
+          "created_ms": 1,
+          "host": "local",
+          "id": "mine",
+          "kind": "agent",
+          "name": "worker",
+          "native_done": true,
+          "owner_pane": "w1:p1",
+          "pane": "w2:p1",
+          "reply": {
+            "captured_ms": 1,
+            "done": true,
+            "seq": 1,
+            "text": "Finished"
+          }
+        },
+        {
+          "closed_ms": null,
+          "created_ms": 1,
+          "host": "local",
+          "id": "theirs",
+          "kind": "agent",
+          "name": "other",
+          "native_done": true,
+          "owner_pane": "w9:p9",
+          "pane": "w2:p1",
+          "reply": {
+            "captured_ms": 1,
+            "done": true,
+            "seq": 1,
+            "text": "Finished"
+          }
+        }
+      ],
+      "orphans": [],
+      "queue": [],
+      "stopped_activity": {},
+      "sweep": null
+    },
+    "todos": []
+  },
+  "local_revision": 1,
+  "published_ms": 10000,
+  "revision": 1,
+  "sources": {
+    "local": {
+      "agents": 10000,
+      "board": 10000,
+      "findings": 10000,
+      "headroom": 10000,
+      "host": 10000,
+      "questions": 10000,
+      "reviews": 10000,
+      "status": 10000,
+      "stopped_activity": 10000,
+      "todos": 10000
+    },
+    "peers": {}
+  },
+  "version": 1,
+  "views": {
+    "active_jobs": {
+      "data": [],
+      "gaps": []
+    },
+    "agents": {
+      "data": [
+        {
+          "agent": "pi",
+          "cwd": "/fixture/context/worker",
+          "name": "worker",
+          "pane": "w2:p1",
+          "repository": "github.com/fixture/context",
+          "state": "idle"
+        }
+      ],
+      "gaps": []
+    },
+    "board": {
+      "data": {
+        "hosts": [
+          {
+            "busy": 1.0,
+            "cores": 8,
+            "eligible": true,
+            "label": "local",
+            "reachable": true,
+            "service": "up"
+          }
+        ],
+        "rows": [
+          {
+            "activity": "+2 commits",
+            "age_ms": 9999,
+            "ahead": 2,
+            "cleanup": {
+              "action": "land",
+              "cause": "never_merged"
+            },
+            "group": "to_land",
+            "host": "local",
+            "id": "mine",
+            "kind": "agent",
+            "name": "worker",
+            "owner_pane": "w1:p1",
+            "pane": "w2:p1",
+            "repository": "github.com/fixture/context",
+            "state": "done",
+            "what": "pi"
+          },
+          {
+            "activity": "+2 commits",
+            "age_ms": 9999,
+            "ahead": 2,
+            "cleanup": {
+              "action": "land",
+              "cause": "never_merged"
+            },
+            "group": "to_land",
+            "holds": [
+              {
+                "code": "checkout",
+                "command_argv": [
+                  "dogsled",
+                  "close",
+                  "w2:p1",
+                  "--host",
+                  "local"
+                ],
+                "command_host": "local",
+                "host": "local",
+                "next_command": "dogsled close w2:p1 --host local",
+                "owner": "w9:p9",
+                "owner_pane": "w9:p9",
+                "reason": "open child retains its resources",
+                "request_id": "theirs",
+                "resource": "checkout /fixture/context/worker"
+              }
+            ],
+            "host": "local",
+            "id": "theirs",
+            "kind": "agent",
+            "name": "other",
+            "owner_pane": "w9:p9",
+            "pane": "w2:p1",
+            "repository": "github.com/fixture/context",
+            "state": "done",
+            "what": "pi"
+          }
+        ]
+      },
+      "gaps": []
+    },
+    "boards": {
+      "data": {
+        "w1:p1": {
+          "hosts": [
+            {
+              "busy": 1.0,
+              "cores": 8,
+              "eligible": true,
+              "label": "local",
+              "reachable": true,
+              "service": "up"
+            }
+          ],
+          "rows": [
+            {
+              "activity": "+2 commits",
+              "age_ms": 9999,
+              "ahead": 2,
+              "cleanup": {
+                "action": "land",
+                "cause": "never_merged"
+              },
+              "group": "to_land",
+              "host": "local",
+              "id": "mine",
+              "kind": "agent",
+              "name": "worker",
+              "owner_pane": "w1:p1",
+              "pane": "w2:p1",
+              "repository": "github.com/fixture/context",
+              "state": "done",
+              "what": "pi"
+            }
+          ]
+        },
+        "w2:p1": {
+          "hosts": [
+            {
+              "busy": 1.0,
+              "cores": 8,
+              "eligible": true,
+              "label": "local",
+              "reachable": true,
+              "service": "up"
+            }
+          ],
+          "rows": []
+        },
+        "w9:p9": {
+          "hosts": [
+            {
+              "busy": 1.0,
+              "cores": 8,
+              "eligible": true,
+              "label": "local",
+              "reachable": true,
+              "service": "up"
+            }
+          ],
+          "rows": [
+            {
+              "activity": "+2 commits",
+              "age_ms": 9999,
+              "ahead": 2,
+              "cleanup": {
+                "action": "land",
+                "cause": "never_merged"
+              },
+              "group": "to_land",
+              "holds": [
+                {
+                  "code": "checkout",
+                  "command_argv": [
+                    "dogsled",
+                    "close",
+                    "w2:p1",
+                    "--host",
+                    "local"
+                  ],
+                  "command_host": "local",
+                  "host": "local",
+                  "next_command": "dogsled close w2:p1 --host local",
+                  "owner": "w9:p9",
+                  "owner_pane": "w9:p9",
+                  "reason": "open child retains its resources",
+                  "request_id": "theirs",
+                  "resource": "checkout /fixture/context/worker"
+                }
+              ],
+              "host": "local",
+              "id": "theirs",
+              "kind": "agent",
+              "name": "other",
+              "owner_pane": "w9:p9",
+              "pane": "w2:p1",
+              "repository": "github.com/fixture/context",
+              "state": "done",
+              "what": "pi"
+            }
+          ]
+        }
+      },
+      "gaps": []
+    },
+    "empty_board": {
+      "data": {
+        "hosts": [
+          {
+            "busy": 1.0,
+            "cores": 8,
+            "eligible": true,
+            "label": "local",
+            "reachable": true,
+            "service": "up"
+          }
+        ],
+        "rows": []
+      },
+      "gaps": []
+    },
+    "empty_inventory": {
+      "data": {
+        "items": [],
+        "queue": []
+      },
+      "gaps": []
+    },
+    "findings": {
+      "data": {
+        "w1:p1": {
+          "failures": [],
+          "holds": [],
+          "landed_dirty": []
+        },
+        "w2:p1": {
+          "failures": [],
+          "holds": [],
+          "landed_dirty": []
+        },
+        "w9:p9": {
+          "failures": [],
+          "holds": [],
+          "landed_dirty": []
+        }
+      },
+      "gaps": []
+    },
+    "hosts": {
+      "data": [
+        {
+          "error": null,
+          "handoffs": [
+            {
+              "after": 0,
+              "marked_ms": 1,
+              "native_done": true,
+              "pane": "w2:p1",
+              "reply": {
+                "captured_ms": 1,
+                "done": true,
+                "seq": 1,
+                "text": "Finished"
+              },
+              "sealed": 1,
+              "session": "worker-session"
+            }
+          ],
+          "headroom": {
+            "eligible": true,
+            "headroom": 7.0,
+            "host": "local",
+            "live_agents": 1
+          },
+          "holds": [],
+          "id": "local",
+          "job_validity": 2,
+          "jobs": [],
+          "label": "local",
+          "probe": {
+            "agent_panes": [
+              {
+                "agent": "pi",
+                "agent_session": "worker-session",
+                "completion_seq": 1,
+                "cwd": "/fixture/context/worker",
+                "done": true,
+                "handoff": "recorded",
+                "lifecycle": "done",
+                "name": "worker",
+                "pane": "w2:p1",
+                "repository": "github.com/fixture/context",
+                "signal": null,
+                "stalled_since_ms": null,
+                "state": "idle",
+                "state_change_seq": 1,
+                "state_since_ms": 10000,
+                "terminal_id": "term_worker",
+                "transcript": null,
+                "transcript_modified": null,
+                "worktree": {
+                  "ahead": 2,
+                  "base": "5fc2dec4f6afe2b119ae56279a5ab3801025db68",
+                  "branch": "feat/x",
+                  "dirty": false,
+                  "head": "c222478b5f14c09c9c0aa7921c3c0afc7ce17707",
+                  "landed": false,
+                  "path": "/fixture/context/worker"
+                }
+              }
+            ],
+            "agents": {
+              "by_status": {
+                "idle": 1
+              },
+              "total": 1
+            },
+            "busy": 0.125,
+            "cores": 8,
+            "cpu_ticks": {
+              "busy": 171,
+              "total": 621
+            },
+            "disk_free_percent": 50.0,
+            "host": "local",
+            "label": "local",
+            "load1": 1.0,
+            "memory": {
+              "pressure_level": null,
+              "total_bytes": 8589934592,
+              "used_bytes": 1073741824
+            },
+            "panes": [],
+            "reservations": []
+          },
+          "reachable": true,
+          "sampled_ms": 10000,
+          "service": "up",
+          "service_lanes": []
+        }
+      ],
+      "gaps": []
+    },
+    "inbox": {
+      "data": {
+        "count": 0,
+        "items": []
+      },
+      "gaps": []
+    },
+    "inventories": {
+      "data": {
+        "w1:p1": {
+          "items": [
+            {
+              "closed_ms": null,
+              "created_ms": 1,
+              "host": "local",
+              "id": "mine",
+              "kind": "agent",
+              "name": "worker",
+              "native_done": true,
+              "owner_pane": "w1:p1",
+              "pane": "w2:p1",
+              "reply": {
+                "captured_ms": 1,
+                "done": true,
+                "seq": 1,
+                "text": "Finished"
+              }
+            }
+          ],
+          "queue": []
+        },
+        "w2:p1": {
+          "items": [],
+          "queue": []
+        },
+        "w9:p9": {
+          "items": [
+            {
+              "closed_ms": null,
+              "created_ms": 1,
+              "host": "local",
+              "id": "theirs",
+              "kind": "agent",
+              "name": "other",
+              "native_done": true,
+              "owner_pane": "w9:p9",
+              "pane": "w2:p1",
+              "reply": {
+                "captured_ms": 1,
+                "done": true,
+                "seq": 1,
+                "text": "Finished"
+              }
+            }
+          ],
+          "queue": []
+        }
+      },
+      "gaps": []
+    },
+    "inventory": {
+      "data": {
+        "items": [
+          {
+            "closed_ms": null,
+            "created_ms": 1,
+            "host": "local",
+            "id": "mine",
+            "kind": "agent",
+            "name": "worker",
+            "native_done": true,
+            "owner_pane": "w1:p1",
+            "pane": "w2:p1",
+            "reply": {
+              "captured_ms": 1,
+              "done": true,
+              "seq": 1,
+              "text": "Finished"
+            }
+          },
+          {
+            "closed_ms": null,
+            "created_ms": 1,
+            "host": "local",
+            "id": "theirs",
+            "kind": "agent",
+            "name": "other",
+            "native_done": true,
+            "owner_pane": "w9:p9",
+            "pane": "w2:p1",
+            "reply": {
+              "captured_ms": 1,
+              "done": true,
+              "seq": 1,
+              "text": "Finished"
+            }
+          }
+        ],
+        "queue": []
+      },
+      "gaps": []
+    },
+    "job_history": {
+      "data": {
+        "w1:p1": {
+          "hosts": [
+            {
+              "id": "local",
+              "label": "local"
+            }
+          ],
+          "jobs": []
+        },
+        "w2:p1": {
+          "hosts": [
+            {
+              "id": "local",
+              "label": "local"
+            }
+          ],
+          "jobs": []
+        },
+        "w9:p9": {
+          "hosts": [
+            {
+              "id": "local",
+              "label": "local"
+            }
+          ],
+          "jobs": []
+        }
+      },
+      "gaps": []
+    },
+    "jobs": {
+      "data": [],
+      "gaps": []
+    },
+    "portal": {
+      "data": {
+        "agents": [
+          {
+            "agent": "pi",
+            "cwd": "/fixture/context/worker",
+            "name": "worker",
+            "pane": "w2:p1",
+            "repository": "github.com/fixture/context",
+            "state": "idle"
+          }
+        ],
+        "board": {
+          "generated_ms": 10000,
+          "hosts": [
+            {
+              "busy": 1.0,
+              "cores": 8,
+              "eligible": true,
+              "label": "local",
+              "reachable": true,
+              "service": "up"
+            }
+          ],
+          "repos": [
+            {
+              "repository": "github.com/fixture/context",
+              "rows": [
+                {
+                  "activity": "+2 commits",
+                  "age_ms": 9999,
+                  "ahead": 2,
+                  "cleanup": {
+                    "action": "land",
+                    "cause": "never_merged"
+                  },
+                  "dirty": false,
+                  "group": "to_land",
+                  "host": "local",
+                  "id": "mine",
+                  "kind": "agent",
+                  "name": "worker",
+                  "owner_pane": "w1:p1",
+                  "pane": "w2:p1",
+                  "repository": "github.com/fixture/context",
+                  "state": "done",
+                  "what": "pi"
+                },
+                {
+                  "activity": "+2 commits",
+                  "age_ms": 9999,
+                  "ahead": 2,
+                  "cleanup": {
+                    "action": "land",
+                    "cause": "never_merged"
+                  },
+                  "dirty": false,
+                  "group": "to_land",
+                  "host": "local",
+                  "id": "theirs",
+                  "kind": "agent",
+                  "name": "other",
+                  "owner_pane": "w9:p9",
+                  "pane": "w2:p1",
+                  "repository": "github.com/fixture/context",
+                  "state": "done",
+                  "what": "pi"
+                }
+              ],
+              "todos": []
+            }
+          ]
+        },
+        "epoch": "context-pre-handoff",
+        "gaps": [],
+        "inbox": {
+          "count": 0,
+          "items": []
+        },
+        "published_ms": 10000,
+        "revision": 1,
+        "version": 1
+      },
+      "gaps": []
+    },
+    "portal_board": {
+      "data": {
+        "generated_ms": 10000,
+        "hosts": [
+          {
+            "busy": 1.0,
+            "cores": 8,
+            "eligible": true,
+            "label": "local",
+            "reachable": true,
+            "service": "up"
+          }
+        ],
+        "repos": [
+          {
+            "repository": "github.com/fixture/context",
+            "rows": [
+              {
+                "activity": "+2 commits",
+                "age_ms": 9999,
+                "ahead": 2,
+                "cleanup": {
+                  "action": "land",
+                  "cause": "never_merged"
+                },
+                "dirty": false,
+                "group": "to_land",
+                "host": "local",
+                "id": "mine",
+                "kind": "agent",
+                "name": "worker",
+                "owner_pane": "w1:p1",
+                "pane": "w2:p1",
+                "repository": "github.com/fixture/context",
+                "state": "done",
+                "what": "pi"
+              },
+              {
+                "activity": "+2 commits",
+                "age_ms": 9999,
+                "ahead": 2,
+                "cleanup": {
+                  "action": "land",
+                  "cause": "never_merged"
+                },
+                "dirty": false,
+                "group": "to_land",
+                "host": "local",
+                "id": "theirs",
+                "kind": "agent",
+                "name": "other",
+                "owner_pane": "w9:p9",
+                "pane": "w2:p1",
+                "repository": "github.com/fixture/context",
+                "state": "done",
+                "what": "pi"
+              }
+            ],
+            "todos": []
+          }
+        ]
+      },
+      "gaps": []
+    },
+    "sidebar_hosts": {
+      "data": [
+        {
+          "disk": [
+            50.0,
+            "ok"
+          ],
+          "label": "local",
+          "load": "1/8",
+          "measured": true,
+          "memory": [
+            0.125,
+            "ok"
+          ],
+          "silent_ms": null,
+          "state": "eligible"
+        }
+      ],
+      "gaps": []
+    },
+    "status": {
+      "data": {
+        "holds": [
+          {
+            "code": "checkout",
+            "command_argv": [
+              "dogsled",
+              "close",
+              "w2:p1",
+              "--host",
+              "local"
+            ],
+            "command_host": "local",
+            "host": "local",
+            "next_command": "dogsled close w2:p1 --host local",
+            "owner": "w9:p9",
+            "owner_pane": "w9:p9",
+            "reason": "open child retains its resources",
+            "request_id": "theirs",
+            "resource": "checkout /fixture/context/worker"
+          }
+        ],
+        "hosts": [
+          {
+            "error": null,
+            "handoffs": [
+              {
+                "after": 0,
+                "marked_ms": 1,
+                "native_done": true,
+                "pane": "w2:p1",
+                "reply": {
+                  "captured_ms": 1,
+                  "done": true,
+                  "seq": 1,
+                  "text": "Finished"
+                },
+                "sealed": 1,
+                "session": "worker-session"
+              }
+            ],
+            "headroom": {
+              "eligible": true,
+              "headroom": 7.0,
+              "host": "local",
+              "live_agents": 1
+            },
+            "holds": [],
+            "id": "local",
+            "job_validity": 2,
+            "jobs": [],
+            "label": "local",
+            "probe": {
+              "agent_panes": [
+                {
+                  "agent": "pi",
+                  "agent_session": "worker-session",
+                  "completion_seq": 1,
+                  "cwd": "/fixture/context/worker",
+                  "done": true,
+                  "handoff": "recorded",
+                  "lifecycle": "done",
+                  "name": "worker",
+                  "pane": "w2:p1",
+                  "repository": "github.com/fixture/context",
+                  "signal": null,
+                  "stalled_since_ms": null,
+                  "state": "idle",
+                  "state_change_seq": 1,
+                  "state_since_ms": 10000,
+                  "terminal_id": "term_worker",
+                  "transcript": null,
+                  "transcript_modified": null,
+                  "worktree": {
+                    "ahead": 2,
+                    "base": "5fc2dec4f6afe2b119ae56279a5ab3801025db68",
+                    "branch": "feat/x",
+                    "dirty": false,
+                    "head": "c222478b5f14c09c9c0aa7921c3c0afc7ce17707",
+                    "landed": false,
+                    "path": "/fixture/context/worker"
+                  }
+                }
+              ],
+              "agents": {
+                "by_status": {
+                  "idle": 1
+                },
+                "total": 1
+              },
+              "busy": 0.125,
+              "cores": 8,
+              "cpu_ticks": {
+                "busy": 171,
+                "total": 621
+              },
+              "disk_free_percent": 50.0,
+              "host": "local",
+              "label": "local",
+              "load1": 1.0,
+              "memory": {
+                "pressure_level": null,
+                "total_bytes": 8589934592,
+                "used_bytes": 1073741824
+              },
+              "panes": [],
+              "reservations": []
+            },
+            "reachable": true,
+            "sampled_ms": 10000,
+            "service": "up",
+            "service_lanes": []
+          }
+        ],
+        "items": [
+          {
+            "closed_ms": null,
+            "created_ms": 1,
+            "host": "local",
+            "id": "mine",
+            "kind": "agent",
+            "name": "worker",
+            "native_done": true,
+            "owner_pane": "w1:p1",
+            "pane": "w2:p1",
+            "reply": {
+              "captured_ms": 1,
+              "done": true,
+              "seq": 1,
+              "text": "Finished"
+            }
+          },
+          {
+            "closed_ms": null,
+            "created_ms": 1,
+            "host": "local",
+            "id": "theirs",
+            "kind": "agent",
+            "name": "other",
+            "native_done": true,
+            "owner_pane": "w9:p9",
+            "pane": "w2:p1",
+            "reply": {
+              "captured_ms": 1,
+              "done": true,
+              "seq": 1,
+              "text": "Finished"
+            }
+          }
+        ],
+        "orphans": [],
+        "queue": [],
+        "stopped_activity": {},
+        "sweep": null
+      },
+      "gaps": []
+    },
+    "status_display": {
+      "data": {
+        "counts": {
+          "finished": 2,
+          "open": 2,
+          "orphans": null,
+          "queued": 0,
+          "stalls": 0
+        },
+        "holds": [
+          {
+            "code": "checkout",
+            "command_argv": [
+              "dogsled",
+              "close",
+              "w2:p1",
+              "--host",
+              "local"
+            ],
+            "command_host": "local",
+            "host": "local",
+            "next_command": "dogsled close w2:p1 --host local",
+            "owner": "w9:p9",
+            "owner_pane": "w9:p9",
+            "reason": "open child retains its resources",
+            "request_id": "theirs",
+            "resource": "checkout /fixture/context/worker"
+          }
+        ],
+        "hosts": [
+          {
+            "agents": [
+              {
+                "name": "worker",
+                "pane": "w2:p1",
+                "stalled_ms": null,
+                "state": "done"
+              }
+            ],
+            "brief": {
+              "label": "local",
+              "load": "1/8",
+              "measured": true,
+              "state": "eligible"
+            },
+            "condition": "service: up",
+            "error": null,
+            "id": "local",
+            "jobs": [],
+            "lanes": [],
+            "metrics": {
+              "disk_free_percent": 50.0,
+              "memory": {
+                "pressure_level": null,
+                "total_bytes": 8589934592,
+                "used_bytes": 1073741824
+              }
+            },
+            "reason": null,
+            "reservations": 0,
+            "sampled_ms": 10000,
+            "states": {
+              "done": 1
+            }
+          }
+        ],
+        "items": [
+          {
+            "branch": null,
+            "owner": {
+              "close_command": "`dogsled close w2:p1 --host local`",
+              "host": "local",
+              "id": "mine",
+              "kind": "agent",
+              "orphan": null,
+              "owner": "w1:p1",
+              "pane": "w2:p1"
+            }
+          },
+          {
+            "branch": null,
+            "owner": {
+              "close_command": "`dogsled close w2:p1 --host local`",
+              "host": "local",
+              "id": "theirs",
+              "kind": "agent",
+              "orphan": null,
+              "owner": "w9:p9",
+              "pane": "w2:p1"
+            }
+          }
+        ],
+        "queue": [],
+        "sweep": null
+      },
+      "gaps": []
+    },
+    "todos": {
+      "data": [],
+      "gaps": []
+    }
+  }
+}

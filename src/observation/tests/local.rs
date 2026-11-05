@@ -415,6 +415,99 @@ fn failed_endpoint_bind_retains_exclusive_publication_ownership() {
 }
 
 #[test]
+fn failed_local_capture_keeps_inventory_and_peer_only_composition_immutable() {
+    use super::super::{Availability, project};
+    use crate::hosts::{Fleet, Host};
+    use std::sync::Arc;
+    for warm in [false, true] {
+        let fixture = Fixture::new();
+        fixture.seed_job("first");
+        let mut collector = Collector::default();
+        if warm {
+            collector.collect(&fixture.node(), 100);
+        }
+        fixture.fail_probe();
+        let mut input = collector.collect(&fixture.node(), 30_101).input;
+        let fleet = Fleet {
+            shell: &fixture.shell,
+            ledger: &fixture.ledger,
+            policy: &fixture.policy,
+            home: "/home".into(),
+            hosts: vec![Host::local()],
+        };
+        let mut projector = project::Projector::default();
+        let captured = projector.inputs(&fleet, &input);
+        project::derive(
+            &captured,
+            collector.reports(),
+            &fixture.node().thresholds,
+            &mut input,
+        )
+        .unwrap();
+        let report = &input.views["status"]["data"]["hosts"][0];
+        assert_eq!(report["service"], "unavailable");
+        assert!(
+            input
+                .gaps
+                .iter()
+                .any(|gap| gap.domain == "host" && gap.availability == Availability::Failed)
+        );
+        assert!(!collector.reports()[0].fresh(30_101));
+        if warm {
+            assert_eq!(report["sampled_ms"], 100);
+            assert_eq!(report["headroom"]["eligible"], false);
+            assert!(!report["probe"].is_null());
+        } else {
+            assert!(report["sampled_ms"].is_null());
+            assert!(report["probe"].is_null());
+            assert!(report["headroom"].is_null());
+        }
+        assert!(
+            crate::plan::choose(
+                &collector
+                    .reports()
+                    .iter()
+                    .filter_map(|report| report.headroom.clone())
+                    .collect::<Vec<_>>()
+            )
+            .is_none()
+        );
+        let original_inventory = input.views["inventory"].clone();
+        // A newer ledger row must not leak into a peer-only composition.
+        crate::items::record(
+            &fixture.ledger,
+            crate::items::Item {
+                id: "later".into(),
+                kind: "agent".into(),
+                host: "local".into(),
+                pane: "later".into(),
+                owner_pane: "owner".into(),
+                ..crate::items::Item::default()
+            },
+        )
+        .unwrap();
+        let calls = fixture.shell.calls.lock().unwrap().len();
+        fixture
+            .ledger
+            .with_lock("state-db", || {
+                let mut peer_only = collector.publication(40_000);
+                let reused = projector.inputs(&fleet, &peer_only);
+                assert!(Arc::ptr_eq(&captured, &reused));
+                project::derive(
+                    &reused,
+                    collector.reports(),
+                    &fixture.node().thresholds,
+                    &mut peer_only,
+                )?;
+                assert_eq!(peer_only.views["inventory"], original_inventory);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls);
+    }
+}
+
+#[test]
 fn observation_without_serve_never_falls_back_to_persisted_facts() {
     let fixture = Fixture::new();
     Collector::default().collect(&fixture.node(), 100);
