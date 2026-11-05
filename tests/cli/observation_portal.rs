@@ -276,9 +276,10 @@ fn portal_readers_share_one_revision_and_one_subscription_without_observation() 
         assert_eq!(event, second["views"]["portal"]["data"]);
         assert_eq!(event["revision"], 2);
     }
+    let unexpected = supplied.requests.try_recv();
     assert!(
-        supplied.requests.try_recv().is_err(),
-        "eight clients share the one subscription"
+        unexpected.is_err(),
+        "eight clients share the one subscription; unexpected request: {unexpected:?}"
     );
     assert_eq!(
         rig.log("portal-access.log"),
@@ -300,6 +301,147 @@ fn portal_readers_share_one_revision_and_one_subscription_without_observation() 
         assert!(data["error"].as_str().unwrap().contains("observation"));
     }
     assert_eq!(rig.log("portal-access.log"), "");
+}
+
+/// Capture detail through the actual serve interest path before trapping every reader tool.
+fn capture_agent_detail(rig: &Rig) -> (Value, Value) {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let transcript = rig.dir.join("conversation.jsonl");
+    fs::write(&transcript, "{\"type\":\"session\",\"id\":\"detail-session\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fixture title\\npublished conversation\"}]}}\n").unwrap();
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{
+            "pane_id":"w1:p1", "agent":"pi", "agent_status":"working",
+            "terminal_id":"detail-terminal", "agent_session":{"kind":"path","value":transcript}
+        }]}}),
+    );
+    let path = rig.dir.join("detail-herdr.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stop = Arc::clone(&stopped);
+    let agents = rig.dir.join("agents.json");
+    let thread = std::thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let mut reply = match request["method"].as_str().unwrap() {
+                "agent.list" => {
+                    serde_json::from_slice::<Value>(&fs::read(&agents).unwrap()).unwrap()
+                }
+                "pane.read" => {
+                    json!({"result":{"type":"pane_read","read":{"text":"published screen","revision":11}}})
+                }
+                "events.subscribe" => {
+                    json!({"error":{"code":"unsupported","message":"fixture uses the fallback"}})
+                }
+                other => panic!("unexpected detail observation: {other}"),
+            };
+            reply["id"] = request["id"].clone();
+            writeln!(stream, "{reply}").unwrap();
+        }
+    });
+    let mut command = rig.cmd(&["serve", "--interval", "60"]);
+    command.env("HERDR_SOCKET_PATH", &path);
+    let observer = Rig::background(command);
+    wait_publication(rig, |frame| {
+        frame["views"]["portal"]["data"]["agents"][0]["pane"] == "w1:p1"
+    });
+    let mut interest = UnixStream::connect(rig.dir.join("state/observation.sock")).unwrap();
+    writeln!(
+        interest,
+        "{}",
+        json!({"version":1,"operation":"detail","pane":"w1:p1"})
+    )
+    .unwrap();
+    let frame = wait_publication(rig, |frame| {
+        frame["views"]["agent_details"]["data"]["w1:p1"]["screen_revision"] == 11
+    });
+    interest.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    let mut reader = BufReader::new(interest);
+    let content = loop {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).unwrap() > 0);
+        let detail: Value = serde_json::from_str(&line).unwrap();
+        if detail["detail"]["conversation"]["availability"] == "available" {
+            break detail;
+        }
+    };
+    assert_eq!(
+        content["detail"]["conversation"]["data"]["turns"][0]["text"],
+        "Fixture title\npublished conversation"
+    );
+    assert_eq!(
+        frame["views"]["portal"]["data"]["agents"][0]["title"],
+        "Fixture title"
+    );
+    assert_eq!(
+        frame["local"]["terminals"]["agents"][0]["session"]["activity"],
+        "Fixture title"
+    );
+    assert!(!frame.to_string().contains("published conversation"));
+    assert!(!frame.to_string().contains("published screen"));
+    drop(observer);
+    drop(reader);
+    stopped.store(true, Ordering::Release);
+    let _ = UnixStream::connect(&path);
+    thread.join().unwrap();
+    fs::remove_file(transcript).unwrap();
+    (frame, content)
+}
+
+#[test]
+fn detail_readers_use_session_qualified_publication_without_observation() {
+    let rig = Rig::short("portal-detail-isolation");
+    let (frame, content) = capture_agent_detail(&rig);
+    let supplied = Supplied::start_details(
+        &rig,
+        frame.clone(),
+        BTreeMap::from([("w1:p1".into(), content.clone())]),
+    );
+    let _locks = isolate(&rig);
+    let portal = Portal::start(&rig);
+    assert_eq!(
+        portal.stream().publication(),
+        frame["views"]["portal"]["data"]
+    );
+    let expected = &content["detail"];
+    for field in ["conversation", "screen"] {
+        let (status, headers, data) = portal.get(&format!("/api/agents/w1:p1/{field}"));
+        assert_eq!(status, 200, "{data}");
+        assert_eq!(data, expected[field]["data"]);
+        supplied.interest("w1:p1", true);
+        supplied.interest("w1:p1", false);
+        assert_ne!(data["session"].as_str().unwrap(), "");
+        assert_eq!(
+            headers["x-observation-revision"],
+            content["revision"].to_string()
+        );
+    }
+    let (mut events, status, _) = Http::open(portal.port, "/api/agents/w1:p1/events");
+    assert_eq!(status, 200);
+    let (kind, data) = events.event();
+    let data: Value = serde_json::from_str(&data).unwrap();
+    assert_eq!(kind, "agent");
+    supplied.interest("w1:p1", true);
+    assert_eq!(data["state"], "working");
+    assert_eq!(data["session"]["availability"], "available");
+    assert_eq!(
+        data["session"]["key"],
+        expected["conversation"]["data"]["session"]
+    );
+    assert_eq!(rig.log("portal-access.log"), "");
+    assert!(rig.dir.join("state/state.db").is_dir());
+    drop(events);
+    supplied.interest("w1:p1", false);
+    assert!(supplied.interests.try_recv().is_err());
+    drop(supplied);
 }
 
 #[test]

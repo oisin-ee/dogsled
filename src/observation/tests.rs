@@ -1,5 +1,6 @@
 mod actions;
 mod context_fixture;
+mod details;
 mod local;
 mod peer;
 mod projection;

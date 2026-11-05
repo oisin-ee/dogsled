@@ -1,9 +1,9 @@
 //! Shell-owned transcript snapshots survive keyed agent sessions.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use dioxus::prelude::*;
-use portal_types::agents::{Conversation, Turn};
+use portal_types::agents::{Conversation, DetailSession, Turn};
 
 /// Keep complete transcripts for the sixteen most recently visited panes.
 const CAPACITY: usize = 16;
@@ -11,6 +11,8 @@ const CAPACITY: usize = 16;
 #[derive(Clone, Default)]
 pub struct Conversations {
     entries: VecDeque<Conversation>,
+    sessions: BTreeMap<String, DetailSession>,
+    generations: BTreeMap<String, u64>,
 }
 
 impl Conversations {
@@ -30,6 +32,57 @@ impl Conversations {
         self.get(pane)
     }
 
+    pub fn get_session(&self, pane: &str, session: &str) -> Option<&Vec<Turn>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.pane == pane && entry.session == session)
+            .map(|entry| &entry.turns)
+    }
+
+    fn begin_request(&mut self, pane: &str) -> u64 {
+        let generation = self.generations.entry(pane.into()).or_default();
+        *generation += 1;
+        *generation
+    }
+
+    pub fn select_session(&mut self, pane: &str, session: &str) {
+        let selected = DetailSession::Available(session.into());
+        if self.sessions.get(pane) != Some(&selected) {
+            self.begin_request(pane);
+            self.entries.retain(|entry| entry.pane != pane);
+            self.sessions.insert(pane.into(), selected);
+        }
+    }
+
+    pub fn unavailable(&mut self, pane: &str) {
+        self.begin_request(pane);
+        self.entries.retain(|entry| entry.pane != pane);
+        self.sessions
+            .insert(pane.into(), DetailSession::Unavailable);
+    }
+
+    fn apply_response(
+        &mut self,
+        pane: &str,
+        generation: u64,
+        result: Result<Option<Conversation>, String>,
+    ) -> Result<Option<String>, String> {
+        if self.generations.get(pane) != Some(&generation) {
+            return Ok(None);
+        }
+        let session = result
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .filter(|conversation| conversation.pane == pane && !conversation.session.is_empty())
+            .map(|conversation| conversation.session.clone());
+        if let Some(session) = &session {
+            self.select_session(pane, session);
+        }
+        self.apply(pane, result)?;
+        Ok(session)
+    }
+
     fn apply(
         &mut self,
         pane: &str,
@@ -40,6 +93,17 @@ impl Conversations {
                 Err("The conversation response belongs to another agent.".to_owned())
             }
             Some(conversation) => {
+                if conversation.session.is_empty()
+                    || self.sessions.get(pane).is_some_and(|session| {
+                        session != &DetailSession::Available(conversation.session.clone())
+                    })
+                {
+                    return Ok(());
+                }
+                self.sessions.insert(
+                    pane.into(),
+                    DetailSession::Available(conversation.session.clone()),
+                );
                 self.insert(conversation);
                 Ok(())
             }
@@ -60,24 +124,31 @@ impl Conversations {
 }
 
 /// Refresh only the transcript. Metadata and terminal reads have separate lifetimes.
-pub fn use_conversation(pane: String, refresh: Signal<u64>) -> Resource<Result<(), String>> {
+pub fn use_conversation(
+    pane: String,
+    refresh: Signal<u64>,
+    mut session: Signal<Option<DetailSession>>,
+) -> Resource<Result<(), String>> {
     let mut conversations = use_context::<Signal<Conversations>>();
     use_hook(|| {
-        conversations.write().access(&pane);
+        let mut cache = conversations.write();
+        cache.begin_request(&pane);
+        cache.sessions.remove(&pane);
+        cache.access(&pane);
     });
     use_resource(move || {
         let _ = refresh();
         let pane = pane.clone();
+        let generation = conversations.write().begin_request(&pane);
         async move {
             let result = crate::api::fetch_conversation(&pane).await;
-            // Do not subscribe this resource to the cache it updates.
-            if let Ok(Some(conversation)) = &result
-                && conversation.pane == pane
-                && conversations.peek().get(&pane) == Some(&conversation.turns)
-            {
-                return Ok(());
+            let accepted = conversations
+                .write()
+                .apply_response(&pane, generation, result)?;
+            if let Some(key) = accepted {
+                session.set(Some(DetailSession::Available(key)));
             }
-            conversations.write().apply(&pane, result)
+            Ok(())
         }
     })
 }
@@ -90,11 +161,63 @@ mod tests {
     fn snapshot(pane: &str, text: &str) -> Conversation {
         Conversation {
             pane: pane.to_owned(),
+            session: format!("{pane}-session"),
             turns: vec![Turn {
                 role: Role::Assistant,
                 text: text.to_owned(),
             }],
         }
+    }
+
+    #[test]
+    fn session_switch_discards_old_text_and_rejects_late_responses() -> Result<(), String> {
+        let mut cache = Conversations::default();
+        let old = snapshot("pane", "old reply");
+        cache.apply("pane", Ok(Some(old.clone())))?;
+        cache.select_session("pane", "new-session");
+        assert_eq!(cache.get("pane"), None);
+        cache.apply("pane", Ok(Some(old)))?;
+        assert_eq!(cache.get("pane"), None);
+        let mut new = snapshot("pane", "new reply");
+        new.session = "new-session".into();
+        cache.apply("pane", Ok(Some(new.clone())))?;
+        assert_eq!(cache.get("pane"), Some(&new.turns));
+        Ok(())
+    }
+
+    #[test]
+    fn polled_session_switch_accepts_current_response_and_rejects_late_response()
+    -> Result<(), String> {
+        let mut cache = Conversations::default();
+        let first = cache.begin_request("pane");
+        cache.apply_response("pane", first, Ok(Some(snapshot("pane", "old reply"))))?;
+        let old_request = cache.begin_request("pane");
+        let current_request = cache.begin_request("pane");
+        let mut new = snapshot("pane", "new reply");
+        new.session = "new-session".into();
+        cache.apply_response("pane", current_request, Ok(Some(new.clone())))?;
+        assert_eq!(
+            cache.apply_response(
+                "pane",
+                old_request,
+                Ok(Some(snapshot("pane", "late old reply")))
+            )?,
+            None
+        );
+        assert_eq!(cache.get_session("pane", "new-session"), Some(&new.turns));
+        assert_eq!(cache.get_session("pane", "pane-session"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_session_rejects_late_cached_content() -> Result<(), String> {
+        let mut cache = Conversations::default();
+        let old = snapshot("pane", "old reply");
+        cache.apply("pane", Ok(Some(old.clone())))?;
+        cache.unavailable("pane");
+        cache.apply("pane", Ok(Some(old)))?;
+        assert_eq!(cache.get("pane"), None);
+        Ok(())
     }
 
     #[test]
@@ -121,6 +244,7 @@ mod tests {
             "empty",
             Ok(Some(Conversation {
                 pane: "empty".to_owned(),
+                session: "empty-session".into(),
                 turns: Vec::new(),
             })),
         )?;

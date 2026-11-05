@@ -225,16 +225,30 @@ fn joined(parts: &[String]) -> Option<String> {
 /// [`CONVERSATION_TURNS`] text turns, or [`CONVERSATION_BYTES`] are read. Tool
 /// output can be megabytes after the last text turn, so a fixed tail window
 /// is not enough.
+#[cfg(test)]
 pub fn conversation(agent: &str, path: &str) -> Vec<Turn> {
+    try_conversation(agent, path).unwrap_or_default()
+}
+
+/// Detail publication preserves I/O failures instead of publishing empty success.
+pub(crate) fn try_conversation(agent: &str, path: &str) -> std::io::Result<Vec<Turn>> {
+    conversation_with_limit(agent, path, CONVERSATION_BYTES)
+}
+
+pub(crate) fn conversation_with_limit(
+    agent: &str,
+    path: &str,
+    limit: u64,
+) -> std::io::Result<Vec<Turn>> {
     let mut newest: Vec<(Option<String>, Turn)> = Vec::new();
-    lines_backwards(path, CONVERSATION_BYTES, CHUNK_BYTES, |line| {
+    lines_backwards(path, limit, CHUNK_BYTES, |line| {
         if let Ok(value) = serde_json::from_str::<Value>(line)
             && let Some(found) = turn(agent, &value)
         {
             newest.push(found);
         }
         newest.len() < CONVERSATION_TURNS
-    });
+    })?;
     // The read runs newest first, and a conversation reads oldest first.
     let mut turns: Vec<(Option<String>, Turn)> = Vec::new();
     for (id, turn) in newest.into_iter().rev() {
@@ -248,14 +262,14 @@ pub fn conversation(agent: &str, path: &str) -> Vec<Turn> {
         }
         turns.push((id, turn));
     }
-    turns.into_iter().map(|(_, turn)| turn).collect()
+    Ok(turns.into_iter().map(|(_, turn)| turn).collect())
 }
 
 /// The most text turns a conversation returns.
 const CONVERSATION_TURNS: usize = 200;
 
 /// The most transcript bytes a conversation reads.
-const CONVERSATION_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const CONVERSATION_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The size of one backward read.
 const CHUNK_BYTES: u64 = 1024 * 1024;
@@ -263,26 +277,24 @@ const CHUNK_BYTES: u64 = 1024 * 1024;
 /// Give the complete lines of `path` to `visit`, newest first, until `visit`
 /// returns `false` or `limit` bytes are read, `step` bytes at a time. A line
 /// cut by the limit is not given.
-fn lines_backwards(path: &str, limit: u64, step: u64, mut visit: impl FnMut(&str) -> bool) {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return;
-    };
-    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
-        return;
-    };
+fn lines_backwards(
+    path: &str,
+    limit: u64,
+    step: u64,
+    mut visit: impl FnMut(&str) -> bool,
+) -> std::io::Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
     let floor = len.saturating_sub(limit);
     let mut end = len;
     // The bytes after this chunk that belong to a line starting in it.
     let mut carry: Vec<u8> = Vec::new();
     while end > floor {
         let start = end.saturating_sub(step).max(floor);
-        let Ok(size) = usize::try_from(end - start) else {
-            return;
-        };
+        let size = usize::try_from(end - start).map_err(std::io::Error::other)?;
         let mut bytes = vec![0; size];
-        if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut bytes).is_err() {
-            return;
-        }
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut bytes)?;
         bytes.extend_from_slice(&carry);
         let chunk = bytes;
         // The first line is complete at the start of the file, or at the read
@@ -299,12 +311,13 @@ fn lines_backwards(path: &str, limit: u64, step: u64, mut visit: impl FnMut(&str
         };
         for line in lines.rsplit(|byte| *byte == b'\n') {
             if !line.is_empty() && !visit(&String::from_utf8_lossy(line)) {
-                return;
+                return Ok(());
             }
         }
         carry = head.to_vec();
         end = start;
     }
+    Ok(())
 }
 
 /// Whether the byte before `at` is a newline.
@@ -793,7 +806,8 @@ mod tests {
             lines_backwards(&path, u64::MAX, step, |line| {
                 seen.push(line.to_owned());
                 true
-            });
+            })
+            .expect("transcript read");
             assert_eq!(
                 seen,
                 ["third", "second much longer line", "first line"],
@@ -804,7 +818,8 @@ mod tests {
         lines_backwards(&path, 30, 7, |line| {
             seen.push(line.to_owned());
             true
-        });
+        })
+        .expect("transcript read");
         assert_eq!(
             seen,
             ["third", "second much longer line"],
@@ -814,8 +829,15 @@ mod tests {
         lines_backwards(&path, 20, 7, |line| {
             seen.push(line.to_owned());
             true
-        });
+        })
+        .expect("transcript read");
         assert_eq!(seen, ["third"], "a line cut by the limit is not given");
+    }
+
+    #[test]
+    fn backward_lines_report_an_unreadable_source() {
+        let directory = std::env::temp_dir();
+        assert!(lines_backwards(&directory.to_string_lossy(), 100, 10, |_| true).is_err());
     }
 
     #[test]

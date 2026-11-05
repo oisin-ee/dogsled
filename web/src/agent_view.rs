@@ -108,8 +108,9 @@ fn AgentSession(
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
     let mut questions = use_signal(|| None::<Vec<Pending>>);
     let mut selection = use_context::<Signal<Option<crate::app::InboxSelection>>>();
-    let conversations = use_context::<Signal<Conversations>>();
-    let mut screen = use_signal(|| None::<String>);
+    let mut conversations = use_context::<Signal<Conversations>>();
+    let mut detail_session = use_signal(|| None::<wire::DetailSession>);
+    let mut screen = use_signal(|| None::<wire::Screen>);
     let mut metadata_loading = use_signal(|| true);
     let mut reachable = use_signal(|| false);
     let mut metadata_error = use_signal(|| None::<String>);
@@ -133,7 +134,7 @@ fn AgentSession(
     let mut draft = try_use_context::<Draft>().map_or(local_draft, |draft| draft.0);
 
     // Transcript I/O must start and render without waiting for the full agent list.
-    let transcript = use_conversation(pane.clone(), refresh);
+    let transcript = use_conversation(pane.clone(), refresh, detail_session);
 
     let read_pane = pane.clone();
     use_resource(move || {
@@ -165,7 +166,17 @@ fn AgentSession(
         async move {
             // A failed or pending transcript must not hide the prompt needed to reply.
             let result = if blocked {
-                api::fetch_screen(&pane).await.map(|value| Some(value.text))
+                match api::fetch_screen(&pane).await {
+                    Ok(value)
+                        if detail_session.peek().as_ref().is_some_and(|session| {
+                            session != &wire::DetailSession::Available(value.session.clone())
+                        }) =>
+                    {
+                        return;
+                    }
+                    Ok(value) => Ok(Some(value)),
+                    Err(error) => Err(error),
+                }
             } else {
                 Ok(None)
             };
@@ -214,6 +225,18 @@ fn AgentSession(
         let pane = event_pane.clone();
         async move {
             let result = api::watch_agent(&pane, |event| {
+                if detail_session.peek().as_ref() != Some(&event.session) {
+                    match &event.session {
+                        wire::DetailSession::Available(session) => {
+                            conversations.write().select_session(&pane, session)
+                        }
+                        wire::DetailSession::Unavailable => {
+                            conversations.write().unavailable(&pane)
+                        }
+                    }
+                    screen.set(None);
+                    detail_session.set(Some(event.session.clone()));
+                }
                 if let Some(current) = agent.write().as_mut() {
                     if let Some(state) = event.state {
                         current.state = state;
@@ -292,7 +315,12 @@ fn AgentSession(
     };
     let mut interrupt = send_key.clone();
     let current = agent();
-    let retained = conversations.read().get(&pane).cloned();
+    let retained = match detail_session.read().as_ref() {
+        Some(wire::DetailSession::Available(session)) => {
+            conversations.read().get_session(&pane, session).cloned()
+        }
+        _ => None,
+    };
     let transcript_loading = retained.is_none() && transcript.read().is_none();
     let transcript_error = transcript
         .read()
@@ -450,7 +478,7 @@ fn AgentSession(
                             } }
                         },
                         Some(RequestTab::Prompt) => rsx! {
-                            BlockedPanel { prompt: current.as_ref().and_then(|agent| agent.blocked.clone()), screen: screen(),
+                            BlockedPanel { prompt: current.as_ref().and_then(|agent| agent.blocked.clone()), screen: screen().filter(|value| detail_session.peek().as_ref().is_none_or(|session| session == &wire::DetailSession::Available(value.session.clone()))).map(|value| value.text),
                                 disabled, on_key: send_key, draft, on_send: move |_| reply_send(true) }
                         },
                         _ => rsx! {},

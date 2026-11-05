@@ -30,6 +30,7 @@ enum Operation {
     Subscribe,
     Peer,
     Retry,
+    Detail,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,6 +42,8 @@ struct Request {
     peer: Option<super::peers::Request>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,8 +64,8 @@ struct FailureDetail {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum Reply {
-    Publication(Published),
+enum Reply<T> {
+    Publication(T),
     Failure(Failure),
 }
 
@@ -76,6 +79,7 @@ pub(crate) struct Server {
     path: PathBuf,
     state: PathBuf,
     interests: super::peers::Interests,
+    details: super::details::Interests,
     dirty: Option<crate::service::wake::Dirty>,
 }
 
@@ -98,6 +102,7 @@ impl Server {
             path: super::socket_path(state, SOCKET)?,
             state: state.to_owned(),
             interests: super::peers::Interests::default(),
+            details: super::details::Interests::default(),
             dirty: None,
         })
     }
@@ -109,6 +114,10 @@ impl Server {
     ) {
         self.interests = interests;
         self.dirty = Some(dirty);
+    }
+
+    pub fn details(&mut self, interests: super::details::Interests) {
+        self.details = interests;
     }
 
     pub fn bind(&mut self, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<()> {
@@ -150,8 +159,11 @@ impl Server {
         let (stop, stopped) = oneshot::channel();
         let interests = self.interests.clone();
         let dirty = self.dirty.clone();
+        let details = self.details.clone();
         let thread = std::thread::spawn(move || {
-            runtime.block_on(serve(listener, receiver, stopped, interests, dirty));
+            runtime.block_on(serve(
+                listener, receiver, stopped, interests, dirty, details,
+            ));
         });
         self.stop = Some(stop);
         self.thread = Some(thread);
@@ -179,6 +191,7 @@ async fn serve(
     mut stopped: oneshot::Receiver<()>,
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
+    details: super::details::Interests,
 ) {
     let mut clients = tokio::task::JoinSet::new();
     loop {
@@ -191,7 +204,8 @@ async fn serve(
                     let receiver = receiver.clone();
                     let interests = interests.clone();
                     let dirty = dirty.clone();
-                    clients.spawn(async move { let _ = connection(socket, receiver, interests, dirty).await; });
+                    let details = details.clone();
+                    clients.spawn(async move { let _ = connection(socket, receiver, interests, dirty, details).await; });
                 }
             }
         }
@@ -254,6 +268,7 @@ async fn connection(
     mut receiver: watch::Receiver<Option<Arc<Frame>>>,
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
+    details: super::details::Interests,
 ) -> Result<()> {
     let Ok(Ok(request)) = tokio::time::timeout(TIMEOUT, request(&socket)).await else {
         return failure(&socket, "invalid", "invalid observation request").await;
@@ -266,6 +281,17 @@ async fn connection(
         )
         .await;
     }
+    let _detail_interest = if matches!(request.operation, Operation::Detail) {
+        let Some(pane) = request.pane.as_deref() else {
+            return failure(&socket, "invalid", "missing detail pane").await;
+        };
+        match details.register(pane, dirty.clone()) {
+            Ok(interest) => Some(interest),
+            Err(_) => return failure(&socket, "invalid", "invalid detail pane").await,
+        }
+    } else {
+        None
+    };
     if matches!(request.operation, Operation::Retry) {
         if let Some(host) = request.host
             && let Some(dirty) = dirty.as_ref()
@@ -293,37 +319,9 @@ async fn connection(
         let Some(peer) = request.peer else {
             return failure(&socket, "invalid", "missing peer request").await;
         };
-        match interests.register(&peer.interests) {
-            Ok(true) => {
-                if let Some(dirty) = dirty {
-                    dirty.mark(crate::service::wake::BRANCHES);
-                }
-            }
-            Ok(false) => (),
-            Err(_) => return failure(&socket, "invalid", "invalid branch interests").await,
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let frame = receiver.borrow_and_update().clone();
-            let Some(frame) = frame else {
-                return failure(&socket, "unavailable", "observation unavailable").await;
-            };
-            if !peer.wait
-                || peer.epoch.as_ref() != Some(&frame.published.epoch)
-                || peer.local_revision != Some(frame.published.local_revision)
-                || tokio::time::Instant::now() >= deadline
-            {
-                let mut bytes = serde_json::to_vec(&super::peers::Export::of(&frame.published))?;
-                bytes.push(b'\n');
-                return write(&socket, &bytes).await;
-            }
-            match tokio::time::timeout_at(deadline, updated(&socket, &mut receiver)).await {
-                Ok(Ok(false)) => return Ok(()),
-                Ok(Err(error)) => return Err(error),
-                _ => (),
-            }
-        }
+        return peer_connection(&socket, &mut receiver, interests, dirty, peer).await;
     }
+    let mut sent_detail = None;
     loop {
         if receiver.has_changed().is_err() {
             return failure(&socket, "unavailable", "observation publisher disconnected").await;
@@ -331,6 +329,35 @@ async fn connection(
         // Release the watch borrow before writing: readers cannot delay publication.
         let frame = receiver.borrow_and_update().clone();
         match frame {
+            Some(frame) if matches!(request.operation, Operation::Detail) => {
+                let pane = request
+                    .pane
+                    .as_deref()
+                    .ok_or_else(|| Error::Invalid("missing detail pane".into()))?;
+                if let Some(payload) = frame.details.get(pane) {
+                    let identity = selected_agent(&frame.published, pane)?;
+                    let signature = (payload.reference.revision, identity.clone());
+                    if sent_detail.as_ref() != Some(&signature) {
+                        write_detail(&socket, &frame.published, identity, true, &payload.bytes)
+                            .await?;
+                        sent_detail = Some(signature);
+                    }
+                } else if frame
+                    .published
+                    .views
+                    .get("portal")
+                    .and_then(|view| view.pointer("/data/agents"))
+                    .is_some_and(serde_json::Value::is_array)
+                    && selected_agent(&frame.published, pane)?.is_none()
+                {
+                    let missing = serde_json::to_vec(&super::details::Detail::unavailable(
+                        None,
+                        "agent unavailable",
+                    ))?;
+                    write_detail(&socket, &frame.published, None, false, &missing).await?;
+                    return Ok(());
+                }
+            }
             Some(frame) => write(&socket, &frame.bytes).await?,
             None => return failure(&socket, "unavailable", "observation unavailable").await,
         }
@@ -340,6 +367,82 @@ async fn connection(
             return Ok(());
         }
     }
+}
+
+async fn peer_connection(
+    socket: &tokio::net::UnixStream,
+    receiver: &mut watch::Receiver<Option<Arc<Frame>>>,
+    interests: super::peers::Interests,
+    dirty: Option<crate::service::wake::Dirty>,
+    peer: super::peers::Request,
+) -> Result<()> {
+    match interests.register(&peer.interests) {
+        Ok(true) => {
+            if let Some(dirty) = dirty {
+                dirty.mark(crate::service::wake::BRANCHES);
+            }
+        }
+        Ok(false) => (),
+        Err(_) => return failure(socket, "invalid", "invalid branch interests").await,
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let frame = receiver.borrow_and_update().clone();
+        let Some(frame) = frame else {
+            return failure(socket, "unavailable", "observation unavailable").await;
+        };
+        if !peer.wait
+            || peer.epoch.as_ref() != Some(&frame.published.epoch)
+            || peer.local_revision != Some(frame.published.local_revision)
+            || tokio::time::Instant::now() >= deadline
+        {
+            let mut bytes = serde_json::to_vec(&super::peers::Export::of(&frame.published))?;
+            bytes.push(b'\n');
+            return write(socket, &bytes).await;
+        }
+        match tokio::time::timeout_at(deadline, updated(socket, receiver)).await {
+            Ok(Ok(false)) => return Ok(()),
+            Ok(Err(error)) => return Err(error),
+            _ => (),
+        }
+    }
+}
+
+fn selected_agent(
+    publication: &Published,
+    pane: &str,
+) -> Result<Option<portal_types::agents::AgentView>> {
+    let Some(agents) = publication
+        .views
+        .get("portal")
+        .and_then(|view| view.pointer("/data/agents"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(None);
+    };
+    agents
+        .iter()
+        .find(|agent| agent["pane"].as_str() == Some(pane))
+        .map(|agent| serde_json::from_value(agent.clone()).map_err(Into::into))
+        .transpose()
+}
+
+/// Serialize only the small envelope; the immutable content bytes are shared by viewers.
+async fn write_detail(
+    socket: &tokio::net::UnixStream,
+    publication: &Published,
+    agent: Option<portal_types::agents::AgentView>,
+    found: bool,
+    content: &[u8],
+) -> Result<()> {
+    let mut header = serde_json::to_vec(&serde_json::json!({
+        "version": VERSION, "epoch": publication.epoch, "revision": publication.revision, "found": found, "agent": agent
+    }))?;
+    header.pop();
+    header.extend_from_slice(b",\"detail\":");
+    write(socket, &header).await?;
+    write(socket, content).await?;
+    write(socket, b"}\n").await
 }
 
 /// Observe peer closure even when there are no new publications, releasing its client slot.
@@ -391,7 +494,7 @@ impl Client {
         })
     }
 
-    fn open(&self, operation: Operation) -> Result<UnixStream> {
+    fn open(&self, operation: Operation, pane: Option<&str>) -> Result<UnixStream> {
         let mut socket = self.connect()?;
         socket
             .set_write_timeout(Some(TIMEOUT))
@@ -406,6 +509,7 @@ impl Client {
                 operation,
                 peer: None,
                 host: None,
+                pane: pane.map(str::to_owned),
             },
         )?;
         socket
@@ -425,6 +529,7 @@ impl Client {
                 operation: Operation::Retry,
                 peer: None,
                 host: Some(host.into()),
+                pane: None,
             },
         )?;
         socket.write_all(b"\n")?;
@@ -452,6 +557,7 @@ impl Client {
                 operation: Operation::Peer,
                 peer: Some(request),
                 host: None,
+                pane: None,
             },
         )?;
         socket.write_all(b"\n")?;
@@ -468,13 +574,25 @@ impl Client {
     }
 
     pub fn current(&self) -> Result<Published> {
-        read(&mut BufReader::new(self.open(Operation::Current)?))
+        read(&mut BufReader::new(self.open(Operation::Current, None)?))
     }
 
     pub fn subscribe(&self) -> Result<Subscription> {
-        let socket = self.open(Operation::Subscribe)?;
+        self.subscription(Operation::Subscribe, None)
+    }
+
+    pub fn detail(&self, pane: &str) -> Result<Subscription<super::details::DetailFrame>> {
+        self.subscription(Operation::Detail, Some(pane))
+    }
+
+    fn subscription<T: Wire>(
+        &self,
+        operation: Operation,
+        pane: Option<&str>,
+    ) -> Result<Subscription<T>> {
+        let socket = self.open(operation, pane)?;
         let mut reader = BufReader::new(socket.try_clone()?);
-        let publication = Arc::new(read(&mut reader)?);
+        let publication = Arc::new(read_value::<T>(&mut reader)?);
         socket.set_read_timeout(None)?;
         let shared = Arc::new((
             Mutex::new(Connection {
@@ -500,24 +618,69 @@ fn unavailable(error: &std::io::Error) -> Error {
 }
 
 fn read(reader: &mut BufReader<UnixStream>) -> Result<Published> {
+    read_value(reader)
+}
+
+pub(crate) trait Wire:
+    serde::de::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static
+{
+    const MAX_BYTES: usize;
+    fn version(&self) -> u32;
+    fn epoch(&self) -> &str;
+    fn revision(&self) -> u64;
+    fn valid(&self) -> bool {
+        !self.epoch().is_empty() && self.revision() > 0
+    }
+}
+
+impl Wire for Published {
+    const MAX_BYTES: usize = MAX_FRAME_BYTES;
+    fn version(&self) -> u32 {
+        self.version
+    }
+    fn epoch(&self) -> &str {
+        &self.epoch
+    }
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+    fn valid(&self) -> bool {
+        !self.epoch.is_empty() && self.revision > 0 && self.local_revision > 0
+    }
+}
+
+impl Wire for super::details::DetailFrame {
+    const MAX_BYTES: usize = super::details::CODEC.wire_limit();
+    fn version(&self) -> u32 {
+        self.version
+    }
+    fn epoch(&self) -> &str {
+        &self.epoch
+    }
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+fn read_value<T: Wire>(reader: &mut BufReader<UnixStream>) -> Result<T> {
     let mut bytes = Vec::new();
     reader
-        .take(MAX_FRAME_BYTES as u64 + 1)
+        .take(T::MAX_BYTES as u64 + 1)
         .read_until(b'\n', &mut bytes)
         .map_err(|error| unavailable(&error))?;
-    if bytes.is_empty() || bytes.last() != Some(&b'\n') || bytes.len() > MAX_FRAME_BYTES {
+    if bytes.is_empty() || bytes.last() != Some(&b'\n') || bytes.len() > T::MAX_BYTES {
         return Err(Error::Invalid(
             "observation unavailable: closed or oversized frame".into(),
         ));
     }
-    match serde_json::from_slice::<Reply>(&bytes)? {
+    match super::details::Codec::decode::<Reply<T>>(&bytes, T::MAX_BYTES)? {
         Reply::Publication(value) => {
-            if value.version != VERSION {
+            if value.version() != VERSION {
                 return Err(Error::Invalid(
                     "unsupported observation protocol version".into(),
                 ));
             }
-            if value.epoch.is_empty() || value.revision == 0 || value.local_revision == 0 {
+            if !value.valid() {
                 return Err(Error::Invalid("invalid observation revision".into()));
             }
             Ok(value)
@@ -537,24 +700,24 @@ pub(crate) enum Status {
 
 /// A retained publication is not current after its publisher disconnects.
 #[derive(Debug, Clone)]
-pub(crate) struct Connection {
-    pub publication: Arc<Published>,
+pub(crate) struct Connection<T = Published> {
+    pub publication: Arc<T>,
     pub status: Status,
     generation: u64,
 }
 
-type Shared = Arc<(Mutex<Connection>, Condvar)>;
+type Shared<T> = Arc<(Mutex<Connection<T>>, Condvar)>;
 
 #[derive(Debug)]
-pub(crate) struct Subscription {
+pub(crate) struct Subscription<T = Published> {
     socket: UnixStream,
-    shared: Shared,
+    shared: Shared<T>,
     thread: Option<JoinHandle<()>>,
     seen: u64,
 }
 
-impl Subscription {
-    pub fn current(&self) -> Connection {
+impl<T: Wire> Subscription<T> {
+    pub fn current(&self) -> Connection<T> {
         self.shared
             .0
             .lock()
@@ -563,7 +726,7 @@ impl Subscription {
     }
 
     /// Wait for replacement or disconnect. Timeout returns the retained connection state.
-    pub fn changed(&mut self, timeout: Duration) -> Connection {
+    pub fn changed(&mut self, timeout: Duration) -> Connection<T> {
         let (mutex, changed) = &*self.shared;
         let state = mutex
             .lock()
@@ -578,7 +741,7 @@ impl Subscription {
     }
 }
 
-impl Drop for Subscription {
+impl<T> Drop for Subscription<T> {
     fn drop(&mut self) {
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
         if let Some(thread) = self.thread.take() {
@@ -587,16 +750,16 @@ impl Drop for Subscription {
     }
 }
 
-fn receive(reader: &mut BufReader<UnixStream>, shared: &Shared) {
+fn receive<T: Wire>(reader: &mut BufReader<UnixStream>, shared: &Shared<T>) {
     loop {
-        let result = read(reader);
+        let result = read_value::<T>(reader);
         let mut state = shared
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = result.and_then(|value| {
-            if value.epoch != state.publication.epoch
-                || value.revision <= state.publication.revision
+            if value.epoch() != state.publication.epoch()
+                || value.revision() <= state.publication.revision()
             {
                 Err(Error::Invalid(
                     "observation publication is out of order".into(),

@@ -1,8 +1,7 @@
 //! The agent view of the portal: the list of agents, one agent's conversation
 //! and screen, and the calls that act on an agent.
 //!
-//! The agent list comes from serve's publication. Agent detail and explicit
-//! actions continue to use Herdr's socket API.
+//! Agent reads come from serve's publication. Only explicit actions use Herdr.
 //!
 //! Keys are a whitelist. The portal may answer a prompt with the keys Herdr
 //! accepts, and nothing else. A key outside the list is refused, so a request
@@ -14,14 +13,17 @@ use axum::response::sse::KeepAlive;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use portal_types::agents::{
-    AgentEvent, AgentView, Conversation, KeysBody, PromptBody, Screen, Turn,
-};
+use portal_types::agents::{AgentEvent, AgentView, KeysBody, PromptBody};
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
-use crate::herdr_socket::{Client, Next};
+use crate::herdr_socket::Client;
+use crate::observation::{
+    details::{Content, Detail, DetailFrame},
+    ipc,
+};
 use crate::web::AppState;
+use std::time::{Duration, Instant};
 
 /// The keys the portal may send. Every key is a single key press, so a
 /// request cannot carry a command.
@@ -110,42 +112,93 @@ fn view_of(
     }
 }
 
-/// One agent's turns, read from its transcript.
+/// One agent's turns, captured by serve for this connection's interest.
 async fn conversation(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
-    let Some(socket) = socket(&state) else {
-        return no_socket();
-    };
-    let Some(agent) = agent_of(socket, &pane) else {
-        return not_found(&pane);
-    };
-    let harness = agent["agent"].as_str().unwrap_or_default();
-    let transcript = agent["agent_session"]["value"].as_str().unwrap_or_default();
-    let turns = match crate::transcript::resolve(Some(harness), kind_of(&agent), transcript) {
-        Some(path) => crate::activity::conversation(harness, &path)
-            .into_iter()
-            .map(|turn| Turn {
-                role: turn.role,
-                text: turn.text,
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    json_response(Json(Conversation { pane, turns }))
+    detail_response(
+        state,
+        pane,
+        |detail| matches!(detail.conversation, Content::Pending),
+        |detail| &detail.conversation,
+    )
+    .await
 }
 
-/// The text on an agent's terminal.
+/// The last published screen, including its native revision.
 async fn screen(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
-    let Some(socket) = socket(&state) else {
-        return no_socket();
-    };
-    match socket.pane_read(&pane, "visible", Some(SCREEN_LINES)) {
-        Ok(read) => json_response(Json(Screen {
-            pane,
-            text: read["text"].as_str().unwrap_or_default().to_owned(),
-            revision: read["revision"].as_u64().unwrap_or_default(),
-        })),
-        Err(error) => error_response(&error),
+    detail_response(
+        state,
+        pane,
+        |detail| matches!(detail.screen, Content::Pending),
+        |detail| &detail.screen,
+    )
+    .await
+}
+
+async fn detail_response<T: serde::Serialize + Send + 'static>(
+    state: AppState,
+    pane: String,
+    pending: fn(&Detail) -> bool,
+    select: fn(&Detail) -> &Content<T>,
+) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let mut subscription = ipc::Client::at(&state.web.dir).detail(&pane)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let connection = subscription.current();
+            if !connection.publication.found {
+                return Ok(not_found(&pane));
+            }
+            if let ipc::Status::Disconnected(error) = connection.status {
+                return Err(crate::error::Error::Invalid(error));
+            }
+            let detail = &connection.publication.detail;
+            if !pending(detail) {
+                let response = match select(detail) {
+                    Content::Available(content) => Json(content).into_response(),
+                    Content::Unavailable(error) => crate::web::observation_error(error),
+                    Content::Failed(error) => {
+                        (StatusCode::BAD_GATEWAY, Json(json!({"error":error}))).into_response()
+                    }
+                    Content::Pending => {
+                        return Err(crate::error::Error::Invalid("agent detail pending".into()));
+                    }
+                };
+                return Ok(stamped(response, &connection.publication));
+            }
+            if state.stop.is_cancelled() || Instant::now() >= deadline {
+                return Err(crate::error::Error::Invalid(
+                    "agent detail unavailable".into(),
+                ));
+            }
+            subscription.changed(Duration::from_millis(100));
+        }
+    })
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => crate::web::observation_error(&error.to_string()),
+        Err(error) => crate::web::observation_error(&error.to_string()),
     }
+}
+
+fn stamped(mut response: Response, publication: &DetailFrame) -> Response {
+    for (name, value) in [
+        ("x-observation-epoch", publication.epoch.clone()),
+        ("x-observation-revision", publication.revision.to_string()),
+        ("cache-control", "no-store".into()),
+    ] {
+        match value.parse() {
+            Ok(value) => {
+                response.headers_mut().insert(name, value);
+            }
+            Err(error) => {
+                return crate::web::observation_error(&format!(
+                    "invalid observation stamp: {error}"
+                ));
+            }
+        }
+    }
+    response
 }
 
 /// Send a prompt to an agent.
@@ -210,76 +263,77 @@ async fn focus(State(state): State<AppState>, Path(pane): Path<String>) -> Respo
     }
 }
 
-/// The agent's events, pushed as Herdr reports them.
+/// Forward serve-owned detail changes. The observation connection owns the interest.
 async fn events(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
-    let Some(socket) = socket(&state) else {
-        return no_socket();
+    let client = ipc::Client::at(&state.web.dir);
+    let selected = pane.clone();
+    let mut subscription = match tokio::task::spawn_blocking(move || client.detail(&selected)).await
+    {
+        Ok(Ok(subscription)) => subscription,
+        Ok(Err(error)) => return crate::web::observation_error(&error.to_string()),
+        Err(error) => return crate::web::observation_error(&error.to_string()),
     };
-    let mut subscription = match socket.subscribe(&[json!({
-        "type": "pane.agent_status_changed",
-        "pane_id": pane,
-    })]) {
-        Ok(subscription) => subscription,
-        Err(error) => return error_response(&error),
-    };
-    // The subscription blocks, so a task reads it and hands the events over.
-    let (sender, receiver) = tokio::sync::mpsc::channel::<String>(16);
+    let (sender, receiver) = tokio::sync::watch::channel(None::<String>);
     let stop = state.stop.clone();
     tokio::task::spawn_blocking(move || {
-        while !stop.is_cancelled() && !sender.is_closed() {
-            match subscription.next() {
-                Ok(Next::Event(event)) => {
-                    let payload = agent_event(&pane, &event);
-                    if sender.blocking_send(payload).is_err() {
-                        break;
+        let mut previous = None;
+        loop {
+            if stop.is_cancelled() || sender.is_closed() {
+                break;
+            }
+            let connection = subscription.current();
+            if let ipc::Status::Disconnected(error) = connection.status {
+                sender.send_replace(Some(json!({"error": error}).to_string()));
+                break;
+            }
+            let result = agent_event(&connection.publication, &pane)
+                .map(|payload| (payload, connection.publication.revision));
+            match result {
+                Ok((payload, detail)) => {
+                    let signature = (payload.clone(), detail);
+                    if previous.as_ref() != Some(&signature) {
+                        sender.send_replace(Some(payload));
+                        previous = Some(signature);
                     }
                 }
-                // No event arrived before the poll ended. The connection stays
-                // open: the browser waits for the next one.
-                Ok(Next::Idle) => {}
-                // Herdr closed the subscription. The stream ends.
-                Ok(Next::Closed) => break,
                 Err(error) => {
-                    let payload = serde_json::to_string(&json!({"error": error.to_string()}))
-                        .unwrap_or_else(|_| "{}".to_owned());
-                    let _ = sender.blocking_send(payload);
+                    sender.send_replace(Some(json!({"error": error.to_string()}).to_string()));
                     break;
                 }
             }
+            subscription.changed(Duration::from_millis(100));
         }
     });
-    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver)
-        .map(|payload| Ok::<_, std::convert::Infallible>(sse_event("agent", payload)));
+    let stream = tokio_stream::wrappers::WatchStream::new(receiver).filter_map(|payload| {
+        payload.map(|payload| {
+            Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default()
+                    .event("agent")
+                    .data(payload),
+            )
+        })
+    });
     axum::response::sse::Sse::new(state.until_shutdown(stream))
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
 }
 
-/// One SSE event with a name and a JSON body.
-fn sse_event(name: &str, data: String) -> axum::response::sse::Event {
-    axum::response::sse::Event::default().event(name).data(data)
-}
-
-/// The event the portal pushes for one Herdr event.
-fn agent_event(pane: &str, event: &Value) -> String {
-    let kind = event["event"].as_str().unwrap_or_default().to_owned();
-    let state = event["data"]["agent_status"].as_str().map(str::to_owned);
-    let payload = AgentEvent {
-        kind,
-        pane: pane.to_owned(),
-        state,
-        blocked: None,
-    };
-    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned())
-}
-
-/// The agent Herdr sees in `pane`, if it sees one.
-fn agent_of(socket: &Client, pane: &str) -> Option<Value> {
-    socket
-        .agent_list()
-        .ok()?
-        .into_iter()
-        .find(|agent| agent["pane_id"].as_str() == Some(pane))
+fn agent_event(publication: &DetailFrame, pane: &str) -> crate::error::Result<String> {
+    let agent = publication.agent.as_ref();
+    Ok(serde_json::to_string(&AgentEvent {
+        kind: "pane.agent_status_changed".into(),
+        pane: pane.into(),
+        state: Some(agent.map_or_else(
+            || publication.detail.state.clone(),
+            |agent| agent.state.clone(),
+        )),
+        blocked: agent.and_then(|agent| agent.blocked.clone()),
+        session: if publication.detail.session.is_some() {
+            portal_types::agents::DetailSession::Available(publication.detail.key()?)
+        } else {
+            portal_types::agents::DetailSession::Unavailable
+        },
+    })?)
 }
 
 #[derive(Debug, Default)]
@@ -315,7 +369,7 @@ pub(crate) fn capture(
     capture_with(agents, titles, socket.as_ref())
 }
 
-fn capture_with(
+pub(crate) fn capture_with(
     agents: &[crate::probe::Agent],
     titles: &mut Titles,
     socket: Option<&Client>,
@@ -352,11 +406,6 @@ fn kind_of(agent: &Value) -> &str {
     agent["agent_session"]["kind"].as_str().unwrap_or("path")
 }
 
-/// A JSON body, as the API serves it.
-fn json_response<T: serde::Serialize>(body: Json<T>) -> Response {
-    body.into_response()
-}
-
 /// The agent is not there.
 fn not_found(pane: &str) -> Response {
     (
@@ -387,6 +436,18 @@ fn error_response(error: &crate::error::Error) -> Response {
         Json(json!({"error": error.to_string()})),
     )
         .into_response()
+}
+
+#[cfg(test)]
+pub(crate) async fn test_request(
+    state: AppState,
+    request: axum::http::Request<axum::body::Body>,
+) -> Response {
+    use tower::ServiceExt as _;
+    crate::web::router(state)
+        .oneshot(request)
+        .await
+        .expect("portal route")
 }
 
 #[cfg(test)]
@@ -516,39 +577,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_closes_an_idle_agent_subscription() {
-        use std::io::{BufRead as _, Read as _, Write as _};
-        use std::os::unix::net::UnixListener;
-        use std::time::Duration;
-
-        let path = std::env::temp_dir().join(format!("hs-stop-{}.sock", crate::ledger::new_id()));
-        let listener = UnixListener::bind(&path).expect("fake Herdr socket");
-        let peer = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("subscription connects");
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .expect("read timeout");
-            let mut line = String::new();
-            std::io::BufReader::new(&socket)
-                .read_line(&mut line)
-                .expect("subscription request");
-            let request: serde_json::Value = serde_json::from_str(&line).expect("request JSON");
-            assert_eq!(request["method"], "events.subscribe");
-            writeln!(
-                socket,
-                "{}",
-                json!({"id": request["id"], "result": {"type": "subscription_started"}})
-            )
-            .expect("subscription acknowledgement");
-            // No events arrive. Only dropping the subscription can wake its reader.
-            let mut buffer = [0; 1];
-            loop {
-                match socket.read(&mut buffer) {
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    result => break result.expect("read until the subscription closes"),
-                }
-            }
-        });
-        let state = state(Some(Client::at(&path)));
+        let server = agent_server();
+        let state = with_socket(&server);
+        let fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
             state.clone(),
             request(Method::GET, "/api/agents/w1:p1/events", None),
@@ -563,8 +595,12 @@ mod tests {
         .await
         .expect("agent SSE stops")
         .expect("the body");
-        assert_eq!(peer.join().expect("fake Herdr finishes"), 0);
-        std::fs::remove_file(path).expect("remove socket");
+        fixture.wait(|frame| {
+            frame.views["agent_details"]["data"]
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+        });
+        assert!(fixture.no_viewers());
     }
 
     /// A fake Herdr that answers the agent calls.
@@ -663,8 +699,11 @@ mod tests {
     #[tokio::test]
     async fn the_screen_of_an_agent_is_served() {
         let server = agent_server();
+        let state = with_socket(&server);
+        let _fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
-            with_socket(&server),
+            state,
             request(Method::GET, "/api/agents/w1:p1/screen", None),
         )
         .await;
@@ -678,8 +717,11 @@ mod tests {
     #[tokio::test]
     async fn the_conversation_of_an_unknown_agent_is_not_found() {
         let server = agent_server();
+        let state = with_socket(&server);
+        let _fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
-            with_socket(&server),
+            state,
             request(Method::GET, "/api/agents/w9:p9/conversation", None),
         )
         .await;
@@ -708,10 +750,14 @@ mod tests {
                     "agent_session": {"kind": "path", "value": path}
                 }
             ]}}),
+            "pane.read" => json!({"result":{"type":"pane_read","read":{"text":"","revision":0}}}),
             other => panic!("unexpected method {other}"),
         });
+        let state = with_socket(&server);
+        let _fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
-            with_socket(&server),
+            state,
             request(Method::GET, "/api/agents/w1:p1/conversation", None),
         )
         .await;
@@ -848,13 +894,13 @@ mod tests {
 
     #[tokio::test]
     async fn the_agent_events_are_pushed_as_they_arrive() {
-        let server = fake::EventServer::start(vec![
-            r#"{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","agent_status":"blocked"}}"#
-                .to_owned(),
-        ]);
+        let server = agent_server();
+        let state = with_socket(&server);
+        let _fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let response = call(
-            state(Some(server.client())),
-            request(Method::GET, "/api/agents/w1:p1/events", None),
+            state.clone(),
+            request(Method::GET, "/api/agents/w2:p1/events", None),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -865,13 +911,20 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/event-stream")
         );
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("the body");
-        let text = String::from_utf8_lossy(&body);
+        let mut stream = response.into_body().into_data_stream();
+        let mut text = String::new();
+        while !text.contains("\"state\":\"blocked\"") {
+            let bytes = tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .expect("published agent event")
+                .expect("stream open")
+                .expect("body data");
+            text.push_str(&String::from_utf8_lossy(&bytes));
+        }
         assert!(text.contains("event: agent"), "the event name: {text}");
         assert!(text.contains("\"kind\":\"pane.agent_status_changed\""));
         assert!(text.contains("\"state\":\"blocked\""));
+        state.stop.cancel();
     }
 
     #[tokio::test]
