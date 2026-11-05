@@ -655,11 +655,21 @@ impl Rig {
     }
 
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("dogsled-cli-{}-{name}", std::process::id()));
+        // A rig's sockets live in it, and Darwin limits a socket path to 104 bytes, which a
+        // macOS `$TMPDIR` alone nearly fills. `/tmp` keeps every rig socket short.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name: String = name.chars().take(16).collect();
+        let dir = PathBuf::from("/tmp").join(format!(
+            "dc-{}-{}-{name}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = fs::remove_dir_all(&dir);
         for child in ["bin", "state", "home"] {
             fs::create_dir_all(dir.join(child)).unwrap();
         }
+        let dir = dir.canonicalize().unwrap();
         let rig = Self {
             dir,
             service: std::sync::Mutex::new(None),

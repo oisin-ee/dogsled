@@ -114,7 +114,8 @@ function rig() {
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
 	/** Resolves once `check` holds after a widget or notice; frames arrive from another process. */
 	const until = (check: () => boolean) => new Promise<void>(resolve => {
-		const poll = () => { if (check()) resolve(); else drawn = poll; };
+		// A resolved check stops polling, so a later redraw never reruns it.
+		const poll = () => { if (check()) { drawn = () => {}; resolve(); } else drawn = poll; };
 		poll();
 	});
 	const frame = (line: unknown) => appendFileSync(frames, `${JSON.stringify(line)}\n`);
@@ -124,7 +125,9 @@ function rig() {
 		/** Make the next subscriptions end after the frames so far, as a stopped serve does. */
 		publisherStops: (stopped: boolean) => { if (stopped) writeFileSync(`${frames}.exit`, ""); else rmSync(`${frames}.exit`, { force: true }); },
 		unavailable: (error: string) => frame({ revision: ++revision, error }),
-		showsBoard: () => typeof widgets.at(-1)?.[1] === "function",
+		/** The newest dogsled widget call; other extensions' widgets are not this one. */
+		last: () => widgets.filter(widget => widget[0] === "dogsled").at(-1),
+		showsBoard: () => typeof widgets.filter(widget => widget[0] === "dogsled").at(-1)?.[1] === "function",
 		widget() { return components.get("dogsled"); },
 		gate: (text: string) => { gate = text; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => frame({ revision: ++revision, board: value, history: { jobs: [], hosts: [] } }), opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
@@ -342,11 +345,11 @@ test("the board widget follows one publication subscription and stops at shutdow
 	await r.invoke("session_start");
 	// Claims first, so this pane is a registered reader before anyone sends to it.
 	assert.deepEqual(r.calls[0]?.slice(1, 3), ["inbox", "claim"]);
-	assert.deepEqual(r.widgets.at(-1), ["dogsled", undefined]);
+	assert.deepEqual(r.last(), ["dogsled", undefined]);
 	r.board({ hosts: [{ label: "local", service: "up", reachable: true, busy: 1, cores: 8, eligible: true }],
 		rows: [{ group: "running", kind: "job", id: "j1", name: "cargo test", what: "job", host: "local", state: "running", activity: "cargo test", age_ms: 60_000 }] });
 	await r.until(r.showsBoard);
-	const [key, , options] = r.widgets.at(-1);
+	const [key, , options] = r.last();
 	assert.deepEqual([key, options], ["dogsled", { placement: "aboveEditor" }]);
 	const lines: string[] = r.widget().render(80);
 	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)), [["dogsled", "1 working", "local ▰▱▱▱ 1/8"], ["WORKING"], ["▸ cargo test", "job", "local", "cargo test", "1m"]]);
@@ -362,7 +365,7 @@ test("the board widget follows one publication subscription and stops at shutdow
 	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
 	assert.equal(r.calls.length, after);
-	assert.deepEqual(r.widgets.at(-1), ["dogsled", undefined]);
+	assert.deepEqual(r.last(), ["dogsled", undefined]);
 	assert.equal(r.subscriptions().length, 1);
 });
 
@@ -408,10 +411,10 @@ test("the board widget steps aside while /dogsled is open, so no row shows twice
 	await r.invoke("session_start");
 	await r.until(r.showsBoard);
 	let during: unknown;
-	const ctx = { ...r.ctx, ui: { ...r.ctx.ui, custom: async () => { during = r.widgets.at(-1)[1]; return undefined; } } };
+	const ctx = { ...r.ctx, ui: { ...r.ctx.ui, custom: async () => { during = r.last()[1]; return undefined; } } };
 	await r.commands.get("dogsled").handler("", ctx);
 	assert.equal(during, undefined);
-	assert.equal(typeof r.widgets.at(-1)[1], "function");
+	assert.equal(typeof r.last()[1], "function");
 	await r.invoke("session_shutdown");
 });
 
@@ -431,15 +434,16 @@ test("Alt+W and /work expand the same above-editor widget without an overlay or 
 		setEditorText: () => assert.fail("draft must remain untouched"),
 	} };
 	await r.shortcuts.get("alt+w").handler(ctx);
-	assert.deepEqual(r.widgets.at(-1)[2], { placement: "aboveEditor" });
+	assert.deepEqual(r.last()[2], { placement: "aboveEditor" });
 	const panel = r.widget();
 	assert.ok(panel.render(100).length > compact.length);
 	assert.match(panel.render(100).join("\n"), /tests/);
 	await r.commands.get("work").handler("", ctx);
 	assert.deepEqual(r.widget().render(100), compact);
-	const drawn = r.next();
+	// A refresh tick while subscribed draws nothing; the next frame is the next redraw.
 	t.mock.timers.tick(10_000);
-	await drawn;
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j2", name: "lints", what: "job", host: "local", state: "running", activity: "lints", age_ms: 0 }] });
+	await r.until(() => r.widget().render(100).join("\n").includes("lints"));
 	assert.equal(historyReads(), 0);
 	await r.invoke("session_shutdown");
 });
@@ -457,7 +461,7 @@ test("work navigation uses modified keys and resets on session replacement", asy
 	const work = [...r.shortcuts.keys()].filter(key => key !== "ctrl+alt+p");
 	assert.ok(work.length > 0 && work.every(key => key.startsWith("alt+")), work.join(" "));
 	await r.invoke("session_start");
-	assert.equal(r.widgets.at(-1)[1], undefined);
+	assert.equal(r.last()[1], undefined);
 	await r.invoke("session_shutdown");
 });
 
@@ -471,14 +475,14 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	await r.until(r.showsBoard);
 	let confirmed!: () => void;
 	const finished = new Promise<void>(resolve => { confirmed = resolve; });
-	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
-		confirm: async (_title: string, _body: string, options: { signal: AbortSignal }) => {
-			signal = options.signal;
-			await r.invoke("session_shutdown");
-			confirmed();
-			return true;
-		},
-	} };
+	// The work panel confirms through the session's UI, the one UI a Pi session has.
+	const ctx = r.ctx as typeof r.ctx & { ui: { confirm?: unknown } };
+	ctx.ui.confirm = async (_title: string, _body: string, options: { signal: AbortSignal }) => {
+		signal = options.signal;
+		await r.invoke("session_shutdown");
+		confirmed();
+		return true;
+	};
 	await r.commands.get("work").handler("", ctx);
 	r.widget().render(100);
 	await r.shortcuts.get("alt+s").handler(ctx);
