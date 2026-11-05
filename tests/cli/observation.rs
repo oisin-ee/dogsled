@@ -220,7 +220,9 @@ pub(super) fn publication(revision: u64) -> Value {
         "local":{"host":host,"todos":["not-the-todos-view"],"status":{"items":["not-the-status-view"]}},
         "views":{"status":view(status),"status_display":view(display(vec![host_display(&format!("published-{revision}"), "0/8", "eligible", Some(1), "service: up")])), "board":view(board.clone()),"boards":view(json!({"w1:p1":board.clone()})),"empty_board":view(board),
             "todos":view(todos),"inventory":view(inventory.clone()),"inventories":view(json!({"w1:p1":inventory})),"empty_inventory":view(json!({"items":[],"queue":[]})),
-            "jobs":view(json!([job.clone()])),"active_jobs":view(json!([job]))},"gaps":[]})
+            "jobs":view(json!([job.clone()])),"active_jobs":view(json!([job.clone()])),
+            "job_history":view(json!({"w1:p1":{"jobs":[job],"hosts":[{"id":"foreign","label":format!("published-{revision}")}]}})),
+            "empty_job_history":view(json!({"jobs":[],"hosts":[]}))},"gaps":[]})
 }
 
 mod readers {
@@ -474,6 +476,68 @@ mod readers {
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("capture refused"));
         assert!(String::from_utf8_lossy(&out.stdout).contains("observation unavailable"));
+    }
+
+    /// Pi's one subscription: each revision carries the owner's board and job history together,
+    /// an unpublished domain is an explicit frame, and a stopped publisher ends the watch.
+    #[test]
+    fn board_watch_streams_the_owners_board_and_history_per_revision() {
+        let rig = Rig::short("readers-board-watch");
+        let server = Supplied::start(&rig, publication(1));
+        let _locks = isolate(&rig);
+        // A watch is one owner's subscription, never the whole fleet's board.
+        let all = rig.run(&["board", "--watch", "--all"]);
+        assert!(!all.status.success());
+        assert!(String::from_utf8_lossy(&all.stderr).contains("cannot be used with"));
+        let mut command = rig.cmd(&["board", "--watch", "--json", "--owner", "w1:p1"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = Owned::spawn(&mut command);
+        let stdout = child.child_mut().stdout.take().unwrap();
+        let (send, lines) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if send.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let next = || -> Value {
+            serde_json::from_str(&lines.recv_timeout(PROCESS_DEADLINE).unwrap()).unwrap()
+        };
+        server.requested("subscribe");
+        for revision in [1, 2] {
+            if revision == 2 {
+                server.replace(publication(2));
+            }
+            let frame = publication(revision);
+            assert_eq!(
+                next(),
+                json!({
+                    "revision": revision,
+                    "board": frame["views"]["boards"]["data"]["w1:p1"],
+                    "history": frame["views"]["job_history"]["data"]["w1:p1"],
+                })
+            );
+        }
+        let mut missing = publication(3);
+        missing["views"]["job_history"]["data"] = Value::Null;
+        missing["views"]["job_history"]["gaps"] =
+            json!([{"domain":"status","availability":"failed","detail":"capture refused"}]);
+        server.replace(missing);
+        let unpublished = next();
+        assert_eq!(unpublished["revision"], 3);
+        assert!(unpublished["board"].is_null(), "{unpublished}");
+        assert!(
+            unpublished["error"]
+                .as_str()
+                .unwrap()
+                .contains("observation unavailable"),
+            "{unpublished}"
+        );
+        drop(server);
+        assert!(!child.wait().success());
+        reader.join().unwrap();
+        assert_eq!(rig.log("reader-access.log"), "");
     }
 
     #[test]

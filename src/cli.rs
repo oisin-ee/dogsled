@@ -79,6 +79,9 @@ pub enum Command {
         /// Close this tab's docked board, or open it when there is none.
         #[arg(long, conflicts_with_all = ["all"])]
         toggle: bool,
+        /// Print the board and the owner's job history again for each replacement publication.
+        #[arg(long, conflicts_with_all = ["all", "open", "toggle"])]
+        watch: bool,
     },
     /// Publish one pane's todo snapshot from stdin, or withdraw it.
     #[command(hide = true)]

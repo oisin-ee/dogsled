@@ -6,20 +6,32 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
 
-// Todo publication uses stdin through the real process API, not ExtensionAPI.exec.
+// Todo publication uses stdin through the real process API, not ExtensionAPI.exec. The board
+// subscription is a real process too: it follows the rig's frames file, as serve's stream would.
 const publicationDirectory = mkdtempSync(join(tmpdir(), "dogsled-publisher-"));
 const previousBinary = process.env["DOGSLED_BIN"];
+const previousFrames = process.env["DOGSLED_FRAMES"];
 const publicationBinary = join(publicationDirectory, "dogsled");
-writeFileSync(publicationBinary, "#!/bin/sh\ncat >/dev/null\n", { mode: 0o700 });
+writeFileSync(publicationBinary, `#!/bin/sh
+if [ "$1" = board ] && [ "$2" = --watch ]; then
+  printf '%s\\n' "$*" >> "$DOGSLED_FRAMES.log"
+  if [ -e "$DOGSLED_FRAMES.exit" ]; then cat "$DOGSLED_FRAMES"; echo "observation unavailable: publisher stopped" >&2; exit 3; fi
+  exec tail -n +1 -f "$DOGSLED_FRAMES"
+fi
+cat >/dev/null
+`, { mode: 0o700 });
 process.env["DOGSLED_BIN"] = publicationBinary;
 after(() => {
 	if (previousBinary === undefined) delete process.env["DOGSLED_BIN"];
 	else process.env["DOGSLED_BIN"] = previousBinary;
+	if (previousFrames === undefined) delete process.env["DOGSLED_FRAMES"];
+	else process.env["DOGSLED_FRAMES"] = previousFrames;
 	rmSync(publicationDirectory, { recursive: true, force: true });
 });
+let rigs = 0;
 
 type Handler = (event: any, ctx: any) => Promise<any> | void;
 const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
@@ -43,7 +55,10 @@ function rig() {
 	let context = "local 3/8\n";
 	let gate = "";
 	let missing = false;
-	let board: unknown = { hosts: [], rows: [] };
+	const frames = join(publicationDirectory, `frames-${rigs++}`);
+	writeFileSync(frames, "");
+	process.env["DOGSLED_FRAMES"] = frames;
+	let revision = 0;
 	let opened: unknown = { pane_id: "w1:p2", terminal_id: "term-board" };
 	let version = `dogsled ${VERSION}\n`;
 	const events = new EventEmitter();
@@ -73,7 +88,6 @@ function rig() {
 			if (args[0] === "hook") assert.equal(options?.timeout, 6_000);
 			const stdout = args[0] === "hook" ? (args[1] === "gate" ? gate : context)
 				: args[0] === "board" && args.includes("--open") ? JSON.stringify(opened)
-				: args[0] === "board" ? JSON.stringify(board)
 				: args[1] === "claim" ? "[]"
 				: args[1] === "path" ? JSON.stringify({ dir: "/nonexistent-dogsled-inbox", file: "t.json" })
 				: args[0] === "unit" && ["prepared", "settlements"].includes(args[1] ?? "") ? "[]"
@@ -98,10 +112,22 @@ function rig() {
 		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
 	const next = () => new Promise<void>(resolve => { drawn = resolve; });
-	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, receipts, userMessages, active: () => [...active], ctx, next,
+	/** Resolves once `check` holds after a widget or notice; frames arrive from another process. */
+	const until = (check: () => boolean) => new Promise<void>(resolve => {
+		const poll = () => { if (check()) resolve(); else drawn = poll; };
+		poll();
+	});
+	const frame = (line: unknown) => appendFileSync(frames, `${JSON.stringify(line)}\n`);
+	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, receipts, userMessages, active: () => [...active], ctx, next, until,
+		/** Every `dogsled board --watch` this rig started. */
+		subscriptions: () => existsSync(`${frames}.log`) ? readFileSync(`${frames}.log`, "utf8").split("\n").filter(Boolean) : [],
+		/** Make the next subscriptions end after the frames so far, as a stopped serve does. */
+		publisherStops: (stopped: boolean) => { if (stopped) writeFileSync(`${frames}.exit`, ""); else rmSync(`${frames}.exit`, { force: true }); },
+		unavailable: (error: string) => frame({ revision: ++revision, error }),
+		showsBoard: () => typeof widgets.at(-1)?.[1] === "function",
 		widget() { return components.get("dogsled"); },
 		gate: (text: string) => { gate = text; },
-		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => { board = value; }, opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
+		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => frame({ revision: ++revision, board: value, history: { jobs: [], hosts: [] } }), opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: any = {}) {
 			const registered = handlers.get(name); assert.ok(registered, name);
 			let current = name === "agent_before_settle" ? { entries: [], continue: false, ...event } : event;
@@ -202,6 +228,7 @@ test("a Dogsled-launched child under Herdr keeps the widget: the board belongs t
 	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
 	await r.invoke("session_start");
 	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "board --open --owner w1:p1 --json"));
+	await r.until(r.showsBoard);
 	assert.ok(r.widgets.some(call => typeof call[1] === "function" && call[2]?.placement === "aboveEditor"));
 	await r.invoke("session_shutdown");
 });
@@ -215,6 +242,7 @@ test("an unreachable Herdr socket keeps the existing above-editor widget", async
 	const r = rig();
 	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
 	await r.invoke("session_start");
+	await r.until(r.showsBoard);
 	assert.ok(r.widgets.some(call => typeof call[1] === "function" && call[2]?.placement === "aboveEditor"));
 	assert.ok(!r.calls.some(call => call.includes("--open")));
 	await r.invoke("session_shutdown");
@@ -307,7 +335,7 @@ test("the stop gate does not query fleet-wide work without an owner", async t =>
 	assert.equal(r.calls.length, 0);
 });
 
-test("the board widget follows dogsled board, refreshes every 10 s, and stops at shutdown", async (t) => {
+test("the board widget follows one publication subscription and stops at shutdown", async (t) => {
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
@@ -317,35 +345,58 @@ test("the board widget follows dogsled board, refreshes every 10 s, and stops at
 	assert.deepEqual(r.widgets.at(-1), ["dogsled", undefined]);
 	r.board({ hosts: [{ label: "local", service: "up", reachable: true, busy: 1, cores: 8, eligible: true }],
 		rows: [{ group: "running", kind: "job", id: "j1", name: "cargo test", what: "job", host: "local", state: "running", activity: "cargo test", age_ms: 60_000 }] });
-	const drawn = r.next();
-	t.mock.timers.tick(10_000);
-	await drawn;
+	await r.until(r.showsBoard);
 	const [key, , options] = r.widgets.at(-1);
 	assert.deepEqual([key, options], ["dogsled", { placement: "aboveEditor" }]);
 	const lines: string[] = r.widget().render(80);
 	assert.deepEqual(lines.map(line => line.trim().split(/ {2,}/)), [["dogsled", "1 working", "local ▰▱▱▱ 1/8"], ["WORKING"], ["▸ cargo test", "job", "local", "cargo test", "1m"]]);
+	// The refresh timer neither reads the board nor subscribes again while subscribed.
+	const drawn = r.next();
+	t.mock.timers.tick(10_000);
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j2", name: "lints", what: "job", host: "local", state: "running", activity: "lints", age_ms: 0 }] });
+	await drawn;
+	await r.until(() => r.widget().render(80).join("\n").includes("lints"));
+	assert.deepEqual(r.subscriptions(), ["board --watch --json --owner w1:p1"]);
+	assert.equal(r.calls.some(call => call[1] === "board" && !call.includes("--open")), false);
 	await r.invoke("session_shutdown");
 	const after = r.calls.length;
 	t.mock.timers.tick(10_000);
 	assert.equal(r.calls.length, after);
 	assert.deepEqual(r.widgets.at(-1), ["dogsled", undefined]);
+	assert.equal(r.subscriptions().length, 1);
 });
 
-test("a failing board refresh is reported once and the timer recovers", async (t) => {
+test("an unavailable publication is reported once and the next frame recovers", async (t) => {
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
-	r.fail();
-	await r.invoke("session_start");
-	const boardFailures = () => r.notices.filter(n => String((n as unknown[])[0]).startsWith("Error: dogsled board failed")).length;
-	assert.equal(boardFailures(), 1);
-	r.recover();
+	r.unavailable("observation unavailable: board was not published");
+	r.unavailable("observation unavailable: board was not published");
 	r.board({ hosts: [], rows: [{ group: "waiting", kind: "agent", id: "t1", name: "lints", what: "pi · sol", host: "any", state: "queued", activity: "for a host with room", age_ms: 0 }] });
-	const drawn = r.next();
+	await r.invoke("session_start");
+	await r.until(r.showsBoard);
+	const failures = () => r.notices.filter(n => String((n as unknown[])[0]) === "observation unavailable: board was not published").length;
+	assert.equal(failures(), 1);
+	await r.invoke("session_shutdown");
+});
+
+test("a stopped publisher keeps the last board, and the refresh timer subscribes again", async (t) => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	r.publisherStops(true);
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
+	await r.invoke("session_start");
+	const stopped = (n: unknown) => String((n as unknown[])[0]) === "Dogsled observation unavailable: observation unavailable: publisher stopped";
+	await r.until(() => r.notices.some(stopped));
+	assert.ok(r.showsBoard());
+	assert.match(r.widget().render(100).join("\n"), /tests/);
+	r.publisherStops(false);
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j2", name: "lints", what: "job", host: "local", state: "running", activity: "lints", age_ms: 0 }] });
 	t.mock.timers.tick(10_000);
-	await drawn;
-	assert.equal(typeof r.widgets.at(-1)[1], "function");
-	assert.equal(boardFailures(), 1);
+	await r.until(() => r.widget().render(100).join("\n").includes("lints"));
+	assert.equal(r.subscriptions().length, 2);
+	assert.equal(r.notices.filter(stopped).length, 1);
 	await r.invoke("session_shutdown");
 });
 
@@ -355,7 +406,7 @@ test("the board widget steps aside while /dogsled is open, so no row shows twice
 	const r = rig();
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "make", what: "job", host: "local", state: "running", activity: "make", age_ms: 0 }] });
 	await r.invoke("session_start");
-	assert.equal(typeof r.widgets.at(-1)[1], "function");
+	await r.until(r.showsBoard);
 	let during: unknown;
 	const ctx = { ...r.ctx, ui: { ...r.ctx.ui, custom: async () => { during = r.widgets.at(-1)[1]; return undefined; } } };
 	await r.commands.get("dogsled").handler("", ctx);
@@ -370,8 +421,11 @@ test("Alt+W and /work expand the same above-editor widget without an overlay or 
 	const r = rig();
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
 	await r.invoke("session_start");
+	await r.until(r.showsBoard);
 	const compact = r.widget().render(100);
-	assert.equal(r.calls.some(args => args.includes("ps")), false);
+	// History is published with the board: no command joins items, jobs, and machines.
+	const historyReads = () => r.calls.filter(args => ["ps", "items", "machine"].includes(args[1] ?? "")).length;
+	assert.equal(historyReads(), 0);
 	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
 		custom: async () => assert.fail("work must never open a custom screen"),
 		setEditorText: () => assert.fail("draft must remain untouched"),
@@ -381,13 +435,12 @@ test("Alt+W and /work expand the same above-editor widget without an overlay or 
 	const panel = r.widget();
 	assert.ok(panel.render(100).length > compact.length);
 	assert.match(panel.render(100).join("\n"), /tests/);
-	assert.equal(r.calls.filter(args => args.includes("ps")).length, 1);
 	await r.commands.get("work").handler("", ctx);
 	assert.deepEqual(r.widget().render(100), compact);
 	const drawn = r.next();
 	t.mock.timers.tick(10_000);
 	await drawn;
-	assert.equal(r.calls.filter(args => args.includes("ps")).length, 1);
+	assert.equal(historyReads(), 0);
 	await r.invoke("session_shutdown");
 });
 
@@ -415,6 +468,7 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	await r.invoke("session_start");
 	let signal: AbortSignal | undefined;
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
+	await r.until(r.showsBoard);
 	let confirmed!: () => void;
 	const finished = new Promise<void>(resolve => { confirmed = resolve; });
 	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,

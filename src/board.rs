@@ -350,6 +350,7 @@ pub fn command(
         all,
         open: opening,
         toggle: toggling,
+        ..
     } = command
     else {
         return Err(Error::Invalid("expected board command".into()));
@@ -370,6 +371,52 @@ pub fn command(
         owner.as_deref(),
     )?;
     crate::print(json, &board, || board.render())
+}
+
+/// One frame per replacement publication: the owner's board and job history, both projected
+/// by serve. A domain that is not published is reported in its frame, and the stream goes on;
+/// a publisher disconnect ends it. The reader never rebuilds state.
+pub fn watch(client: &crate::observation::ipc::Client, owner: &str, json: bool) -> Result<()> {
+    use crate::observation::ipc::Status;
+    let mut subscription = client.subscribe()?;
+    let mut connection = subscription.current();
+    loop {
+        if let Status::Disconnected(detail) = &connection.status {
+            return Err(Error::Invalid(format!(
+                "observation disconnected: {detail}"
+            )));
+        }
+        let published = &*connection.publication;
+        let board = crate::observation::read::board(published, Some(owner));
+        if json {
+            let frame = match board.and_then(|board| {
+                Ok((
+                    board,
+                    crate::observation::read::job_history(published, owner)?,
+                ))
+            }) {
+                Ok((board, history)) => serde_json::json!({
+                    "revision": published.revision, "board": board, "history": history
+                }),
+                Err(error) => serde_json::json!({
+                    "revision": published.revision, "error": error.to_string()
+                }),
+            };
+            crate::print(true, &frame, String::new)?;
+        } else {
+            let text = board.map_or_else(|error| format!("{error}\n"), |board| board.render());
+            crate::print(false, &(), || format!("\x1b[2J\x1b[H{text}"))?;
+        }
+        let revision = published.revision;
+        loop {
+            connection = subscription.changed(std::time::Duration::from_secs(3600));
+            if connection.publication.revision != revision
+                || matches!(connection.status, Status::Disconnected(_))
+            {
+                break;
+            }
+        }
+    }
 }
 
 fn one_line(text: &str) -> String {

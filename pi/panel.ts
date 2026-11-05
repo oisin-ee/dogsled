@@ -1,6 +1,6 @@
 // `/dogsled`: the control panel. It takes the board widget's place while open, so each row
-// shows once. Status (the default), Hosts, Profiles, and Inbox, all from
-// `dogsled board|machine|profiles|inbox --json`. The panel only shows choices. Each choice
+// shows once. Status (the default) comes from the session's publication subscription; Hosts,
+// Profiles, and Inbox from `dogsled machine|profiles|inbox --json`. The panel only shows choices. Each choice
 // closes it with an action that the command runs, so dialogs never open inside the panel.
 import { readFile, writeFile } from "node:fs/promises";
 import type { ExtensionCommandContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
@@ -150,13 +150,16 @@ export class Panel {
 
 type Exec = (args: string[]) => Promise<string>;
 
-async function load(exec: Exec, now: number): Promise<PanelData> {
-	const data: PanelData = { board: { hosts: [], rows: [] }, machines: [], profiles: [], inbox: [], errors: {}, now };
+/** The session's last published board, and why the publication is unavailable, if it is. */
+export type Observed = () => { board: Board; error?: string | undefined };
+
+async function load(exec: Exec, observed: Observed, now: number): Promise<PanelData> {
+	const { board, error } = observed();
+	const data: PanelData = { board, machines: [], profiles: [], inbox: [], errors: error ? { status: error } : {}, now };
 	const read = async <T>(tab: Tab, args: string[], set: (value: T) => void) => {
 		try { set(JSON.parse(await exec(args)) as T); } catch (error) { data.errors[tab] = error instanceof Error ? error.message : String(error); }
 	};
 	await Promise.all([
-		read<Board>("status", ["board", "--json"], v => { data.board = v; }),
 		read<Machine[]>("hosts", ["machine", "list", "--json"], v => { data.machines = v; }),
 		read<Profile[]>("profiles", ["profiles", "--json"], v => { data.profiles = v; }),
 		read<{ lines: InboxLine[] }>("inbox", ["inbox", "list", "--json"], v => { data.inbox = v.lines; }),
@@ -210,10 +213,10 @@ async function run(action: NonNullable<Action>, ctx: ExtensionCommandContext, ex
 }
 
 /** Open the panel, run what the user picks, and reopen it until they close it. */
-export async function openPanel(ctx: ExtensionCommandContext, exec: Exec, now: () => number = Date.now): Promise<void> {
+export async function openPanel(ctx: ExtensionCommandContext, exec: Exec, observed: Observed, now: () => number = Date.now): Promise<void> {
 	let tab: Tab = "status";
 	for (;;) {
-		const data = await load(exec, now());
+		const data = await load(exec, observed, now());
 		const action = await ctx.ui.custom<Action>((_tui, theme, keys, done) => new Panel(tab, data, theme, keys, done));
 		if (!action) return;
 		tab = action.tab;

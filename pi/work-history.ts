@@ -1,5 +1,3 @@
-import { clean } from "./board.ts";
-
 export interface WorkJob {
 	id: string; host: string; owner: string; cmd: string[]; state: string;
 	ended_ms: number | null; exit: number | null;
@@ -14,20 +12,10 @@ function job(value: unknown): value is WorkJob {
 		&& (value["exit"] === null || typeof value["exit"] === "number");
 }
 
-/** History comes from the owner's ledger, not a coincidentally equal pane on another host. */
-export async function loadJobHistory(exec: WorkExec, owner: string): Promise<JobHistory> {
-	try {
-		const [itemText, jobText, hostText] = await Promise.all([exec(["items", "--owner", owner, "--json"]), exec(["ps", "--all", "--json"]), exec(["machine", "list", "--json"])]);
-		const items: unknown = JSON.parse(itemText), jobs: unknown = JSON.parse(jobText), hosts: unknown = JSON.parse(hostText);
-		if (!Array.isArray(hosts) || !hosts.every((host): host is { id: string; label: string } => record(host) && typeof host["id"] === "string" && typeof host["label"] === "string")) throw new Error("Invalid Dogsled host identities");
-		if (!record(items) || !Array.isArray(items["items"]) || !Array.isArray(jobs) || !jobs.every(job)) throw new Error("Invalid Dogsled job history");
-		const allowed = new Set<string>();
-		for (const item of items["items"]) {
-			if (!record(item) || typeof item["id"] !== "string" || typeof item["host"] !== "string" || typeof item["owner_pane"] !== "string") throw new Error("Invalid Dogsled owner item");
-			if (item["owner_pane"] === owner && item["kind"] === "job") allowed.add(JSON.stringify([item["host"], item["id"]]));
-		}
-		return { jobs: jobs.filter(item => allowed.has(JSON.stringify([item.host, item.id]))), hosts };
-	} catch (error) {
-		return { jobs: [], error: `History unavailable: ${clean(String(error))}` };
-	}
+/** Serve publishes each owner's history, joined on host and job id; this only checks its shape. */
+export function parseJobHistory(value: unknown): JobHistory {
+	if (!record(value) || !Array.isArray(value["jobs"]) || !value["jobs"].every(job)) throw new Error("Invalid Dogsled job history");
+	const hosts = value["hosts"];
+	if (!Array.isArray(hosts) || !hosts.every((host): host is { id: string; label: string } => record(host) && typeof host["id"] === "string" && typeof host["label"] === "string")) throw new Error("Invalid Dogsled host identities");
+	return { jobs: value["jobs"], hosts: hosts.map(host => ({ id: host.id, label: host.label })) };
 }
