@@ -13,13 +13,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.32.0 # x-release-please-version
+mise use github:oisin-ee/dogsled@v0.33.0 # x-release-please-version
 ```
 
 Pi (extension, tools, the `todo` tool, and skill), from npm:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.32.0 # x-release-please-version
+pi install npm:@oisin-ee/pi-dogsled@0.33.0 # x-release-please-version
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
