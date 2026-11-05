@@ -12,6 +12,30 @@ Render the owner's selected Message timeline inside the existing Dioxus console.
 Read `plans/chat-conversation.md`, `.impeccable/surfaces/web-src-agent-view-rs.md`, `DESIGN.md`, and the approved `.impeccable/mocks/decision/chat-conversation/timeline.html`. The HTML controls composition, not its illustrative messages or states. `plans/chat-conversation.squig.json` records the selected layout at 2560, 1440, and 1024px.
 Preserve the existing graphite palette, Inter text, official controls, inbox, agents, todos, waiting requests, and viewport-contained scrolling. Do not hold a new design round.
 
+## History wire contract (reviewed, staged; exact commit supplied at dispatch)
+
+The history unit defines these shapes in `portal-types/src/agents.rs`. Render from these types; do not reparse prose.
+
+- `Conversation { pane, turns: Vec<Turn>, truncated: bool }`. The session-boundary unit adds nullable `session: SessionStamp`. When `truncated` is true, older history exists but was not returned; show a quiet notice at the top of history, never a fake complete start.
+- `Turn { id, role, text, source, timestamp: Option<Timestamp>, tool: Option<ToolSummary> }`. Use `id` as the key. It is the native ID where available, otherwise `{harness}:offset:{n}`; tool rows add `:tool:{call_id}`.
+- `Role`: `user`, `assistant`, `context`, `tool`. `context` covers displayed extension and Dogsled messages; it is never the owner.
+- `Source` (tagged `kind`):
+  - `harness {harness, model?, provider?}`. `model` and `provider` appear only on assistant records that recorded them.
+  - `custom {custom_type}`. This is visible extension context, including Dogsled gate messages without delivery records. It has no sender; label it by type, never as You or as a named worker.
+  - `dogsled {sender, delivery_kind}`. This is an attributed inbox delivery; label it with `sender`.
+- `Timestamp { ms, meaning }`. `meaning` is one of:
+  - `message`: the harness message time. For Pi assistant records this is the request start, not response completion.
+  - `recorded`: when the transcript entry was written.
+  - `created`: when the Dogsled delivery was created.
+
+  Expose the meaning in the accessible full date/time where it differs from "sent".
+- `ToolSummary { call_id, name?, status }`. `status` is one of:
+  - `completed`: a result was recorded. This does not mean the payload reports success.
+  - `error`: the recorded result was an error.
+  - `unknown`: no matching result was read. This means "no recorded outcome", never "running now".
+
+  Tool rows carry no arguments, output, or reasoning.
+
 ## Composition
 
 - Give history, live activity, and composer one centered column with a 640px maximum and 24px side insets where space permits. The timeline has a 46px time gutter, 12px marker track, and flexible prose. Do not recreate the separated right-aligned owner column.
