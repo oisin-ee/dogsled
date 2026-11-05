@@ -109,14 +109,14 @@ interface Call {
   signal: AbortSignal | undefined;
 }
 const evidence = { session_file: "/sessions/native.jsonl", session_id: "native" };
-const view = { version: 1, pane: "pane", epoch: "serve", producer: { generation: 2 } };
+const view = { version: 1, pane: "pane", epoch: "serve", producer: { generation: 2, id: null } };
 const response = (body: unknown, status = 200) => Response.json(body, { status });
 function ack(call: Call) {
   return {
     version: 1,
     pane: "pane",
-    epoch: "serve",
-    generation: 3,
+    epoch: call.body.epoch,
+    generation: call.method === "POST" ? call.body.expected_generation + 1 : call.body.generation,
     producer_id: call.body.producer_id,
     session: "native-key",
     sequence: call.method === "POST" ? 0 : call.body.sequence,
@@ -197,20 +197,184 @@ test("ambiguous publication retries the exact request before a replaceable pendi
   assert.equal(r.calls[4]?.body.payload.state.phase, "responding");
 });
 
-test("ambiguous registration keeps its CAS request; a conflict stops ownership attempts", async (t) => {
+test("ambiguous registration keeps its CAS request; a replacement stops ownership attempts", async (t) => {
   let posts = 0;
   const r = rig(t, (call) => {
     if (call.method === "POST" && ++posts === 1) throw new Error("registration ack lost");
     if (call.method === "POST")
       return response({ code: "stale_generation", error: "replaced" }, 409);
-    return response(view);
+    return response(posts === 0 ? view : { ...view, producer: { generation: 4, id: "other" } });
   });
   await r.ready();
   assert.deepEqual(r.calls[1]?.body, r.calls[2]?.body);
+  await r.step(500);
+  assert.equal(r.calls.at(-1)?.method, "GET");
   r.publisher.event({ type: "settled" });
   await r.step(10000);
-  assert.equal(r.calls.length, 3);
+  assert.equal(r.calls.length, 4);
 });
+
+test("registration refreshes binding evidence after session changes with exponential backoff", async (t) => {
+  let gets = 0;
+  let posts = 0;
+  const r = rig(t, (call) => {
+    if (call.method === "GET")
+      return response({
+        ...view,
+        epoch: `serve-${++gets}`,
+        producer: { generation: gets, id: null },
+      });
+    if (call.method === "POST" && ++posts <= 2)
+      return response(
+        { code: posts === 1 ? "session_changed" : "session_unverified", error: "not yet bound" },
+        posts === 1 ? 409 : 503,
+      );
+    return response(ack(call));
+  });
+  await r.ready();
+  assert.equal(r.calls.length, 2);
+  r.publisher.event(block(0, "thinking"));
+  await r.step(249);
+  assert.equal(r.calls.length, 2);
+  await r.step(1);
+  assert.equal(r.calls.at(-1)?.method, "GET");
+  await r.step();
+  assert.equal(posts, 2);
+  await r.step(999);
+  assert.equal(r.calls.length, 4);
+  await r.step(1);
+  assert.equal(r.calls.at(-1)?.method, "GET");
+  await r.step();
+  await r.step();
+  assert.deepEqual(
+    r.calls.map((call) => call.method),
+    ["GET", "POST", "GET", "POST", "GET", "POST", "PUT"],
+  );
+  assert.deepEqual(
+    r.calls
+      .filter((call) => call.method === "POST")
+      .map((call) => [call.body.epoch, call.body.expected_generation]),
+    [
+      ["serve-1", 1],
+      ["serve-2", 2],
+      ["serve-3", 3],
+    ],
+  );
+  assert.equal(r.calls.at(-1)?.body.payload.state.phase, "thinking");
+});
+
+test("registration backoff doubles to five seconds and cannot be bypassed by events or heartbeats", async (t) => {
+  let posts = 0;
+  const codes = ["upstream_unavailable", "stale_generation"];
+  const r = rig(t, (call) => {
+    if (call.method === "POST")
+      return response(
+        { code: codes[posts++ % codes.length], error: "not yet bound" },
+        posts % 2 ? 503 : 409,
+      );
+    return response(view);
+  });
+  await r.step(0);
+  await r.step();
+  for (const delay of [500, 1000, 2000, 4000, 5000, 5000]) {
+    const count = r.calls.length;
+    r.publisher.event({ type: "settled" });
+    await r.step(delay - 1);
+    assert.equal(r.calls.length, count);
+    await r.step(1);
+    assert.equal(r.calls.at(-1)?.method, "GET");
+    await r.step();
+    assert.equal(r.calls.at(-1)?.method, "POST");
+  }
+});
+
+test("an activity GET with an existing producer never registers", async (t) => {
+  const r = rig(t, () => response({ ...view, producer: { generation: 3, id: "other" } }));
+  await r.ready();
+  r.publisher.event({ type: "settled" });
+  await r.step(10000);
+  assert.deepEqual(
+    r.calls.map((call) => call.method),
+    ["GET"],
+  );
+});
+
+for (const code of ["stale_generation", "session_changed", "producer_closed"]) {
+  test(`PUT ${code} refreshes registration and republishes the latest snapshot`, async (t) => {
+    let gets = 0;
+    let puts = 0;
+    const r = rig(t, (call) => {
+      if (call.method === "GET")
+        return response({
+          ...view,
+          epoch: `serve-${++gets}`,
+          producer: { generation: gets * 2, id: null },
+        });
+      if (call.method === "PUT" && ++puts === 1)
+        return response({ code, error: "registration cleared" }, 409);
+      return response({ ...ack(call), session: gets === 1 ? "native-key" : "new-native-key" });
+    });
+    await r.ready();
+    r.publisher.event(block(0, "responding"));
+    await r.step(499);
+    assert.equal(r.calls.length, 3);
+    await r.step(1);
+    await r.step();
+    await r.step();
+    assert.deepEqual(
+      r.calls.map((call) => call.method),
+      ["GET", "POST", "PUT", "GET", "POST", "PUT"],
+    );
+    assert.equal(r.calls.at(-1)?.body.epoch, "serve-2");
+    assert.equal(r.calls.at(-1)?.body.generation, 5);
+    assert.equal(r.calls.at(-1)?.body.session, "new-native-key");
+    assert.equal(r.calls.at(-1)?.body.sequence, 1);
+    assert.equal(r.calls.at(-1)?.body.payload.state.phase, "responding");
+  });
+}
+
+for (const method of ["POST", "PUT"]) {
+  test(`${method} with an unparseable 5xx body retries the exact request`, async (t) => {
+    let attempts = 0;
+    const r = rig(t, (call) => {
+      if (call.method === method && ++attempts === 1)
+        return new Response("unavailable", { status: 503 });
+      return response(call.method === "GET" ? view : ack(call));
+    });
+    await r.ready();
+    await r.step();
+    const retries = r.calls.filter((call) => call.method === method);
+    assert.equal(retries.length, 2);
+    assert.deepEqual(retries[0]?.body, retries[1]?.body);
+  });
+
+  test(`${method} stops on non-recoverable 4xx errors`, async (t) => {
+    const r = rig(t, (call) =>
+      call.method === method
+        ? response({ code: "sequence_conflict", error: "conflict" }, 409)
+        : response(call.method === "GET" ? view : ack(call)),
+    );
+    await r.ready();
+    const count = r.calls.length;
+    r.publisher.event({ type: "settled" });
+    await r.step(10000);
+    assert.equal(r.calls.length, count);
+  });
+
+  test(`dispose during ${method} recovery backoff sends nothing further`, async (t) => {
+    const r = rig(t, (call) =>
+      call.method === method
+        ? response({ code: "session_changed", error: "not bound" }, 409)
+        : response(call.method === "GET" ? view : ack(call)),
+    );
+    await r.ready();
+    const count = r.calls.length;
+    r.publisher.dispose();
+    r.publisher.event({ type: "settled" });
+    await r.step(20000);
+    assert.equal(r.calls.length, count);
+  });
+}
 
 test("one-second deadline aborts one flight; offline telemetry never blocks reduction", async (t) => {
   const r = rig(t, () => new Promise<Response>(() => {}));

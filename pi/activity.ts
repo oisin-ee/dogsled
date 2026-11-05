@@ -129,6 +129,8 @@ export class ActivityPublisher {
   private stamp: Stamp | undefined;
   private sequence = 0;
   private lastAttempt = -Infinity;
+  private retryAt = -Infinity;
+  private retryDelay = 500;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private heartbeat: ReturnType<typeof setInterval>;
   private controller: AbortController | undefined;
@@ -168,7 +170,7 @@ export class ActivityPublisher {
         this.timer = undefined;
         this.flight = this.pump();
       },
-      Math.max(0, 250 - (performance.now() - this.lastAttempt)),
+      Math.max(0, this.retryAt - performance.now(), 250 - (performance.now() - this.lastAttempt)),
     );
     this.timer.unref();
   }
@@ -187,7 +189,9 @@ export class ActivityPublisher {
           });
           return {
             status: response.status,
-            body: response.ok ? ((await response.json()) as unknown) : undefined,
+            body: response.ok
+              ? ((await response.json()) as unknown)
+              : ((await response.json().catch(() => undefined)) as unknown),
           };
         })(),
         new Promise<never>((_resolve, reject) => {
@@ -227,9 +231,29 @@ export class ActivityPublisher {
     try {
       const { status, body } = await this.send(request, controller);
       if (this.disposed) return;
-      // A server failure may follow a committed mutation. Retry this exact request.
-      if (status >= 500) return;
       if (status < 200 || status >= 300) {
+        const code = record(body) && typeof body["error"] === "string" ? body["code"] : undefined;
+        if (
+          (request.method === "POST" &&
+            (code === "session_changed" ||
+              code === "session_unverified" ||
+              code === "upstream_unavailable" ||
+              code === "stale_generation")) ||
+          (request.method === "PUT" &&
+            (code === "stale_generation" ||
+              code === "session_changed" ||
+              code === "producer_closed"))
+        ) {
+          this.stamp = undefined;
+          this.sequence = 0;
+          this.pending = this.reducer.snapshot();
+          this.request = { method: "GET", path: this.path };
+          this.retryAt = performance.now() + this.retryDelay;
+          this.retryDelay = Math.min(5000, this.retryDelay * 2);
+          return;
+        }
+        // A server failure may follow a committed mutation. Retry this exact request.
+        if (status >= 500) return;
         this.stop();
         return;
       }
@@ -240,12 +264,13 @@ export class ActivityPublisher {
           body["pane"] !== this.pane ||
           !text(body["epoch"], 256) ||
           !record(body["producer"]) ||
-          !counter(body["producer"]["generation"])
+          !counter(body["producer"]["generation"]) ||
+          (body["producer"]["id"] !== null && body["producer"]["id"] !== undefined)
         ) {
           this.stop();
           return;
         }
-        // Freeze compare-and-swap evidence once; conflicts never take ownership back.
+        // Freeze fresh compare-and-swap evidence only while the pane is unowned.
         this.request = {
           method: "POST",
           path: `${this.path}/producer`,
@@ -281,6 +306,8 @@ export class ActivityPublisher {
           session: body.session,
         };
         this.request = undefined;
+        this.retryDelay = 500;
+        this.retryAt = -Infinity;
       }
     } catch {
       // Offline and ambiguous outcomes are telemetry gaps, never hook failures.
@@ -297,6 +324,7 @@ export class ActivityPublisher {
   private stop(): void {
     this.stopped = true;
     clearInterval(this.heartbeat);
+    if (this.timer) clearTimeout(this.timer);
   }
 
   dispose(): void {
