@@ -90,6 +90,7 @@
       "sampled_ms": 10000,
       "service_lanes": []
     },
+    "sidebar_preferences": {},
     "status": {
       "holds": [
         {
@@ -292,6 +293,7 @@
       "host": 10000,
       "questions": 10000,
       "reviews": 10000,
+      "sidebar_preferences": 10000,
       "status": 10000,
       "stopped_activity": 10000,
       "terminals": 10000,
@@ -517,6 +519,30 @@
       "data": {
         "items": [],
         "queue": []
+      },
+      "gaps": []
+    },
+    "empty_sidebar": {
+      "data": {
+        "cards": [],
+        "hosts": [
+          {
+            "disk": [
+              50.0,
+              "ok"
+            ],
+            "label": "local",
+            "load": "1/8",
+            "measured": true,
+            "memory": [
+              0.125,
+              "ok"
+            ],
+            "silent_ms": null,
+            "state": "eligible"
+          }
+        ],
+        "todos": null
       },
       "gaps": []
     },
@@ -940,6 +966,108 @@
           "state": "eligible"
         }
       ],
+      "gaps": []
+    },
+    "sidebar_preferences": {
+      "data": {},
+      "gaps": []
+    },
+    "sidebars": {
+      "data": {
+        "w1:p1": {
+          "cards": [
+            {
+              "activity": "+2 commits",
+              "age_ms": 9999,
+              "ahead": 2,
+              "group": "to_land",
+              "harness": "pi",
+              "host": "local",
+              "id": "mine",
+              "kind": "agent",
+              "name": "worker",
+              "pane": "w2:p1",
+              "pill": "to land",
+              "tone": "ToLand"
+            }
+          ],
+          "hosts": [
+            {
+              "disk": [
+                50.0,
+                "ok"
+              ],
+              "label": "local",
+              "load": "1/8",
+              "measured": true,
+              "memory": [
+                0.125,
+                "ok"
+              ],
+              "silent_ms": null,
+              "state": "eligible"
+            }
+          ],
+          "todos": null
+        },
+        "w2:p1": {
+          "cards": [],
+          "hosts": [
+            {
+              "disk": [
+                50.0,
+                "ok"
+              ],
+              "label": "local",
+              "load": "1/8",
+              "measured": true,
+              "memory": [
+                0.125,
+                "ok"
+              ],
+              "silent_ms": null,
+              "state": "eligible"
+            }
+          ],
+          "todos": null
+        },
+        "w9:p9": {
+          "cards": [
+            {
+              "activity": "+2 commits",
+              "age_ms": 9999,
+              "ahead": 2,
+              "group": "to_land",
+              "harness": "pi",
+              "host": "local",
+              "id": "theirs",
+              "kind": "agent",
+              "name": "other",
+              "pane": "w2:p1",
+              "pill": "to land",
+              "tone": "ToLand"
+            }
+          ],
+          "hosts": [
+            {
+              "disk": [
+                50.0,
+                "ok"
+              ],
+              "label": "local",
+              "load": "1/8",
+              "measured": true,
+              "memory": [
+                0.125,
+                "ok"
+              ],
+              "silent_ms": null,
+              "state": "eligible"
+            }
+          ],
+          "todos": null
+        }
+      },
       "gaps": []
     },
     "status": {

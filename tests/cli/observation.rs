@@ -5,6 +5,8 @@ use std::sync::mpsc;
 
 #[path = "observation_portal.rs"]
 mod portal;
+#[path = "observation_sidebar.rs"]
+mod sidebar;
 
 /// A supplied wire publication, not an observer. Its data deliberately differs from the
 /// local inputs, so a reader that reconstructs even one section fails these assertions.

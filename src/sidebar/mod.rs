@@ -10,123 +10,200 @@ pub mod palette;
 pub mod view;
 
 use crate::board;
-use crate::config::{Policy, Thresholds};
+use crate::config::Policy;
 use crate::error::{Error, Result};
-use crate::hosts::ObserverFleet;
-use crate::ledger::{Ledger, now_ms};
+use crate::ledger::Ledger;
+use crate::observation::{ipc, read as publication};
 use crate::shell::{Shell, System};
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use model::{Data, Effect, HostRow, Model};
+use model::{Data, Effect, Model};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// The reader rebuilds the model from cached ledger state this often.
-const REFRESH: Duration = Duration::from_secs(2);
+/// Retry only the publication transport; never reconstruct observations.
+const RETRY: Duration = Duration::from_secs(1);
 /// Input is polled in slices this long; each also drains the reader's results.
 const TICK: Duration = Duration::from_millis(100);
 /// A notice stays in the footer this long.
 const NOTICE: Duration = Duration::from_secs(5);
 
+#[derive(Debug)]
 enum Msg {
-    Data(Data),
+    Publication(std::sync::Arc<crate::observation::Published>),
     Failed(String),
     Notice(String),
 }
 
-/// Build the model's data from the cached status. Never probes or reaches a peer itself:
-/// `commands::status` reads the service snapshots and the peer caches in the ledger.
-/// The todo cache is a separate source: when it cannot be read, Hosts and Agents & Jobs
-/// still draw, and the error comes back for the footer.
-fn read(
-    fleet: &ObserverFleet<'_>,
-    limits: &Thresholds,
-    owner: &str,
-) -> Result<(Data, Option<String>)> {
-    let now = now_ms();
-    let status = crate::commands::status(fleet)?;
-    let board = board::build(&status, Some(owner), now);
-    let (todos, todo_error) = owner_todos(board::cached_todos(fleet.ledger), owner);
-    let mut hosts: Vec<HostRow> = status
-        .hosts
-        .iter()
-        .map(|report| HostRow::from_report(report, limits, now))
-        .collect();
-    // Local first, then config order (`ObserverFleet::discover` already lists them so).
-    if let Some(local) = hosts.iter().position(|h| {
-        status
-            .hosts
-            .iter()
-            .any(|r| r.host.is_local() && r.host.label == h.label)
-    }) {
-        let row = hosts.remove(local);
-        hosts.insert(0, row);
-    }
-    Ok((Data::from_board(&board, todos, hosts), todo_error))
-}
-
-/// The owner's sections, or the cache error for the footer. Never fails the whole read.
-fn owner_todos(
-    cached: Result<Vec<board::TodoSections>>,
-    owner: &str,
-) -> (Option<board::TodoSections>, Option<String>) {
-    match cached {
-        Ok(todos) => (todos.into_iter().find(|todo| todo.pane == owner), None),
-        Err(error) => (None, Some(format!("todos: {error}"))),
-    }
-}
-
-fn reader(
-    shell: &dyn Shell,
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    owner: &str,
-    tx: &mpsc::Sender<Msg>,
-    stop: &AtomicBool,
-) {
-    let limits = Thresholds::from(policy);
-    let mut fleet: Option<ObserverFleet<'_>> = None;
-    while !stop.load(Ordering::Relaxed) {
-        if fleet.is_none() {
-            fleet = ObserverFleet::discover(shell, ledger, policy, home.to_owned()).ok();
+/// Select already-derived views from exactly one revision. No observation capabilities.
+fn read(published: &crate::observation::Published, owner: &str) -> Result<Selection> {
+    let data = publication::sidebar(published, owner)?;
+    let preferences = publication::view::<std::collections::BTreeMap<String, model::Saved>>(
+        published,
+        "sidebar_preferences",
+    );
+    let findings = publication::findings(published, owner)?;
+    let mut gaps = published.gaps.clone();
+    for domain in ["sidebars", "sidebar_preferences", "findings"] {
+        if let Some(value) = published.views.get(domain) {
+            let view: crate::observation::project::View<serde_json::Value> =
+                serde_json::from_value(value.clone())?;
+            gaps.extend(view.gaps);
         }
-        let messages = match &fleet {
-            Some(fleet) => match read(fleet, &limits, owner) {
-                Ok((data, todo_error)) => {
-                    let mut messages = vec![Msg::Data(data)];
-                    messages.extend(todo_error.map(Msg::Failed));
-                    messages
+    }
+    let mut notices: Vec<_> = gaps
+        .iter()
+        .map(|gap| {
+            format!(
+                "observation gap: {}: {:?}: {}",
+                gap.domain, gap.availability, gap.detail
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let saved = match preferences {
+        Ok(mut values) if !gaps.iter().any(|gap| gap.domain == "sidebar_preferences") => {
+            Preference::Published(values.remove(owner))
+        }
+        Ok(_) => Preference::Unavailable,
+        Err(error) => {
+            notices.push(error.to_string());
+            Preference::Unavailable
+        }
+    };
+    notices.extend(findings.failures);
+    notices.extend(findings.holds);
+    notices.extend(findings.landed_dirty);
+    Ok(Selection {
+        data,
+        saved,
+        observed_ms: published
+            .sources
+            .local
+            .get("status")
+            .copied()
+            .unwrap_or(published.published_ms),
+        notice: (!notices.is_empty()).then(|| notices.join("; ")),
+    })
+}
+
+enum Preference {
+    Unavailable,
+    Published(Option<model::Saved>),
+}
+
+struct Selection {
+    data: Data,
+    saved: Preference,
+    observed_ms: u64,
+    notice: Option<String>,
+}
+
+/// Keep the render mailbox bounded. Waiting never blocks the IPC receiver or publisher,
+/// and shutdown cancels a delivery even when the terminal has stopped draining frames.
+fn send(tx: &mpsc::SyncSender<Msg>, mut message: Msg, stop: &AtomicBool) -> bool {
+    while !stop.load(Ordering::Relaxed) {
+        match tx.try_send(message) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Full(value)) => message = value,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+        }
+        std::thread::park_timeout(TICK);
+    }
+    false
+}
+
+fn reader(client: &ipc::Client, tx: &mpsc::SyncSender<Msg>, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        let result = client.subscribe().and_then(|mut subscription| {
+            let mut connection = subscription.current();
+            let mut last = None;
+            while !stop.load(Ordering::Relaxed) {
+                if let ipc::Status::Disconnected(detail) = connection.status {
+                    return Err(Error::Invalid(detail));
                 }
-                Err(error) => vec![Msg::Failed(error.to_string())],
-            },
-            None => vec![Msg::Failed("herdr machine list failed".into())],
-        };
-        if messages
-            .into_iter()
-            .any(|message| tx.send(message).is_err())
+                if last != Some(connection.publication.revision) {
+                    last = Some(connection.publication.revision);
+                    if !send(tx, Msg::Publication(connection.publication), stop) {
+                        return Ok(());
+                    }
+                }
+                connection = subscription.changed(TICK);
+            }
+            Ok(())
+        });
+        if let Err(error) = result
+            && !send(tx, Msg::Failed(error.to_string()), stop)
         {
             return;
         }
-        let until = Instant::now() + REFRESH;
+        let until = Instant::now() + RETRY;
         while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::park_timeout(TICK);
         }
+    }
+}
+
+fn age(data: &mut Data, elapsed_ms: u64) {
+    for card in &mut data.cards {
+        card.age_ms = card.age_ms.saturating_add(elapsed_ms);
+    }
+    for host in &mut data.hosts {
+        if let Some(silent) = &mut host.silent_ms {
+            *silent = silent.saturating_add(elapsed_ms);
+        }
+    }
+}
+
+/// Local intent wins over publications captured before its write. Acknowledgement is
+/// value-based, so reconnects and service epochs cannot erase an unobserved keypress.
+#[derive(Default)]
+struct Preferences {
+    pending: Option<model::Saved>,
+    last: Option<model::Saved>,
+}
+
+impl Preferences {
+    fn apply(&mut self, model: &mut Model, published: Option<model::Saved>) {
+        if let Some(pending) = &self.pending {
+            if published.as_ref() == Some(pending) {
+                self.pending = None;
+                self.last = published;
+            }
+            return;
+        }
+        if self.last != published {
+            self.last.clone_from(&published);
+            let restored = Model::from_saved(published.clone());
+            model.focus = restored.focus;
+            model.collapsed = restored.collapsed;
+            model.fold_open = restored.fold_open;
+            model.hosts_compact = restored.hosts_compact;
+            if let Some(id) = published.and_then(|saved| saved.selected_card) {
+                model.select_card_id(&id);
+            }
+        }
+    }
+
+    fn changed(&mut self, saved: model::Saved) {
+        self.pending = Some(saved);
     }
 }
 
 /// Run what an input asked for, off the input thread. The result comes back as a footer notice.
 fn perform(
     effect: Effect,
-    shell: System,
+    shell: &dyn Shell,
     ledger: &Ledger,
     policy: &Policy,
     home: &str,
     owner: &str,
+    published: Option<std::sync::Arc<crate::observation::Published>>,
 ) -> Result<String> {
     match effect {
         Effect::None => Ok(String::new()),
@@ -138,13 +215,13 @@ fn perform(
             Ok(String::new())
         }
         Effect::Stop(card) => {
-            let fleet = crate::hosts::Fleet::cold(
-                &shell,
+            let fleet = crate::hosts::ActionFleet::new(
+                shell,
                 ledger,
                 policy,
                 home.to_owned(),
-                vec![crate::hosts::Host::local()],
-            );
+                published.ok_or_else(|| Error::Invalid("observation unavailable".into()))?,
+            )?;
             crate::runtime::stop(&fleet, &card.id)?;
             Ok(format!("Stopped {}", card.name))
         }
@@ -160,21 +237,21 @@ fn perform(
             let pane = card
                 .pane
                 .ok_or_else(|| Error::Invalid("no pane to close".into()))?;
-            let fleet = crate::hosts::Fleet::cold(
-                &shell,
+            let fleet = crate::hosts::ActionFleet::new(
+                shell,
                 ledger,
                 policy,
                 home.to_owned(),
-                vec![crate::hosts::Host::local()],
-            );
-            let (closed, label) = crate::runtime::close(&fleet, &pane, Some("local"))?;
+                published.ok_or_else(|| Error::Invalid("observation unavailable".into()))?,
+            )?;
+            let (closed, label) = crate::runtime::close(&fleet, &pane, Some(&card.host))?;
             Ok(crate::runtime::closed_line(&closed, &label)
                 .trim_end()
                 .to_owned())
         }
         Effect::CloseDock => {
             let socket = crate::herdr_socket::Client::from_env()?;
-            board::toggle(ledger, &shell, &socket, owner)?;
+            board::toggle(ledger, shell, &socket, owner)?;
             Ok(String::new())
         }
     }
@@ -207,6 +284,86 @@ fn restore() {
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }
 
+struct Display {
+    model: Model,
+    preferences: Preferences,
+    published: Option<std::sync::Arc<crate::observation::Published>>,
+    observation_notice: Option<String>,
+    notice_until: Option<Instant>,
+    aged_at: Instant,
+}
+
+impl Display {
+    fn new() -> Self {
+        Self {
+            model: Model::default(),
+            preferences: Preferences::default(),
+            published: None,
+            observation_notice: Some("observation unavailable: connecting to dogsled serve".into()),
+            notice_until: None,
+            aged_at: Instant::now(),
+        }
+    }
+
+    fn receive(&mut self, message: Msg, owner: &str) {
+        match message {
+            Msg::Publication(value) => match read(&value, owner) {
+                Ok(mut selection) => {
+                    age(
+                        &mut selection.data,
+                        crate::ledger::now_ms().saturating_sub(selection.observed_ms),
+                    );
+                    self.model.update(selection.data);
+                    if let Preference::Published(saved) = selection.saved {
+                        self.preferences.apply(&mut self.model, saved);
+                    }
+                    self.observation_notice = selection.notice;
+                    self.aged_at = Instant::now();
+                    self.published = Some(value);
+                }
+                Err(error) => self.observation_notice = Some(error.to_string()),
+            },
+            Msg::Failed(error) => {
+                self.observation_notice = Some(if self.published.is_some() {
+                    format!("observation disconnected/stale: {error}")
+                } else {
+                    error
+                });
+            }
+            Msg::Notice(error) if error.is_empty() => {}
+            Msg::Notice(error) => {
+                self.model.notice = Some(error);
+                self.notice_until = Some(Instant::now() + NOTICE);
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        let elapsed = self.aged_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        age(&mut self.model.data, elapsed);
+        self.aged_at = Instant::now();
+        if self
+            .notice_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.notice_until = None;
+        }
+        if self.notice_until.is_none() {
+            self.model.notice.clone_from(&self.observation_notice);
+        }
+    }
+
+    fn save(&mut self, ledger: &Ledger, owner: &str, before: &model::Saved) {
+        let saved = self.model.saved();
+        if &saved != before {
+            self.preferences.changed(saved.clone());
+            if let Err(error) = model::save(ledger, owner, &saved) {
+                self.receive(Msg::Notice(format!("sidebar preferences: {error}")), owner);
+            }
+        }
+    }
+}
+
 pub fn command(
     shell: System,
     ledger: &Ledger,
@@ -215,71 +372,51 @@ pub fn command(
     owner: Option<String>,
 ) -> Result<()> {
     let owner = board::owner(owner, false)?.unwrap_or_default();
-    let mut model = Model::from_saved(model::load(ledger, &owner));
-    let saved_card = model::load(ledger, &owner).and_then(|s| s.selected_card);
+    let mut display = Display::new();
     let pal = palette::Palette::load_default();
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(1);
     let stop = AtomicBool::new(false);
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
-    let mut last_saved = model.saved();
-    let mut notice_until: Option<Instant> = None;
-    let mut first = true;
+    let client = ipc::Client::at(&ledger.dir);
     std::thread::scope(|scope| {
-        scope.spawn(|| reader(&shell, ledger, policy, home, &owner, &tx, &stop));
+        scope.spawn(|| reader(&client, &tx, &stop));
         let outcome = (|| -> Result<()> {
             loop {
                 let area = terminal.size()?;
                 let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
                 while let Ok(message) = rx.try_recv() {
-                    match message {
-                        Msg::Data(data) => {
-                            model.update(data);
-                            if first {
-                                first = false;
-                                if let Some(id) = &saved_card {
-                                    model.select_card_id(id);
-                                }
-                            }
-                        }
-                        Msg::Failed(error) | Msg::Notice(error) if error.is_empty() => {}
-                        Msg::Failed(error) | Msg::Notice(error) => {
-                            model.notice = Some(error);
-                            notice_until = Some(Instant::now() + NOTICE);
-                        }
-                    }
+                    display.receive(message, &owner);
                 }
-                if notice_until.is_some_and(|t| Instant::now() >= t) {
-                    model.notice = None;
-                    notice_until = None;
-                }
-                let geo = view::geometry(&model, area, &pal);
-                view::settle(&mut model, &geo);
-                terminal
-                    .draw(|frame| view::render(&model, frame.area(), frame.buffer_mut(), &pal))?;
+                display.tick();
+                let geo = view::geometry(&display.model, area, &pal);
+                view::settle(&mut display.model, &geo);
+                terminal.draw(|frame| {
+                    view::render(&display.model, frame.area(), frame.buffer_mut(), &pal);
+                })?;
                 if event::poll(TICK)? {
+                    let before = display.model.saved();
                     let effect = match event::read()? {
-                        Event::Key(key) => input::key(&mut model, key),
+                        Event::Key(key) => input::key(&mut display.model, key),
                         Event::Mouse(mouse) => {
-                            input::mouse(&mut model, &geo, mouse, Instant::now())
+                            input::mouse(&mut display.model, &geo, mouse, Instant::now())
                         }
                         _ => Effect::None,
                     };
                     if effect != Effect::None {
                         let tx = tx.clone();
                         let owner = owner.clone();
-                        let (shell, ledger, policy) = (shell, ledger, policy);
+                        let published = display.published.clone();
+                        let shell = &shell;
+                        let stop = &stop;
                         scope.spawn(move || {
-                            let message = perform(effect, shell, ledger, policy, home, &owner)
-                                .map_or_else(|e| Msg::Notice(e.to_string()), Msg::Notice);
-                            let _ = tx.send(message);
+                            let message =
+                                perform(effect, shell, ledger, policy, home, &owner, published)
+                                    .map_or_else(|e| Msg::Notice(e.to_string()), Msg::Notice);
+                            send(&tx, message, stop);
                         });
                     }
-                    let saved = model.saved();
-                    if saved != last_saved {
-                        model::save(ledger, &owner, &saved);
-                        last_saved = saved;
-                    }
+                    display.save(ledger, &owner, &before);
                 }
             }
         })();
@@ -289,15 +426,4 @@ pub fn command(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_todo_cache_error_becomes_a_notice_not_a_failed_read() {
-        let (todos, error) = owner_todos(Err(Error::Invalid("bad cache".into())), "w1:p1");
-        assert_eq!(todos, None);
-        assert_eq!(error.as_deref(), Some("todos: bad cache"));
-        let (todos, error) = owner_todos(Ok(Vec::new()), "w1:p1");
-        assert_eq!((todos, error), (None, None));
-    }
-}
+mod tests;

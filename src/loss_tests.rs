@@ -6,6 +6,27 @@ use crate::loss::{Evidence, Held};
 use crate::shell::{Output, Shell};
 use std::path::{Path, PathBuf};
 
+/// Probe the exact lock path acquired by Ledger, without creating a missing lock.
+fn locked(ledger: &Ledger, name: &str) -> Result<bool> {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(ledger.lock_path(name))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 #[derive(Debug)]
 struct System;
 impl Shell for System {
@@ -1945,15 +1966,25 @@ fn close_refuses_pane_moved_during_locked_teardown() {
         });
         entered.wait();
         assert!(
-            Ledger::new(fixture.repo.repo.join(".git"))
-                .locked("dogsled-lifecycle")
-                .unwrap()
+            locked(
+                &Ledger::new(fixture.repo.repo.join(".git")),
+                "dogsled-lifecycle"
+            )
+            .unwrap()
         );
         *shell.cwd.lock().unwrap() = other.clone();
         release.wait();
         assert_moved_close_preserved(&fixture, &shell, &other, &captured, close.join().unwrap());
     });
     assert_eq!(shell.teardowns.load(SeqCst), 1);
+    assert!(
+        !locked(
+            &Ledger::new(fixture.repo.repo.join(".git")),
+            "dogsled-lifecycle"
+        )
+        .unwrap(),
+        "the probe must report the released lifecycle lock as unlocked"
+    );
 }
 
 #[test]
@@ -2149,7 +2180,10 @@ fn close_reconciles_removal_before_initial_stat() {
         &crate::close::Caller::default(),
         crate::close::Guard::Clean,
         |closed| {
-            assert!(Ledger::new(fixture.repo.repo.join(".git")).locked("dogsled-lifecycle")?);
+            assert!(locked(
+                &Ledger::new(fixture.repo.repo.join(".git")),
+                "dogsled-lifecycle"
+            )?);
             crate::items::close(&fixture.ledger, "local", "placed-shell", 100)?;
             Ok(closed)
         },
@@ -2533,7 +2567,7 @@ fn unmarked_close_establishes_identity_under_the_same_lock() {
     let marker = unmark_checkout(&fixture);
     let lock = Ledger::new(fixture.repo.repo.join(".git"));
     let shell = LifecycleShell::new(&fixture.repo.tree, move || {
-        assert!(lock.locked("dogsled-lifecycle").unwrap());
+        assert!(locked(&lock, "dogsled-lifecycle").unwrap());
         let generation = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(generation.trim().len(), 32);
     });

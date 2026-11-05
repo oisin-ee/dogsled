@@ -29,6 +29,7 @@ pub(crate) struct LocalInputs {
     captured_ms: u64,
     inventory: Option<Value>,
     todos: Option<Vec<TodoSections>>,
+    sidebar_preferences: Option<BTreeMap<String, crate::sidebar::model::Saved>>,
     enrichment: Option<board::Enrichment>,
     watchdog: Option<crate::watchdog::State>,
     findings: Option<BTreeMap<String, crate::gate::Findings>>,
@@ -84,6 +85,11 @@ impl LocalInputs {
             .copied()
             .unwrap_or(input.published_ms);
         let todos = capture("todos", domain(&input.local, "todos"), &mut gaps);
+        let sidebar_preferences = capture(
+            "sidebar_preferences",
+            domain(&input.local, "sidebar_preferences"),
+            &mut gaps,
+        );
         let enrichment = status.as_ref().and_then(|status| {
             let messages = capture(
                 "board",
@@ -151,6 +157,7 @@ impl LocalInputs {
                 )
             }),
             todos,
+            sidebar_preferences,
             enrichment,
             watchdog,
             findings,
@@ -353,11 +360,7 @@ pub(crate) fn derive(
         status.as_ref().map(|_| json!({"items":[],"queue":[]})),
         &gaps,
     )?;
-    let sidebar: Vec<_> = reports
-        .iter()
-        .map(|report| crate::sidebar::model::HostRow::from_report(report, limits, local.now))
-        .collect();
-    insert(views, "sidebar_hosts", Some(sidebar), &gaps)?;
+    sidebar_views(views, local, &reports, status.as_ref(), limits, &gaps)?;
     let jobs: Vec<_> = reports
         .iter()
         .flat_map(|report| report.jobs.iter())
@@ -379,6 +382,68 @@ pub(crate) fn derive(
     insert(views, "inbox", portal.inbox.as_ref(), &gaps)?;
     insert(views, "portal", Some(portal), &gaps)?;
     input.gaps = gaps;
+    Ok(())
+}
+
+fn sidebar_views(
+    views: &mut Domains,
+    local: &LocalInputs,
+    reports: &[HostReport],
+    status: Option<&Status>,
+    limits: &Thresholds,
+    gaps: &[Gap],
+) -> Result<()> {
+    let mut sidebar: Vec<_> = reports
+        .iter()
+        .map(|report| super::sidebar::host(report, limits, local.now))
+        .collect();
+    if let Some(index) = reports.iter().position(|report| report.host.is_local()) {
+        let row = sidebar.remove(index);
+        sidebar.insert(0, row);
+    }
+    insert(views, "sidebar_hosts", Some(&sidebar), gaps)?;
+    insert(
+        views,
+        "sidebar_preferences",
+        local.sidebar_preferences.as_ref(),
+        gaps,
+    )?;
+    let sidebars = status.map(|status| {
+        owners(status, local.todos.as_deref().unwrap_or_default())
+            .into_iter()
+            .map(|owner| {
+                let data = local.enrichment.as_ref().map(|enrichment| {
+                    let mut board = board::build(status, Some(owner), local.now);
+                    board::enrich_captured(
+                        &mut board,
+                        status,
+                        local.todos.as_deref().unwrap_or_default(),
+                        enrichment,
+                    );
+                    crate::sidebar::model::Data::from_board(
+                        &board,
+                        local
+                            .todos
+                            .as_ref()
+                            .and_then(|todos| todos.iter().find(|todo| todo.pane == owner))
+                            .cloned(),
+                        sidebar.clone(),
+                    )
+                });
+                (owner, data)
+            })
+            .collect::<BTreeMap<_, _>>()
+    });
+    insert(views, "sidebars", sidebars, gaps)?;
+    insert(
+        views,
+        "empty_sidebar",
+        status.map(|_| crate::sidebar::model::Data {
+            hosts: sidebar,
+            ..Default::default()
+        }),
+        gaps,
+    )?;
     Ok(())
 }
 

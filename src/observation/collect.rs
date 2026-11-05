@@ -276,6 +276,11 @@ impl Collector {
         self.record("headroom", now, headroom);
         self.record("status", now, status);
         self.record("todos", now, todos);
+        self.record(
+            "sidebar_preferences",
+            now,
+            super::sidebar::preferences(node.ledger),
+        );
         Collection {
             input: Publication {
                 published_ms: now,

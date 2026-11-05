@@ -825,40 +825,6 @@ impl<'a> Fleet<'a> {
     }
 }
 
-impl ObserverFleet<'_> {
-    /// Temporary legacy assembly for the sidebar and portal readers.
-    pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
-        self.shell.budget().remaining("fleet status")?;
-        Ok(self
-            .hosts
-            .iter()
-            .map(|host| self.read_host(host, now))
-            .collect())
-    }
-
-    fn read_host(&self, host: &Host, now: u64) -> HostReport {
-        let result = if host.is_local() {
-            (|| {
-                crate::observation::collect::host(
-                    &self.node(),
-                    crate::host_store::snapshot(self.ledger)?,
-                    self.ledger.locked("service")?,
-                    now,
-                )
-            })()
-            .map(Cached::from)
-        } else {
-            crate::host_store::peer(self.ledger, &host.id).map(Option::unwrap_or_default)
-        };
-        let cached = result.unwrap_or_else(|error| Cached {
-            fetched_ms: now,
-            failure: Some(Failure::of(&error)),
-            ..Cached::default()
-        });
-        self.cached_report(host, cached, now)
-    }
-}
-
 pub(crate) fn cached_report(
     host: &Host,
     cached: Cached,
@@ -1006,7 +972,14 @@ mod tests {
                 false,
             )?;
         }
-        ObserverFleet(fleet.clone()).status(now)
+        fleet
+            .hosts
+            .iter()
+            .map(|host| {
+                let cached = crate::host_store::peer(fleet.ledger, &host.id)?.unwrap_or_default();
+                Ok(fleet.cached_report(host, cached, now))
+            })
+            .collect()
     }
 
     #[test]
@@ -1542,7 +1515,8 @@ mod tests {
         });
         crate::host_store::put_peer(&ledger, &host.id, &serde_json::from_value(old).unwrap())
             .unwrap();
-        let report = ObserverFleet(fleet.clone()).status(100).unwrap().remove(0);
+        let cached = crate::host_store::peer(&ledger, &host.id).unwrap().unwrap();
+        let report = fleet.cached_report(&host, cached, 100);
         assert_eq!(report.condition(), "unreachable: other");
         assert!(
             !serde_json::to_string(&report)

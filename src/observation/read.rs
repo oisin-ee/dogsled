@@ -80,6 +80,16 @@ pub(crate) fn board(published: &Published, owner: Option<&str>) -> Result<crate:
     owned(published, "boards", owner, "board", "empty_board")
 }
 
+pub(crate) fn sidebar(published: &Published, owner: &str) -> Result<crate::sidebar::model::Data> {
+    owned(
+        published,
+        "sidebars",
+        Some(owner),
+        "empty_sidebar",
+        "empty_sidebar",
+    )
+}
+
 pub(crate) fn findings(published: &Published, owner: &str) -> Result<crate::gate::Findings> {
     let mut findings: std::collections::BTreeMap<String, crate::gate::Findings> =
         view(published, "findings")?;

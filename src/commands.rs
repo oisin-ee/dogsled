@@ -1,7 +1,7 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
 use crate::error::{Error, Result};
-use crate::hosts::{ActionFleet, Fleet, Host, HostReport, ObserverFleet};
+use crate::hosts::{ActionFleet, Fleet, Host, HostReport};
 use crate::plan;
 use crate::prepare::Prepared;
 use serde::Serialize;
@@ -19,11 +19,6 @@ pub struct Status {
     /// Resource ownership is independent of task state and completion.
     #[serde(default)]
     pub holds: Vec<crate::holds::Hold>,
-}
-
-pub fn status(fleet: &ObserverFleet<'_>) -> Result<Status> {
-    let now = crate::ledger::now_ms();
-    crate::observation::collect::status(fleet.ledger, fleet.status(now)?, now)
 }
 
 #[derive(Debug, Serialize)]
