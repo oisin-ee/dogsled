@@ -394,13 +394,35 @@ pub fn close(
     let closed = match outcome {
         Ok(closed) => closed,
         Err(error) => {
-            if let Some(request) = &request {
-                items::close_blocker(fleet.ledger, &request.item, &error.to_string())?;
-            }
-            return Err(error);
+            return Err(close_failed(fleet.ledger, request.as_ref(), error));
         }
     };
     Ok((closed, host.label.clone()))
+}
+
+/// Failure recording must finish independently of an expired close command.
+const CLOSE_RECORD_BUDGET: Duration = Duration::from_secs(5);
+
+/// Retain the close failure without changing which step failed.
+pub(crate) fn close_failed(
+    ledger: &crate::ledger::Ledger,
+    request: Option<&crate::preservation::CloseRequest>,
+    error: Error,
+) -> Error {
+    if let Some(request) = request {
+        let mut recording_ledger = ledger.clone();
+        recording_ledger.budget =
+            crate::budget::Budget::until(std::time::Instant::now() + CLOSE_RECORD_BUDGET);
+        if let Err(recording) =
+            items::close_blocker(&recording_ledger, &request.item, &error.to_string())
+        {
+            return Error::CloseRecording {
+                source: Box::new(error),
+                recording: Box::new(recording),
+            };
+        }
+    }
+    error
 }
 
 pub fn closed_line(closed: &crate::close::Closed, label: &str) -> String {

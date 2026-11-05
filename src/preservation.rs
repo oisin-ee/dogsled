@@ -2124,6 +2124,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn committed_close_stages_survive_an_expired_budget_with_the_same_recovery_identity() {
+        for stage in [Stage::Intent, Stage::Captured, Stage::TeardownComplete] {
+            let repo = Repo::new(true);
+            let mut ledger = crate::ledger::Ledger::new(repo.scratch.0.join("state"));
+            let request = CloseRequest {
+                item: "child".into(),
+                created_ms: 1,
+                owner_pane: "owner".into(),
+                owner_session: Some("owner-session".into()),
+                host: "local".into(),
+            };
+            let expected = CloseExpectation {
+                pane: "child-pane".into(),
+                terminal: Some("terminal".into()),
+                request: Some(request.clone()),
+                launch: Some(request.item.clone()),
+                owners: vec![request],
+                tree: crate::worktree::with_lifecycle(
+                    &System::default(),
+                    &ledger,
+                    &repo.path,
+                    |guard| {
+                        Ok(guard
+                            .discover(&System::default(), repo.path.to_str().unwrap())?
+                            .unwrap()
+                            .tree())
+                    },
+                )
+                .unwrap(),
+                mode: CloseMode::Owner,
+                caller: crate::close::Caller::default(),
+            };
+            let mut saved = Operation::begin(&ledger, expected.clone()).unwrap();
+            if stage != Stage::Intent {
+                saved.capture_initial(&System::default(), &ledger).unwrap();
+                saved.advance(&ledger, stage).unwrap();
+            }
+            ledger.budget = crate::budget::Budget::until(std::time::Instant::now());
+            assert!(matches!(
+                saved.save(&ledger),
+                Err(crate::error::Error::Deadline(_))
+            ));
+            ledger.budget = crate::budget::Budget::default();
+            let resumed = Operation::begin(&ledger, expected).unwrap();
+            assert_eq!(resumed.id, saved.id);
+            assert_eq!(resumed.initial_id, saved.initial_id);
+            assert_eq!(resumed.stage, stage);
+            assert_eq!(resumed.initial, saved.initial);
+            resumed.check_retry(&CloseMode::Owner).unwrap();
+            if let Some(snapshot) = &resumed.initial {
+                assert_eq!(
+                    show(&System::default(), &repo.path, &snapshot.id).unwrap(),
+                    *snapshot
+                );
+            }
+            let mut uncertain = resumed;
+            uncertain.advance(&ledger, Stage::Normalizing).unwrap();
+            assert!(
+                uncertain
+                    .check_retry(&CloseMode::Owner)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("normalization was interrupted")
+            );
+        }
+    }
+
     fn tree_files(root: &Path) -> std::collections::BTreeMap<PathBuf, (u32, Vec<u8>)> {
         fn collect(
             root: &Path,
