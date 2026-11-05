@@ -614,9 +614,18 @@ case "$*" in
 esac
 "#;
 
+/// Release the shared kernel lock even when a parallel test's fork retained a copy.
+struct ServiceLock(fs::File);
+
+impl Drop for ServiceLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 struct Rig {
     dir: PathBuf,
-    service: std::sync::Mutex<Option<fs::File>>,
+    service: std::sync::Mutex<Option<ServiceLock>>,
     /// The time this rig's records were created at. It never moves, so a record and its
     /// receipt always name the same request time.
     origin_ms: u64,
@@ -766,7 +775,7 @@ esac
                 .open(self.dir.join("state/service.lock"))
                 .unwrap();
             lock.try_lock().unwrap();
-            *service = Some(lock);
+            *service = Some(ServiceLock(lock));
         }
     }
     fn put(&self, path: &str, value: &Value) {
@@ -1619,6 +1628,25 @@ impl Drop for Rig {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+#[test]
+fn rig_releases_service_lock_while_an_inherited_handle_remains_open() {
+    let rig = Rig::new("inherited-service-lock");
+    rig.service();
+    // A fork retains the same open file description until exec; a clone models it exactly.
+    let inherited = rig
+        .service
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .0
+        .try_clone()
+        .unwrap();
+    rig.service.lock().unwrap().take();
+    rig.service();
+    drop(inherited);
 }
 
 #[test]
