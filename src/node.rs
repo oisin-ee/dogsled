@@ -691,6 +691,12 @@ pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<
         };
     }
     crate::done::observe(ledger, &mut probe.agent_panes)?;
+    let leads = crate::lead_store::list(ledger)?;
+    probe.agents = probe::AgentCounts::from_agents(probe.agent_panes.iter().filter(|agent| {
+        !leads
+            .iter()
+            .any(|lead| crate::leads::matches_agent(lead, agent))
+    }));
     Ok(probe)
 }
 
