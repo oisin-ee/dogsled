@@ -339,28 +339,31 @@ async fn connection(
                     .pane
                     .as_deref()
                     .ok_or_else(|| Error::Invalid("missing detail pane".into()))?;
-                if let Some(payload) = frame.details.get(pane) {
-                    let identity = selected_agent(&frame.published, pane)?;
-                    let signature = (payload.reference.revision, identity.clone());
-                    if sent_detail.as_ref() != Some(&signature) {
-                        write_detail(&socket, &frame.published, identity, true, &payload.bytes)
-                            .await?;
-                        sent_detail = Some(signature);
-                    }
-                } else if frame
+                // The published agent list decides whether the pane exists. Serve captures a
+                // detail for every pane a reader asks about, an unknown one included, so a
+                // detail payload alone never makes a pane found.
+                let identity = selected_agent(&frame.published, pane)?;
+                let listed = frame
                     .published
                     .views
                     .get("portal")
                     .and_then(|view| view.pointer("/data/agents"))
-                    .is_some_and(serde_json::Value::is_array)
-                    && selected_agent(&frame.published, pane)?.is_none()
-                {
+                    .is_some_and(serde_json::Value::is_array);
+                if listed && identity.is_none() {
                     let missing = serde_json::to_vec(&super::details::Detail::unavailable(
                         None,
                         "agent unavailable",
                     ))?;
                     write_detail(&socket, &frame.published, None, false, &missing).await?;
                     return Ok(());
+                }
+                if let Some(payload) = frame.details.get(pane) {
+                    let signature = (payload.reference.revision, identity.clone());
+                    if sent_detail.as_ref() != Some(&signature) {
+                        write_detail(&socket, &frame.published, identity, true, &payload.bytes)
+                            .await?;
+                        sent_detail = Some(signature);
+                    }
                 }
             }
             Some(frame) => write(&socket, &frame.bytes).await?,
