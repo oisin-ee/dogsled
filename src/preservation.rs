@@ -635,22 +635,11 @@ fn git_words(checkout: &Path, index: Option<&Path>, args: &[&str]) -> Result<Vec
     // Hooks export repository-local routing. The explicit checkout, not the caller's
     // repository or index, owns every Git operation in this module.
     let mut words = Vec::new();
-    for key in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_PREFIX",
-        "GIT_SHALLOW_FILE",
-        "GIT_NAMESPACE",
-        "GIT_CONFIG",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_SYSTEM",
-    ] {
+    for key in crate::shell::GIT_LOCAL_ENV
+        .iter()
+        .copied()
+        .chain(["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])
+    {
         words.extend(["-u".into(), key.into()]);
     }
     for (key, _) in std::env::vars_os() {

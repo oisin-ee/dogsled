@@ -5,6 +5,38 @@ use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
 
+/// Repository-local variables from `git rev-parse --local-env-vars`, plus namespace
+/// routing. Do not inherit a hook's repository, index, object store, or local config.
+/// Intentional overrides must be supplied explicitly, for example through `env` argv.
+pub(crate) const GIT_LOCAL_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
+/// A command for a dogsled child process. Every child starts here, so none inherits a
+/// hook's repository routing.
+pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for key in GIT_LOCAL_ENV {
+        command.env_remove(key);
+    }
+    command
+}
+
 /// Captured result of a finished process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
@@ -179,7 +211,7 @@ impl System {
         if timeout.is_zero() {
             return Err(Error::Deadline(operation));
         }
-        let mut child = Command::new(program)
+        let mut child = command(program)
             .args(args)
             .stdin(if input.is_some() {
                 Stdio::piped()
@@ -370,6 +402,204 @@ pub fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct GitFixture(std::path::PathBuf);
+
+    impl GitFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(crate::ledger::new_id());
+            std::fs::create_dir_all(&root).unwrap();
+            let fixture = Self(root.canonicalize().unwrap());
+            for name in ["repo", "hook"] {
+                Self::git(&["init", "-q", "-b", "main", &fixture.path(name)]);
+                std::fs::write(fixture.0.join(name).join("file"), name).unwrap();
+                Self::git(&["-C", &fixture.path(name), "add", "."]);
+                Self::git(&["-C", &fixture.path(name), "commit", "-qm", "base"]);
+            }
+            Self::git(&[
+                "-C",
+                &fixture.path("repo"),
+                "worktree",
+                "add",
+                "-qb",
+                "feature",
+                &fixture.path("tree"),
+            ]);
+            std::fs::write(fixture.0.join("tree/feature"), "feature\n").unwrap();
+            Self::git(&["-C", &fixture.path("tree"), "add", "."]);
+            Self::git(&["-C", &fixture.path("tree"), "commit", "-qm", "feature"]);
+            fixture
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).display().to_string()
+        }
+
+        fn git(args: &[&str]) -> String {
+            let mut words = Vec::new();
+            for key in GIT_LOCAL_ENV {
+                words.extend(["-u".into(), (*key).into()]);
+            }
+            words.extend([
+                "git".into(),
+                "-c".into(),
+                "user.name=Fixture".into(),
+                "-c".into(),
+                "user.email=fixture@example.invalid".into(),
+            ]);
+            words.extend(args.iter().map(ToString::to_string));
+            System::default().run_ok("env", &words).unwrap().stdout
+        }
+    }
+
+    impl Drop for GitFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn with_hook_environment(test: &str, check: impl FnOnce(&GitFixture)) {
+        const ROOT: &str = "DOGSLED_SHELL_GIT_FIXTURE";
+        if let Some(root) = std::env::var_os(ROOT) {
+            // The parent also removes this directory if the child times out.
+            let fixture = GitFixture(std::path::PathBuf::from(root));
+            check(&fixture);
+            return;
+        }
+        let fixture = GitFixture::new();
+        let mut words = GIT_LOCAL_ENV
+            .iter()
+            .map(|key| format!("{key}=hook-local"))
+            .collect::<Vec<_>>();
+        words.extend([
+            format!("{ROOT}={}", fixture.0.display()),
+            format!("GIT_DIR={}/hook/.git", fixture.0.display()),
+            format!("GIT_WORK_TREE={}/hook", fixture.0.display()),
+            format!("GIT_INDEX_FILE={}/hook/.git/index", fixture.0.display()),
+            "GIT_SSH_COMMAND=retained-transport-setting".into(),
+            std::env::current_exe().unwrap().display().to_string(),
+            "--exact".into(),
+            format!("shell::tests::{test}"),
+            "--nocapture".into(),
+        ]);
+        let output = System::default()
+            .run_bounded("env", &words, std::time::Duration::from_secs(30))
+            .unwrap();
+        assert!(output.ok(), "{}\n{}", output.stdout, output.stderr);
+    }
+
+    #[test]
+    fn system_observes_requested_worktree_inside_hook_environment() {
+        with_hook_environment(
+            "system_observes_requested_worktree_inside_hook_environment",
+            |fixture| {
+                let shell = System::default();
+                let tree = fixture.0.join("tree");
+                let facts = crate::facts::worktree(&shell, tree.to_str().unwrap(), None).unwrap();
+                assert_eq!(facts.path, tree.to_str().unwrap());
+                assert_eq!(facts.branch, "feature");
+                assert_eq!(facts.ahead, 1);
+                assert!(!facts.dirty);
+                assert!(!facts.landed);
+                assert_eq!(
+                    facts.head,
+                    GitFixture::git(&["-C", tree.to_str().unwrap(), "rev-parse", "HEAD"]).trim()
+                );
+                for output in [
+                    shell.run_ok("env", &[]).unwrap().stdout.into_bytes(),
+                    shell
+                        .run_bytes_bounded("env", &[], std::time::Duration::from_secs(2))
+                        .unwrap()
+                        .stdout,
+                    shell
+                        .run_input_bounded(
+                            "sh",
+                            &["-c".into(), "cat >/dev/null; env".into()],
+                            b"input",
+                            std::time::Duration::from_secs(2),
+                        )
+                        .unwrap()
+                        .stdout
+                        .into_bytes(),
+                ] {
+                    let output = String::from_utf8(output).unwrap();
+                    assert!(
+                        output
+                            .lines()
+                            .any(|line| line == "GIT_SSH_COMMAND=retained-transport-setting")
+                    );
+                    assert!(output.lines().any(|line| line.starts_with("PATH=")));
+                    for key in GIT_LOCAL_ENV {
+                        assert!(
+                            !output
+                                .lines()
+                                .any(|line| line.starts_with(&format!("{key}="))),
+                            "{key}"
+                        );
+                    }
+                }
+                std::fs::write(tree.join("feature"), "dirty\n").unwrap();
+                assert!(
+                    crate::facts::worktree(&shell, tree.to_str().unwrap(), Some(&facts))
+                        .unwrap()
+                        .dirty
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn preservation_temporary_index_overrides_ambient_hook_index() {
+        with_hook_environment(
+            "preservation_temporary_index_overrides_ambient_hook_index",
+            |fixture| {
+                let shell = System::default();
+                let repo = fixture.0.join("repo");
+                let index = repo.join(".git/index");
+                let hook_index = fixture.0.join("hook/.git/index");
+                std::fs::write(repo.join("file"), "staged\n").unwrap();
+                GitFixture::git(&["-C", repo.to_str().unwrap(), "add", "file"]);
+                std::fs::write(repo.join("file"), "working\n").unwrap();
+                let before = std::fs::read(&index).unwrap();
+                let hook_before = std::fs::read(&hook_index).unwrap();
+                let saved = crate::preservation::snapshot(&shell, &repo).unwrap();
+                for (tree, expected) in [
+                    (&saved.index_tree, "staged\n"),
+                    (&saved.worktree_tree, "working\n"),
+                ] {
+                    let out = shell
+                        .run_ok(
+                            "git",
+                            &[
+                                "-C".into(),
+                                repo.display().to_string(),
+                                "cat-file".into(),
+                                "blob".into(),
+                                format!("{tree}:file"),
+                            ],
+                        )
+                        .unwrap();
+                    assert_eq!(out.stdout, expected);
+                }
+                assert_ne!(saved.index_tree, saved.worktree_tree);
+                assert_eq!(std::fs::read(index).unwrap(), before);
+                assert_eq!(std::fs::read(hook_index).unwrap(), hook_before);
+            },
+        );
+    }
+
+    #[test]
+    fn every_git_local_variable_is_isolated() {
+        let reported = System::default()
+            .run_ok("git", &["rev-parse".into(), "--local-env-vars".into()])
+            .unwrap()
+            .stdout;
+        let reported = reported.lines().collect::<Vec<_>>();
+        assert!(reported.contains(&"GIT_DIR"), "{reported:?}");
+        for key in reported {
+            assert!(GIT_LOCAL_ENV.contains(&key), "{key} is not isolated");
+        }
+    }
 
     #[test]
     fn byte_output_preserves_non_utf8_and_obeys_deadlines() {

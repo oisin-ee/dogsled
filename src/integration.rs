@@ -295,14 +295,9 @@ impl MergeRepo {
     }
 
     fn git(&self, shell: &dyn Shell, args: &[&str]) -> Result<crate::shell::Output> {
-        // Git hooks can export repository paths and command-scope configuration. Neither
-        // those nor system/global config and attributes belong in this merge calculation.
+        // System removes hook-local routing and configuration. This disposable merge
+        // calculation also ignores system/global config and attributes.
         let mut words = Vec::new();
-        for (key, _) in std::env::vars() {
-            if key.starts_with("GIT_") {
-                words.extend(["-u".into(), key]);
-            }
-        }
         words.extend([
             "GIT_CONFIG_NOSYSTEM=1".into(),
             "GIT_CONFIG_GLOBAL=/dev/null".into(),
