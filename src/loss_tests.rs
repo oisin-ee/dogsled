@@ -1083,6 +1083,27 @@ fn shell_idle_for(fixture: &Landed, minutes: u64) {
 
 #[test]
 fn worktree_with_a_young_shell_is_held_and_an_old_shell_releases_it() {
+    // Isolate the debug clock: changing this process's environment would race other tests.
+    if std::env::var_os("DOGSLED_TEST_YOUNG_SHELL_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "loss_tests::worktree_with_a_young_shell_is_held_and_an_old_shell_releases_it",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("DOGSLED_TEST_YOUNG_SHELL_CHILD", "1")
+            .env("DOGSLED_TEST_NOW_MS", "2000000")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let fixture = Landed::new();
     let shell = ShellIn {
         path: fixture.repo.tree.clone(),

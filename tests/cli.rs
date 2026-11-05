@@ -618,9 +618,18 @@ case "$*" in
 esac
 "#;
 
+/// Release the shared kernel lock even when a parallel test's fork retained a copy.
+struct ServiceLock(fs::File);
+
+impl Drop for ServiceLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 struct Rig {
     dir: PathBuf,
-    service: std::sync::Mutex<Option<fs::File>>,
+    service: std::sync::Mutex<Option<ServiceLock>>,
     /// The time this rig's records were created at. It never moves, so a record and its
     /// receipt always name the same request time.
     origin_ms: u64,
@@ -770,7 +779,7 @@ esac
                 .open(self.dir.join("state/service.lock"))
                 .unwrap();
             lock.try_lock().unwrap();
-            *service = Some(lock);
+            *service = Some(ServiceLock(lock));
         }
     }
     fn put(&self, path: &str, value: &Value) {
@@ -893,6 +902,8 @@ esac
         .current_dir(self.dir.join("home"))
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_WORKSPACE_ID", "w1")
+        // Fake Herdr owns this rig; never discover or subscribe to the developer's daemon.
+        .env("HERDR_SOCKET_PATH", self.dir.join("herdr.sock"))
         .env("RIG", &self.dir)
         .env("RIG_DOGSLED", env!("CARGO_BIN_EXE_dogsled"))
         .env("HOME", self.dir.join("home"))
@@ -1003,6 +1014,17 @@ esac
         } else {
             self.put_host_at(path, &snapshot);
         }
+    }
+
+    /// Branch/refusal fixtures need stable capacity, not the runner's resources or clock.
+    fn placement_capacity(&self) {
+        // The snapshot template supplies 7 GiB free memory and 50% free disk.
+        self.snapshot("state", self.now_ms(), 0.0, 16);
+        fs::write(
+            self.dir.join("clock"),
+            self.host()["sampled_ms"].to_string(),
+        )
+        .unwrap();
     }
 
     /// Explicit observer peer ingestion without replacing the local fixture sample.
@@ -1610,6 +1632,25 @@ impl Drop for Rig {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
     }
+}
+
+#[test]
+fn rig_releases_service_lock_while_an_inherited_handle_remains_open() {
+    let rig = Rig::new("inherited-service-lock");
+    rig.service();
+    // A fork retains the same open file description until exec; a clone models it exactly.
+    let inherited = rig
+        .service
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .0
+        .try_clone()
+        .unwrap();
+    rig.service.lock().unwrap().take();
+    rig.service();
+    drop(inherited);
 }
 
 #[test]

@@ -98,6 +98,7 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
         "exit 3",
     ]);
     command.stdout(std::process::Stdio::piped());
+    command.stderr(fs::File::create(rig.dir.join("waiting-error")).unwrap());
     // The test owns the command as its own child, so the test reaps it and reads its
     // exit status. A failed assertion kills the command and its own group.
     let mut child = Owned::spawn(&mut command);
@@ -108,7 +109,7 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
     // The fixture supplies admission capacity, not the CI runner's current load.
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
-    assert_eq!(child.wait().code(), Some(3));
+    assert_eq!(child.wait().code(), Some(3), "{}", rig.log("waiting-error"));
     assert_eq!(rig.tickets()[0]["state"], "admitted");
     assert_eq!(rig.tickets()[0]["waiting"], true);
     assert!(!rig.log("herdr.log").contains("dogsled: ticket"));

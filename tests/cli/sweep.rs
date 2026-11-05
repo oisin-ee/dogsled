@@ -1419,6 +1419,12 @@ fn remote_stopped_orphan_flag_cannot_override_host_launch_progress() {
         stopped_orphan(&rig, &tree);
         orphan(&rig, "i1", "w9:p1", "8103");
         rig.peer();
+        // This case observes the peer at its sampling instant, not after a wall-time lease.
+        fs::write(
+            rig.dir.join("clock"),
+            rig.read("remote.json")["sampled_ms"].to_string(),
+        )
+        .unwrap();
         super::close::unfinished_launch(&rig, "pending", &tree, "w2:p1");
         if progress == "ambiguous" {
             super::close::unfinished_launch(&rig, "competing", &tree, "w2:p1");
@@ -1555,6 +1561,12 @@ fn serve_closes_a_remote_orphan_over_ssh_with_the_pushed_check() {
     let (rig, tree) = close_rig("sweep-remote-orphan");
     child(&rig, "idle", &tree);
     rig.peer();
+    // All observations and safety rechecks happen at the peer's sampling instant.
+    fs::write(
+        rig.dir.join("clock"),
+        rig.read("remote.json")["sampled_ms"].to_string(),
+    )
+    .unwrap();
     let mut remote = rig.read("remote.json");
     // The peer lists the child's pane, so item reconciliation keeps the item open.
     remote["probe"]["agent_panes"][0]["pane"] = json!("w2:p1");

@@ -1154,7 +1154,12 @@ fn exec_close_failure_preserves_final_record_exit_and_logs() {
     ] {
         rig.claim(id, &["sh", "-c", command]);
         let output = rig.run(&["exec", id, "--", "sh", "-c", command]);
-        assert_eq!(output.status.code(), Some(code));
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{id}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("dogsled pane close:"), "{stderr}");
         assert!(stderr.contains("close-refused"), "{stderr}");

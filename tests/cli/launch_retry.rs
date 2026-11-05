@@ -4177,7 +4177,8 @@ fn a_busy_start_is_repeated_on_the_same_pane_until_the_shell_is_ready() {
 #[test]
 fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried() {
     let rig = Rig::new("busy-timeout");
-    fs::write(rig.dir.join("busy-window-ms"), "600").unwrap();
+    // The first busy refusal exhausts the window regardless of host scheduling.
+    fs::write(rig.dir.join("busy-window-ms"), "0").unwrap();
     busy_start(&rig, -1);
     let request = host_request(&rig);
     let (code, error) = rig.json(&[
@@ -4198,7 +4199,7 @@ fn a_start_that_stays_busy_times_out_without_closing_its_pane_and_can_be_retried
     assert!(message.contains("stays open"), "{message}");
     assert!(!message.contains("outcome is unknown"), "{message}");
     let log = rig.log("herdr.log");
-    assert!(log.matches("agent start worker ").count() >= 2, "{log}");
+    assert_eq!(log.matches("agent start worker ").count(), 1, "{log}");
     assert!(!log.contains("pane close"), "{log}");
     assert!(!log.contains("workspace close"), "{log}");
     // No final receipt: the launch may run again, and it has not been attempted.
