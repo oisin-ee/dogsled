@@ -406,11 +406,23 @@ impl<'a> Node<'a> {
     }
 
     fn live_reservations(&self, now: u64) -> Result<Vec<Reservation>> {
-        let reservations = self
-            .ledger
-            .reservations(now, self.thresholds.reservation_ttl_ms)?;
-        crate::job_store::put_reservations(self.ledger, &reservations)?;
-        Ok(reservations)
+        self.prune_reservations(now)?;
+        self.ledger
+            .reservations(now, self.thresholds.reservation_ttl_ms)
+    }
+
+    /// Prune authoritative expiry values in one transaction, never a previously read set.
+    /// A release or creation committed during collection must not be overwritten.
+    pub(crate) fn prune_reservations(&self, now: u64) -> Result<()> {
+        let ttl = self.thresholds.reservation_ttl_ms;
+        let cutoff = now.checked_sub(ttl).map(crate::rows::integer).transpose()?;
+        crate::store::write(self.ledger, |tx| {
+            tx.execute(
+                "DELETE FROM placements WHERE ?1 OR created_ms <= ?2",
+                rusqlite::params![ttl == 0, cutoff],
+            )?;
+            Ok(())
+        })
     }
 
     /// Preparation fencing precedes the short capacity transaction. No lifecycle work
