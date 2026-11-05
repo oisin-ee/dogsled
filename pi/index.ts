@@ -13,6 +13,7 @@ import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor,
 import { registerInterview } from "./interview.ts";
 import { registerPlanMode } from "./plan-mode.ts";
 import { PortalClient } from "./portal-client.ts";
+import { registerActivity } from "./activity.ts";
 import { createTodo } from "./todo/src/index.ts";
 
 const REFRESH_MS = 10_000;
@@ -59,6 +60,7 @@ export default function dogsled(pi: ExtensionAPI) {
 	const units = new UnitBridge(pi, binary, todo.tasks);
 	// The portal owns the interactive parts of Pi: the interview form and the plan review.
 	const portal = new PortalClient();
+	registerActivity(pi, portal, owner);
 	const planMode = registerPlanMode(pi, todo.approve, portal);
 	const interviews = registerInterview(pi, portal);
 	// One handler owns the tool call: the unit bridge first, then the plan-mode gate.

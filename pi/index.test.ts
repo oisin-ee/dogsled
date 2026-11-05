@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
 
 // Todo publication uses stdin through the real process API, not ExtensionAPI.exec. The board
@@ -145,6 +145,54 @@ function rig() {
 			return result;
 		} };
 }
+
+test("the extension publishes real activity through PortalClient with bearer auth and native evidence", async t => {
+	withPane(t);
+	const state = mkdtempSync(join(tmpdir(), "dogsled-activity-token-"));
+	mkdirSync(join(state, "web"));
+	writeFileSync(join(state, "web", "token"), "fixture-token\n");
+	const previous = process.env["DOGSLED_STATE"];
+	process.env["DOGSLED_STATE"] = state;
+	t.after(() => {
+		if (previous === undefined) delete process.env["DOGSLED_STATE"]; else process.env["DOGSLED_STATE"] = previous;
+		rmSync(state, { recursive: true, force: true });
+	});
+	let first!: () => void;
+	let thinking!: () => void;
+	let closed!: () => void;
+	const firstPublication = new Promise<void>(resolve => { first = resolve; });
+	const thinkingPublication = new Promise<void>(resolve => { thinking = resolve; });
+	const closure = new Promise<void>(resolve => { closed = resolve; });
+	const publications: any[] = [];
+	t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+		assert.match(String(url), /\/api\/agents\/w1%3Ap1\/activity(?:\/producer)?$/);
+		assert.equal((init.headers as Record<string, string>)["authorization"], "Bearer fixture-token");
+		if (init.method === "GET") return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", producer: { generation: 0 } });
+		const body = JSON.parse(String(init.body));
+		if (init.method === "POST") assert.deepEqual(body.evidence, { session_file: "/native/session.jsonl", session_id: "session" });
+		else {
+			publications.push(body.payload);
+			if (body.payload.state?.phase === "idle") first();
+			if (body.payload.state?.phase === "thinking") thinking();
+			if (body.payload.kind === "closed") closed();
+		}
+		return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", generation: 1,
+			producer_id: body.producer_id, session: "native-key", sequence: body.sequence ?? 0, heartbeat_ms: 5000, ttl_ms: 15000 });
+	});
+	const r = rig();
+	t.mock.method(r.ctx.sessionManager, "getSessionFile", () => "/native/session.jsonl");
+	await r.invoke("session_start");
+	await firstPublication;
+	await r.invoke("agent_start");
+	await r.invoke("message_update", { message: { role: "assistant" }, assistantMessageEvent: {
+		type: "thinking_delta", contentIndex: 0, delta: "private reasoning that must not leave Pi",
+	} });
+	await thinkingPublication;
+	await r.invoke("session_shutdown");
+	await closure;
+	assert.equal(JSON.stringify(publications).includes("private reasoning"), false);
+	assert.deepEqual(publications.at(-1), { kind: "closed" });
+});
 
 function withPane(t: { after: (fn: () => void) => void }) {
 	const herdr = process.env["HERDR_ENV"];
