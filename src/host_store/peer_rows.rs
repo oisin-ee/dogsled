@@ -24,6 +24,9 @@ pub(super) const SCHEMA: &str = r"CREATE TABLE host_peer_handoffs (
  signal_session TEXT,
  signal_recorded_ms INTEGER CHECK (signal_recorded_ms >= 0),
  signal_cleared_ms INTEGER CHECK (signal_cleared_ms >= 0),
+ signal_history_message BLOB,
+ signal_inputs_message BLOB,
+ signal_delivered INTEGER NOT NULL CHECK(signal_delivered IN (0,1)),
  branch_present INTEGER NOT NULL CHECK(branch_present IN (0,1)),
  branch_repo TEXT,
  branch_name TEXT,
@@ -176,6 +179,9 @@ pub(super) fn put_handoff(
             columns.number("signal_cleared_ms", Some(*value))?;
         }
     }
+    columns.message("signal_history_message", Some(&value.signal_history))?;
+    columns.message("signal_inputs_message", Some(&value.signal_inputs))?;
+    columns.flag("signal_delivered", value.signal_delivered);
     columns.flag("branch_present", value.branch.is_some());
     if let Some(value) = &value.branch {
         columns.text("branch_repo", Some(&value.repo));
@@ -263,6 +269,9 @@ pub(super) fn handoffs(
                 } else {
                     None
                 },
+                signal_history: rows::decoded(row, "signal_history_message")?.unwrap_or_default(),
+                signal_inputs: rows::decoded(row, "signal_inputs_message")?.unwrap_or_default(),
+                signal_delivered: row.get("signal_delivered")?,
                 branch: if row.get::<_, Option<bool>>("branch_present")? == Some(true) {
                     Some(crate::done::Branch {
                         repo: rows::required(row, "branch_repo")?,

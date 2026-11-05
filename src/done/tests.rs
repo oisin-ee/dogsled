@@ -17,6 +17,7 @@ fn live_signal_agent(shell: &Fake, child: &Agent) {
         "herdr agent list",
         &json!({"result":{"agents":[{
             "pane_id": child.pane, "agent":"pi", "agent_status":child.state,
+            "terminal_id": child.terminal_id,
             "agent_session": child.agent_session.as_ref().map(|s| json!({"kind":"path","value":s})),
             "state_change_seq":child.state_change_seq, "state_since_ms":child.state_since_ms
         }]}})
@@ -56,7 +57,7 @@ fn signals_record_without_terminal_evidence_and_derive_after_the_turn() {
 }
 
 #[test]
-fn identical_signals_deduplicate_and_conflicting_repeats_refuse() {
+fn identical_signals_deduplicate_and_newer_signals_keep_history() {
     let ledger = ledger();
     let shell = Fake::new();
     live_signal_agent(&shell, &agent("working"));
@@ -79,19 +80,18 @@ fn identical_signals_deduplicate_and_conflicting_repeats_refuse() {
     )
     .unwrap();
     assert_eq!(first, again);
+    let mut history = vec![first];
     for (kind, text) in [
         (crate::lifecycle::Signal::Ask, "different"),
         (crate::lifecycle::Signal::Blocked, "question"),
     ] {
-        assert!(matches!(
-            signal(&ledger, &shell, "w2:p1", kind, text, 3),
-            Err(Error::Refused {
-                code: crate::error::Refusal::SignalConflict,
-                ..
-            })
-        ));
+        let next = signal(&ledger, &shell, "w2:p1", kind, text, 3).unwrap();
+        let mark = list(&ledger).unwrap().remove(0);
+        assert_eq!(mark.signal_history, history);
+        assert_eq!(mark.signal.as_ref(), Some(&next));
+        assert!(!mark.signal_delivered);
+        history.push(next);
     }
-    assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&first));
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn unmatched_turns_never_block_a_new_signal_or_done() {
 }
 
 #[test]
-fn shared_equal_axes_prove_the_same_turn_despite_missing_evidence() {
+fn shared_equal_axes_do_not_prove_an_unchanged_native_turn() {
     for (before_seq, before_since, seq, since) in [
         (Some(10), Some(100), Some(10), None),
         (Some(10), None, Some(10), Some(100)),
@@ -264,19 +264,18 @@ fn shared_equal_axes_prove_the_same_turn_despite_missing_evidence() {
             old
         );
         shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
-        for error in [
-            signal(&ledger, &shell, &child.pane, old.kind, "different", 210).unwrap_err(),
+        let next = signal(&ledger, &shell, &child.pane, old.kind, "different", 210).unwrap();
+        assert_ne!(next.event_id, old.event_id);
+        assert!(matches!(
             mark(&ledger, &shell, &child.pane, 210).unwrap_err(),
-        ] {
-            assert!(matches!(
-                error,
-                Error::Refused {
-                    code: crate::error::Refusal::SignalConflict,
-                    ..
-                }
-            ));
-        }
-        assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&old));
+            Error::Refused {
+                code: crate::error::Refusal::SignalConflict,
+                ..
+            }
+        ));
+        let saved = list(&ledger).unwrap().remove(0);
+        assert_eq!(saved.signal.as_ref(), Some(&next));
+        assert_eq!(saved.signal_history, [old]);
     }
 }
 
@@ -474,6 +473,203 @@ fn next_turn_can_record_a_new_event() {
 }
 
 #[test]
+fn delivered_input_opens_a_new_signal_turn_without_a_herdr_transition() {
+    for kind in ["message", "task", "check-in", "reply", "blocked", "failed"] {
+        for finish in [false, true] {
+            let ledger = ledger();
+            let shell = Fake::new();
+            let child = agent("working");
+            live_signal_agent(&shell, &child);
+            shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+            let previous = signal(
+                &ledger,
+                &shell,
+                &child.pane,
+                crate::lifecycle::Signal::Blocked,
+                "need approval",
+                1,
+            )
+            .unwrap();
+            // A poll with no input must not release the equal-counter guard.
+            assert_eq!(
+                crate::inbox::claim_for(&ledger, &shell, &child.pane, "pi", 2).unwrap(),
+                Vec::<crate::inbox::Record>::new()
+            );
+            assert!(matches!(
+                mark(&ledger, &shell, &child.pane, 2),
+                Err(Error::Refused {
+                    code: crate::error::Refusal::SignalConflict,
+                    ..
+                })
+            ));
+            let record: crate::inbox::Record = serde_json::from_value(json!({
+                "id":"input-1", "terminal":"old", "pane":child.pane,
+                "from":{"host":"local"}, "kind":kind, "text":"new input",
+                "created_ms":2, "state":"pending", "attempts":0, "next_ms":0
+            }))
+            .unwrap();
+            crate::store::write(&ledger, |tx| {
+                crate::web_store::inbox::put_records(tx, "old", &[record])
+            })
+            .unwrap();
+            let claimed = crate::inbox::claim_for(&ledger, &shell, &child.pane, "pi", 3).unwrap();
+            assert_eq!(claimed.len(), 1);
+            let accepted = matches!(kind, "message" | "task");
+            let saved = list(&ledger).unwrap().remove(0);
+            assert_eq!(saved.signal_delivered, accepted);
+            assert_peer_signal_round_trip(&ledger, saved.clone());
+            // Delivery releases only the guard. The owner still sees the earlier event.
+            assert_eq!(saved.signal.as_ref(), Some(&previous));
+            let mut observed = vec![child.clone()];
+            observe(&ledger, &mut observed).unwrap();
+            assert_eq!(observed[0].signal.as_deref(), Some("blocked"));
+            if !accepted {
+                assert!(matches!(
+                    mark(&ledger, &shell, &child.pane, 4),
+                    Err(Error::Refused {
+                        code: crate::error::Refusal::SignalConflict,
+                        ..
+                    })
+                ));
+                continue;
+            }
+            if finish {
+                let done = mark(&ledger, &shell, &child.pane, 4).unwrap();
+                assert!(done.done_turn.is_some());
+                assert_eq!(done.signal_history, [previous]);
+            } else {
+                let next = signal(
+                    &ledger,
+                    &shell,
+                    &child.pane,
+                    crate::lifecycle::Signal::Ask,
+                    "another question",
+                    4,
+                )
+                .unwrap();
+                assert_ne!(next.event_id, previous.event_id);
+                assert_eq!(next.turn, previous.turn);
+                // Claiming the same ID after its lease expires cannot open another turn.
+                let replay = crate::inbox::claim_for(
+                    &ledger,
+                    &shell,
+                    &child.pane,
+                    "pi",
+                    claimed[0].lease.next_ms,
+                )
+                .unwrap();
+                assert_eq!(replay[0].id, claimed[0].id);
+                let saved = list(&ledger).unwrap().remove(0);
+                assert_eq!(saved.signal_history, [previous]);
+                assert!(!saved.signal_delivered);
+                assert!(matches!(
+                    mark(&ledger, &shell, &child.pane, 5),
+                    Err(Error::Refused {
+                        code: crate::error::Refusal::SignalConflict,
+                        ..
+                    })
+                ));
+                assert_peer_signal_round_trip(&ledger, saved);
+            }
+        }
+    }
+}
+
+#[test]
+fn resumed_native_signal_and_done_calls_do_not_require_a_herdr_transition() {
+    for finish in [true, false] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        let child = agent("working");
+        live_signal_agent(&shell, &child);
+        shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+        let first = signal(
+            &ledger,
+            &shell,
+            &child.pane,
+            crate::lifecycle::Signal::Blocked,
+            "need approval",
+            1,
+        )
+        .unwrap();
+        if finish {
+            let record: crate::inbox::Record = serde_json::from_value(json!({
+                "id":"new-task", "terminal":"old", "pane":child.pane,
+                "from":{"host":"local"}, "kind":"task", "text":"approved",
+                "created_ms":2, "state":"pending", "attempts":0, "next_ms":0
+            }))
+            .unwrap();
+            crate::store::write(&ledger, |tx| {
+                crate::web_store::inbox::put_records(tx, "old", &[record])
+            })
+            .unwrap();
+            assert_eq!(
+                crate::inbox::claim_for(&ledger, &shell, &child.pane, "pi", 3)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                mark(&ledger, &shell, &child.pane, 4)
+                    .unwrap()
+                    .done_turn
+                    .is_some()
+            );
+        } else {
+            let next = signal(
+                &ledger,
+                &shell,
+                &child.pane,
+                crate::lifecycle::Signal::Ask,
+                "another question",
+                2,
+            )
+            .unwrap();
+            assert_ne!(next.event_id, first.event_id);
+        }
+    }
+}
+
+#[test]
+fn failed_input_claim_does_not_release_the_signal_guard() {
+    let ledger = ledger();
+    let shell = Fake::new();
+    let child = agent("working");
+    live_signal_agent(&shell, &child);
+    shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+    signal(
+        &ledger,
+        &shell,
+        &child.pane,
+        crate::lifecycle::Signal::Ask,
+        "question",
+        1,
+    )
+    .unwrap();
+    let failed: Result<()> = input(&ledger, &child, Input::Claim, || {
+        Err(Error::Invalid("claim failed".into()))
+    });
+    assert!(failed.is_err());
+    assert!(matches!(
+        mark(&ledger, &shell, &child.pane, 2),
+        Err(Error::Refused {
+            code: crate::error::Refusal::SignalConflict,
+            ..
+        })
+    ));
+}
+
+fn assert_peer_signal_round_trip(ledger: &Ledger, saved: Mark) {
+    let peer = crate::hosts::Cached {
+        handoffs: vec![saved.clone()],
+        ..Default::default()
+    };
+    crate::host_store::put_peer(ledger, "peer", &peer).unwrap();
+    let imported = crate::host_store::peer(ledger, "peer").unwrap().unwrap();
+    assert_eq!(imported.handoffs, [saved]);
+}
+
+#[test]
 fn inbox_acceptance_does_not_remove_turn_signals() {
     let ledger = ledger();
     let shell = Fake::new();
@@ -491,7 +687,7 @@ fn inbox_acceptance_does_not_remove_turn_signals() {
         &ledger,
         &agent("working"),
         Input::Put { from: None },
-        || Ok(((), true)),
+        || Ok(((), true, Vec::new())),
     )
     .unwrap();
     assert_eq!(list(&ledger).unwrap()[0].signal.as_ref(), Some(&saved));
@@ -537,6 +733,9 @@ fn mark_at() -> Mark {
         marked_ms: 1,
         done_turn: None,
         signal: None,
+        signal_history: Vec::new(),
+        signal_inputs: BTreeSet::new(),
+        signal_delivered: false,
         branch: None,
         detached: false,
         reply: None,
@@ -1099,7 +1298,7 @@ fn inbox_cancels_only_during_the_done_turn_and_never_after_it() {
         &ledger,
         &agent("working"),
         Input::Put { from: None },
-        || Ok(((), true)),
+        || Ok(((), true, Vec::new())),
     )
     .unwrap();
     assert_eq!(list(&ledger).unwrap(), []);
@@ -1108,7 +1307,7 @@ fn inbox_cancels_only_during_the_done_turn_and_never_after_it() {
         &ledger,
         &agent("idle"),
         Input::Put { from: None },
-        || -> Result<((), bool)> { panic!("must not deliver") },
+        || -> Result<((), bool, Vec<String>)> { panic!("must not deliver") },
     );
     assert!(
         refused
@@ -1121,7 +1320,7 @@ fn inbox_cancels_only_during_the_done_turn_and_never_after_it() {
             &ledger,
             &agent("working"),
             Input::Put { from: None },
-            || Ok(((), true))
+            || Ok(((), true, Vec::new()))
         )
         .is_err()
     );
@@ -1141,7 +1340,7 @@ fn an_overlapping_branch_refresh_cannot_erase_a_terminal_seal() {
             &ledger,
             &agent("working"),
             Input::Put { from: None },
-            || Ok(((), true))
+            || Ok(((), true, Vec::new()))
         )
         .is_err()
     );

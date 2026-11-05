@@ -31,15 +31,21 @@ A signal never changes terminal evidence (`sealed`, `reply`, `native_done`).
 
 A different session in the same pane never sees or clears an old signal. Treat it as a different agent.
 
-**Same turn, more than one call:**
+**More than one nonterminal call:**
 
 - An identical repeat (same kind, same text) is deduplicated, and it returns the existing event id.
-- A different kind or different text in the same turn is refused with typed `conflict`.
+- A newer `ask` or `blocked` from the same session supersedes the active signal. Preserve the earlier event in persisted history.
+- Equal or missing Herdr counters do not prove that the native turn stayed unchanged. Harness reminders can resume work without a visible state transition.
 
 **Order against `done`:**
 
-- `done` after `ask` or `blocked` in the same turn is refused.
-- `ask` or `blocked` after `done` in the same turn is refused.
+- `done` after `ask` or `blocked` is refused only when the available axes match and no new `message` or `task` input was claimed.
+- Restored or decreased counters, entirely absent axes, and a positive later Herdr turn do not block `done`. Keep the existing unmatched-axis behavior.
+- This rule is asymmetric: a false refusal strands a finished child. An accepted `done` retains the earlier signal in history.
+- Deduplicate claimed input IDs. A lease replay cannot release a new signal's guard.
+- Input delivery releases only the conflict guard. The earlier signal remains visible until the existing clearance rules apply.
+- A harness-only reminder does not release the guard.
+- `ask` or `blocked` after `done` remains refused.
 
 ## -16: record signals
 

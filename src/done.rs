@@ -87,6 +87,15 @@ pub struct Mark {
     pub done_turn: Option<Turn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<Signal>,
+    /// Superseded nonterminal events remain available to the originating owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signal_history: Vec<Signal>,
+    /// Input identities already claimed by this session, including lease replays.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub signal_inputs: BTreeSet<String>,
+    /// New input releases only the current signal's conflict guard, not its visibility.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signal_delivered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<Branch>,
     /// The child's checkout is detached: it has no branch to land, and its commits must be
@@ -344,7 +353,7 @@ pub fn mark(
         Preflight::Detached => (None, true),
         Preflight::Branch(branch) => (Some(branch), false),
     };
-    let mark = Mark {
+    let mut mark = Mark {
         pane: pane.into(),
         item,
         session: Some(session),
@@ -354,6 +363,9 @@ pub fn mark(
         marked_ms: now,
         done_turn: Some(Turn::of_agent(&agent)),
         signal: None,
+        signal_history: Vec::new(),
+        signal_inputs: BTreeSet::new(),
+        signal_delivered: false,
         branch,
         detached,
         reply: None,
@@ -366,6 +378,7 @@ pub fn mark(
         for existing in marks.values().filter(|m| matches(m, &agent)) {
             if let Some(signal) = &existing.signal
                 && signal.cleared_ms.is_none()
+                && !existing.signal_delivered
                 && signal.turn.same_as(&Turn::of_agent(&agent))
             {
                 return Err(conflict(pane));
@@ -377,6 +390,11 @@ pub fn mark(
             return Err(Error::Invalid(format!(
                 "{pane} finished; start a new child for more work"
             )));
+        }
+        if let Some(existing) = marks.get(&key(&mark)) {
+            mark.signal_history.clone_from(&existing.signal_history);
+            mark.signal_history.extend(existing.signal.clone());
+            mark.signal_inputs.clone_from(&existing.signal_inputs);
         }
         marks.insert(key(&mark), mark.clone());
         crate::host_store::replace_marks(tx, &marks)
@@ -416,15 +434,31 @@ pub fn signal(
             }
             if let Some(existing) = &mark.signal
                 && existing.cleared_ms.is_none()
+                && !mark.signal_delivered
                 && existing.turn.same_as(&turn)
+                && existing.kind == kind
+                && existing.text == text
             {
-                return if existing.kind == kind && existing.text == text {
-                    Ok(existing.clone())
-                } else {
-                    Err(conflict(pane))
-                };
+                return Ok(existing.clone());
             }
         }
+        // Read the baseline under the same lock as claims. A first signal must not
+        // miss a claim that completed while it waited for this lock.
+        let claimed: BTreeSet<String> = if let Some(terminal) = &agent.terminal_id {
+            crate::inbox::received(ledger, terminal)?
+                .into_iter()
+                .filter(|record| {
+                    matches!(record.kind.as_str(), "message" | "task")
+                        && matches!(
+                            record.state,
+                            crate::inbox::State::Claimed | crate::inbox::State::Delivered
+                        )
+                })
+                .map(|record| record.id)
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         let session_hash = crate::unit_transport::digest_hex(session.as_bytes());
         let signal = Signal {
             kind,
@@ -442,7 +476,7 @@ pub fn signal(
             recorded_ms: now,
             cleared_ms: None,
         };
-        let mark = Mark {
+        let mut mark = Mark {
             pane: pane.to_owned(),
             item,
             session: Some(session.clone()),
@@ -452,6 +486,9 @@ pub fn signal(
             marked_ms: now,
             done_turn: None,
             signal: Some(signal.clone()),
+            signal_history: Vec::new(),
+            signal_inputs: claimed,
+            signal_delivered: false,
             branch: None,
             detached: false,
             reply: None,
@@ -459,6 +496,12 @@ pub fn signal(
             closed_ms: None,
             dropped_ms: None,
         };
+        if let Some(previous) = marks.get(&key(&mark)) {
+            mark.signal_history.clone_from(&previous.signal_history);
+            mark.signal_history.extend(previous.signal.clone());
+            mark.signal_inputs
+                .extend(previous.signal_inputs.iter().cloned());
+        }
         marks.insert(key(&mark), mark);
         crate::host_store::replace_marks(tx, &marks)?;
         Ok(signal)
@@ -737,7 +780,7 @@ pub fn input<T>(
     ledger: &Ledger,
     agent: &Agent,
     input: Input<'_>,
-    accept: impl FnOnce() -> Result<(T, bool)>,
+    accept: impl FnOnce() -> Result<(T, bool, Vec<String>)>,
 ) -> Result<T> {
     if matches!(input, Input::Legacy { .. }) {
         return Err(Error::Invalid(
@@ -759,14 +802,16 @@ pub fn continue_legacy<T>(
     from: &crate::inbox::Sender,
     accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool)>,
 ) -> Result<T> {
-    guarded(ledger, agent, Input::Legacy { from }, accept)
+    guarded(ledger, agent, Input::Legacy { from }, |mark| {
+        accept(mark).map(|(result, received)| (result, received, Vec::new()))
+    })
 }
 
 fn guarded<T>(
     ledger: &Ledger,
     agent: &Agent,
     input: Input<'_>,
-    accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool)>,
+    accept: impl FnOnce(Option<&Mark>) -> Result<(T, bool, Vec<String>)>,
 ) -> Result<T> {
     ledger.with_lock("done", || {
         let before: Marks = crate::host_store::marks(ledger)?;
@@ -851,7 +896,16 @@ fn guarded<T>(
         }
         // Legacy input without a refusal reaches here with its one mark, or with no matching
         // mark at all: its receipt decides whether that is a finished retry.
-        let (result, received) = accept(legacy.as_ref().map(|(_, mark)| mark))?;
+        let (result, received, delivered) = accept(legacy.as_ref().map(|(_, mark)| mark))?;
+        if matches!(input, Input::Claim) {
+            for mark in marks.values_mut().filter(|mark| matches(mark, agent)) {
+                for id in &delivered {
+                    if mark.signal_inputs.insert(id.clone()) && mark.signal.is_some() {
+                        mark.signal_delivered = true;
+                    }
+                }
+            }
+        }
         if let Some((key, mark)) = &legacy {
             // The acceptance consumed this mark. Remove exactly it, and only if unchanged.
             if received && marks.get(key) == Some(mark) {

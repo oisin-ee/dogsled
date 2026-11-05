@@ -287,7 +287,7 @@ fn put_checked(
         ledger,
         &agent,
         crate::done::Input::Put { from: Some(&from) },
-        || put(ledger, record).map(|r| (r, true)),
+        || put(ledger, record).map(|r| (r, true, Vec::new())),
     )
 }
 
@@ -817,7 +817,12 @@ pub fn claim_for(
     crate::done::input(ledger, &agent, crate::done::Input::Claim, || {
         let records = claim(ledger, &terminal, &reader, now)?;
         let received = !records.is_empty();
-        Ok((records, received))
+        let delivered = records
+            .iter()
+            .filter(|record| matches!(record.kind.as_str(), "message" | "task"))
+            .map(|record| record.id.clone())
+            .collect();
+        Ok((records, received, delivered))
     })
 }
 
