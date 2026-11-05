@@ -203,30 +203,66 @@ fn service_publishes_snapshots_while_remote_action_times_out() {
     let (_, ticket) = rig.json(&["place", "--host", "netcup"]);
     drop(publisher);
     rig.expire_cache();
-    rig.script("ssh", "#!/bin/sh\nexec sleep 60\n");
-    // Every agent-list call, which only a publication tick makes, reads the previous published
-    // snapshot. This observes publication at each service tick without sleeps or polling.
-    rig.script("herdr", r#"#!/bin/sh
+    // Admission must have an eligible peer; only the reservation call should hang.
+    rig.config("");
+    // The blocked admission itself records publications, so every record proves SSH was
+    // still running. It never replies: the real SSH deadline must end the admission.
+    rig.script(
+        "ssh",
+        r#"#!/bin/sh
 case "$*" in
- 'machine list --json') cat "$RIG/machines.json" ;;
- 'agent list') "$DOGSLED_BINARY" state host --json >> "$RIG/publications"; printf '\n---\n' >> "$RIG/publications"; cat "$RIG/agents.json" ;;
- 'pane list') cat "$RIG/panes.json" ;;
+ *'host observation'*) exit 2 ;;
+ *'host snapshot'*) cat "$RIG/remote.json" ;;
+ *'host reserve'*)
+    "$DOGSLED_BINARY" observation subscribe > "$RIG/publications" &
+    subscriber=$!
+    printf '%s\n' "$$" > "$RIG/ssh-pid"
+    printf '%s\n' "$subscriber" > "$RIG/subscriber-pid"
+    ps -o pgid= -p "$$" > "$RIG/ssh-group"
+    ps -o pgid= -p "$subscriber" > "$RIG/subscriber-group"
+    # Keep SSH blocked even if subscribing fails; both processes inherit its group.
+    exec sleep 60
+    ;;
  *) exit 2 ;;
 esac
-"#);
+"#,
+    );
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let records: Vec<Value> = rig
+    let group: u32 = rig.log("ssh-group").trim().parse().unwrap();
+    let subscriber_group: u32 = rig.log("subscriber-group").trim().parse().unwrap();
+    assert_eq!(subscriber_group, group);
+    for role in ["ssh", "subscriber"] {
+        let pid: u32 = rig.log(&format!("{role}-pid")).trim().parse().unwrap();
+        if role == "ssh" {
+            assert_eq!(pid, group);
+        }
+        assert!(
+            wait_gone(pid, PROCESS_DEADLINE),
+            "{role} outlived the admission deadline"
+        );
+    }
+    let mut records: Vec<Value> = rig
         .log("publications")
-        .split("\n---\n")
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| serde_json::from_str(s).unwrap())
+        .split_inclusive('\n')
+        // The deadline can interrupt the subscriber while it writes its final frame.
+        .filter(|line| line.ends_with('\n'))
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["local"]["host"].clone())
         .collect();
-    assert!(records.len() >= 3);
+    // Ledger-only publications can retain the same capacity sample.
+    records.dedup_by(|a, b| a["sampled_ms"] == b["sampled_ms"]);
+    // The subscription starts inside admission SSH. A newer sample on that connection
+    // proves publication advanced while SSH was blocked, regardless of interval counts.
+    assert!(
+        records.windows(2).any(|pair| {
+            pair[1]["sampled_ms"].as_u64().unwrap() > pair[0]["sampled_ms"].as_u64().unwrap()
+        }),
+        "no sample advanced while admission SSH was blocked: {records:?}"
+    );
     for pair in records.windows(2) {
         assert!(pair[1]["sampled_ms"].as_u64().unwrap() > pair[0]["sampled_ms"].as_u64().unwrap());
     }
