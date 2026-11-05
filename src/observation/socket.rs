@@ -77,7 +77,10 @@ mod tests {
         let root = std::env::temp_dir().join(crate::ledger::new_id());
         let state = root.join("long".repeat(40));
         std::fs::create_dir_all(&state).unwrap();
-        let runtime = root.join("runtime");
+        // Production runtime directories are short (`/tmp/dogsled-<uid>` or
+        // `$XDG_RUNTIME_DIR/dogsled`). macOS `temp_dir()` alone is ~49 bytes, which would
+        // push a runtime socket past its 104-byte `sun_path`.
+        let runtime = PathBuf::from("/tmp").join(crate::ledger::new_id());
         let ordinary = fallback(&state, "observation.sock", &runtime).unwrap();
         let alias = state.join("..").join(state.file_name().unwrap());
         assert_eq!(
@@ -102,6 +105,7 @@ mod tests {
         datagram.recv(&mut bytes).unwrap();
         assert_eq!(&bytes, b"ledger");
         drop((listener, datagram));
+        std::fs::remove_dir_all(runtime).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
