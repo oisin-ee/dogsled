@@ -24,8 +24,9 @@ pub fn command(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<E
 }
 
 async fn run(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<ExitCode> {
-    let (_sender, receiver) = watch::channel(super::empty_payload());
+    let (sender, receiver) = watch::channel(super::PortalState::default());
     let (listener, state) = super::listen(ledger, 0, receiver).await?;
+    let _reader = super::spawn_reader(ledger.clone(), sender, state.stop.clone());
     let server_state = state.clone();
     let mut server = tokio::spawn(async move {
         super::serve_until(listener, server_state, std::future::pending()).await
@@ -211,7 +212,7 @@ mod tests {
         let ledger = Ledger::new(
             std::env::temp_dir().join(format!("dogsled-oneshot-{}", crate::ledger::new_id())),
         );
-        let (_sender, receiver) = watch::channel(super::super::empty_payload());
+        let (_sender, receiver) = watch::channel(super::super::PortalState::default());
         let (listener, state) = super::super::listen(&ledger, 0, receiver).await?;
         assert_eq!(listener.local_addr()?.port(), state.port);
         assert_ne!(state.port, 0);
@@ -235,6 +236,99 @@ mod tests {
             "questions": {"questions": [{"id": "q1", "type": "text", "question": "Which?"}]},
             "pane": "pane & name", "session": "session", "cwd": "/repo"
         }))?)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporary_portal_receives_publication_updates() -> Result<()> {
+        use std::io::BufRead as _;
+
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let mut publisher = crate::observation::Publisher::new()?;
+        let mut board = super::super::board::view(
+            &crate::board::Board {
+                hosts: vec![],
+                rows: vec![],
+            },
+            &[],
+            &[],
+            7,
+        );
+        let initial =
+            super::super::test_support::publish(&mut publisher, &ledger, board.clone(), vec![])?;
+        let mut ipc = crate::observation::ipc::Server::new(&ledger.dir)?;
+        ipc.bind(publisher.subscribe())?;
+        let file = ledger.dir.join("interview.json");
+        std::fs::write(&file, serde_json::to_vec(&ask()?.questions)?)?;
+        let command = Command::Interview {
+            file,
+            pane: "pane".into(),
+            session: "session".into(),
+            cwd: Some("/repo".into()),
+            timeout: 30,
+        };
+        let (send, mut opened) = mpsc::unbounded_channel();
+        let browser = Browser(send);
+        let (events, mut snapshots) = mpsc::unbounded_channel();
+        let verify = async {
+            let url = opened.recv().await.expect("temporary portal URL");
+            let port: u16 = url
+                .split("127.0.0.1:")
+                .nth(1)
+                .expect("URL host")
+                .split('/')
+                .next()
+                .expect("URL port")
+                .parse()
+                .expect("port number");
+            let client = tokio::task::spawn_blocking(move || {
+                let mut socket =
+                    std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("timeout");
+                write!(socket, "GET /api/stream HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").expect("request SSE");
+                for line in std::io::BufReader::new(socket).lines() {
+                    let line = line.expect("SSE line");
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(snapshot) =
+                            serde_json::from_str::<portal_types::PortalSnapshot>(data)
+                    {
+                        events.send(snapshot).expect("report publication");
+                    }
+                }
+            });
+            let first = tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+                .await
+                .expect("initial publication")
+                .expect("stream open");
+            assert_eq!(Some(first), initial.snapshot);
+            board.generated_ms = 8;
+            let changed =
+                super::super::test_support::publish(&mut publisher, &ledger, board, vec![])?;
+            let second = tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+                .await
+                .expect("replacement publication")
+                .expect("stream open");
+            assert_eq!(second.revision, 2);
+            assert_eq!(second.inbox.as_ref().expect("published inbox").count, 1);
+            assert_eq!(Some(second), changed.snapshot);
+            let pending = super::super::store::pending(&ledger)?;
+            let response = post(
+                port,
+                format!("/api/questions/{}/answer", pending[0].id),
+                r#"{"responses":[]}"#,
+                port,
+            )
+            .await?;
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            Ok::<_, Error>(client)
+        };
+        let (outcome, client) = tokio::join!(run(&browser, &ledger, command), verify);
+        assert_eq!(outcome?, ExitCode::SUCCESS);
+        client?.await.expect("temporary portal closes its stream");
+        drop(ipc);
+        std::fs::remove_dir_all(ledger.dir)?;
+        Ok(())
     }
 
     #[tokio::test]

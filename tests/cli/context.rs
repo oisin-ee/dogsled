@@ -196,17 +196,19 @@ fn context_without_snapshot_exits_silently() {
 #[test]
 fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
     let rig = Rig::new("context-output");
-    // Both paths share a real observation and a fixed clock, so formatting is stable.
+    // All readers share one frozen real publication and a fixed clock.
     rig.snapshot("state", now() - 60_000, 1.0, 8);
     fs::write(rig.dir.join("clock"), now().to_string()).unwrap();
-    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
-    wait_publication(&rig, |frame| {
+    let observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    let publication = wait_publication(&rig, |frame| {
         let samples: i64 = rig
             .database()
             .query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))
             .unwrap();
         samples >= 2 && frame["local"]["host"]["probe"] == rig.host()["probe"]
     });
+    drop(observer);
+    let _publisher = super::observation::Supplied::start(&rig, publication);
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     for harness in ["claude", "codex", "pi"] {
         for event in ["SessionStart", "UserPromptSubmit"] {

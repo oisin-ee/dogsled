@@ -895,23 +895,6 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
     );
 }
 
-/// Capture metadata once before deriving reader boards.
-pub fn enrich(
-    board: &mut Board,
-    status: &Status,
-    todos: &[TodoSections],
-    ledger: &Ledger,
-    shell: &dyn Shell,
-) -> Result<()> {
-    let captured = capture_enrichment(board, status, inbox_messages(ledger)?, shell);
-    enrich_captured(board, status, todos, &captured);
-    Ok(())
-}
-
-fn inbox_messages(ledger: &Ledger) -> Result<Vec<crate::inbox::Record>> {
-    crate::store::read(ledger, crate::web_store::inbox::all_records)
-}
-
 #[cfg(test)]
 fn enrich_rows(
     board: &mut Board,
@@ -1952,7 +1935,9 @@ mod tests {
             crate::web_store::inbox::put_records(tx, "term_owner", std::slice::from_ref(&unread))
         })?;
         let shell = crate::shell::Fake::new();
-        enrich(&mut board, &status, &[todo], &ledger, &shell)?;
+        let messages = crate::store::read(&ledger, crate::web_store::inbox::all_records)?;
+        let captured = capture_enrichment(&board, &status, messages, &shell);
+        enrich_captured(&mut board, &status, &[todo], &captured);
         assert_eq!(board.rows[0].owner_pane.as_deref(), Some("w1:p1"));
         assert_eq!(board.rows[0].title.as_deref(), Some("Implement inbox"));
         assert!(board.rows[0].unseen);

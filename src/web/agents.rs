@@ -1,9 +1,8 @@
 //! The agent view of the portal: the list of agents, one agent's conversation
 //! and screen, and the calls that act on an agent.
 //!
-//! Every read comes from Herdr's socket API, so the portal shows what Herdr
-//! sees and not what dogsled last cached. A blocked agent shows the prompt it
-//! waits on, read from its screen.
+//! The agent list comes from serve's publication. Agent detail and explicit
+//! actions continue to use Herdr's socket API.
 //!
 //! Keys are a whitelist. The portal may answer a prompt with the keys Herdr
 //! accepts, and nothing else. A key outside the list is refused, so a request
@@ -16,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use portal_types::agents::{
-    AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen, Turn,
+    AgentEvent, AgentView, Conversation, KeysBody, PromptBody, Screen, Turn,
 };
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
@@ -74,47 +73,20 @@ pub fn router() -> Router<AppState> {
 
 /// The client the agent routes talk to Herdr through, if there is one.
 fn socket(state: &AppState) -> Option<&Client> {
-    state.agents.as_deref()
+    state
+        .agents
+        .get_or_init(|| Client::discover().ok().map(std::sync::Arc::new))
+        .as_deref()
 }
 
-/// The agents Herdr sees, with the prompt a blocked agent waits on.
+/// The agents from the same publication as the portal board and inbox.
 async fn list(State(state): State<AppState>) -> Response {
-    let Some(socket) = socket(&state) else {
-        return no_socket();
-    };
-    let socket = socket.clone();
-    match tokio::task::spawn_blocking(move || views(&socket)).await {
-        Ok(Ok(agents)) => json_response(Json(AgentList { agents })),
-        Ok(Err(error)) => error_response(&error),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
-    }
-}
-
-/// Shared read for the agent list and inbox; callers run it on a blocking thread.
-pub(super) fn views(socket: &Client) -> crate::error::Result<Vec<AgentView>> {
-    let agents = socket.agent_list()?;
-    let mut views = Vec::new();
-    for agent in agents {
-        let pane = agent["pane_id"].as_str().unwrap_or_default().to_owned();
-        let state = agent["agent_status"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_owned();
-        let blocked = if state == "blocked" {
-            read_blocked(socket, &pane)
-        } else {
-            None
-        };
-        views.push(view_of(
-            &agent,
-            title_of(&agent),
-            agent["cwd"]
-                .as_str()
-                .and_then(|cwd| repository(&crate::shell::System::default(), cwd)),
-            blocked,
-        ));
-    }
-    Ok(views)
+    state.projection(|snapshot| {
+        snapshot
+            .agents
+            .clone()
+            .map(|agents| portal_types::agents::AgentList { agents })
+    })
 }
 
 fn view_of(
@@ -136,11 +108,6 @@ fn view_of(
         repository,
         blocked,
     }
-}
-
-/// Use the same origin normalization as the board's observed agents.
-fn repository(shell: &dyn crate::shell::Shell, cwd: &str) -> Option<String> {
-    crate::facts::repository(shell, cwd)
 }
 
 /// One agent's turns, read from its transcript.
@@ -315,28 +282,10 @@ fn agent_of(socket: &Client, pane: &str) -> Option<Value> {
         .find(|agent| agent["pane_id"].as_str() == Some(pane))
 }
 
-/// The kind of a native session reference: a path or an id.
-/// The title of an agent, from the start of its transcript.
-///
-/// A transcript only grows, and its first message never changes, so a title
-/// read once for a path is kept. A path read before it had a first message
-/// is read again when its size changes.
-fn title_of(agent: &Value) -> Option<String> {
-    static TITLES: std::sync::Mutex<Titles> = std::sync::Mutex::new(Titles::new());
-    TITLES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .read(agent)
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Titles(std::collections::BTreeMap<String, (u64, Option<String>)>);
 
 impl Titles {
-    const fn new() -> Self {
-        Self(std::collections::BTreeMap::new())
-    }
-
     pub(crate) fn read(&mut self, agent: &Value) -> Option<String> {
         let harness = agent["agent"].as_str()?;
         let transcript = agent["agent_session"]["value"].as_str()?;
@@ -363,11 +312,19 @@ pub(crate) fn capture(
     } else {
         None
     };
+    capture_with(agents, titles, socket.as_ref())
+}
+
+fn capture_with(
+    agents: &[crate::probe::Agent],
+    titles: &mut Titles,
+    socket: Option<&Client>,
+) -> crate::error::Result<Vec<AgentView>> {
     agents
         .iter()
         .map(|agent| {
             let blocked = if agent.state == "blocked" {
-                let socket = socket.as_ref().ok_or_else(|| {
+                let socket = socket.ok_or_else(|| {
                     crate::error::Error::Invalid("agent screen unavailable".into())
                 })?;
                 let read = socket.pane_read(&agent.pane, "visible", Some(SCREEN_LINES))?;
@@ -393,13 +350,6 @@ pub(crate) fn capture(
 
 fn kind_of(agent: &Value) -> &str {
     agent["agent_session"]["kind"].as_str().unwrap_or("path")
-}
-
-/// The prompt a blocked agent waits on, read from its screen.
-fn read_blocked(socket: &Client, pane: &str) -> Option<portal_types::agents::BlockedPrompt> {
-    let read = socket.pane_read(pane, "visible", Some(SCREEN_LINES)).ok()?;
-    let text = read["text"].as_str()?;
-    crate::activity::blocked_prompt(text)
 }
 
 /// A JSON body, as the API serves it.
@@ -459,17 +409,16 @@ mod tests {
             "git@GitHub.com:owner/repo.git\n",
         );
         assert_eq!(
-            repository(&shell, "/checkout").as_deref(),
+            crate::facts::repository(&shell, "/checkout").as_deref(),
             Some("github.com/owner/repo")
         );
         shell.on("git -C /checkout remote get-url origin", "/local/repo");
-        assert_eq!(repository(&shell, "/checkout"), None);
+        assert_eq!(crate::facts::repository(&shell, "/checkout"), None);
     }
 
     /// The state of the API, with or without a Herdr socket.
     fn state(socket: Option<Client>) -> AppState {
-        let (sender, receiver) = watch::channel(String::new());
-        sender.send_replace(String::new());
+        let (_sender, receiver) = watch::channel(crate::web::PortalState::default());
         AppState::new(
             receiver,
             PORT,
@@ -485,6 +434,49 @@ mod tests {
     /// The state of the API, talking to a fake Herdr.
     fn with_socket(server: &fake::Server) -> AppState {
         state(Some(server.client()))
+    }
+
+    /// Capture native source records before installing a publication in the reader.
+    fn with_published_agents(server: &fake::Server) -> AppState {
+        let state = with_socket(server);
+        let socket = server.client();
+        let agents: Vec<_> = socket
+            .agent_list()
+            .expect("agent source")
+            .iter()
+            .map(|raw| crate::probe::Agent {
+                pane: raw["pane_id"].as_str().unwrap_or_default().to_owned(),
+                name: raw["name"].as_str().map(str::to_owned),
+                agent: raw["agent"].as_str().map(str::to_owned),
+                state: raw["agent_status"].as_str().unwrap_or_default().to_owned(),
+                cwd: raw["cwd"].as_str().map(str::to_owned),
+                transcript: raw["agent_session"]["value"].as_str().map(str::to_owned),
+                ..crate::probe::Agent::default()
+            })
+            .collect();
+        let views =
+            capture_with(&agents, &mut Titles::default(), Some(&socket)).expect("capture agents");
+        let board = crate::web::board::view(
+            &crate::board::Board {
+                hosts: vec![],
+                rows: vec![],
+            },
+            &[],
+            &[],
+            7,
+        );
+        let publication = crate::web::test_support::publish(
+            &mut crate::observation::Publisher::new().expect("publisher"),
+            &state.web,
+            board,
+            views,
+        )
+        .expect("publish captured views");
+        let (_sender, receiver) = watch::channel(publication);
+        AppState {
+            portal: receiver,
+            ..state
+        }
     }
 
     /// A request to the API.
@@ -636,7 +628,7 @@ mod tests {
     async fn the_agent_list_holds_every_agent_herdr_sees() {
         let server = agent_server();
         let response = call(
-            with_socket(&server),
+            with_published_agents(&server),
             request(Method::GET, "/api/agents", None),
         )
         .await;
@@ -656,7 +648,7 @@ mod tests {
     async fn a_blocked_agent_carries_the_prompt_it_waits_on() {
         let server = agent_server();
         let response = call(
-            with_socket(&server),
+            with_published_agents(&server),
             request(Method::GET, "/api/agents", None),
         )
         .await;

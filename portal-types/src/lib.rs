@@ -5,11 +5,37 @@ pub mod agents;
 pub mod inbox;
 pub mod questions;
 pub mod reviews;
+#[cfg(test)]
+mod tests;
 
 use serde::{Deserialize, Serialize};
 
+/// One ordered portal stream carries either a coherent snapshot or connection status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PortalEvent {
+    Snapshot(Box<PortalSnapshot>),
+    Status(PortalStatus),
+}
+
+/// The required discriminator cannot occur in a snapshot's status shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortalStatus {
+    pub observation: PortalAvailability,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortalAvailability {
+    Unavailable,
+    Disconnected,
+}
+
 /// One coherent portal update. All payloads and gaps belong to this exact publication.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PortalSnapshot {
     pub version: u32,
     pub epoch: String,

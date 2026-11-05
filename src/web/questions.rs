@@ -217,7 +217,7 @@ mod tests {
 
     /// A state over a fresh directory.
     fn fresh_state() -> AppState {
-        let (_sender, receiver) = tokio::sync::watch::channel(String::new());
+        let (_sender, receiver) = tokio::sync::watch::channel(crate::web::PortalState::default());
         AppState::new(
             receiver,
             PORT,
@@ -523,7 +523,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dogsled-restart-{}", crate::ledger::new_id()));
         let web = crate::ledger::Ledger::new(dir.clone());
         let id = {
-            let (_sender, receiver) = tokio::sync::watch::channel(String::new());
+            let (_sender, receiver) =
+                tokio::sync::watch::channel(crate::web::PortalState::default());
             let state = AppState::new(
                 receiver,
                 PORT,
@@ -534,7 +535,7 @@ mod tests {
             ask(&state).await
         };
         // A new state over the same directory holds the question that waits.
-        let (_sender, receiver) = tokio::sync::watch::channel(String::new());
+        let (_sender, receiver) = tokio::sync::watch::channel(crate::web::PortalState::default());
         let state = AppState::new(
             receiver,
             PORT,

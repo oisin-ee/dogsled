@@ -3,11 +3,10 @@
 use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
-use portal_types::BoardView;
 use portal_types::agents::{
     AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
 };
-use portal_types::inbox::InboxView;
+use portal_types::{BoardView, PortalEvent};
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -17,16 +16,13 @@ const BASE: &str = match option_env!("DOGSLED_API") {
     None => "",
 };
 
-/// The current board.
+/// Independent detail lookup; the portal shell uses only the combined stream.
 pub async fn fetch_board() -> Result<BoardView, String> {
     let response = Request::get(&format!("{BASE}/api/board"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
-    if !response.ok() {
-        return Err(format!("the board answered {}", response.status()));
-    }
-    response.json().await.map_err(|error| error.to_string())
+    read_json(response).await
 }
 
 const MAX_IMAGE_BYTES: f64 = 10.0 * 1024.0 * 1024.0;
@@ -77,15 +73,6 @@ pub async fn fetch_agents() -> Result<Vec<AgentView>, String> {
         .map_err(|error| error.to_string())?;
     let list: AgentList = read_json(response).await?;
     Ok(list.agents)
-}
-
-/// The server-owned actionable inbox. A failed read is not an empty inbox.
-pub async fn fetch_inbox() -> Result<InboxView, String> {
-    let response = Request::get(&format!("{BASE}/api/inbox"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    read_json(response).await
 }
 
 /// The agent in `pane`, with the prompt it waits on while it is blocked.
@@ -183,45 +170,39 @@ pub async fn watch_agent(pane: &str, mut on_event: impl FnMut(AgentEvent)) -> Re
     Err("the agent stream ended".to_owned())
 }
 
-/// Hand board and inbox snapshots to their owners, retaining subscriptions
-/// across transport failures while native EventSource reconnects.
+/// Deliver snapshots and connection statuses in their original wire order.
 pub async fn watch(
-    mut on_board: impl FnMut(BoardView),
-    mut on_inbox: impl FnMut(Result<InboxView, String>),
-    mut on_paused: impl FnMut(bool),
+    mut on_publication: impl FnMut(Result<PortalEvent, String>),
 ) -> Result<(), String> {
     let mut source =
         EventSource::new(&format!("{BASE}/api/stream")).map_err(|error| error.to_string())?;
-    let subscriptions = ["board", "inbox", "inbox_error"]
-        .into_iter()
-        .map(|name| {
-            source
-                .subscribe(name)
-                .map(|stream| stream.map(move |item| (name, item)).boxed_local())
-                .map_err(|error| error.to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut stream = futures_util::stream::select_all(subscriptions);
-    while let Some((name, item)) = stream.next().await {
-        let Ok((_, message)) = item else {
-            on_paused(true);
-            continue;
+    let mut stream = source
+        .subscribe("portal")
+        .map_err(|error| error.to_string())?;
+    let mut stamp: Option<(String, u64)> = None;
+    while let Some(item) = stream.next().await {
+        let (_, message) = match item {
+            Ok(item) => item,
+            Err(error) => {
+                on_publication(Err(error.to_string()));
+                continue;
+            }
         };
         if let Some(text) = message.data().as_string() {
-            match name {
-                "board" => {
-                    let view = serde_json::from_str::<BoardView>(&text)
-                        .map_err(|error| format!("the board stream sent invalid data: {error}"))?;
-                    on_board(view);
+            let event = serde_json::from_str::<PortalEvent>(&text)
+                .map_err(|error| format!("the portal stream sent invalid data: {error}"))?;
+            if let PortalEvent::Snapshot(snapshot) = &event {
+                if snapshot.version != 1 || snapshot.epoch.is_empty() || snapshot.revision == 0 {
+                    return Err("invalid observation revision".to_owned());
                 }
-                "inbox" => on_inbox(
-                    serde_json::from_str::<InboxView>(&text)
-                        .map_err(|error| format!("the inbox stream sent invalid data: {error}")),
-                ),
-                "inbox_error" => on_inbox(Err(text)),
-                _ => {}
+                if stamp.as_ref().is_some_and(|(epoch, revision)| {
+                    *epoch == snapshot.epoch && *revision > snapshot.revision
+                }) {
+                    return Err("observation publication is out of order".to_owned());
+                }
+                stamp = Some((snapshot.epoch.clone(), snapshot.revision));
             }
-            on_paused(false);
+            on_publication(Ok(event));
         }
     }
     Err("the portal stream ended".to_owned())

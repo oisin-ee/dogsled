@@ -3,6 +3,9 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 
+#[path = "observation_portal.rs"]
+mod portal;
+
 /// A supplied wire publication, not an observer. Its data deliberately differs from the
 /// local inputs, so a reader that reconstructs even one section fails these assertions.
 pub(super) struct Supplied {
