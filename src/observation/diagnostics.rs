@@ -12,6 +12,19 @@ pub(crate) struct Diagnostics {
 }
 
 impl Diagnostics {
+    /// Keep gap diagnostics ordered with the publication that exposes them.
+    pub(crate) fn publish(
+        &mut self,
+        publisher: &mut super::Publisher,
+        input: super::Publication,
+        now: u64,
+        write: impl FnMut(String),
+    ) -> crate::error::Result<()> {
+        self.record(&input.gaps, now, write);
+        publisher.replace(input)?;
+        Ok(())
+    }
+
     pub(crate) fn record(&mut self, gaps: &[Gap], now: u64, mut write: impl FnMut(String)) {
         let mut current: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
         for gap in gaps {
@@ -80,6 +93,48 @@ mod tests {
             availability: Availability::Failed,
             detail: detail.into(),
         }
+    }
+
+    #[test]
+    fn gap_diagnostics_are_written_before_the_new_revision_is_visible() {
+        let mut publisher = super::super::Publisher::new().unwrap();
+        let input = super::super::Publication {
+            published_ms: 1,
+            sources: super::super::Sources::default(),
+            local: super::super::Domains::new(),
+            views: super::super::Domains::new(),
+            gaps: Vec::new(),
+        };
+        let previous = publisher.replace(input.clone()).unwrap();
+        let reader = publisher.subscribe();
+        let gaps = vec![failure("peer:8103:branches", "branch-check-failed")];
+        let mut lines = Vec::new();
+        Diagnostics::default()
+            .publish(
+                &mut publisher,
+                super::super::Publication {
+                    published_ms: 2,
+                    gaps: gaps.clone(),
+                    ..input
+                },
+                2,
+                |line| {
+                    assert_eq!(
+                        reader.borrow().as_ref().unwrap().published.revision,
+                        previous.revision
+                    );
+                    lines.push(line);
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            lines,
+            ["dogsled service: peer:8103:branches collection failed: branch-check-failed"]
+        );
+        let frame = reader.borrow();
+        let observation = &frame.as_ref().unwrap().published;
+        assert_eq!(observation.revision, previous.revision + 1);
+        assert_eq!(observation.gaps, gaps);
     }
 
     #[test]

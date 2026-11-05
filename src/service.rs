@@ -312,8 +312,7 @@ fn publish(
         Ok(collection)
     })?;
     herdr.interests(collector.panes());
-    let frame = publisher.replace(collection.input)?;
-    diagnostics.record(&frame.gaps, now, |line| eprintln!("{line}"));
+    diagnostics.publish(publisher, collection.input, now, |line| eprintln!("{line}"))?;
     if once {
         collection.sample?;
     }
