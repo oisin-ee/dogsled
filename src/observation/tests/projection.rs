@@ -566,7 +566,9 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
     )
     .unwrap();
     for (key, view) in &input.views {
-        if key == "agents" {
+        // The agent list and the GitHub catalogue do not derive from the failed capture;
+        // the catalogue reports its own read failure in `data.error`.
+        if key == "agents" || key == "repos" {
             assert_eq!(view["gaps"], json!([]));
             continue;
         }
