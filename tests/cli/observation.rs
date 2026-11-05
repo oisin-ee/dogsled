@@ -83,6 +83,8 @@ impl Supplied {
                     false
                 });
                 while let Ok((mut stream, _)) = listener.accept() {
+                    // Darwin streams inherit the listener's O_NONBLOCK; Linux streams do not.
+                    stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
                     stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
                     let mut line = String::new();
