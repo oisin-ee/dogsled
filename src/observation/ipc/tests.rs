@@ -48,3 +48,141 @@ fn a_publication_followed_by_an_immediate_close_is_delivered() {
     drop(subscription);
     std::fs::remove_dir_all(state).unwrap();
 }
+
+fn activity_input() -> super::super::Publication {
+    super::super::Publication {
+        published_ms: 1000,
+        sources: super::super::Sources {
+            local: std::collections::BTreeMap::from([(
+                "terminals".into(),
+                crate::ledger::now_ms(),
+            )]),
+            peers: std::collections::BTreeMap::new(),
+        },
+        local: super::super::Domains::new(),
+        views: super::super::Domains::from([(
+            "portal".into(),
+            serde_json::json!({
+                "data": {"version":1,"epoch":"","revision":0,"published_ms":1000,
+                    "board":null,"agents":[],"inbox":null,"gaps":[]}, "gaps":[]
+            }),
+        )]),
+        gaps: vec![],
+    }
+}
+
+#[test]
+fn activity_refusals_preserve_typed_codes_without_native_reads() {
+    use portal_types::agents::ActivityCode;
+    let state = std::env::temp_dir().join(crate::ledger::new_id());
+    let mut publisher = super::super::Publisher::new().unwrap();
+    let mut server = Server::new(&state).unwrap();
+    server.bind(publisher.subscribe()).unwrap();
+    let client = Client::at(&state);
+    publisher.replace(activity_input()).unwrap();
+    assert_eq!(
+        client.activity("absent").unwrap_err().code,
+        ActivityCode::AgentMissing
+    );
+    assert_eq!(
+        client.activity_subscribe("absent").unwrap_err().code,
+        ActivityCode::AgentMissing
+    );
+    assert_eq!(
+        client.activity("").unwrap_err().code,
+        ActivityCode::InvalidRequest
+    );
+    let mut outdated = activity_input();
+    outdated.sources.local.insert("terminals".into(), 1);
+    publisher.replace(outdated).unwrap();
+    assert_eq!(
+        client.activity("absent").unwrap_err().code,
+        ActivityCode::UpstreamUnavailable
+    );
+    drop(server);
+    assert_eq!(
+        client.activity("absent").unwrap_err().code,
+        ActivityCode::UpstreamUnavailable
+    );
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_frames() {
+    use portal_types::agents::{
+        ActivityDetail, ActivityProducer, ActivityView, LivePhase, LiveState,
+    };
+    let state = std::env::temp_dir().join(crate::ledger::new_id());
+    let mut publisher = super::super::Publisher::new().unwrap();
+    let mut server = Server::new(&state).unwrap();
+    server.bind(publisher.subscribe()).unwrap();
+    let client = Client::at(&state);
+    publisher.activity(std::collections::BTreeMap::from([(
+        "pane".into(),
+        ActivityView {
+            version: 1,
+            epoch: publisher.epoch().into(),
+            revision: 0,
+            pane: "pane".into(),
+            session: Some("native-key".into()),
+            coarse_state: Some("working".into()),
+            producer: ActivityProducer {
+                generation: 1,
+                id: Some("producer".into()),
+            },
+            detail: ActivityDetail::Available {
+                sequence: 1,
+                received_at_ms: 1000,
+                valid_for_ms: 10_000,
+                state: LiveState {
+                    phase: LivePhase::Thinking,
+                    active_tools: vec![],
+                },
+            },
+        },
+    )]));
+    publisher.replace(activity_input()).unwrap();
+    let frame = publisher.sender.borrow().clone().unwrap();
+    publisher.sender.send_replace(Some(Arc::new(Frame {
+        published: Arc::clone(&frame.published),
+        bytes: Arc::clone(&frame.bytes),
+        details: frame.details.clone(),
+        activity: frame.activity.clone(),
+        activity_measured: std::time::Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .unwrap(),
+    })));
+    let first = client.activity("pane").unwrap();
+    assert!(matches!(
+        first.detail,
+        ActivityDetail::Available {
+            valid_for_ms: 1..=8000,
+            ..
+        }
+    ));
+    assert!(
+        !serde_json::to_string(&client.current().unwrap())
+            .unwrap()
+            .contains("active_tools")
+    );
+    assert!(
+        !serde_json::to_string(&super::super::peers::Export::of(&frame.published))
+            .unwrap()
+            .contains("active_tools")
+    );
+    publisher.sender.send_replace(Some(Arc::new(Frame {
+        published: Arc::clone(&frame.published),
+        bytes: Arc::clone(&frame.bytes),
+        details: frame.details.clone(),
+        activity: frame.activity.clone(),
+        activity_measured: std::time::Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .unwrap(),
+    })));
+    assert!(matches!(
+        client.activity("pane").unwrap().detail,
+        ActivityDetail::Unavailable { .. }
+    ));
+    drop(server);
+    std::fs::remove_dir_all(state).unwrap();
+}

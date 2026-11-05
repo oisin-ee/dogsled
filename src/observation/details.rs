@@ -64,7 +64,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    fn of(agent: &Agent) -> Option<Self> {
+    pub(super) fn of(agent: &Agent) -> Option<Self> {
         Some(Self {
             terminal: agent.terminal_id.clone(),
             session: agent

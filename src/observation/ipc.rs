@@ -31,6 +31,9 @@ enum Operation {
     Peer,
     Retry,
     Detail,
+    Activity,
+    ActivitySubscribe,
+    ActivityCommand,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,6 +47,8 @@ struct Request {
     host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity: Option<super::live_activity::Command>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,6 +85,7 @@ pub(crate) struct Server {
     state: PathBuf,
     interests: super::peers::Interests,
     details: super::details::Interests,
+    activity: Option<super::live_activity::Commands>,
     dirty: Option<crate::service::wake::Dirty>,
 }
 
@@ -103,6 +109,7 @@ impl Server {
             state: state.to_owned(),
             interests: super::peers::Interests::default(),
             details: super::details::Interests::default(),
+            activity: None,
             dirty: None,
         })
     }
@@ -118,6 +125,10 @@ impl Server {
 
     pub fn details(&mut self, interests: super::details::Interests) {
         self.details = interests;
+    }
+
+    pub fn activity(&mut self, commands: super::live_activity::Commands) {
+        self.activity = Some(commands);
     }
 
     pub fn bind(&mut self, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<()> {
@@ -160,9 +171,10 @@ impl Server {
         let interests = self.interests.clone();
         let dirty = self.dirty.clone();
         let details = self.details.clone();
+        let activity = self.activity.clone();
         let thread = std::thread::spawn(move || {
             runtime.block_on(serve(
-                listener, receiver, stopped, interests, dirty, details,
+                listener, receiver, stopped, interests, dirty, details, activity,
             ));
         });
         self.stop = Some(stop);
@@ -192,6 +204,7 @@ async fn serve(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
+    activity: Option<super::live_activity::Commands>,
 ) {
     let mut clients = tokio::task::JoinSet::new();
     loop {
@@ -205,7 +218,8 @@ async fn serve(
                     let interests = interests.clone();
                     let dirty = dirty.clone();
                     let details = details.clone();
-                    clients.spawn(async move { let _ = connection(socket, receiver, interests, dirty, details).await; });
+                    let activity = activity.clone();
+                    clients.spawn(async move { let _ = connection(socket, receiver, interests, dirty, details, activity).await; });
                 }
             }
         }
@@ -269,6 +283,7 @@ async fn connection(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
+    activity: Option<super::live_activity::Commands>,
 ) -> Result<()> {
     let Ok(Ok(request)) = tokio::time::timeout(TIMEOUT, request(&socket)).await else {
         return failure(&socket, "invalid", "invalid observation request").await;
@@ -280,6 +295,15 @@ async fn connection(
             "unsupported observation protocol version",
         )
         .await;
+    }
+    if matches!(request.operation, Operation::ActivityCommand) {
+        return activity_command(&socket, request, activity, dirty.as_ref()).await;
+    }
+    if matches!(
+        request.operation,
+        Operation::Activity | Operation::ActivitySubscribe
+    ) {
+        return activity_connection(&socket, &mut receiver, request).await;
     }
     let _detail_interest = if matches!(request.operation, Operation::Detail) {
         let Some(pane) = request.pane.as_deref() else {
@@ -293,27 +317,8 @@ async fn connection(
         None
     };
     if matches!(request.operation, Operation::Retry) {
-        if let Some(host) = request.host
-            && let Some(dirty) = dirty.as_ref()
-        {
-            let frame = receiver.borrow().clone();
-            let Some(frame) = frame else {
-                return failure(&socket, "unavailable", "observation unavailable").await;
-            };
-            let reports: Vec<crate::hosts::HostReport> =
-                super::read::view(&frame.published, "hosts")?;
-            let Some(selected) = reports
-                .into_iter()
-                .find(|report| report.host.id == host || report.host.label == host)
-            else {
-                return failure(&socket, "unknown_host", &format!("unknown host {host}")).await;
-            };
-            let token = dirty.retry_peer(selected.host.id);
-            let mut bytes = serde_json::to_vec(&RetryAck { retry_token: token })?;
-            bytes.push(b'\n');
-            return write(&socket, &bytes).await;
-        }
-        return failure(&socket, "unavailable", "peer observer unavailable").await;
+        let frame = receiver.borrow().clone();
+        return retry_command(&socket, frame, request.host, dirty.as_ref()).await;
     }
     if matches!(request.operation, Operation::Peer) {
         let Some(peer) = request.peer else {
@@ -364,6 +369,131 @@ async fn connection(
         if matches!(request.operation, Operation::Current | Operation::Retry)
             || !updated(&socket, &mut receiver).await?
         {
+            return Ok(());
+        }
+    }
+}
+
+/// Resolve retry intent against one frozen publication before queueing its command.
+async fn retry_command(
+    socket: &tokio::net::UnixStream,
+    frame: Option<Arc<Frame>>,
+    host: Option<String>,
+    dirty: Option<&crate::service::wake::Dirty>,
+) -> Result<()> {
+    let (Some(host), Some(dirty)) = (host, dirty) else {
+        return failure(socket, "unavailable", "peer observer unavailable").await;
+    };
+    let Some(frame) = frame else {
+        return failure(socket, "unavailable", "observation unavailable").await;
+    };
+    let reports: Vec<crate::hosts::HostReport> = super::read::view(&frame.published, "hosts")?;
+    let Some(selected) = reports
+        .into_iter()
+        .find(|report| report.host.id == host || report.host.label == host)
+    else {
+        return failure(socket, "unknown_host", &format!("unknown host {host}")).await;
+    };
+    let mut bytes = serde_json::to_vec(&RetryAck {
+        retry_token: dirty.retry_peer(selected.host.id),
+    })?;
+    bytes.push(b'\n');
+    write(socket, &bytes).await
+}
+
+async fn activity_command(
+    socket: &tokio::net::UnixStream,
+    request: Request,
+    activity: Option<super::live_activity::Commands>,
+    dirty: Option<&crate::service::wake::Dirty>,
+) -> Result<()> {
+    use portal_types::agents::ActivityCode;
+    let result = match (request.pane, request.activity, activity) {
+        (Some(pane), Some(command), Some(activity)) => activity.send(pane, command, dirty).await,
+        (_, _, None) => Err(super::live_activity::error(
+            ActivityCode::UpstreamUnavailable,
+            "activity authority unavailable",
+        )),
+        _ => Err(super::live_activity::error(
+            ActivityCode::InvalidRequest,
+            "missing activity command",
+        )),
+    };
+    let mut bytes = serde_json::to_vec(&result)?;
+    bytes.push(b'\n');
+    write(socket, &bytes).await
+}
+
+async fn activity_connection(
+    socket: &tokio::net::UnixStream,
+    receiver: &mut watch::Receiver<Option<Arc<Frame>>>,
+    request: Request,
+) -> Result<()> {
+    let Some(pane) = request.pane else {
+        return failure(socket, "invalid_request", "missing activity pane").await;
+    };
+    if super::live_activity::validate_pane(&pane).is_err() {
+        return failure(socket, "invalid_request", "invalid activity pane").await;
+    }
+    loop {
+        if receiver.has_changed().is_err() {
+            return failure(
+                socket,
+                "upstream_unavailable",
+                "activity publisher disconnected",
+            )
+            .await;
+        }
+        let frame = receiver.borrow_and_update().clone();
+        let Some(frame) = frame else {
+            return failure(socket, "upstream_unavailable", "observation unavailable").await;
+        };
+        if let Some(bytes) = frame.activity.get(&pane) {
+            // Relative validity is a transport budget, not renewed by reading a retained
+            // publication. Subtract queue/retention time before handing it to a consumer.
+            let mut activity: portal_types::agents::ActivityView = serde_json::from_slice(bytes)?;
+            if let portal_types::agents::ActivityDetail::Available { valid_for_ms, .. } =
+                &mut activity.detail
+            {
+                let elapsed = u64::try_from(frame.activity_measured.elapsed().as_millis())
+                    .unwrap_or(u64::MAX);
+                *valid_for_ms = valid_for_ms.saturating_sub(elapsed);
+                if *valid_for_ms == 0 {
+                    activity.detail = portal_types::agents::ActivityDetail::Unavailable {
+                        reason: portal_types::agents::UnavailableReason::NativeUnavailable,
+                    };
+                }
+            }
+            let mut bytes = serde_json::to_vec(&activity)?;
+            bytes.push(b'\n');
+            write(socket, &bytes).await?;
+        } else if frame
+            .published
+            .views
+            .get("portal")
+            .and_then(|view| view.pointer("/data/agents"))
+            .is_some_and(serde_json::Value::is_array)
+            && selected_agent(&frame.published, &pane)?.is_none()
+            && frame
+                .published
+                .sources
+                .local
+                .get("terminals")
+                .is_some_and(|measured| {
+                    crate::ledger::now_ms().saturating_sub(*measured)
+                        < super::live_activity::NATIVE_TTL_MS
+                })
+        {
+            return failure(socket, "agent_missing", "agent is absent").await;
+        } else {
+            return failure(
+                socket,
+                "upstream_unavailable",
+                "activity binding unavailable",
+            )
+            .await;
+        }
+        if matches!(request.operation, Operation::Activity) || !updated(socket, receiver).await? {
             return Ok(());
         }
     }
@@ -510,6 +640,7 @@ impl Client {
                 peer: None,
                 host: None,
                 pane: pane.map(str::to_owned),
+                activity: None,
             },
         )?;
         socket
@@ -530,6 +661,7 @@ impl Client {
                 peer: None,
                 host: Some(host.into()),
                 pane: None,
+                activity: None,
             },
         )?;
         socket.write_all(b"\n")?;
@@ -558,6 +690,7 @@ impl Client {
                 peer: Some(request),
                 host: None,
                 pane: None,
+                activity: None,
             },
         )?;
         socket.write_all(b"\n")?;
@@ -571,6 +704,73 @@ impl Client {
             ));
         }
         serde_json::from_slice(&bytes).map_err(Into::into)
+    }
+
+    pub fn activity_command(
+        &self,
+        pane: &str,
+        command: super::live_activity::Command,
+    ) -> std::result::Result<portal_types::agents::ActivityAck, portal_types::agents::ActivityError>
+    {
+        use portal_types::agents::ActivityCode;
+        let exchange = || -> Result<_> {
+            let mut socket = self.connect()?;
+            socket.set_write_timeout(Some(TIMEOUT))?;
+            socket.set_read_timeout(Some(TIMEOUT))?;
+            serde_json::to_writer(
+                &mut socket,
+                &Request {
+                    version: VERSION,
+                    operation: Operation::ActivityCommand,
+                    peer: None,
+                    host: None,
+                    pane: Some(pane.into()),
+                    activity: Some(command),
+                },
+            )?;
+            socket.write_all(b"\n")?;
+            let mut bytes = Vec::new();
+            BufReader::new(socket)
+                .take(super::live_activity::MAX_BODY as u64 + 1)
+                .read_until(b'\n', &mut bytes)?;
+            if bytes.len() > super::live_activity::MAX_BODY || bytes.last() != Some(&b'\n') {
+                return Err(Error::Invalid("invalid activity acknowledgment".into()));
+            }
+            Ok(serde_json::from_slice::<std::result::Result<_, _>>(&bytes)?)
+        };
+        exchange().map_err(|failure| {
+            super::live_activity::error(ActivityCode::UpstreamUnavailable, &failure.to_string())
+        })?
+    }
+
+    pub fn activity(
+        &self,
+        pane: &str,
+    ) -> std::result::Result<portal_types::agents::ActivityView, portal_types::agents::ActivityError>
+    {
+        let socket = self
+            .open(Operation::Activity, Some(pane))
+            .map_err(|error| activity_transport_error(&error))?;
+        read_activity(&mut BufReader::new(socket))
+    }
+
+    pub fn activity_subscribe(
+        &self,
+        pane: &str,
+    ) -> std::result::Result<
+        Subscription<portal_types::agents::ActivityView>,
+        portal_types::agents::ActivityError,
+    > {
+        let socket = self
+            .open(Operation::ActivitySubscribe, Some(pane))
+            .map_err(|error| activity_transport_error(&error))?;
+        let mut reader = BufReader::new(
+            socket
+                .try_clone()
+                .map_err(|error| activity_transport_error(&error))?,
+        );
+        let publication = read_activity(&mut reader)?;
+        Ok(start_subscription(socket, reader, publication))
     }
 
     pub fn current(&self) -> Result<Published> {
@@ -592,30 +792,84 @@ impl Client {
     ) -> Result<Subscription<T>> {
         let socket = self.open(operation, pane)?;
         let mut reader = BufReader::new(socket.try_clone()?);
-        let publication = Arc::new(read_value::<T>(&mut reader)?);
-        // The first publication is authoritative even when the publisher closes after it.
-        // Darwin refuses socket options once the peer has shut down (EINVAL); Linux accepts
-        // them and the receiver then reads EOF. Both are a disconnect after one publication.
-        let (status, receiving) = match socket.set_read_timeout(None) {
-            Ok(()) => (Status::Connected, true),
-            Err(error) => (Status::Disconnected(error.to_string()), false),
-        };
-        let shared = Arc::new((
-            Mutex::new(Connection {
-                publication,
-                status,
-                generation: 0,
-            }),
-            Condvar::new(),
+        let publication = read_value::<T>(&mut reader)?;
+        Ok(start_subscription(socket, reader, publication))
+    }
+}
+
+fn start_subscription<T: Wire>(
+    socket: UnixStream,
+    mut reader: BufReader<UnixStream>,
+    publication: T,
+) -> Subscription<T> {
+    let publication = Arc::new(publication);
+    // The first publication is authoritative even when the publisher closes after it.
+    // Darwin refuses socket options once the peer has shut down (EINVAL); Linux accepts
+    // them and the receiver then reads EOF. Both are a disconnect after one publication.
+    let (status, receiving) = match socket.set_read_timeout(None) {
+        Ok(()) => (Status::Connected, true),
+        Err(error) => (Status::Disconnected(error.to_string()), false),
+    };
+    let shared = Arc::new((
+        Mutex::new(Connection {
+            publication,
+            status,
+            generation: 0,
+        }),
+        Condvar::new(),
+    ));
+    let output = Arc::clone(&shared);
+    let thread = receiving.then(|| std::thread::spawn(move || receive(&mut reader, &output)));
+    Subscription {
+        socket,
+        shared,
+        thread,
+        seen: 0,
+    }
+}
+
+fn activity_transport_error(error: &impl std::fmt::Display) -> portal_types::agents::ActivityError {
+    super::live_activity::error(
+        portal_types::agents::ActivityCode::UpstreamUnavailable,
+        &error.to_string(),
+    )
+}
+
+/// Keep protocol refusal codes typed across the socket boundary, separate from I/O loss.
+fn read_activity(
+    reader: &mut BufReader<UnixStream>,
+) -> std::result::Result<portal_types::agents::ActivityView, portal_types::agents::ActivityError> {
+    use portal_types::agents::ActivityCode;
+    let invalid =
+        |message: &str| super::live_activity::error(ActivityCode::UpstreamInvalid, message);
+    let mut bytes = Vec::new();
+    reader
+        .take(super::live_activity::MAX_FRAME as u64 + 1)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|error| activity_transport_error(&error))?;
+    if bytes.is_empty() {
+        return Err(super::live_activity::error(
+            ActivityCode::UpstreamUnavailable,
+            "activity publisher disconnected",
         ));
-        let output = Arc::clone(&shared);
-        let thread = receiving.then(|| std::thread::spawn(move || receive(&mut reader, &output)));
-        Ok(Subscription {
-            socket,
-            shared,
-            thread,
-            seen: 0,
-        })
+    }
+    if bytes.last() != Some(&b'\n') || bytes.len() > super::live_activity::MAX_FRAME {
+        return Err(invalid("invalid activity frame"));
+    }
+    let reply: Reply<portal_types::agents::ActivityView> =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("invalid activity frame"))?;
+    match reply {
+        Reply::Publication(view) if view.valid() && view.version == VERSION => Ok(view),
+        Reply::Publication(_) => Err(invalid("invalid activity revision or version")),
+        Reply::Failure(failure) => {
+            let code = match failure.error.code.as_str() {
+                "agent_missing" => ActivityCode::AgentMissing,
+                "invalid_request" => ActivityCode::InvalidRequest,
+                "upstream_unavailable" => ActivityCode::UpstreamUnavailable,
+                _ => ActivityCode::UpstreamInvalid,
+            };
+            Err(super::live_activity::error(code, &failure.error.message))
+        }
     }
 }
 
@@ -652,6 +906,19 @@ impl Wire for Published {
     }
     fn valid(&self) -> bool {
         !self.epoch.is_empty() && self.revision > 0 && self.local_revision > 0
+    }
+}
+
+impl Wire for portal_types::agents::ActivityView {
+    const MAX_BYTES: usize = super::live_activity::MAX_FRAME;
+    fn version(&self) -> u32 {
+        self.version
+    }
+    fn epoch(&self) -> &str {
+        &self.epoch
+    }
+    fn revision(&self) -> u64 {
+        self.revision
     }
 }
 
