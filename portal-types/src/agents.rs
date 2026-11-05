@@ -203,6 +203,7 @@ pub struct RepoList {
 /// A lead that started and accepted its first prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatedLead {
+    pub host: String,
     pub pane: String,
 }
 

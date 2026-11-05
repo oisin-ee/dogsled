@@ -124,9 +124,7 @@ async fn create_lead(
         Ok(body) => body,
         Err(rejection) => return refuse(&rejection.body_text()),
     };
-    let Some(socket) = socket(&state).cloned() else {
-        return no_socket();
-    };
+    let socket = socket(&state).cloned();
     let ledger = state.web.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let mut ledger = ledger;
@@ -137,7 +135,7 @@ async fn create_lead(
             ledger: &ledger,
             config_path: &launch.config_path,
             home: &launch.home,
-            herdr: &socket,
+            herdr: socket.as_ref(),
         };
         crate::leads::create(&context, &body.repo, &body.prompt)
     })
@@ -145,7 +143,10 @@ async fn create_lead(
     match outcome {
         Ok(Ok(started)) => (
             StatusCode::CREATED,
-            Json(portal_types::agents::CreatedLead { pane: started.pane }),
+            Json(portal_types::agents::CreatedLead {
+                host: started.host,
+                pane: started.pane,
+            }),
         )
             .into_response(),
         Ok(Err(failure)) => lead_error_response(&failure),
@@ -644,14 +645,21 @@ mod tests {
             post_lead(leads(), r#"{"repo":"https://example.org/r","prompt":"go"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
-            body["error"].as_str().unwrap().contains("not registered"),
+            body["error"].as_str().unwrap().contains("owner/name"),
             "{body}"
         );
         assert_eq!(body["id"], serde_json::Value::Null);
-        // No Herdr socket: the capability is unavailable, and nothing is started.
+        // Invalid input is rejected even without a local Herdr socket.
         let (status, body) = post_lead(
             state(None).with_leads(launch("")),
             r#"{"repo":"r","prompt":"go"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        // A valid slug still reports unavailable launch capability as 503.
+        let (status, body) = post_lead(
+            state(None).with_leads(launch("")),
+            r#"{"repo":"owner/repo","prompt":"go"}"#,
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");

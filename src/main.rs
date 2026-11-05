@@ -32,7 +32,6 @@ mod job_store;
 mod jobs;
 mod launch;
 mod launch_store;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by lead launch in L3"))]
 mod lead_store;
 #[cfg_attr(not(test), expect(dead_code, reason = "wired by lead lifetime in L2"))]
 mod leads;
@@ -229,6 +228,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             std::time::Duration::from_secs(interval),
             once,
         )?,
+        Command::Host(HostCommand::Lead { .. }) => host_lead(&node, &config_path)?,
         Command::Host(cmd) => return host(cmd, &node),
         Command::Exec {
             id,
@@ -310,18 +310,30 @@ fn lead_command(
     json: bool,
 ) -> Result<()> {
     let prompt = inbox::message_text(args.message, args.message_file)?;
-    let herdr = herdr_socket::Client::discover()?;
     let context = leads::CreateContext {
         shell: node.shell,
         ledger: node.ledger,
         config_path,
         home: node.home,
-        herdr: &herdr,
+        herdr: None,
     };
     let started = leads::create(&context, &args.repo, &prompt)?;
     print(json, &started, || {
-        format!("{}\t{}\n", started.name, started.pane)
+        format!("{}\t{}\t{}\n", started.host, started.name, started.pane)
     })
+}
+
+fn host_lead(node: &Node<'_>, config_path: &std::path::Path) -> Result<()> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)?;
+    let context = leads::CreateContext {
+        shell: node.shell,
+        ledger: node.ledger,
+        config_path,
+        home: node.home,
+        herdr: None,
+    };
+    print(true, &leads::peer(&context, &input)?, String::new)
 }
 
 fn repo_command(
@@ -1366,6 +1378,11 @@ fn state_jobs(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
+        HostCommand::Lead { .. } => {
+            return Err(Error::Invalid(
+                "lead dispatch requires its config path".into(),
+            ));
+        }
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
             inbox::host(node.ledger, node.shell, cmd)?;
         }

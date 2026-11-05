@@ -5,6 +5,9 @@ use crate::jobs::Validity;
 use crate::probe::Agent;
 use serde::{Deserialize, Serialize};
 
+mod checkout;
+mod routing;
+
 /// Intent is saved before each external effect; its outcome advances the phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,15 +67,16 @@ pub(crate) fn protects_pane(record: &Record, pane: &str, terminal: Option<&str>)
 pub(crate) struct CreateContext<'a> {
     pub shell: &'a dyn crate::shell::Shell,
     pub ledger: &'a crate::ledger::Ledger,
-    /// Reloaded on every launch, so a long-lived portal or MCP server sees `repo add`.
+    /// Reloaded for the fleet's remote command and capacity policy.
     pub config_path: &'a std::path::Path,
     pub home: &'a str,
-    pub herdr: &'a crate::herdr_socket::Client,
+    pub herdr: Option<&'a crate::herdr_socket::Client>,
 }
 
 /// A lead that started and accepted its first prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Started {
+    pub host: String,
     pub id: String,
     pub name: String,
     pub pane: String,
@@ -173,7 +177,7 @@ fn agent_name(id: &str) -> crate::error::Result<String> {
     Ok(name)
 }
 
-/// Start one ownerless Pi lead in a registered repository and submit its first prompt.
+/// Start one ownerless Pi lead on the roomiest reachable fleet host.
 /// Intent is saved before every effect. A failure after the record keeps the pane and
 /// never retries an uncertain start or prompt.
 pub(crate) fn create(
@@ -181,42 +185,44 @@ pub(crate) fn create(
     selector: &str,
     prompt: &str,
 ) -> Result<Started, Failure> {
-    let invalid = |error| Failure {
-        kind: FailureKind::Invalid,
+    routing::create(context, selector, prompt)
+}
+
+fn failure(kind: FailureKind, error: crate::error::Error) -> Failure {
+    Failure {
+        kind,
         id: None,
         pane: None,
         phase: None,
         error: Box::new(error),
-    };
-    let repository = registered(context, selector).map_err(invalid)?;
-    if prompt.trim().is_empty() {
-        return Err(invalid(crate::error::Error::Invalid(
-            "the first prompt is empty".into(),
-        )));
     }
-    context.herdr.agent_list().map_err(|error| Failure {
-        kind: FailureKind::Unavailable,
-        id: None,
-        pane: None,
-        phase: None,
-        error: Box::new(error),
-    })?;
-    let id = new_id();
-    let name = agent_name(&id).map_err(invalid)?;
-    let validity =
-        crate::jobs::issue_unowned_validity(context.ledger, &id).map_err(|error| Failure {
-            kind: FailureKind::Launch,
-            id: Some(id.clone()),
-            pane: None,
-            phase: None,
-            error: Box::new(error),
-        })?;
+}
+
+fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<Started, Failure> {
+    let unavailable = |error| failure(FailureKind::Unavailable, error);
+    let discovered;
+    let herdr = if let Some(herdr) = context.herdr {
+        herdr
+    } else {
+        discovered = crate::herdr_socket::Client::discover().map_err(unavailable)?;
+        &discovered
+    };
+    herdr.agent_list().map_err(unavailable)?;
+    let context = &CreateContext {
+        herdr: Some(herdr),
+        ..*context
+    };
+    let repository = checkout::ensure(context, &delivery.repo)
+        .map_err(|error| failure(FailureKind::Launch, error))?;
+    let id = delivery.id.clone();
+    let name = agent_name(&id).map_err(|error| failure(FailureKind::Invalid, error))?;
+    let validity = delivery.validity;
     let now = crate::ledger::now_ms();
     let mut record = Record {
         id,
         name,
         repository,
-        prompt: prompt.to_owned(),
+        prompt: delivery.prompt.clone(),
         validity,
         created_ms: now,
         phase: Phase::Recorded,
@@ -258,6 +264,7 @@ pub(crate) fn create(
         }
     })?;
     Ok(Started {
+        host: delivery.host.clone(),
         id: record.id,
         name: record.name,
         pane: record.pane.unwrap_or_default(),
@@ -265,34 +272,12 @@ pub(crate) fn create(
     })
 }
 
-/// The registered repository, checked against its local checkout. Stage 1 never clones,
-/// creates a worktree, or changes branches.
-fn registered(
+/// Execute a peer delivery without entering placement again.
+pub(crate) fn peer(
     context: &CreateContext<'_>,
-    selector: &str,
-) -> crate::error::Result<crate::checkout::Repository> {
-    let policy = crate::config::load(context.config_path)?;
-    let repo = crate::repos::resolve(&policy.repos, context.home, selector)?;
-    let path = crate::repos::checkout_path(context.home, repo)?;
-    let display = path.display().to_string();
-    let found = crate::checkout::discover(context.shell, &display, context.home, false)?
-        .ok_or_else(|| {
-            crate::error::Error::Invalid(format!("{display} is not a repository checkout"))
-        })?;
-    let canonical = |path: &str| std::fs::canonicalize(path).ok();
-    if canonical(&found.path).is_none() || canonical(&found.path) != canonical(&display) {
-        return Err(crate::error::Error::Invalid(format!(
-            "{display} is not the main checkout of {}",
-            repo.origin
-        )));
-    }
-    if !crate::repos::same_origin(&found.origin, &repo.origin) {
-        return Err(crate::error::Error::Invalid(format!(
-            "{display} has origin {}, not the registered {}",
-            found.origin, repo.origin
-        )));
-    }
-    Ok(found)
+    input: &str,
+) -> crate::error::Result<serde_json::Value> {
+    routing::peer(context, input)
 }
 
 /// Advance one saved phase per effect. `record` mirrors what is saved.
@@ -337,7 +322,12 @@ fn launch(context: &CreateContext<'_>, record: &mut Record) -> crate::error::Res
     })?;
     advance(record, Phase::Started)?;
     advance(record, Phase::Prompting)?;
-    context.herdr.agent_prompt(&pane, &record.prompt)?;
+    context
+        .herdr
+        .ok_or_else(|| {
+            crate::error::Error::Invalid("this host has no Herdr prompt connection".into())
+        })?
+        .agent_prompt(&pane, &record.prompt)?;
     advance(record, Phase::Ready)
 }
 
