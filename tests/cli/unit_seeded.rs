@@ -76,6 +76,31 @@ fn refusal_rig(name: &str) -> Rig {
     rig
 }
 
+/// Serve's lanes settle refusals too. This observer finishes its startup lane pass before the
+/// commit and runs no other within the test, so only the test decides when settlement reads
+/// the evidence it prepared.
+fn quiet_observer(rig: &Rig) -> Background {
+    // Count only this observer's lane results.
+    rig.database()
+        .execute("DELETE FROM service_lanes", [])
+        .unwrap();
+    let observer = super::place::placement_observer_every(rig, "3600");
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let lanes = || -> i64 {
+        rig.database()
+            .query_row("SELECT count(*) FROM service_lanes", [], |row| row.get(0))
+            .unwrap()
+    };
+    while lanes() < 7 {
+        assert!(
+            Instant::now() < deadline,
+            "startup lane pass did not finish"
+        );
+        std::thread::yield_now();
+    }
+    observer
+}
+
 fn refused_unit(name: &str) -> (Rig, Value, Value) {
     let rig = refusal_rig(name);
     rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
@@ -84,9 +109,10 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
     ));
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
-    let observer = super::place::placement_observer(&rig);
+    let observer = quiet_observer(&rig);
     let (code, error) = operation(&rig, "commit", &input);
     drop(observer);
+    assert!(admission(&rig, &execution)["unit"]["abandoned"].is_null());
     assert_eq!(code, 2, "{error}");
     assert!(error.to_string().contains("native refusal"), "{error}");
     (rig, execution, input)
