@@ -99,12 +99,8 @@ fn lead(rig: &Rig, socket: &Socket, repo: &str, message: &str) -> (i32, Value) {
         .env_remove("HERDR_WORKSPACE_ID")
         .env("HERDR_SOCKET_PATH", &socket.path);
     let output = command.output().unwrap();
-    let text = if output.status.success() {
-        output.stdout
-    } else {
-        output.stderr
-    };
-    let text = String::from_utf8_lossy(&text);
+    // `--json` reports a failure as `{"error": ...}` on stdout.
+    let text = String::from_utf8_lossy(&output.stdout);
     let value = serde_json::from_str(text.trim()).unwrap_or_else(|_| json!(text.trim()));
     (output.status.code().unwrap_or(-1), value)
 }
@@ -277,7 +273,7 @@ fn partial_failures_keep_the_pane_phase_and_cause_without_retrying() {
             .env("HERDR_SOCKET_PATH", &socket.path)
             .env("DOGSLED_TEST_BUSY_WINDOW_MS", "300");
         let output = command.output().unwrap();
-        let error = String::from_utf8_lossy(&output.stderr);
+        let error = String::from_utf8_lossy(&output.stdout);
         assert!(!output.status.success(), "{name}: {output:?}");
         assert!(error.contains(expected), "{name}: {error}");
         assert!(
