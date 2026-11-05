@@ -110,6 +110,10 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
     let observer = quiet_observer(&rig);
+    drop(observer);
+    rig.placement_capacity();
+    // Retain the completed quiet startup pass, but freeze explicit capacity for commit.
+    let observer = super::observation::seeded(&rig);
     let (code, error) = operation(&rig, "commit", &input);
     drop(observer);
     assert!(admission(&rig, &execution)["unit"]["abandoned"].is_null());
@@ -415,6 +419,12 @@ fn prepare_refusal_workspace(rig: &Rig) {
 
 fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
     let rig = refusal_rig(name);
+    fs::write(rig.dir.join("clock"), rig.origin_ms.to_string()).unwrap();
+    // Capture before requests exist; later service lanes must not release this claim.
+    rig.config("free_core_fraction_min = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    let out = rig.run(&["serve", "--once", "--interval", "1"]);
+    assert!(out.status.success(), "{out:?}");
+    rig.service();
     prepare_refusal_workspace(&rig);
     let prepare_input =
         json!({"origin":exported(0)["contract"]["ref"],"placement":{"branch":"proof"}});
@@ -428,7 +438,8 @@ fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
     ]);
     assert_eq!(code, 0, "{execution}");
     let input = commit_input(&execution, 0);
-    let observer = super::place::placement_observer(&rig);
+    // Keep recovery lanes stopped until this fixture's explicit settlement call.
+    let observer = super::observation::seeded(&rig);
     let (code, error) = operation(&rig, "commit", &input);
     drop(observer);
     assert_eq!(code, 2, "{error}");
@@ -1609,7 +1620,8 @@ fn commit_as(rig: &Rig, owner: &str, call: &str) -> (i32, Value) {
     );
     let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
     let commit = commit_input(&execution, 0).to_string();
-    let observer = super::place::placement_observer(rig);
+    rig.placement_capacity();
+    let observer = super::observation::seeded(rig);
     let out = run(&["unit", "commit", "--input", &commit]);
     drop(observer);
     (out.status.code().unwrap(), execution)

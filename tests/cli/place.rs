@@ -1849,7 +1849,11 @@ fn place_skips_setup_when_the_base_revision_has_no_repository_config() {
 #[test]
 fn place_bases_new_branches_reuses_existing_ones_and_refuses_foreign_work() {
     let (rig, repo) = place_rig("place-branches");
-    let _observer = placement_observer(&rig);
+    let observer = placement_observer(&rig);
+    drop(observer);
+    rig.placement_capacity();
+    // Branch checks reuse explicit capacity; no live lane may republish old reservations.
+    let _observer = super::observation::seeded(&rig);
     let first = git(&repo, &["rev-parse", "HEAD"]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "second"]);
     assert_eq!(place(&rig, &repo, "from-base", Some("HEAD~1")).0, 0);

@@ -889,6 +889,8 @@ esac
         .current_dir(self.dir.join("home"))
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_WORKSPACE_ID", "w1")
+        // Fake Herdr owns this rig; never discover or subscribe to the developer's daemon.
+        .env("HERDR_SOCKET_PATH", self.dir.join("herdr.sock"))
         .env("RIG", &self.dir)
         .env("RIG_DOGSLED", env!("CARGO_BIN_EXE_dogsled"))
         .env("HOME", self.dir.join("home"))
@@ -999,6 +1001,17 @@ esac
         } else {
             self.put_host_at(path, &snapshot);
         }
+    }
+
+    /// Branch/refusal fixtures need stable capacity, not the runner's resources or clock.
+    fn placement_capacity(&self) {
+        // The snapshot template supplies 7 GiB free memory and 50% free disk.
+        self.snapshot("state", self.now_ms(), 0.0, 16);
+        fs::write(
+            self.dir.join("clock"),
+            self.host()["sampled_ms"].to_string(),
+        )
+        .unwrap();
     }
 
     /// Explicit observer peer ingestion without replacing the local fixture sample.

@@ -1157,6 +1157,15 @@ fn unit_commit_error_and_observe_keep_diagnostic() {
     );
     let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
     let producer = super::place::peer_observer(&rig);
+    drop(producer);
+    // Preserve the peer's fresh sample without live lanes settling its refusal.
+    fs::write(
+        rig.dir.join("clock"),
+        rig.read("remote.json")["sampled_ms"].to_string(),
+    )
+    .unwrap();
+    rig.placement_capacity();
+    let producer = super::observation::seeded(&rig);
     let (code, error) = operation(&rig, "commit", &commit_input(&execution, 0));
     drop(producer);
     assert_eq!(code, 2, "{error}");
