@@ -516,17 +516,14 @@ fn cold_collection_failure_is_not_empty_success() {
 fn failed_host_capture_still_imports_and_publishes_todos() {
     let fixture = Fixture::new();
     fixture.seed_todo();
-    let pending = crate::prepare::Pending {
-        request_id: "ownerless".into(),
-        tree: crate::cleanup::Tree {
-            repo: "/execution-host/repository".into(),
-            path: "/execution-host/checkout".into(),
-            branch: "pending-branch".into(),
-            head: String::new(),
-            identity: None,
-        },
-    };
-    crate::preparation_store::put_pending(&fixture.ledger, &[pending]).unwrap();
+    crate::store::write(&fixture.ledger, |tx| {
+        tx.execute(
+            "ALTER TABLE service_lanes RENAME TO unavailable_service_lanes",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(crate::board::cached_todos(&fixture.ledger).unwrap(), []);
     let collection = Collector::default().collect(&fixture.node(), 100);
     collection.sample.unwrap();
@@ -544,7 +541,7 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
     for domain in ["host", "headroom", "status"] {
         let gap = frame.gaps.iter().find(|gap| gap.domain == domain).unwrap();
         assert_eq!(gap.availability, super::super::Availability::Failed);
-        assert!(gap.detail.contains("has no recorded owner pane"));
+        assert!(gap.detail.contains("no such table: service_lanes"));
     }
     assert_eq!(
         crate::board::cached_todos(&fixture.ledger).unwrap().len(),

@@ -126,6 +126,25 @@ impl Collector {
         }
     }
 
+    fn record_holds(&mut self, holds: &[crate::holds::Hold]) {
+        self.gaps.retain(|domain, _| !domain.starts_with("holds/"));
+        for hold in holds {
+            if hold.code == "unreadable"
+                || (hold.owner_pane.is_none() && hold.owner == "unrecorded")
+            {
+                let domain = format!("holds/{}", hold.resource);
+                self.gaps.insert(
+                    domain.clone(),
+                    Gap {
+                        domain,
+                        availability: Availability::Failed,
+                        detail: format!("{}: {}", hold.resource, hold.reason),
+                    },
+                );
+            }
+        }
+    }
+
     /// Capture first, then freeze and publish. `host` includes jobs, handoffs, holds,
     /// capabilities, lane diagnostics, agent metadata and checkout/retained-branch facts.
     /// `status` is local-only inventory, not an aggregated fleet projection.
@@ -226,6 +245,7 @@ impl Collector {
         };
         let (headroom, status) = match &host {
             Ok(host) => {
+                self.record_holds(&host.holds);
                 let headroom = host
                     .snapshot
                     .as_ref()

@@ -5,6 +5,7 @@ mod local;
 mod peer;
 mod projection;
 mod projection_import;
+mod unreadable_hold;
 
 mod publication {
     use super::super::*;
