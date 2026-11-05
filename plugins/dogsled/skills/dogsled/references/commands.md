@@ -25,7 +25,7 @@ A unit dispatch is the lead's normal path: `spawn {unit:{id}, branch, base}` lin
 
 ```sh
 dogsled agent --profile writer --name api-dups --message-file task.md --branch feat/api-dups
-dogsled agent --kind codex --name reviewer --message 'Review the change on feat/x'
+dogsled agent --profile research --name change-review --message 'Review the change on feat/x; do not edit files'
 dogsled profiles
 ```
 

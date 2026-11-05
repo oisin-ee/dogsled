@@ -1,6 +1,6 @@
 ---
 name: dogsled
-description: Lead procedure for a change to code, config, or Git. It covers splitting the work, starting workers, and landing their results. Load it when a top-level session gets a change request. Do not load it in an exec session given prewalk. Do not load it when your system prompt names you a writer, reviewer, scout, or architect, because that prompt is your whole job.
+description: Lead procedure for a change to code, config, or Git. It covers splitting the work, starting workers, and landing their results. Load it when a top-level session gets a change request. Do not load it in an exec session given prewalk. Do not load it in a worker session, because the worker profile prompt is your whole job.
 ---
 
 # Exec agents given prewalk
@@ -25,19 +25,24 @@ Otherwise, do not edit code or config. Delegate it with steps 1 to 5.
 
 ## 1. Split
 
-List the deliverables. Each one has one outcome, one acceptance command, and the paths it owns.
+List the deliverables. Each one has one outcome, an acceptance condition, and the paths it reads or owns.
 Add each deliverable as a todo unit with a `worker` assignment and the profile from step 2.
 Put deliverables that touch the same files in one unit.
 Put small specified edits of one request in one unit, even across files. Never start one worker per small edit.
 
 ## 2. Pick the profile
 
+Use only these two worker profiles:
+
 | The unit is | Profile |
 | --- | --- |
+| Read-only investigation, diagnosis, design analysis, or review | `research` |
 | A specified change: you know what to edit and why | `writer` |
-| The cause or the design is unknown | `architect` first. Its findings become the writer's brief |
-| Facts only: paths, versions, call sites | `scout` |
-| A finished diff, plan, or design to check | `reviewer` |
+
+Investigate ordinary questions in the lead session.
+Delegate research only for a defined question that warrants a separate worker.
+An unknown cause or design does not require a research worker.
+Research produces evidence, not file changes or more agents.
 
 The default writer uses GPT Sol for the whole session, with no typing-tier handoff. The profile owns model selection and effort.
 
@@ -47,8 +52,12 @@ Before you write your first brief in a session, read `references/brief.md`.
 
 ## 4. Start
 
-Start each worker from its unit: `spawn {unit: {id}, branch, base: "origin/main"}`. A bare `spawn` with a name does not link the unit, so the unit can never close.
-Start independent units in the same turn. Start a dependent unit only after its prerequisite merges.
+Start each worker from its unit.
+For a writer, use `spawn {unit: {id}, branch, base: "origin/main"}`.
+For research, use `spawn {unit: {id}}` without a branch or base.
+A bare `spawn` with a name does not link the unit, so the unit can never close.
+Start independent units in the same turn.
+Start a dependent unit only after its prerequisite is accepted and any prerequisite code changes are merged.
 Then end your turn. Replies arrive in your inbox. Do not wait or poll.
 
 ## 5. Check each reply
