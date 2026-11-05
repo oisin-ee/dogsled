@@ -75,32 +75,18 @@ pub fn router() -> Router<AppState> {
         .route("/api/repos", get(repos))
 }
 
-/// The registered repositories, reread from config on every request.
+/// The serve-owned GitHub catalogue, without configuration or shell reads.
 async fn repos(State(state): State<AppState>) -> Response {
-    let Some(launch) = state.leads.clone() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "this server cannot start leads"})),
-        )
-            .into_response();
-    };
-    match crate::config::load(&launch.config_path) {
-        Ok(policy) => Json(portal_types::agents::RepoList {
-            repos: policy
-                .repos
-                .iter()
-                .map(|repo| portal_types::agents::RepoChoice {
-                    origin: repo.origin.clone(),
-                    path: repo.path.clone(),
-                })
-                .collect(),
-        })
-        .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": error.to_string()})),
-        )
-            .into_response(),
+    let directory = state.web.dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        let published = ipc::Client::at(&directory).current()?;
+        crate::observation::read::view::<portal_types::agents::RepoList>(&published, "repos")
+    })
+    .await
+    {
+        Ok(Ok(list)) => ([("cache-control", "no-store")], Json(list)).into_response(),
+        Ok(Err(error)) => super::observation_error(&error.to_string()),
+        Err(error) => super::observation_error(&format!("observation unavailable: {error}")),
     }
 }
 
@@ -667,32 +653,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repos_route_rereads_the_registered_list() {
-        let launch = launch("[[repos]]\npath = \"~/a\"\norigin = \"https://example.org/a.git\"\n");
-        let config = launch.config_path.clone();
-        let get = |state: AppState| async move {
-            let response =
-                super::test_request(state, request(Method::GET, "/api/repos", None)).await;
-            let status = response.status();
-            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            (
-                status,
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-            )
-        };
-        let (status, body) = get(state(None).with_leads(launch.clone())).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(
-            body,
-            json!({"repos":[{"origin":"https://example.org/a.git","path":"~/a"}]})
-        );
-        std::fs::write(&config, "").unwrap();
-        let (_, body) = get(state(None).with_leads(launch)).await;
-        assert_eq!(body, json!({"repos":[]}));
-        let (status, _) = get(state(None)).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    async fn repos_route_requires_a_publication() {
+        let response =
+            super::test_request(state(None), request(Method::GET, "/api/repos", None)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["error"].as_str().unwrap().contains("unavailable"));
     }
 
     /// Capture native source records before installing a publication in the reader.

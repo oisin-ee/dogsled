@@ -316,7 +316,7 @@ pub enum Command {
     /// The saved Herdr machines dogsled uses as hosts.
     #[command(subcommand)]
     Machine(MachineCommand),
-    /// Configure the repositories available on the fleet.
+    /// Read the published GitHub repository catalogue.
     #[command(subcommand)]
     Repo(RepoCommand),
     /// Send a message to an agent on any host, through its inbox. Nothing types into its
@@ -617,11 +617,7 @@ pub enum UnitCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCommand {
-    /// Add a repository, or the current directory when no path is given.
-    Add { path: Option<String> },
-    /// Remove a repository by origin or checkout path.
-    Remove { selector: String },
-    /// Show the configured repositories.
+    /// Show accessible GitHub repositories, newest first.
     List,
 }
 

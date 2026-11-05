@@ -328,6 +328,7 @@ pub(crate) fn derive(
     }
     let views = &mut input.views;
     views.clear();
+    insert(views, "repos", input.local.get("repos"), &[])?;
     insert(views, "hosts", Some(&reports), &gaps)?;
     insert(views, "status", status.as_ref(), &gaps)?;
     insert(
