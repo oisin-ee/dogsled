@@ -41,6 +41,7 @@ fn optional_number<T: TryFrom<i64>>(row: &Row<'_>, column: &str) -> Result<Optio
 
 pub(crate) const SCHEMA:&str=concat!(
     "CREATE TABLE host_sweep_request (id TEXT PRIMARY KEY CHECK(id = 'local'), token TEXT NOT NULL CHECK(length(token) > 0)) STRICT;
+    CREATE TABLE host_quota_request (id TEXT PRIMARY KEY CHECK(id = 'local'), token TEXT NOT NULL CHECK(length(token) > 0)) STRICT;
     CREATE TABLE host_gate (id TEXT PRIMARY KEY CHECK(length(id) > 0)) STRICT;
     CREATE TABLE host_gate_sets (owner TEXT NOT NULL REFERENCES host_gate(id) ON DELETE CASCADE, position INTEGER NOT NULL CHECK(position >= 0), PRIMARY KEY(owner,position)) STRICT;
     CREATE TABLE host_gate_entries (owner TEXT NOT NULL, signature_position INTEGER NOT NULL, position INTEGER NOT NULL CHECK(position >= 0), item TEXT NOT NULL, ahead INTEGER CHECK(ahead >= 0), dirty INTEGER NOT NULL CHECK(dirty IN (0,1)), PRIMARY KEY(owner,signature_position,position), FOREIGN KEY(owner,signature_position) REFERENCES host_gate_sets(owner,position) ON DELETE CASCADE) STRICT;
@@ -3847,34 +3848,53 @@ pub(crate) fn replace_operations(
     )
 }
 
-pub(crate) fn sweep_request(ledger: &Ledger) -> Result<Option<String>> {
+/// A durable request for serve: the latest token, consumed only when it is still the latest.
+fn request_token(ledger: &Ledger, table: &str) -> Result<Option<String>> {
     crate::store::read(ledger, |tx| {
         use rusqlite::OptionalExtension;
         Ok(tx
             .query_row(
-                "SELECT token FROM host_sweep_request WHERE id = 'local'",
+                &format!("SELECT token FROM {table} WHERE id = 'local'"),
                 [],
                 |row| row.get(0),
             )
             .optional()?)
     })
 }
-pub(crate) fn put_sweep_request(ledger: &Ledger, token: &str) -> Result<()> {
+fn put_request_token(ledger: &Ledger, table: &str, token: &str) -> Result<()> {
     crate::store::write(ledger, |tx| {
         let mut columns = Columns::default();
         columns.text("id", Some("local"));
         columns.text("token", Some(token));
-        columns.upsert(tx, "host_sweep_request", "id")
+        columns.upsert(tx, table, "id")
     })
 }
-pub(crate) fn consume_sweep_request(ledger: &Ledger, token: &str) -> Result<()> {
+fn consume_request_token(ledger: &Ledger, table: &str, token: &str) -> Result<()> {
     crate::store::write(ledger, |tx| {
         tx.execute(
-            "DELETE FROM host_sweep_request WHERE id = 'local' AND token = ?1",
+            &format!("DELETE FROM {table} WHERE id = 'local' AND token = ?1"),
             [token],
         )?;
         Ok(())
     })
+}
+pub(crate) fn sweep_request(ledger: &Ledger) -> Result<Option<String>> {
+    request_token(ledger, "host_sweep_request")
+}
+pub(crate) fn put_sweep_request(ledger: &Ledger, token: &str) -> Result<()> {
+    put_request_token(ledger, "host_sweep_request", token)
+}
+pub(crate) fn consume_sweep_request(ledger: &Ledger, token: &str) -> Result<()> {
+    consume_request_token(ledger, "host_sweep_request", token)
+}
+pub(crate) fn quota_request(ledger: &Ledger) -> Result<Option<String>> {
+    request_token(ledger, "host_quota_request")
+}
+pub(crate) fn put_quota_request(ledger: &Ledger, token: &str) -> Result<()> {
+    put_request_token(ledger, "host_quota_request", token)
+}
+pub(crate) fn consume_quota_request(ledger: &Ledger, token: &str) -> Result<()> {
+    consume_request_token(ledger, "host_quota_request", token)
 }
 
 pub(crate) type Gate = BTreeMap<String, BTreeSet<BTreeSet<(String, Option<u64>, bool)>>>;

@@ -147,6 +147,12 @@ pub fn request_at_stop(ledger: &Ledger) {
 /// The hook never waits for the survey or a reply from the service.
 pub fn request(ledger: &Ledger) -> Result<()> {
     crate::host_store::put_sweep_request(ledger, &crate::ledger::new_id())?;
+    wake(ledger)
+}
+
+/// Notify a running service that a durable request is pending. The service rereads every
+/// request kind on each notification, so the notification carries no meaning of its own.
+pub fn wake(ledger: &Ledger) -> Result<()> {
     let socket = std::os::unix::net::UnixDatagram::unbound()?;
     socket.set_nonblocking(true)?;
     match socket.send_to(b"sweep", ledger.dir.join(SOCKET)) {

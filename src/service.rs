@@ -97,7 +97,8 @@ impl LaneDiagnostics {
 #[derive(Debug)]
 pub(crate) enum Event {
     Finished(usize, Result<()>),
-    Sweep,
+    /// A durable request (cleanup or quota refresh) may be pending.
+    Wake,
     Swept(Result<()>),
     Observe,
 }
@@ -128,7 +129,7 @@ impl Listener {
             let mut bytes = [0; 16];
             while reader.recv(&mut bytes).is_ok() {
                 if done.load(std::sync::atomic::Ordering::Acquire)
-                    || send.send(Event::Sweep).is_err()
+                    || send.send(Event::Wake).is_err()
                 {
                     break;
                 }
@@ -163,13 +164,13 @@ fn actions(
     published: Arc<crate::observation::Published>,
 ) -> Result<()> {
     let shell = System::default();
-    if lane == Lane::Quota {
-        return crate::quota::read(&shell, ledger, policy, &home, false, false).map(|_| ());
-    }
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }
     let fleet = crate::hosts::ActionFleet::new(&shell, ledger, policy, home, published)?;
+    if lane == Lane::Quota {
+        return crate::quota::lane(&fleet, now_ms());
+    }
     if lane == Lane::Retention {
         // Retention owns its synchronization too; no other service lane is required.
         crate::launch::release_owned(&fleet)?;
@@ -221,25 +222,60 @@ impl Workers {
         source: &crate::observation::Publisher,
     ) -> Result<()> {
         let published = source.current()?;
-        for (lane, worker) in self.handles.iter_mut().enumerate() {
-            if worker.is_none()
-                && (!once || (!self.completed[lane] && ready(LANES[lane], self.completed)))
-            {
-                let mut ledger = node.ledger.clone();
-                ledger.budget = crate::budget::Budget::default();
-                let policy = policy.clone();
-                let home = node.home.to_owned();
-                let send = send.clone();
-                let published = Arc::clone(&published);
-                *worker = Some(std::thread::spawn(move || {
-                    let _ = send.send(Event::Finished(
-                        lane,
-                        actions(&ledger, &policy, home, LANES[lane], published),
-                    ));
-                }));
+        for (index, lane) in LANES.iter().enumerate() {
+            if !once || (!self.completed[index] && ready(*lane, self.completed)) {
+                self.spawn(index, node, policy, send, &published);
             }
         }
         Ok(())
+    }
+
+    /// Durable requests outlive their wake, so they are reread on every wake and every pass.
+    /// A quota refresh starts the quota lane now unless it is running; the result says whether
+    /// a cleanup pass is requested.
+    fn requests(
+        &mut self,
+        node: &Node<'_>,
+        policy: &Policy,
+        once: bool,
+        send: &mpsc::Sender<Event>,
+        source: &crate::observation::Publisher,
+    ) -> Result<bool> {
+        if !once && crate::quota::pending(node.ledger)? {
+            let index = LANES
+                .iter()
+                .position(|lane| *lane == Lane::Quota)
+                .ok_or_else(|| Error::Invalid("quota lane missing".into()))?;
+            if self.handles[index].is_none() {
+                self.spawn(index, node, policy, send, &source.current()?);
+            }
+        }
+        crate::sweep::pending(node.ledger)
+    }
+
+    fn spawn(
+        &mut self,
+        lane: usize,
+        node: &Node<'_>,
+        policy: &Policy,
+        send: &mpsc::Sender<Event>,
+        published: &Arc<crate::observation::Published>,
+    ) {
+        if self.handles[lane].is_some() {
+            return;
+        }
+        let mut ledger = node.ledger.clone();
+        ledger.budget = crate::budget::Budget::default();
+        let policy = policy.clone();
+        let home = node.home.to_owned();
+        let send = send.clone();
+        let published = Arc::clone(published);
+        self.handles[lane] = Some(std::thread::spawn(move || {
+            let _ = send.send(Event::Finished(
+                lane,
+                actions(&ledger, &policy, home, LANES[lane], published),
+            ));
+        }));
     }
 
     fn finished(&mut self, lane: usize) -> Result<()> {
@@ -426,9 +462,6 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             baseline = None;
         }
         let domains = dirty.take();
-        // The socket only reduces latency. Recover pending requests on every publication
-        // iteration, including when the socket cannot bind or a notification was lost.
-        requested |= crate::sweep::pending(node.ledger)?;
         observation.refresh(
             node,
             policy,
@@ -446,6 +479,9 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             workers.start(node, policy, once, &send, &observation.publisher)?;
             next += interval;
         }
+        // The socket only reduces latency. Recover pending requests on every publication
+        // iteration, including when the socket cannot bind or a notification was lost.
+        requested |= workers.requests(node, policy, once, &send, &observation.publisher)?;
         loop {
             if requested && sweep.is_none() {
                 requested = false;
@@ -465,7 +501,10 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             }
             let observation_due = baseline.map_or(next, |at| next.min(at));
             match recv.recv_timeout(observation_due.saturating_duration_since(Instant::now())) {
-                Ok(Event::Sweep) => requested = true,
+                Ok(Event::Wake) => {
+                    requested |=
+                        workers.requests(node, policy, once, &send, &observation.publisher)?;
+                }
                 Ok(Event::Observe) => {
                     if dirty.pending() && !once {
                         break;
