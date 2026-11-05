@@ -275,6 +275,59 @@ fn dispatch_before_removal_keeps_pending_job_checkout() {
 }
 
 #[test]
+fn hook_environment_cannot_redirect_a_job_command() {
+    let (rig, tree) = close::close_rig("startup-git-env");
+    let hook = rig.dir.join("home/hook");
+    fs::create_dir_all(&hook).unwrap();
+    close::git(&hook, &["init", "-q", "-b", "main"]);
+    startup_herdr(&rig);
+    let mut request = startup_request(&rig, &tree);
+    request["action"]["cmd"] = json!([
+        "sh",
+        "-c",
+        "git rev-parse --absolute-git-dir > \"$RIG/job-git-dir\" && env > \"$RIG/job-env\""
+    ]);
+    let (code, result) = rig.json(&[
+        "host",
+        "launch",
+        "--job-validity",
+        "2",
+        "--request",
+        &request.to_string(),
+    ]);
+    assert_eq!(code, 0, "{result}");
+    register_startup_tree(&rig, &result["checkout"]);
+    let mut wrapper = isolated("sh");
+    wrapper.args([
+        "-c",
+        &read_command(&rig.dir.join("startup-wrapper"), "git env wrapper"),
+    ]);
+    rig.rig_env(&mut wrapper);
+    wrapper
+        .env("GIT_DIR", hook.join(".git"))
+        .env("GIT_WORK_TREE", &hook)
+        .env("GIT_INDEX_FILE", hook.join(".git/index"))
+        .stdout(fs::File::create(rig.dir.join("wrapper-output")).unwrap())
+        .stderr(fs::File::create(rig.dir.join("wrapper-error")).unwrap());
+    assert!(
+        Owned::spawn(&mut wrapper).wait().success(),
+        "{}",
+        rig.log("wrapper-error")
+    );
+    assert_eq!(
+        rig.log("job-git-dir").trim(),
+        close::git(&tree, &["rev-parse", "--absolute-git-dir"]).trim()
+    );
+    let env = rig.log("job-env");
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        assert!(
+            !env.lines().any(|line| line.starts_with(&format!("{key}="))),
+            "{key}"
+        );
+    }
+}
+
+#[test]
 fn removal_before_dispatch_refuses_stale_job_startup() {
     let (rig, tree) = close::close_rig("startup-removed");
     startup_herdr(&rig);

@@ -11,6 +11,8 @@ mod context;
 mod done;
 #[path = "cli/drop.rs"]
 mod drop;
+#[path = "cli/git_env.rs"]
+mod git_env;
 #[path = "cli/host_store.rs"]
 mod host_store;
 #[path = "cli/inbox.rs"]

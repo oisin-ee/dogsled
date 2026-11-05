@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -971,7 +971,7 @@ fn spawn(ledger: &Ledger, job: &Job) -> Result<Capture> {
         .create(true)
         .append(true)
         .open(store(ledger).dir.join(format!("{}.log", job.id)))?;
-    let child = Command::new(&job.cmd[0])
+    let child = crate::shell::command(&job.cmd[0])
         .args(&job.cmd[1..])
         .current_dir(&job.cwd)
         .stdin(Stdio::null())
