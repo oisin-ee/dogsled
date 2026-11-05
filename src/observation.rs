@@ -2,6 +2,7 @@
 //! clients receive complete publications without a shell, ledger, or fleet.
 
 pub(crate) mod collect;
+pub(crate) mod details;
 pub(crate) mod diagnostics;
 pub(crate) mod display;
 pub(crate) mod ipc;
@@ -74,12 +75,14 @@ pub(crate) struct Frame {
     pub published: Arc<Published>,
     /// One newline-delimited frame, serialized before making this revision visible.
     pub bytes: Arc<[u8]>,
+    pub details: BTreeMap<String, Arc<details::Payload>>,
 }
 
 /// The single producer owns revision assignment. Watch retains only the latest value.
 #[derive(Debug)]
 pub(crate) struct Publisher {
     epoch: String,
+    details: details::Payloads,
     sender: watch::Sender<Option<Arc<Frame>>>,
 }
 
@@ -98,8 +101,13 @@ impl Publisher {
             });
         Ok(Self {
             epoch,
+            details: details::Payloads::default(),
             sender: watch::channel(None).0,
         })
+    }
+
+    pub fn details(&mut self, details: details::Payloads) {
+        self.details = details;
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Option<Arc<Frame>>> {
@@ -166,6 +174,7 @@ impl Publisher {
         self.sender.send_replace(Some(Arc::new(Frame {
             published: Arc::clone(&published),
             bytes: bytes.into(),
+            details: self.details.snapshot(),
         })));
         Ok(published)
     }

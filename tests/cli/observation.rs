@@ -1,5 +1,5 @@
 use super::*;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc;
 
@@ -12,11 +12,20 @@ pub(super) struct Supplied {
     path: PathBuf,
     updates: mpsc::Sender<Option<Value>>,
     requests: mpsc::Receiver<Value>,
+    interests: mpsc::Receiver<(String, bool)>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Supplied {
-    pub(super) fn start(rig: &Rig, mut frame: Value) -> Self {
+    pub(super) fn start(rig: &Rig, frame: Value) -> Self {
+        Self::start_details(rig, frame, std::collections::BTreeMap::new())
+    }
+
+    fn start_details(
+        rig: &Rig,
+        mut frame: Value,
+        details: std::collections::BTreeMap<String, Value>,
+    ) -> Self {
         let path = rig.dir.join("state/observation.sock");
         if let Ok(metadata) = fs::symlink_metadata(&path) {
             use std::os::unix::fs::FileTypeExt as _;
@@ -33,19 +42,44 @@ impl Supplied {
         listener.set_nonblocking(true).unwrap();
         let (updates, incoming) = mpsc::channel();
         let (requests, received) = mpsc::channel();
+        let (interest_events, interests) = mpsc::channel();
         let thread = std::thread::spawn(move || {
             let mut subscribers = Vec::new();
             loop {
                 match incoming.recv_timeout(Duration::from_millis(5)) {
                     Ok(Some(next)) => {
                         frame = next;
-                        subscribers.retain_mut(|stream: &mut std::os::unix::net::UnixStream| {
-                            writeln!(stream, "{frame}").is_ok()
-                        });
+                        subscribers.retain_mut(
+                            |(stream, pane): &mut (
+                                std::os::unix::net::UnixStream,
+                                Option<String>,
+                            )| {
+                                if pane.is_some() {
+                                    return true;
+                                }
+                                if writeln!(stream, "{frame}").is_ok() {
+                                    true
+                                } else {
+                                    if let Some(pane) = pane {
+                                        let _ = interest_events.send((pane.clone(), false));
+                                    }
+                                    false
+                                }
+                            },
+                        );
                     }
                     Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
+                subscribers.retain_mut(|(stream, pane)| {
+                    let mut byte = [0];
+                    stream.set_nonblocking(true).unwrap();
+                    let result = stream.read(&mut byte);
+                    stream.set_nonblocking(false).unwrap();
+                    if matches!(result, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock) { return true; }
+                    if let Some(pane) = pane { let _ = interest_events.send((pane.clone(), false)); }
+                    false
+                });
                 while let Ok((mut stream, _)) = listener.accept() {
                     stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
                     stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
@@ -53,9 +87,19 @@ impl Supplied {
                     BufReader::new(&stream).read_line(&mut line).unwrap();
                     let request: Value = serde_json::from_str(&line).unwrap();
                     assert_eq!(request["version"], 1);
-                    writeln!(stream, "{frame}").unwrap();
-                    if request["operation"] == "subscribe" {
-                        subscribers.push(stream);
+                    let selected = if request["operation"] == "detail" {
+                        &details[request["pane"].as_str().unwrap()]
+                    } else {
+                        &frame
+                    };
+                    writeln!(stream, "{selected}").unwrap();
+                    if request["operation"] == "subscribe" || request["operation"] == "detail" {
+                        let pane = (request["operation"] == "detail")
+                            .then(|| request["pane"].as_str().unwrap().to_owned());
+                        if let Some(pane) = &pane {
+                            interest_events.send((pane.clone(), true)).unwrap();
+                        }
+                        subscribers.push((stream, pane));
                     }
                     requests.send(request).unwrap();
                 }
@@ -65,12 +109,20 @@ impl Supplied {
             path,
             updates,
             requests: received,
+            interests,
             thread: Some(thread),
         }
     }
 
     pub(super) fn replace(&self, frame: Value) {
         self.updates.send(Some(frame)).unwrap();
+    }
+
+    fn interest(&self, pane: &str, registered: bool) {
+        assert_eq!(
+            self.interests.recv_timeout(PROCESS_DEADLINE).unwrap(),
+            (pane.to_owned(), registered)
+        );
     }
 
     fn requested(&self, operation: &str) {

@@ -258,6 +258,8 @@ struct Exchange {
     branches: crate::observation::peers::Branches,
     interests: crate::observation::peers::Interests,
     diagnostics: crate::observation::diagnostics::Diagnostics,
+    details: crate::observation::details::Collector,
+    dirty: wake::Dirty,
 }
 
 fn publish(
@@ -275,10 +277,12 @@ fn publish(
         branches,
         interests,
         diagnostics,
+        details,
+        dirty,
     } = exchange;
     let now = now_ms();
     let collection = crate::store::observing(|| -> Result<_> {
-        let gaps = if domains & !wake::PEERS != 0 {
+        let gaps = if domains & (wake::LOCAL | wake::BRANCHES) != 0 {
             branches.observe(node, &interests.current()?, now)?
         } else {
             branches.gaps()
@@ -309,11 +313,11 @@ fn publish(
         }
         collection.input.gaps.extend(gaps);
         peers.compose(fleet, &mut collection.input, now, collector.reports())?;
+        details.refresh(&mut collection.input, dirty)?;
         Ok(collection)
     })?;
     herdr.interests(collector.panes());
-    let frame = publisher.replace(collection.input)?;
-    diagnostics.record(&frame.gaps, now, |line| eprintln!("{line}"));
+    diagnostics.publish(publisher, collection.input, now, |line| eprintln!("{line}"))?;
     if once {
         collection.sample?;
     }
@@ -331,10 +335,13 @@ struct Observation {
 
 impl Observation {
     fn new(node: &Node<'_>, interval: Duration, dirty: &wake::Dirty) -> Result<Self> {
-        let publisher = crate::observation::Publisher::new()?;
+        let mut publisher = crate::observation::Publisher::new()?;
         let mut server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
         let interests = crate::observation::peers::Interests::default();
         server.branches(interests.clone(), dirty.clone());
+        let details = crate::observation::details::Collector::default();
+        server.details(details.interests.clone());
+        publisher.details(details.payloads.clone());
         if let Err(error) = server.bind(publisher.subscribe()) {
             eprintln!("observation socket unavailable: {error}");
         }
@@ -354,6 +361,8 @@ impl Observation {
                 branches: crate::observation::peers::Branches::default(),
                 interests,
                 diagnostics: crate::observation::diagnostics::Diagnostics::default(),
+                details,
+                dirty: dirty.clone(),
             },
             _commits: commits,
             herdr: wake::Herdr::start(dirty.clone(), interval),

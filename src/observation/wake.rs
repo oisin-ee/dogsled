@@ -17,6 +17,7 @@ pub(crate) const LEDGER: u8 = 1;
 pub(crate) const LOCAL: u8 = 3;
 pub(crate) const PEERS: u8 = 4;
 pub(crate) const BRANCHES: u8 = 8;
+pub(crate) const DETAILS: u8 = 16;
 
 /// Best-effort post-commit notification. Never wait for the service or run collection.
 pub(crate) fn notify(ledger: &Ledger) {
@@ -67,7 +68,7 @@ pub(crate) struct Dirty {
 }
 
 impl Dirty {
-    pub(super) fn new(send: mpsc::Sender<Event>) -> Self {
+    pub(crate) fn new(send: mpsc::Sender<Event>) -> Self {
         Self {
             pending: Arc::new(AtomicU8::new(0)),
             send,
@@ -101,7 +102,7 @@ impl Dirty {
         self.pending.load(Ordering::Acquire) != 0
     }
 
-    pub(super) fn take(&self) -> u8 {
+    pub(crate) fn take(&self) -> u8 {
         self.pending.swap(0, Ordering::AcqRel)
     }
 }

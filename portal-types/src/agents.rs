@@ -63,6 +63,7 @@ pub struct Turn {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversation {
     pub pane: String,
+    pub session: String,
     pub turns: Vec<Turn>,
 }
 
@@ -70,6 +71,7 @@ pub struct Conversation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Screen {
     pub pane: String,
+    pub session: String,
     pub text: String,
     pub revision: u64,
 }
@@ -86,9 +88,18 @@ pub struct KeysBody {
     pub keys: Vec<String>,
 }
 
+/// A session-less agent cannot supply a cache key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "availability", content = "key", rename_all = "snake_case")]
+pub enum DetailSession {
+    Available(String),
+    Unavailable,
+}
+
 /// A change the agent stream pushes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEvent {
+    pub session: DetailSession,
     /// The Herdr event name, such as `pane.agent_status_changed`.
     pub kind: String,
     pub pane: String,
