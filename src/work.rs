@@ -221,6 +221,7 @@ fn expire_request_sidecars(
         let id = id.as_str();
         let admission_owner = crate::admissions::exists(ledger, id)?;
         if admission_owner
+            || crate::lead_store::exists_in(tx, id)?
             || crate::preparation_store::exists(ledger, id)?
             || crate::launch_store::exists(ledger, id)?
             || tickets.iter().any(|t| t.request.id == id)

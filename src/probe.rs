@@ -13,6 +13,15 @@ pub struct AgentCounts {
 }
 
 impl AgentCounts {
+    pub fn from_agents<'a>(agents: impl IntoIterator<Item = &'a Agent>) -> Self {
+        let mut counts = Self::default();
+        for agent in agents {
+            counts.total += 1;
+            *counts.by_status.entry(agent.state.clone()).or_default() += 1;
+        }
+        counts
+    }
+
     pub fn live(&self) -> usize {
         self.total
             .saturating_sub(self.by_status.get("done").copied().unwrap_or(0))
@@ -368,11 +377,7 @@ pub struct Probe {
 
 pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
     let agent_panes = agent_list(shell)?;
-    let mut agents = AgentCounts::default();
-    for pane in &agent_panes {
-        agents.total += 1;
-        *agents.by_status.entry(pane.state.clone()).or_default() += 1;
-    }
+    let agents = AgentCounts::from_agents(&agent_panes);
     let panes = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&panes.stdout)?;
     let mut panes: Vec<Pane> = serde_json::from_value(
