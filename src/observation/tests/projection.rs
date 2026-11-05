@@ -243,6 +243,24 @@ fn closed_branch_has_no_cli_pane_but_keeps_portal_identity() {
     assert_eq!(*portal, serde_json::to_value(expected).unwrap());
 }
 
+/// Job history is keyed by owner and host-qualified job identity, never by host or id alone.
+fn assert_owner_scoped_job_history(views: &crate::observation::Domains) {
+    let history = &views["job_history"]["data"]["owner"];
+    assert_eq!(
+        history["jobs"].as_array().unwrap().len(),
+        1,
+        "host-qualified job identity"
+    );
+    assert_eq!(history["jobs"][0]["host"], "local");
+    let other = &views["job_history"]["data"]["other"]["jobs"];
+    assert_eq!(other.as_array().unwrap().len(), 1, "{other}");
+    assert_eq!(other[0]["id"], "foreign");
+    assert_eq!(history["hosts"].as_array().unwrap().len(), 2);
+    let empty = &views["empty_job_history"]["data"];
+    assert_eq!(empty["jobs"], json!([]));
+    assert_eq!(empty["hosts"], history["hosts"]);
+}
+
 #[test]
 fn all_views_share_one_capture_and_published_revision() {
     let fixture = Fixture::new();
@@ -318,20 +336,7 @@ fn all_views_share_one_capture_and_published_revision() {
             .iter()
             .any(|row| row["title"] == "Captured title")
     );
-    let history = &input.views["job_history"]["data"]["owner"];
-    assert_eq!(
-        history["jobs"].as_array().unwrap().len(),
-        1,
-        "host-qualified job identity"
-    );
-    assert_eq!(history["jobs"][0]["host"], "local");
-    let other = &input.views["job_history"]["data"]["other"]["jobs"];
-    assert_eq!(other.as_array().unwrap().len(), 1, "{other}");
-    assert_eq!(other[0]["id"], "foreign");
-    assert_eq!(history["hosts"].as_array().unwrap().len(), 2);
-    let empty = &input.views["empty_job_history"]["data"];
-    assert_eq!(empty["jobs"], json!([]));
-    assert_eq!(empty["hosts"], history["hosts"]);
+    assert_owner_scoped_job_history(&input.views);
     let mut producer = Publisher::new().unwrap();
     let published = producer.replace(input).unwrap();
     let portal: portal_types::PortalSnapshot =
