@@ -7,6 +7,8 @@ All notable changes to this project are documented in this file.
 
 ### Features
 
+* **activity:** publish Pi events and follow session-safe live data ([a4fd315](https://github.com/oisin-ee/dogsled/commit/a4fd315635ffa6e8471a49f4f7044c1dfe212d49))
+* **leads:** start, keep, and close top-level Pi leads from CLI, MCP, and portal ([8a1f2dc](https://github.com/oisin-ee/dogsled/commit/8a1f2dcfb8f08ede14a888880dc6759c71e39bb5))
 * **leads:** persist ownerless records and exclude admission demand ([5f3ff63](https://github.com/oisin-ee/dogsled/commit/5f3ff63d30c81cdd1b951be552c29ab4c93b829f))
 * **leads:** persist ownerless records and exclude admission demand ([9249a9f](https://github.com/oisin-ee/dogsled/commit/9249a9f96f639c6c41cf4f83cb50ddc49f34a7f3))
 * **observation:** centralize session-qualified agent details ([f1fea4d](https://github.com/oisin-ee/dogsled/commit/f1fea4dd7a6b4352e16b057a542156a71b240f05))
@@ -25,18 +27,31 @@ All notable changes to this project are documented in this file.
 * **observation:** serve one portal revision ([a10fd76](https://github.com/oisin-ee/dogsled/commit/a10fd7636f37db7b97e6beb7295b239ae7b9e3d7))
 * **observation:** wake collection from local changes ([6f2ce50](https://github.com/oisin-ee/dogsled/commit/6f2ce50c41b02337a0bb6e15149b9eb9c8b36f6e))
 * **observation:** wake collection from local changes ([a6b3a98](https://github.com/oisin-ee/dogsled/commit/a6b3a983b4aa961aba67ec0ca32a69c2f5ca3077))
+* **observation:** serve-owned live activity authority ([569f00b](https://github.com/oisin-ee/dogsled/commit/569f00bcdf75c5b63116420d7a79d0dd678a3c15))
+* **pi:** follow one publication subscription per session ([2628488](https://github.com/oisin-ee/dogsled/commit/26284880a5280c936d3985be741c7251fb1dbeac))
+* **portal:** attributed conversation history for the timeline ([36e10b6](https://github.com/oisin-ee/dogsled/commit/36e10b6b8f43da1fd216522eb031f7b87ef0f2a8))
+* **portal:** render the conversation message timeline ([0d8c0e1](https://github.com/oisin-ee/dogsled/commit/0d8c0e1727daba40fe87b57c2a706c9a7e7f42be))
 * **repo:** configure repository list and CLI commands ([6835289](https://github.com/oisin-ee/dogsled/commit/68352890fb043a2fee533cc8dc5a4753f99f62a8))
 * **repo:** configure repository list and CLI commands ([a0a938a](https://github.com/oisin-ee/dogsled/commit/a0a938ad710a170297db2788eb18c536cb76b52d))
+* **sidebar:** render subscribed publications without observation ([a3a7976](https://github.com/oisin-ee/dogsled/commit/a3a7976f72033467f580dbcff103896ebc4b1702))
 
 
 ### Bug Fixes
 
+* **close:** honor the operation-specific native close budget ([1b3c185](https://github.com/oisin-ee/dogsled/commit/1b3c1853245605a2f26035f14bb4bf3986ab1bc3))
+* **close:** retain step errors after the command budget expires ([a6f7251](https://github.com/oisin-ee/dogsled/commit/a6f725124d8b6316511499665e71e275f4ef8259))
+* **done:** release stale signal guards on newly claimed input ([cecb563](https://github.com/oisin-ee/dogsled/commit/cecb563cf624055867893d6fa50e36f54159cfd2))
 * **observation:** collect todos apart from host capture ([40ae5a1](https://github.com/oisin-ee/dogsled/commit/40ae5a1d1d75ef543435809334650aad52751092))
 * **observation:** gate branch checks on fresh host facts ([2e4c8e6](https://github.com/oisin-ee/dogsled/commit/2e4c8e6959daf68006b0b760168e8f0e03b9a459))
 * **observation:** prune expired reservations without rewriting live rows ([b40f905](https://github.com/oisin-ee/dogsled/commit/b40f90574c0d9580b50324d13b30288c165a1b77))
 * **observation:** prune reservations without replacing committed state ([5f32616](https://github.com/oisin-ee/dogsled/commit/5f32616f09968f40830196407a16419311a6c885))
 * **observation:** retry native exports after legacy fallback ([3109822](https://github.com/oisin-ee/dogsled/commit/3109822976f1f86ae2dff539369ae97385200982))
+* **observation:** keep a final detail publication on macOS ([00a9763](https://github.com/oisin-ee/dogsled/commit/00a9763460fe86181ee02ebcf2f7196f6c42fab6))
+* **observation:** publish an unreadable hold as a gap ([639c583](https://github.com/oisin-ee/dogsled/commit/639c58336c135f5c698f8cb52816e96d1c486cf2))
+* **pi:** retry activity registration after session binding changes ([7985ad6](https://github.com/oisin-ee/dogsled/commit/7985ad6f6c260377ed99d70652c04365c33462ca))
+* **quota:** only serve's quota lane collects; the CLI reads storage ([cfe8725](https://github.com/oisin-ee/dogsled/commit/cfe8725b9a75338f4dd8e6b44249384c9d9e292c))
 * **service:** log gap diagnostics before publishing ([ecbb2a2](https://github.com/oisin-ee/dogsled/commit/ecbb2a223e7a1e15e5612f93d5ecd95d7600b787))
+* **shell:** strip repository-local GIT_* variables at the spawn point ([514a8d1](https://github.com/oisin-ee/dogsled/commit/514a8d10e3ee5714a48fad0ae443f74db88c04f5))
 * **skill:** limit worker roles to research and writer ([e193bdf](https://github.com/oisin-ee/dogsled/commit/e193bdfc6d70a4f8ba698535296f5e99ec43a745))
 * **worktree:** normalize local identity before pure equality ([e630277](https://github.com/oisin-ee/dogsled/commit/e63027786909063a0d79ab6ca7a4406487c77689))
 * **worktree:** normalize local identity before pure equality ([8acea38](https://github.com/oisin-ee/dogsled/commit/8acea38abe3a404480891b0cf8a553f39de18d92))
