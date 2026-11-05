@@ -2,7 +2,7 @@
 
 use crate::cli::{Command, WorkArgs};
 use crate::error::{Error, Refusal, Result};
-use crate::hosts::Fleet;
+use crate::hosts::{ActionFleet, Fleet};
 use crate::items::{self, Item};
 use crate::jobs::{self, Job};
 use crate::ledger::{new_id, now_ms};
@@ -58,7 +58,7 @@ pub fn recovery(
     let Some(host) = host.filter(|host| *host != crate::hosts::LOCAL) else {
         return recovery_local(shell, ledger, command);
     };
-    let fleet = Fleet::discover(shell, ledger, policy, home.into())?;
+    let fleet = ActionFleet::current(shell, ledger, policy, home.into())?;
     let host = fleet.find(host)?;
     if host.is_local() {
         return recovery_local(shell, ledger, command);
@@ -152,10 +152,16 @@ pub(crate) fn request_with_id(
                 .ok_or_else(|| Error::Invalid("HERDR_WORKSPACE_ID is required".into()))?,
         )?)
     };
+    let owner_host = crate::inbox::hostname();
     let validity = if matches!(action, Action::Job { .. }) {
         None
     } else {
-        Some(jobs::issue_request_validity(fleet.ledger, &id)?)
+        Some(jobs::issue_request_validity(
+            fleet.ledger,
+            &id,
+            &owner,
+            &owner_host,
+        )?)
     };
     Ok(Request {
         id,
@@ -169,7 +175,7 @@ pub(crate) fn request_with_id(
         workspace,
         workspace_name,
         owner,
-        owner_host: Some(crate::inbox::hostname()),
+        owner_host: Some(owner_host),
     })
 }
 
@@ -207,12 +213,12 @@ fn wait_ticket(fleet: &Fleet, id: &str) -> Result<Value> {
 }
 
 pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
-    let host = work::job_host(fleet, id, now_ms())?;
+    let host = work::job_host(fleet, id)?;
     loop {
         let job: Job = if host.is_local() {
             jobs::get(fleet.ledger, id)?
         } else {
-            fleet.remote(host, &["job".into(), id.into()])?
+            fleet.remote(&host, &["job".into(), id.into()])?
         };
         if job.ended_ms.is_some() {
             return Ok(job.exit.unwrap_or(2));
@@ -225,7 +231,7 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
 /// `{"queued":true,"ticket":…}`, with `retrying` when the first launch failed and the service
 /// retries it with backoff.
 pub fn start(fleet: &Fleet, request: Request, waiting: bool) -> Result<Value> {
-    start_using(fleet, request, waiting, work::submit)
+    start_using(fleet, request, waiting, work::submit_current)
 }
 
 /// Hand startup to the admission service instead of spending a tool call's budget.
@@ -241,7 +247,7 @@ pub(crate) fn start_locked(fleet: &Fleet, request: Request) -> Result<Value> {
         if work::waits_behind(fleet, request)? {
             return Ok(None);
         }
-        work::perform_locked(fleet, request, now)
+        work::perform_current_locked(fleet, request, now)
     })
 }
 
@@ -347,7 +353,7 @@ pub fn close(
     host: Option<&str>,
 ) -> Result<(crate::close::Closed, String)> {
     let host = match host {
-        Some(host) => fleet.find(host)?,
+        Some(host) => crate::hosts::command_host(fleet, host)?,
         None => close_host(fleet, pane)?,
     };
     let request = items::list(fleet.ledger)?
@@ -379,7 +385,7 @@ pub fn close(
                     serde_json::to_string(request)?,
                 ]);
             }
-            let closed = fleet.remote_setup(host, &args)?;
+            let closed = fleet.remote_setup(&host, &args)?;
             items::close_result(fleet.ledger, &host.id, &closed, now_ms())?;
             closed
         };
@@ -414,11 +420,11 @@ pub fn closed_line(closed: &crate::close::Closed, label: &str) -> String {
 }
 
 pub fn stop(fleet: &Fleet, id: &str) -> Result<()> {
-    let host = work::job_host(fleet, id, now_ms())?;
+    let host = work::job_host(fleet, id)?;
     if host.is_local() {
         jobs::stop(fleet.ledger, id)
     } else {
-        let _: Value = fleet.remote(host, &["stop".into(), id.into()])?;
+        let _: Value = fleet.remote(&host, &["stop".into(), id.into()])?;
         Ok(())
     }
 }
@@ -426,7 +432,22 @@ pub fn stop(fleet: &Fleet, id: &str) -> Result<()> {
 /// The newest output of a child or job of the caller, by name, pane, or id, with its captured
 /// final reply. Without such an item, any agent on the fleet by name or pane.
 pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
-    let pinned = host.map(|h| fleet.find(h)).transpose()?;
+    if host.is_some_and(|host| fleet.find(host).is_err()) {
+        return read_selected(&ActionFleet::from_fleet(fleet)?, target, host);
+    }
+    let pinned = host.map(|host| fleet.find(host)).transpose()?;
+    if let Some(item) = recorded_item(fleet, target, pinned)? {
+        let host = crate::hosts::request_host(fleet, &item.id, &item.host)?;
+        return read_on(fleet, item, &host);
+    }
+    read_selected(&ActionFleet::from_fleet(fleet)?, target, host)
+}
+
+fn recorded_item(
+    fleet: &Fleet,
+    target: &str,
+    pinned: Option<&crate::hosts::Host>,
+) -> Result<Option<Item>> {
     let owner = std::env::var("HERDR_PANE_ID").ok();
     let item = items::list(fleet.ledger)?
         .into_iter()
@@ -434,39 +455,51 @@ pub fn read(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Value> {
         .filter(|i| owner.as_ref().is_none_or(|o| *o == i.owner_pane))
         .filter(|i| pinned.is_none_or(|h| h.id == i.host))
         .find(|i| i.id == target || i.pane == target || i.name.as_deref() == Some(target));
-    let item = if let Some(item) = item {
-        item
-    } else if let Some(job) = crate::launch::retained_job(fleet.ledger, target)? {
-        Item {
+    if let Some(item) = item {
+        return Ok(Some(item));
+    }
+    if let Some(job) = crate::launch::retained_job(fleet.ledger, target)? {
+        return Ok(Some(Item {
             id: job.id,
             kind: "job".into(),
             host: job.host,
             pane: job.pane,
             owner_pane: job.owner,
             ..Item::default()
-        }
-    } else {
-        // Execution IDs are immutable. Never reinterpret one as a replacement agent.
-        if target.starts_with("r-") {
-            return Err(Error::Refused {
-                code: Refusal::ResultUnavailable,
-                detail: jobs::RESULT_UNAVAILABLE.into(),
-            });
-        }
-        let found = crate::inbox::resolve(fleet, target, host, now_ms()).map_err(|error| {
-            if matches!(error.root(), Error::Invalid(detail) if detail.starts_with("no agent named or in pane")) {
-                Error::Refused { code: Refusal::ResultUnavailable, detail: jobs::RESULT_UNAVAILABLE.into() }
-            } else { error }
-        })?;
-        Item {
-            kind: "agent".into(),
-            host: found.host.id.clone(),
-            pane: found.agent.pane,
-            name: found.agent.name,
-            ..Item::default()
-        }
+        }));
+    }
+    // Execution IDs are immutable. Never reinterpret one as a replacement agent.
+    if target.starts_with("r-") {
+        return Err(Error::Refused {
+            code: Refusal::ResultUnavailable,
+            detail: jobs::RESULT_UNAVAILABLE.into(),
+        });
+    }
+    Ok(None)
+}
+
+fn read_selected(fleet: &ActionFleet, target: &str, host: Option<&str>) -> Result<Value> {
+    let pinned = host.map(|host| fleet.find(host)).transpose()?;
+    if let Some(item) = recorded_item(fleet, target, pinned)? {
+        let host = fleet.find(&item.host)?.clone();
+        return read_on(fleet, item, &host);
+    }
+    let found = crate::inbox::resolve(fleet, target, host).map_err(|error| {
+        if matches!(error.root(), Error::Invalid(detail) if detail.starts_with("no agent named or in pane")) {
+            Error::Refused { code: Refusal::ResultUnavailable, detail: jobs::RESULT_UNAVAILABLE.into() }
+        } else { error }
+    })?;
+    let item = Item {
+        kind: "agent".into(),
+        host: found.host.id.clone(),
+        pane: found.agent.pane,
+        name: found.agent.name,
+        ..Item::default()
     };
-    let host = fleet.find(&item.host)?;
+    read_on(fleet, item, &found.host)
+}
+
+fn read_on(fleet: &Fleet, item: Item, host: &crate::hosts::Host) -> Result<Value> {
     let tail = if item.kind == "agent" && item.closed_ms.is_some() {
         String::new()
     } else if item.kind == "job" && host.is_local() && jobs::expired(fleet.ledger, &item.id)? {
@@ -665,20 +698,20 @@ pub fn dispatch(fleet: &Fleet, command: Command, json_output: bool) -> Result<Ex
 fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
     match command {
         Command::Doctor { host } => {
-            let host = fleet.find(host.as_deref().unwrap_or("local"))?;
+            let host = crate::hosts::command_host(fleet, host.as_deref().unwrap_or("local"))?;
             let plan = if host.is_local() {
                 crate::cleanup::doctor(&fleet.node(), now_ms())?
             } else {
-                fleet.remote_setup(host, &["doctor".into()])?
+                fleet.remote_setup(&host, &["doctor".into()])?
             };
             crate::print(json_output, &plan, || crate::cleanup::render(&plan))?;
         }
         Command::Prune { host, yes, classes } => {
-            let host = fleet.find(host.as_deref().unwrap_or("local"))?;
+            let host = crate::hosts::command_host(fleet, host.as_deref().unwrap_or("local"))?;
             let mut plan: crate::cleanup::Plan = if host.is_local() {
                 crate::cleanup::doctor(&fleet.node(), now_ms())?
             } else {
-                fleet.remote_setup(host, &["doctor".into()])?
+                fleet.remote_setup(&host, &["doctor".into()])?
             };
             plan.entries
                 .retain(|e| classes.is_empty() || classes.contains(&e.class));
@@ -692,14 +725,14 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            let applied = crate::commands::prune(fleet, host, &plan, now_ms())?;
+            let applied = crate::commands::prune(fleet, &host, &plan, now_ms())?;
             crate::print(json_output, &applied, || applied.render())?;
             if !applied.failures.is_empty() {
                 return Ok(ExitCode::from(2));
             }
         }
         Command::Track { host, pane, name } => {
-            let host = fleet.find(&host)?;
+            let host = crate::hosts::command_host(fleet, &host)?;
             let item = Item {
                 id: new_id(),
                 kind: "agent".into(),
@@ -715,7 +748,7 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             if host.is_local() {
                 crate::watchdog::register_parent(fleet.ledger, fleet.shell, &item.pane)?;
             } else {
-                let _: bool = fleet.remote(host, &["parent".into(), item.pane.clone()])?;
+                let _: bool = fleet.remote(&host, &["parent".into(), item.pane.clone()])?;
             }
             crate::print(true, &item, String::new)?;
         }
@@ -766,15 +799,17 @@ pub fn read_text(read: &Value) -> String {
 }
 
 /// The host of the open item for `pane`. Pane ids repeat across hosts, so more than one is ambiguous.
-fn close_host<'a>(fleet: &'a Fleet, pane: &str) -> Result<&'a crate::hosts::Host> {
-    let hosts: std::collections::BTreeSet<_> = items::list(fleet.ledger)?
-        .into_iter()
-        .filter(|i| i.pane == pane)
-        .map(|i| i.host)
-        .collect();
+fn close_host(fleet: &Fleet, pane: &str) -> Result<crate::hosts::Host> {
+    let items = items::list(fleet.ledger)?;
+    let matching: Vec<_> = items.iter().filter(|item| item.pane == pane).collect();
+    let hosts: std::collections::BTreeSet<_> =
+        matching.iter().map(|item| item.host.as_str()).collect();
     match hosts.len() {
-        0 => fleet.find("local"),
-        1 => fleet.find(hosts.first().map_or("local", String::as_str)),
+        0 => crate::hosts::command_host(fleet, "local"),
+        1 => {
+            let item = matching[0];
+            crate::hosts::request_host(fleet, &item.id, &item.host)
+        }
         _ => Err(Error::Invalid(format!(
             "pane {pane} has open items on {}; pass --host",
             hosts.into_iter().collect::<Vec<_>>().join(", ")
@@ -784,7 +819,7 @@ fn close_host<'a>(fleet: &'a Fleet, pane: &str) -> Result<&'a crate::hosts::Host
 
 /// Stream job output, translating remote retention only for an owner-held job.
 fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
-    let host = work::job_host(fleet, id, now_ms())?;
+    let host = work::job_host(fleet, id)?;
     let owned_remote_job = !host.is_local()
         && items::list(fleet.ledger)?
             .iter()
@@ -795,7 +830,7 @@ fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
             jobs::logs(fleet.ledger, id, offset)?
         } else {
             match fleet.remote(
-                host,
+                &host,
                 &[
                     "logs".into(),
                     id.to_owned(),
@@ -836,34 +871,21 @@ fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
     Ok(())
 }
 
-fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
+pub(crate) fn published_inventory(
+    published: &crate::observation::Published,
+    command: Command,
+    json_output: bool,
+) -> Result<ExitCode> {
     match command {
         Command::Items { owner } => {
-            let items: Vec<_> = items::list(fleet.ledger)?
-                .into_iter()
-                .filter(|i| owner.as_ref().is_none_or(|o| *o == i.owner_pane))
-                .collect();
-            let queue: Vec<_> = work::queue(fleet.ledger)?
-                .into_iter()
-                .filter(|t| owner.as_ref().is_none_or(|o| *o == t.request.owner))
-                .collect();
-            let output = json!({"items":items,"queue":queue});
+            let output = crate::observation::read::inventory(published, owner.as_deref())?;
             crate::print(json_output, &output, || format!("{output}\n"))?;
         }
         Command::Ps { all } => {
-            let mut jobs = Vec::new();
-            for host in fleet.status(now_ms())? {
-                let host_jobs = if host.host.is_local() {
-                    jobs::list(fleet.ledger)?
-                } else {
-                    host.jobs
-                };
-                jobs.extend(
-                    host_jobs
-                        .into_iter()
-                        .filter(|j| all || j.ended_ms.is_none()),
-                );
-            }
+            let jobs: Vec<jobs::Job> = crate::observation::read::view(
+                published,
+                if all { "jobs" } else { "active_jobs" },
+            )?;
             crate::print(json_output, &jobs, || {
                 jobs.iter()
                     .map(|j| {
@@ -880,6 +902,24 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
                     .join("\n")
                     + "\n"
             })?;
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "expected published inventory command".into(),
+            ));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
+    match command {
+        command @ (Command::Items { .. } | Command::Ps { .. }) => {
+            return published_inventory(
+                &crate::observation::ipc::Client::at(&fleet.ledger.dir).current()?,
+                command,
+                json_output,
+            );
         }
         Command::Cancel { ticket } => {
             let result = work::cancel(fleet.ledger, &ticket)?;
@@ -898,25 +938,7 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
             }
         }
         Command::Retry { host } => {
-            let host = fleet.find(&host)?;
-            fleet.retry_now(host)?;
-            let report = fleet
-                .status(now_ms())?
-                .into_iter()
-                .find(|r| r.host.id == host.id);
-            crate::print(json_output, &report, || {
-                report.as_ref().map_or_else(String::new, |r| {
-                    format!(
-                        "{}: {}\n",
-                        r.host.label,
-                        if r.reachable {
-                            "reachable".to_owned()
-                        } else {
-                            r.error.clone().unwrap_or_else(|| "unreachable".into())
-                        }
-                    )
-                })
-            })?;
+            return crate::observation::peers::retry_command(fleet, &host, json_output);
         }
         Command::Stop { id } => stop(fleet, &id)?,
         Command::Wait { id, .. } => return Ok(ExitCode::from(wait_job(fleet, &id)? as u8)),

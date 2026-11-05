@@ -237,6 +237,11 @@ pub fn observe(shell: &dyn Shell, probe: &mut Probe, previous: Option<&Probe>) {
     }
 }
 
+pub(crate) fn repository(shell: &dyn Shell, cwd: &str) -> Option<String> {
+    git(shell, cwd, &["remote", "get-url", "origin"])
+        .and_then(|url| crate::checkout::identity(&url))
+}
+
 /// Canonical identity of each distinct agent checkout's `origin`. A checkout with no `origin`,
 /// or one that is a local path, has none. A checkout whose identity is already known is not
 /// looked up again; a checkout without one is, because it may gain an `origin` later.
@@ -275,8 +280,7 @@ fn repositories(
             scope.spawn(move || {
                 for (cwd, repository) in group {
                     if repository.is_none() {
-                        *repository = git(shell, cwd, &["remote", "get-url", "origin"])
-                            .and_then(|url| crate::checkout::identity(&url));
+                        *repository = self::repository(shell, cwd);
                     }
                 }
             });

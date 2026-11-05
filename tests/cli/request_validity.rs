@@ -50,13 +50,16 @@ fn stripped_queued_job(rig: &Rig, remote: bool) -> String {
         let mut snapshot = rig.read("remote.json");
         snapshot["job_validity"] = json!(2);
         rig.put("remote.json", &snapshot);
+        rig.ingest_peers();
     }
     let args = if remote {
         vec!["run", "--host", "netcup", "--", "true"]
     } else {
         vec!["run", "--", "true"]
     };
+    let observer = super::observation::seeded(rig);
     let (code, result) = rig.json(&args);
+    drop(observer);
     assert_eq!(code, 1, "{result}");
     let mut tickets = rig.tickets();
     let id = tickets[0]["request"]["id"].as_str().unwrap().to_owned();
@@ -137,7 +140,9 @@ fn rv_agent_and_place_stamp_once_at_origin() {
         } else {
             vec!["place"]
         };
+        let observer = super::observation::seeded(&rig);
         let (code, result) = rig.json(&args);
+        drop(observer);
         assert_eq!(code, 1, "{result}");
         let tickets = rig.tickets();
         let request = &tickets[0]["request"];
@@ -193,11 +198,13 @@ fn rv_missing_or_changed_authority_never_repairs_from_inline_data() {
         set_clock(&rig, created);
         rig.config("free_core_fraction_min = 2\n");
         rig.snapshot("state", created, 0.0, 8);
+        let observer = super::observation::seeded(&rig);
         assert_eq!(
             rig.json(&["agent", "--name", "worker", "--message", "go"])
                 .0,
             1
         );
+        drop(observer);
         let tickets = rig.tickets();
         let id = tickets[0]["request"]["id"].as_str().unwrap();
         if changed {
@@ -231,7 +238,9 @@ fn rv_expired_agent_and_place_refuse_at_origin_and_host() {
         } else {
             vec!["place"]
         };
+        let observer = super::observation::seeded(&rig);
         assert_eq!(rig.json(&args).0, 1);
+        drop(observer);
         set_clock(&rig, created + WINDOW_MS + 1);
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         rig.snapshot("state", clock(&rig), 0.0, 8);
@@ -463,6 +472,7 @@ fn rv_old_peer_cannot_silently_bypass_validity() {
     let mut peer = rig.read("remote.json");
     peer.as_object_mut().unwrap().remove("request_validity");
     rig.put("remote.json", &peer);
+    rig.ingest_peers();
     assert_eq!(
         rig.json(&[
             "agent",
@@ -513,11 +523,13 @@ fn rv_finished_ms_is_write_once_and_not_startup_time() {
     set_clock(&rig, now);
     rig.config("free_core_fraction_min = 2\n");
     rig.snapshot("state", now, 0.0, 8);
+    let observer = super::observation::seeded(&rig);
     assert_eq!(
         rig.json(&["agent", "--name", "worker", "--message", "go"])
             .0,
         1
     );
+    drop(observer);
     let id = rig.tickets()[0]["request"]["id"]
         .as_str()
         .unwrap()
@@ -553,6 +565,7 @@ fn expired_after_preparation(name: &str) -> (Rig, Value, String) {
     );
     let script = fs::read_to_string(rig.dir.join("bin/herdr")).unwrap();
     rig.script("herdr", &script.replace("    touch \"$RIG/anchor\"", "    \"$RIG_DOGSLED\" state clock --put < \"$RIG/expired-preparation-clock\"; touch \"$RIG/anchor\""));
+    let observer = super::place::placement_observer(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -568,6 +581,7 @@ fn expired_after_preparation(name: &str) -> (Rig, Value, String) {
         "--message",
         "go",
     ]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     let claims = rig.preparations();
     let id = claims[0]["request_id"].as_str().unwrap().to_owned();
@@ -608,6 +622,7 @@ fn rv_completed_placement_replays_with_immutable_completion_proof() {
     let (rig, repo) = place::place_rig("rv-placement-replay");
     let now = clock(&rig);
     set_clock(&rig, now);
+    let observer = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -619,6 +634,7 @@ fn rv_completed_placement_replays_with_immutable_completion_proof() {
         "--base",
         "main",
     ]);
+    drop(observer);
     assert_eq!(code, 0, "{result}");
     let id = result["request_id"].as_str().unwrap().to_owned();
     let id = id.as_str();
@@ -963,6 +979,8 @@ fn a_running_job_survives_the_age_expiry() {
     set_clock(&rig, created + 2 * WINDOW_MS);
     let job = rig.job("job-1");
     assert_eq!(job["exit"], 0, "{job}");
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| frame["views"]["jobs"]["data"][0]["exit"] == 0);
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["exit"], 0);
 }
 
@@ -1013,7 +1031,10 @@ fn a_new_caller_refuses_an_old_peer_without_a_fallback() {
     rig.snapshot("state", now, 0.0, 8);
     // The peer reports no validity protocol.
     rig.snapshot("remote.json", now, 0.0, 8);
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let out = rig.run(&["run", "--host", "netcup", "--", "true"]);
+    drop(observer);
     assert_eq!(
         out.status.code(),
         Some(2),
@@ -1148,7 +1169,9 @@ fn the_cli_stamps_one_creation_time_through_the_queue_and_the_claim() {
     let now = clock(&rig);
     set_clock(&rig, now);
     rig.snapshot("state", now, 0.0, 8);
+    let observer = super::observation::seeded(&rig);
     let (code, result) = rig.json(&["run", "--", "true"]);
+    drop(observer);
     assert_eq!(code, 0, "{result}");
     let id = result["id"].as_str().unwrap().to_owned();
     let job = rig.job(&id);
@@ -1178,6 +1201,7 @@ fn the_mcp_path_stamps_one_creation_time() {
     let now = clock(&rig);
     set_clock(&rig, now);
     rig.snapshot("state", now, 0.0, 8);
+    let _publisher = super::observation::seeded(&rig);
     let mut child = rig
         .cmd(&["mcp"])
         .stdin(Stdio::piped())

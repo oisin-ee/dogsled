@@ -27,6 +27,8 @@ mod lifecycle;
 mod machines;
 #[path = "cli/mcp.rs"]
 mod mcp;
+#[path = "cli/observation.rs"]
+mod observation;
 #[path = "cli/place.rs"]
 mod place;
 #[path = "cli/placement.rs"]
@@ -569,6 +571,7 @@ const CONTRACT: &str = "End every turn with exactly one of: done (whole task com
 
 const HERDR_SCRIPT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"
+printf '%s %s\n' "${DOGSLED_TEST_ROLE:-actor}" "$*" >> "$RIG/herdr-roles.log"
 # The line Herdr types for `agent start`: the kind, then each argument shell-quoted.
 # A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
 if test "$1 $2" = 'agent start'; then
@@ -736,6 +739,20 @@ esac
         rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
         rig
     }
+    /// Start a real observer explicitly. Background owns termination and reaping, including
+    /// unwinding tests. Callers wait for their specific mutation before subsequent reads.
+    fn serve(&self) -> Background {
+        self.serve_at(&self.dir.join("state"), "1")
+    }
+
+    fn serve_at(&self, state: &Path, interval: &str) -> Background {
+        let mut command = self.cmd(&["serve", "--interval", interval]);
+        command.env("DOGSLED_STATE", state);
+        let observer = Self::background(command);
+        wait_publication_at(self, state, |frame| frame["revision"].is_u64());
+        observer
+    }
+
     fn service(&self) {
         let mut service = self.service.lock().unwrap();
         if service.is_none() {
@@ -793,8 +810,10 @@ esac
 
     fn script(&self, name: &str, text: &str) {
         let path = self.dir.join("bin").join(name);
-        fs::write(&path, text).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        let temporary = path.with_extension("next");
+        fs::write(&temporary, text).unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(temporary, path).unwrap();
     }
 
     fn config(&self, text: &str) {
@@ -807,6 +826,16 @@ esac
         }
         let mut cmd = isolated(env!("CARGO_BIN_EXE_dogsled"));
         cmd.env("DOGSLED_BIN", env!("CARGO_BIN_EXE_dogsled"));
+        cmd.env(
+            "DOGSLED_TEST_ROLE",
+            if args.first() == Some(&"serve")
+                || args.windows(2).any(|pair| pair == ["state", "project"])
+            {
+                "observer"
+            } else {
+                "actor"
+            },
+        );
         cmd.args(args);
         if args.windows(2).any(|w| w == ["host", "reserve"]) && !args.contains(&"--owner") {
             cmd.args(["--owner", "w1:p1", "--owner-host", "origin"]);
@@ -896,19 +925,27 @@ esac
     /// The command leads a process group of its own, so the guard kills the commands it
     /// started too.
     fn start(&self, args: &[&str]) -> Background {
-        let mut command = self.cmd(args);
+        Self::background(self.cmd(args))
+    }
+
+    fn background(mut command: Command) -> Background {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         let mut owned = Owned::spawn(&mut command);
         let mut stdout = owned.child_mut().stdout.take().unwrap();
         let mut stderr = owned.child_mut().stderr.take().unwrap();
         let (send, output) = std::sync::mpsc::channel();
+        let errors = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut err = Vec::new();
+            let _ = stderr.read_to_end(&mut err);
+            err
+        });
         let reader = std::thread::spawn(move || {
             use std::io::Read as _;
             let mut out = Vec::new();
-            let mut err = Vec::new();
             let _ = stdout.read_to_end(&mut out);
-            let _ = stderr.read_to_end(&mut err);
+            let err = errors.join().unwrap();
             let _ = send.send((
                 String::from_utf8_lossy(&out).into_owned(),
                 String::from_utf8_lossy(&err).into_owned(),
@@ -959,6 +996,23 @@ esac
             self.put(path, &snapshot);
         } else {
             self.put_host_at(path, &snapshot);
+        }
+    }
+
+    /// Explicit observer peer ingestion without replacing the local fixture sample.
+    /// The failed local probe publishes a gap and exits 2, after peer ingestion.
+    fn ingest_peers(&self) {
+        let running = self.service.lock().unwrap().is_some();
+        let unavailable = self.dir.join("unavailable-origin-agents.json");
+        fs::write(&unavailable, "unavailable local probe").unwrap();
+        let output = self
+            .cmd(&["serve", "--once", "--interval", "1"])
+            .env("RIG_AGENTS", unavailable)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        if running {
+            self.service();
         }
     }
 
@@ -1553,7 +1607,7 @@ impl Drop for Rig {
 }
 
 #[test]
-fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
+fn serve_once_publishes_local_facts_and_discovers_peers_once_without_ssh() {
     let rig = Rig::new("serve");
     rig.put(
         "agents.json",
@@ -1583,6 +1637,21 @@ fn serve_once_publishes_memory_agents_and_all_panes_without_ssh_or_discovery() {
     // add ticks. Every tick reads agents, panes, and each shell's foreground.
     // No Stop request means no doctor survey or workspace list.
     let herdr = rig.log("herdr.log");
+    assert_eq!(
+        herdr
+            .lines()
+            .filter(|line| *line == "machine list --json")
+            .count(),
+        1
+    );
+    let herdr = herdr
+        .lines()
+        .filter(|line| *line != "machine list --json")
+        .fold(String::new(), |mut text, line| {
+            text.push_str(line);
+            text.push('\n');
+            text
+        });
     let ticks: Vec<_> = herdr.split("agent list\n").collect();
     assert_eq!(ticks[0], "");
     assert!(ticks.len() > 1);
@@ -1672,6 +1741,22 @@ fn service_liveness_and_snapshot_age_are_independent() {
     let rig = Rig::new("service-liveness");
     fs::write(rig.dir.join("clock"), "61000").unwrap();
     rig.snapshot("state", 1000, 0.0, 8);
+    let snapshot = rig.host();
+    let report = json!({"id":"local","label":"local","target":null,"service":"up","reachable":true,"sampled_ms":1000,
+        "probe":snapshot["probe"],"jobs":[],"headroom":{"host":"local","headroom":8.0,"eligible":false,"live_agents":0}});
+    let mut frame = observation::publication(1);
+    let mut peer = report.clone();
+    peer["id"] = json!("8103");
+    peer["label"] = json!("netcup");
+    peer["service"] = json!("down");
+    frame["views"]["status"]["data"]["hosts"] = json!([report, peer]);
+    frame["views"]["status_display"]["data"] = observation::display(vec![
+        observation::host_display("local", "0/8", "no_headroom", Some(1000), "service: up"),
+        observation::host_display("netcup", "0/8", "unreachable", Some(1000), "service: down"),
+    ]);
+    frame["local"]["host"]["sampled_ms"] = json!(1000);
+    frame["local"]["host"]["probe"] = snapshot["probe"].clone();
+    let publisher = observation::Supplied::start(&rig, frame.clone());
     let status = rig.json(&["status"]).1;
     assert_eq!(status["hosts"][0]["service"], "up");
     assert_eq!(status["hosts"][0]["sampled_ms"], 1000);
@@ -1681,9 +1766,32 @@ fn service_liveness_and_snapshot_age_are_independent() {
     let live = rig.json(&["host", "snapshot"]).1;
     assert_eq!(live["running"], true);
     assert_eq!(live["sampled_ms"], 1000);
-    rig.service.lock().unwrap().take();
-    assert_eq!(rig.json(&["status"]).1["hosts"][0]["service"], "down");
+    assert_eq!(status["hosts"][1]["service"], "down");
+    assert_eq!(status["hosts"][1]["sampled_ms"], 1000);
+    // A fresh, idle, roomy probe would be eligible if the reader recomputed it.
+    // The publisher's deliberate refusal remains authoritative for display.
+    frame["revision"] = json!(2);
+    frame["views"]["status"]["data"]["hosts"][0]["sampled_ms"] = json!(61000);
+    frame["local"]["host"]["running"] = json!(false);
+    publisher.replace(frame);
+    wait_publication(&rig, |frame| frame["revision"] == 2);
+    assert_eq!(
+        rig.json(&["status"]).1["hosts"][0]["headroom"]["eligible"],
+        false
+    );
     assert_eq!(rig.json(&["host", "snapshot"]).1["running"], false);
+    drop(publisher);
+    for args in [vec!["status"], vec!["host", "snapshot"]] {
+        let (code, error) = rig.json(&args);
+        assert_ne!(code, 0);
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("observation unavailable"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -1691,7 +1799,45 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     let rig = Rig::new("status-cache");
     rig.peer();
     rig.snapshot("state", now(), 50.0, 12);
+    let local = rig.host();
     rig.config("remote_command = ['custom-dogsled', 'argument with spaces']\n");
+    rig.ingest_peers();
+    // Supply the captured fixtures with explicit producer display classifications.
+    // The reader must not reconstruct either host from these persisted source rows.
+    let peer = rig.state(&["peer", "8103"]);
+    let mut frame = observation::publication(1);
+    let local_report = json!({"id":"local","label":"local","target":null,"service":"up","reachable":true,"sampled_ms":local["sampled_ms"],"probe":local["probe"],"jobs":[],"headroom":{"host":"local","headroom":0.0,"eligible":false,"live_agents":1}});
+    let mut peer_probe = peer["snapshot"]["probe"].clone();
+    peer_probe["host"] = json!("8103");
+    peer_probe["label"] = json!("netcup");
+    let peer_report = json!({"id":"8103","label":"netcup","target":"netcup-dev","service":"up","reachable":true,"sampled_ms":peer["snapshot"]["sampled_ms"],"probe":peer_probe,"jobs":[],"headroom":{"host":"8103","headroom":14.0,"eligible":true,"live_agents":1}});
+    frame["views"]["status"]["data"]["hosts"] = json!([local_report, peer_report]);
+    let mut local_display = observation::host_display(
+        "local",
+        "12/12",
+        "no_headroom",
+        local["sampled_ms"].as_u64(),
+        "service: up",
+    );
+    local_display["metrics"] = json!({"memory":local["probe"]["memory"],"disk_free_percent":50.0});
+    local_display["states"] = json!({"stopped":1});
+    local_display["agents"] =
+        json!([{"pane":"w1:p1","state":"stopped","name":"","stalled_ms":null}]);
+    let mut peer_display = observation::host_display(
+        "netcup",
+        "2/16",
+        "eligible",
+        peer["snapshot"]["sampled_ms"].as_u64(),
+        "service: up",
+    );
+    peer_display["metrics"] = local_display["metrics"].clone();
+    peer_display["states"] = local_display["states"].clone();
+    peer_display["agents"] = local_display["agents"].clone();
+    frame["views"]["status_display"]["data"] =
+        observation::display(vec![local_display, peer_display]);
+    let publication = observation::Supplied::start(&rig, frame);
+    // Serve probed herdr above; readers must never probe it themselves.
+    let probes = rig.log("herdr.log").matches("agent list").count();
     let (code, status) = rig.json(&["status"]);
     assert_eq!(code, 0);
     assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
@@ -1707,63 +1853,173 @@ fn status_reads_snapshots_and_caches_peer_reads() {
     assert_eq!(brief.lines().count(), 3);
     assert!(brief.contains("mem 1.0/8.0GiB disk 50% free agents 1"));
     assert!(brief.contains("Run `dogsled status`"));
-    assert_eq!(rig.log("ssh.log").lines().count(), 1);
+    assert_eq!(rig.log("ssh.log").lines().count(), 2);
     assert!(
         rig.log("ssh.log")
             .contains("custom-dogsled 'argument with spaces' host snapshot --json")
     );
-    assert!(!rig.log("herdr.log").contains("agent list"));
+    assert_eq!(rig.log("herdr.log").matches("agent list").count(), probes);
+    let reads = rig.log("ssh.log").lines().count();
     rig.expire_cache();
     rig.json(&["status"]);
-    assert_eq!(rig.log("ssh.log").lines().count(), 2);
+    assert_eq!(
+        rig.log("ssh.log").lines().count(),
+        reads,
+        "status never fills an expired cache"
+    );
+    assert_eq!(rig.log("herdr.log").matches("agent list").count(), probes);
+    drop(publication);
+    rig.ingest_peers();
+    assert_eq!(rig.log("ssh.log").lines().count(), reads + 2);
+}
+
+fn assert_peer_retry(rig: &Rig) {
+    let retry = rig.run(&["retry", "netcup", "--json"]);
+    let publication = rig.run(&["observation", "current", "--json"]);
+    assert_eq!(
+        retry.status.code(),
+        Some(0),
+        "retry stdout={} stderr={} publication={}",
+        String::from_utf8_lossy(&retry.stdout),
+        String::from_utf8_lossy(&retry.stderr),
+        String::from_utf8_lossy(&publication.stdout)
+    );
+}
+
+fn assert_observation_cold(rig: &Rig) {
+    let (code, cold) = rig.json(&["status"]);
+    assert_ne!(code, 0);
+    assert!(
+        cold["error"]
+            .as_str()
+            .unwrap()
+            .contains("observation unavailable")
+    );
+}
+
+fn trap_observation_reader(rig: &Rig) {
+    // Attribute access to reader processes, not to the independent live observer.
+    for name in ["herdr", "ssh"] {
+        let script = rig.log(&format!("bin/{name}"));
+        rig.script(name, &script.replacen("#!/bin/sh", "#!/bin/sh\nif test -n \"$DOGSLED_READER_TEST\"; then printf '%s\\n' \"$*\" >> \"$RIG/reader-access.log\"; fi", 1));
+    }
+    rig.script("git", "#!/bin/sh\nif test -n \"$DOGSLED_READER_TEST\"; then printf git >> \"$RIG/reader-access.log\"; exit 97; fi\nexit 1\n");
+}
+
+fn observation_reader(rig: &Rig, args: &[&str]) -> std::process::Output {
+    let before = rig.log("reader-access.log");
+    let output = rig
+        .cmd(args)
+        .env("DOGSLED_READER_TEST", "1")
+        .output()
+        .unwrap();
+    assert_eq!(rig.log("reader-access.log"), before, "{args:?}");
+    output
+}
+
+fn observation_json_reader(rig: &Rig, args: &[&str]) -> (i32, Value) {
+    let mut args = args.to_vec();
+    args.push("--json");
+    let output = observation_reader(rig, &args);
+    (
+        output.status.code().unwrap(),
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+    )
 }
 
 #[test]
 fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     let rig = Rig::new("down");
+    assert_observation_cold(&rig);
     rig.peer();
-    rig.snapshot("remote.json", now() - 31_000, 6.0, 7);
-    let (_, status) = rig.json(&["status"]);
-    assert_eq!(status["hosts"][0]["service"], "down");
+    let sampled = now() - 31_000;
+    rig.snapshot("remote.json", sampled, 6.0, 7);
+    fs::write(rig.dir.join("agents.json"), "unavailable local probe").unwrap();
+    trap_observation_reader(&rig);
+    let read = |args: &[&str]| observation_reader(&rig, args);
+    let json_read = |args: &[&str]| observation_json_reader(&rig, args);
+    let observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["sources"]["peers"]["8103"]["availability"] == "stale"
+            && frame["views"]["status"]["data"]["hosts"][1]["sampled_ms"] == sampled
+            && frame["gaps"]
+                .as_array()
+                .is_some_and(|gaps| gaps.iter().any(|gap| gap["domain"] == "host"))
+    });
+    let (_, status) = json_read(&["status"]);
+    assert_eq!(status["hosts"][0]["service"], "unavailable");
     assert!(status["hosts"][0]["probe"].is_null());
+    assert!(status["hosts"][0]["sampled_ms"].is_null());
+    assert!(status["hosts"][0]["headroom"].is_null());
     assert_eq!(status["hosts"][1]["service"], "down");
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
     assert_eq!(status["hosts"][1]["headroom"]["eligible"], false);
     assert_eq!(
-        String::from_utf8(rig.run(&["status", "--line"]).stdout).unwrap(),
+        String::from_utf8(read(&["status", "--line"]).stdout).unwrap(),
         "local ? · netcup 4/7 ?\n"
     );
-    rig.expire_cache();
+    let previous = wait_publication(&rig, |_| true)["sources"]["peers"]["8103"]["received_ms"]
+        .as_u64()
+        .unwrap();
     fs::write(rig.dir.join("unreachable"), "").unwrap();
-    let (_, status) = rig.json(&["status"]);
+    assert_eq!(rig.json(&["retry", "netcup"]).0, 0);
+    wait_publication(&rig, |frame| {
+        frame["sources"]["peers"]["8103"]["availability"] == "unavailable"
+            && frame["sources"]["peers"]["8103"]["received_ms"]
+                .as_u64()
+                .is_some_and(|time| time > previous)
+            && frame["views"]["status"]["data"]["hosts"][1]["sampled_ms"] == sampled
+    });
+    let (_, status) = json_read(&["status"]);
     assert_eq!(status["hosts"][1]["reachable"], false);
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
-    // The panel shows when the next read happens; the board carries the same time.
     let retry = status["hosts"][1]["retry_ms"].as_u64().unwrap();
     assert!(retry > now(), "{retry}");
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = json_read(&["board", "--all"]);
     assert_eq!(board["hosts"][1]["retry_ms"], retry);
     assert!(
-        String::from_utf8(rig.run(&["status", "--line"]).stdout)
+        String::from_utf8(read(&["status", "--line"]).stdout)
             .unwrap()
             .contains("netcup 4/7 ?")
     );
-    // "Retry now" reads the peer at once instead of waiting out the backoff.
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
+    let script = rig.log("bin/ssh");
+    rig.put("peer-export.json", &json!({"version":1,"epoch":"retry-peer","local_revision":1,
+        "measured":{"host":sampled},"local":{"host":serde_json::from_str::<Value>(&rig.log("remote.json")).unwrap()},"gaps":[]}));
+    rig.script(
+        "ssh",
+        &script.replacen(
+            "case \"$*\" in",
+            "case \"$*\" in\n  *'host observation'*) cat \"$RIG/peer-export.json\" ;;",
+            1,
+        ),
+    );
     let reads = rig.log("ssh.log").lines().count();
     let (code, report) = rig.json(&["retry", "netcup"]);
     assert_eq!(code, 0, "{report}");
     assert_eq!(report["reachable"], true);
     assert!(report["retry_ms"].is_null());
     assert_eq!(rig.log("ssh.log").lines().count(), reads + 1);
-    rig.expire_cache();
+
+    rig.script("ssh", &script);
     rig.put("remote.json", &Value::Null);
-    let (_, status) = rig.json(&["status"]);
+    assert_peer_retry(&rig);
+    wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["hosts"][1]["error"]
+            == "host snapshot is missing; service: down"
+            && frame["views"]["status"]["data"]["hosts"][1]["sampled_ms"] == sampled
+    });
+    let (_, status) = json_read(&["status"]);
     assert_eq!(status["hosts"][1]["service"], "down");
     assert_eq!(status["hosts"][1]["probe"]["load1"], 6.0);
-    rig.expire_cache();
     fs::write(rig.dir.join("remote.json"), "bad json").unwrap();
-    let (_, status) = rig.json(&["status"]);
+    assert_peer_retry(&rig);
+    wait_publication(&rig, |frame| {
+        frame["sources"]["peers"]["8103"]["availability"] == "unavailable"
+            && frame["views"]["status"]["data"]["hosts"][1]["failure"] == "unexpected_output"
+            && frame["views"]["status"]["data"]["hosts"][1]["sampled_ms"] == sampled
+    });
+    let (_, status) = json_read(&["status"]);
     assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
     assert!(
         status["hosts"][1]["error"]
@@ -1771,6 +2027,106 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
             .unwrap()
             .contains("unexpected output")
     );
+    assert_observer_gap_diagnostics(observer);
+}
+
+fn assert_observer_gap_diagnostics(mut observer: Background) {
+    observer.owned.terminate();
+    let (_, stderr) = observer.output();
+    let mut counts = std::collections::BTreeMap::new();
+    for line in stderr.lines().filter(|line| line.contains("collection ")) {
+        *counts.entry(line).or_insert(0_usize) += 1;
+    }
+    for domain in ["agents", "headroom", "host", "status"] {
+        let prefix = format!("dogsled service: {domain} collection failed:");
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|line| line.starts_with(&prefix))
+                .count(),
+            1,
+            "{stderr}"
+        );
+    }
+    assert!(
+        stderr.contains(
+            "peer:8103 collection failure changed to unavailable: unreachable: unexpected output"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().filter(|line| line == &"dogsled service: peer:8103:branches collection failed: branch observation requires fresh execution-host facts").count(), 2, "{stderr}");
+    eprintln!("observer failure line counts: {counts:?}");
+}
+
+fn wait_publication(rig: &Rig, ready: impl Fn(&Value) -> bool) -> Value {
+    wait_publication_at(rig, &rig.dir.join("state"), ready)
+}
+
+fn wait_publication_at(rig: &Rig, state: &Path, ready: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let mut last = String::new();
+    loop {
+        if std::os::unix::net::SocketAddr::from_pathname(state.join("observation.sock")).is_err() {
+            // The production client owns secure fallback-path resolution for long states.
+            let output = rig
+                .cmd(&["observation", "current"])
+                .env("DOGSLED_STATE", state)
+                .output()
+                .unwrap();
+            if output.status.success()
+                && let Ok(frame) = serde_json::from_slice::<Value>(&output.stdout)
+                && ready(&frame)
+            {
+                return frame;
+            }
+            last = String::from_utf8_lossy(&output.stderr).into_owned();
+        }
+        if let Ok(mut socket) =
+            std::os::unix::net::UnixStream::connect(state.join("observation.sock"))
+        {
+            use std::io::{BufRead as _, Write as _};
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .write_all(b"{\"version\":1,\"operation\":\"current\"}\n")
+                .unwrap();
+            let mut line = String::new();
+            if std::io::BufReader::new(socket).read_line(&mut line).is_ok()
+                && let Ok(frame) = serde_json::from_str::<Value>(&line)
+                && ready(&frame)
+            {
+                return frame;
+            }
+            last = line;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "observer did not publish expected facts at {}: {last}; herdr: {}",
+            rig.dir.display(),
+            rig.log("herdr.log")
+        );
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn retry_without_serve_resets_backoff_but_never_starts_ssh() {
+    let rig = Rig::new("retry-no-observer");
+    rig.peer();
+    rig.ingest_peers();
+    let reads = rig.log("ssh.log");
+    let (code, error) = rig.json(&["retry", "netcup"]);
+    assert_eq!(code, 2);
+    assert!(error["error"].as_str().unwrap().contains("backoff reset"));
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("serve is not running")
+    );
+    assert_eq!(rig.log("ssh.log"), reads);
+    assert_eq!(rig.state(&["peer", "8103"])["fetched_ms"], 0);
 }
 
 #[test]
@@ -1783,6 +2139,12 @@ fn brief_keeps_every_host_within_six_lines_and_line_sanitizes_labels() {
         "id":format!("h{i}"), "label":format!("peer-{i}\nlabel"), "target":format!("h{i}")
     })).collect::<Vec<_>>()),
     );
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["hosts"]
+            .as_array()
+            .is_some_and(|hosts| hosts.len() == 9)
+    });
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert_eq!(brief.lines().count(), 6);
     for i in 0..8 {
@@ -1796,6 +2158,12 @@ fn brief_keeps_every_host_within_six_lines_and_line_sanitizes_labels() {
 fn concurrent_status_callers_share_one_peer_cache_fill() {
     let rig = Rig::new("concurrent-cache");
     rig.peer();
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["hosts"][1]["sampled_ms"].is_u64()
+    });
+    let reads = rig.log("ssh.log").lines().count();
+    assert_eq!(rig.log("ssh.log").matches("host snapshot").count(), 1);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| rig.json(&["status"]).0))
@@ -1804,7 +2172,11 @@ fn concurrent_status_callers_share_one_peer_cache_fill() {
             assert_eq!(handle.join().unwrap(), 0);
         }
     });
-    assert_eq!(rig.log("ssh.log").lines().count(), 1);
+    assert_eq!(
+        rig.log("ssh.log").lines().count(),
+        reads,
+        "concurrent readers do no SSH"
+    );
 }
 
 #[test]
@@ -1841,7 +2213,7 @@ cat "$RIG/remote.json"
     // The test owns the command as its own child, so the test reaps it and reads its
     // exit status. The guard kills the command's group, so the peers it started never
     // outlive the test.
-    let mut command = rig.cmd(&["status", "--json"]);
+    let mut command = rig.cmd(&["serve", "--once", "--interval", "1"]);
     command.stdout(std::process::Stdio::piped());
     let mut owned = Owned::spawn(&mut command);
     let status = owned.wait();
@@ -1852,7 +2224,9 @@ cat "$RIG/remote.json"
 fn place_reserves_most_headroom_and_respects_host_pin() {
     let rig = Rig::new("place");
     rig.peer();
+    rig.ingest_peers();
     rig.snapshot("state", now(), 0.0, 2);
+    let _publisher = observation::seeded(&rig);
     let (code, placed) = rig.json(&["place"]);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "8103");
@@ -1870,19 +2244,28 @@ fn place_reserves_most_headroom_and_respects_host_pin() {
 fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
     let rig = Rig::new("fallback");
     rig.peer();
+    rig.ingest_peers();
     rig.snapshot("state", now(), 0.0, 2);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let observer = observation::seeded(&rig);
     let (code, placed) = rig.json(&["place"]);
+    drop(observer);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["host"]["id"], "local");
-    let mut snapshot = rig.host();
-    snapshot["probe"]["disk_free_percent"] = json!(14.0);
-    rig.put_host(&snapshot);
+    rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 860 140 86%% /\n'\n");
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    wait_publication(&rig, |frame| {
+        frame["local"]["host"]["probe"]["disk_free_percent"]
+            .as_f64()
+            .is_some_and(|free| (free - 14.0).abs() < 0.001)
+    });
     assert_eq!(rig.json(&["place", "--host", "local"]).0, 1);
+    let status = rig.run(&["status"]);
+    let text = String::from_utf8(status.stdout).unwrap();
     assert!(
-        String::from_utf8(rig.run(&["status"]).stdout)
-            .unwrap()
-            .contains("disk 14.0% free")
+        text.contains("disk 14.0% free"),
+        "status={text}; publication={}",
+        rig.json(&["observation", "current"]).1
     );
 }
 
@@ -1890,13 +2273,16 @@ fn place_falls_back_when_remote_capacity_changed_and_refuses_low_disk() {
 fn full_is_exit_one_with_durable_queue() {
     let rig = Rig::new("full");
     rig.snapshot("state", now(), 3.0, 2);
+    let publisher = observation::seeded(&rig);
     let output = rig.run(&["place"]);
     assert_eq!(output.status.code(), Some(1));
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["queued"], true);
     assert!(value["ticket"].is_string());
     assert_eq!(rig.tickets()[0]["state"], "pending");
+    drop(publisher);
     rig.snapshot("state", 0, 0.0, 2);
+    let _publisher = observation::seeded(&rig);
     assert_eq!(rig.json(&["place"]).0, 1);
 }
 
@@ -1904,6 +2290,7 @@ fn full_is_exit_one_with_durable_queue() {
 fn concurrent_placement_rechecks_capacity_under_host_lock() {
     let rig = Rig::new("concurrent-place");
     rig.snapshot("state", now(), 2.0, 2);
+    let _publisher = observation::seeded(&rig);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| scope.spawn(|| rig.json(&["place"]).0))
@@ -1919,8 +2306,13 @@ fn concurrent_placement_rechecks_capacity_under_host_lock() {
 fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     let rig = Rig::new("reservation");
     rig.snapshot("state", now(), 2.0, 2);
+    let publisher = observation::seeded(&rig);
     assert_eq!(rig.json(&["place"]).0, 0);
-    assert!(!rig.log("herdr.log").contains("agent list"));
+    assert!(
+        !rig.log("herdr-roles.log")
+            .lines()
+            .any(|line| line == "actor agent list")
+    );
     rig.put(
         "agents.json",
         &json!({"result":{"agents":[{"pane_id":"w1:p8"}]}}),
@@ -1928,6 +2320,7 @@ fn reservation_survives_agent_discovery_and_ends_only_at_ttl() {
     assert_eq!(rig.json(&["place"]).0, 1);
     let queued = rig.tickets()[0]["id"].as_str().unwrap().to_owned();
     assert!(rig.run(&["cancel", &queued]).status.success());
+    drop(publisher);
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
     rig.put_reservations(&json!([{"id":"expired","created_ms":now()-90_001}]));
@@ -2176,6 +2569,8 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     repository(&repo);
     rig.peer();
     rig.config("remote_command = ['custom', 'dogsled']\n");
+    rig.ingest_peers();
+    let observer = place::peer_observer(&rig);
     let (code, placed) = rig.json(&[
         "place",
         "--host",
@@ -2187,6 +2582,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
         "--repo",
         repo.to_str().unwrap(),
     ]);
+    drop(observer);
     assert_eq!(code, 0, "{placed}");
     assert_eq!(placed["path"], "/remote/tree");
     let ssh = rig.log("ssh.log");
@@ -2270,6 +2666,16 @@ fn removed_commands_and_sidebar_are_not_accepted() {
 fn watch_prints_a_frame_without_waiting_for_the_interval() {
     let rig = Rig::new("watch");
     rig.snapshot("state", now(), 1.0, 2);
+    let mut frame = observation::publication(1);
+    frame["views"]["status_display"]["data"] =
+        observation::display(vec![observation::host_display(
+            "local",
+            "1/2",
+            "eligible",
+            Some(now()),
+            "service: up",
+        )]);
+    let _publisher = observation::Supplied::start(&rig, frame);
     // The test owns the command as its own child, so the test reaps it. The guard kills
     // the command's group, so the watch never outlives the test.
     let mut command = rig.cmd(&["status", "--watch", "--line", "--interval", "3600"]);
@@ -2299,9 +2705,31 @@ fn watch_prints_a_frame_without_waiting_for_the_interval() {
 /// joins the reader first waits on a command that never ends. The drop runs on its own
 /// thread, so a drop that waits fails the test on the bound instead of hanging it.
 #[test]
+fn draining_background_stderr_does_not_wait_for_stdout_eof() {
+    let rig = Rig::new("background-stderr");
+    let ready = rig.dir.join("stderr-drained");
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            "dd if=/dev/zero bs=65536 count=32 >&2 2>/dev/null; printf ready > \"$1\"; sleep 60",
+            "fixture",
+        ])
+        .arg(&ready);
+    let mut background = Rig::background(command);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "stderr pipe blocked the child");
+        std::thread::yield_now();
+    }
+    assert!(background.owned.child_mut().try_wait().unwrap().is_none());
+}
+
+#[test]
 fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
     let rig = Rig::new("background-drop");
     rig.snapshot("state", now(), 1.0, 2);
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
     // The command never ends on its own: it watches until the test ends it.
     let background = rig.start(&["status", "--watch", "--line", "--interval", "3600"]);
     let pid = background.owned.pid;

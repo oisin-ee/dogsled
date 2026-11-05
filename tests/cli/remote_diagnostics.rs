@@ -5,6 +5,7 @@ fn launch_peer(rig: &Rig) {
     let mut snapshot = rig.read("remote.json");
     snapshot["job_validity"] = json!(2);
     rig.put("remote.json", &snapshot);
+    rig.ingest_peers();
 }
 
 fn run_json(rig: &Rig, args: &[&str]) -> (i32, Value) {
@@ -24,6 +25,7 @@ fn assert_remote_launch_cause(cause: &str) {
         "version":1,"operation":"launch","cause":cause,
         "context":{"workspace":"PEER_SECRET","directory":"PEER_SECRET"},"host":"FORGED_HOST","request_id":"forged"}}),
     );
+    let _observer = super::place::peer_observer(&rig);
     let args = [
         "run",
         "--host",
@@ -229,6 +231,7 @@ fn real_remote_missing_directory_names_the_path_and_host() {
     let expected = format!("execution directory {missing} does not exist on netcup");
     launch_peer(&rig);
     real_peer_prepare(&rig);
+    let _observer = super::place::peer_observer(&rig);
     let args = ["run", "--host", "netcup", "--cwd", missing, "--", "true"];
     let (code, error) = run_json(&rig, &args);
     assert_eq!(code, 2, "{error}");
@@ -256,10 +259,12 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}));
     assert_eq!(run_json(&rig, &["inbox", "claim", "--harness", "pi"]).0, 0);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let observer = super::place::peer_observer(&rig);
     let (code, queued) = run_json(
         &rig,
         &["run", "--host", "netcup", "--cwd", missing, "--", "true"],
     );
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     let ticket = advance(&rig);
@@ -276,6 +281,16 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
         inbox[0]["text"].as_str().unwrap().contains(error),
         "{inbox}"
     );
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["queue"]
+            .as_array()
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|ticket| ticket["diagnostic"]["cause"] == "execution_directory_missing")
+            })
+    });
     let status = rig.run(&["status"]);
     assert!(status.status.success(), "{status:?}");
     let text = String::from_utf8(status.stdout).unwrap();
@@ -292,6 +307,7 @@ fn launch_ssh_exit_255_stays_a_transport_failure_even_with_a_peer_envelope() {
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replace("  *'host launch'*)", "  *'host launch'*) echo 'Permission denied (publickey)' >&2; cat \"$RIG/transport-envelope.json\"; exit 255;"));
     rig.put("transport-envelope.json", &json!({"error":"PRIVATE_SENTINEL","deadline":true,"diagnostic":{"version":1,"operation":"launch","cause":"execution_directory_missing","context":{}}}));
+    let observer = super::place::peer_observer(&rig);
     let (code, error) = run_json(
         &rig,
         &[
@@ -304,6 +320,7 @@ fn launch_ssh_exit_255_stays_a_transport_failure_even_with_a_peer_envelope() {
             "true",
         ],
     );
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -326,6 +343,7 @@ fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
     launch_peer(&rig);
     real_peer_prepare(&rig);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    let observer = super::place::peer_observer(&rig);
     let mut command = rig.start(&[
         "--json", "run", "--wait", "--max", "30s", "--host", "netcup", "--cwd", missing, "--",
         "true",
@@ -335,6 +353,7 @@ fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
         assert!(Instant::now() < deadline, "waiting caller did not enqueue");
         std::thread::sleep(Duration::from_millis(10));
     }
+    drop(observer);
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     assert_eq!(advance(&rig)["state"], "failed");
     assert_eq!(command.wait().code(), Some(2));
@@ -381,7 +400,9 @@ fn assert_repository_relative_remote_cwd_mapping(symlinked: bool) {
         } else {
             args.extend(["--name", "worker", "--message", "go"]);
         }
+        let observer = super::place::peer_observer(&rig);
         let (code, result) = run_json(&rig, &args);
+        drop(observer);
         assert_eq!(code, 0, "{action}: {result}");
         let log = rig.log("ssh.log");
         assert!(
@@ -422,6 +443,8 @@ fn cli_preserves_known_causes_and_never_peer_text() {
         repository(&repo);
         rig.peer();
         fail_peer(&rig, "prepare", &envelope(cause));
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -460,6 +483,7 @@ fn cli_preserves_known_causes_and_never_peer_text() {
             "--base",
             "missing",
         ]);
+        drop(observer);
         let text = String::from_utf8(text.stderr).unwrap();
         assert!(text.contains(cause) && text.contains("netcup"), "{text}");
         assert!(!text.contains("PRIVATE_SENTINEL"));
@@ -499,6 +523,8 @@ fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
     let (rig, repo) = place::place_rig("diagnostic-real-unknown-base");
     rig.peer();
     real_peer_prepare(&rig);
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -514,6 +540,7 @@ fn a_real_remote_unknown_base_names_the_base_in_the_ticket() {
         "--message",
         "TASK_SECRET",
     ]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     let text = error["error"].as_str().unwrap();
     assert!(text.contains("origin/absent"), "{error}");
@@ -655,6 +682,8 @@ fn a_remote_peer_fetches_a_base_its_clone_has_not_fetched() {
     origin_with_branch(&rig, &repo, "feature");
     rig.peer();
     real_peer_prepare(&rig);
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, prepared) = rig.json(&[
         "agent",
         "--host",
@@ -670,6 +699,7 @@ fn a_remote_peer_fetches_a_base_its_clone_has_not_fetched() {
         "--message",
         "go",
     ]);
+    drop(observer);
     assert_eq!(code, 0, "{prepared}");
     let tree = repo.join(".worktrees/worker");
     assert!(tree.is_dir(), "{tree:?}");
@@ -786,6 +816,8 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
         if case == "occupied" {
             fs::create_dir_all(repo.join(".worktrees/worker")).unwrap();
         }
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -801,6 +833,7 @@ fn real_remote_preparation_causes_are_safe_through_transport() {
             "--message",
             "TASK_SECRET",
         ]);
+        drop(observer);
         assert_eq!(code, 2, "{case}: {error}");
         assert_eq!(error["diagnostic"]["cause"], cause, "{case}: {error}");
         assert_eq!(error["diagnostic"]["context"]["branch"], branch);
@@ -826,6 +859,8 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
     repository(&repo);
     rig.peer();
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -841,6 +876,7 @@ fn a_remote_prepare_failure_names_its_cause_in_the_ticket() {
         "--message",
         "TASK_SECRET",
     ]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     let text = error["error"].as_str().unwrap();
     assert!(text.contains("base origin/x"), "{error}");
@@ -869,6 +905,8 @@ setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; \"$DOGSLE
     );
     rig.peer();
     real_peer_prepare(&rig);
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -884,6 +922,7 @@ setup = ["printf 'https://user:SCRIPT_SECRET@private/PATH_SECRET' >&2; \"$DOGSLE
         "--message",
         "TASK_SECRET",
     ]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert_eq!(
         error["diagnostic"]["cause"], "outcome_unrecorded",
@@ -943,8 +982,11 @@ fn malformed_unknown_and_secret_envelopes_never_import_peer_text() {
         let rig = Rig::new(&format!("diagnostic-invalid-{index}"));
         let repo = rig.dir.join("home/repo"); repository(&repo); rig.peer();
         fail_peer(&rig,"prepare",&json!({"error":"SECRET_SENTINEL","diagnostic":diagnostic}));
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, error) = rig.json(&["agent","--host","netcup","--cwd",repo.to_str().unwrap(),
             "--branch","worker","--base","missing","--name","worker","--message","TASK_SECRET"]);
+        drop(observer);
         assert_eq!(code,2,"{error}");
         assert_eq!(error["diagnostic"]["operation"],"prepare");
         assert_eq!(error["diagnostic"]["status"],2);
@@ -970,6 +1012,8 @@ fn parse_errors_do_not_format_launch_payloads_or_echo_remote_output() {
             "  *'host launch'*) echo 'PAYLOAD_SECRET'; exit 0;",
         ),
     );
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -979,6 +1023,7 @@ fn parse_errors_do_not_format_launch_payloads_or_echo_remote_output() {
         "--message",
         "TASK_SECRET",
     ]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["diagnostic"]["operation"], "launch");
     assert_eq!(error["diagnostic"]["status"], 0);
@@ -997,6 +1042,8 @@ fn remote_deadline_keeps_operation_and_correlation_without_launch_payload() {
         "ssh",
         &script.replace("  *'host launch'*)", "  *'host launch'*) printf '%s\\n' '{\"deadline\":true,\"error\":\"TASK_SECRET\"}'; exit 2;"),
     );
+    rig.ingest_peers();
+    let observer = super::observation::seeded(&rig);
     let (code, error) = rig.json(&[
         "agent",
         "--host",
@@ -1006,6 +1053,7 @@ fn remote_deadline_keeps_operation_and_correlation_without_launch_payload() {
         "--message",
         "TASK_SECRET",
     ]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["deadline"], true);
     assert_eq!(error["diagnostic"]["operation"], "launch", "{error}");
@@ -1029,6 +1077,8 @@ fn remote_checkout_causes_and_legacy_clone_code_keep_the_diagnostic() {
             response["code"] = json!("CLONE_FAILED");
         }
         fail_peer(&rig, "checkout", &response);
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -1042,6 +1092,7 @@ fn remote_checkout_causes_and_legacy_clone_code_keep_the_diagnostic() {
             "--message",
             "TASK_SECRET",
         ]);
+        drop(observer);
         assert_eq!(code, 2, "{error}");
         assert_eq!(error["diagnostic"]["cause"], cause);
         assert_eq!(error["diagnostic"]["operation"], "checkout");
@@ -1060,6 +1111,8 @@ fn mcp_place_preserves_structured_cause_and_safe_text() {
     repository(&repo);
     rig.peer();
     fail_peer(&rig, "prepare", &envelope("branch_exists"));
+    rig.ingest_peers();
+    let _observer = super::place::peer_observer(&rig);
     let mut client = mcp::Client::start(&rig);
     let (error, failed) = client.call(
         "place",
@@ -1083,6 +1136,7 @@ fn unit_commit_error_and_observe_keep_diagnostic() {
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{
         "host":"netcup","branch":"worker","base":"missing"}});
+    rig.ingest_peers();
     let out = rig
         .cmd(&[
             "unit",
@@ -1102,7 +1156,9 @@ fn unit_commit_error_and_observe_keep_diagnostic() {
         String::from_utf8_lossy(&out.stdout)
     );
     let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let producer = super::place::peer_observer(&rig);
     let (code, error) = operation(&rig, "commit", &commit_input(&execution, 0));
+    drop(producer);
     assert_eq!(code, 2, "{error}");
     assert_eq!(error["error"]["diagnostic"]["cause"], "base_unavailable");
     let (code, observed) = operation(&rig, "observe", &execution_input(&execution));
@@ -1122,6 +1178,7 @@ fn queued_unit_receipt_retains_diagnostic_after_service_admission_fails() {
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let input = json!({"origin":exported(0)["contract"]["ref"],"placement":{
         "host":"netcup","branch":"worker","base":"missing"}});
+    rig.ingest_peers();
     let out = rig
         .cmd(&[
             "unit",
@@ -1137,7 +1194,9 @@ fn queued_unit_receipt_retains_diagnostic_after_service_admission_fails() {
         .unwrap();
     assert!(out.status.success());
     let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let producer = super::place::peer_observer(&rig);
     let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    drop(producer);
     assert_eq!(code, 0, "{receipt}");
     assert_eq!(receipt["disposition"], "queued");
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
@@ -1452,6 +1511,8 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
     rig.peer();
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let mut child = rig
         .cmd(&[
             "agent",
@@ -1485,6 +1546,7 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    drop(observer);
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     assert_eq!(advance(&rig)["state"], "failed");
     let output = child.wait_with_output().unwrap();
@@ -1513,6 +1575,8 @@ fn a_typed_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
     );
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, queued) = rig.json(&[
         "agent",
         "--host",
@@ -1528,6 +1592,7 @@ fn a_typed_remote_prepare_failure_names_its_cause_in_the_ticket_and_inbox() {
         "--message",
         "TASK_SECRET",
     ]);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));
@@ -1562,6 +1627,8 @@ fn queued_failure_keeps_cause_in_ticket_admission_and_owner_inbox() {
     rig.put("agents.json",&json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}));
     assert_eq!(rig.json(&["inbox", "claim", "--harness", "pi"]).0, 0);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    rig.ingest_peers();
+    let producer = super::place::peer_observer(&rig);
     let (code, queued) = rig.json(&[
         "agent",
         "--host",
@@ -1577,6 +1644,7 @@ fn queued_failure_keeps_cause_in_ticket_admission_and_owner_inbox() {
         "--message",
         "TASK_SECRET",
     ]);
+    drop(producer);
     assert_eq!(code, 1, "{queued}");
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     fail_peer(&rig, "prepare", &envelope("base_unavailable"));

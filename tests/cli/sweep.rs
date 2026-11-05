@@ -859,7 +859,10 @@ fn the_sweep_classifies_a_child_by_its_current_custodian_not_its_origin_owner() 
         ]}}),
     );
     serve(&rig);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["orphans"], json!([]), "{status}");
     assert!(
         rig.items()[0]["closed_ms"].is_null(),
@@ -873,7 +876,10 @@ fn the_sweep_classifies_a_child_by_its_current_custodian_not_its_origin_owner() 
         ]}}),
     );
     serve(&rig);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["orphans"].as_array().unwrap().len(), 1, "{status}");
     assert_eq!(
         status["orphans"][0]["status"],
@@ -895,7 +901,10 @@ fn a_child_with_a_legacy_owner_session_is_never_called_session_ended() {
     child_with_owner_session(&rig, "w1:p1", None);
     child(&rig, "working", &tree);
     serve(&rig);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     let orphans = status["orphans"].as_array().unwrap();
     assert_eq!(orphans.len(), 1, "{status}");
     assert_eq!(orphans[0]["status"], json!("unknown"), "{status}");
@@ -932,7 +941,10 @@ fn a_child_with_an_unreadable_custody_record_stays_listed_as_unknown() {
     );
     child(&rig, "working", &tree);
     serve(&rig);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     let orphans = status["orphans"].as_array().unwrap();
     assert_eq!(orphans.len(), 2, "{status}");
     for orphan in orphans {
@@ -982,7 +994,10 @@ fn a_child_whose_custody_cannot_be_written_stays_unknown_and_the_other_is_still_
     );
     child(&rig, "working", &tree);
     serve(&rig);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     let orphans = status["orphans"].as_array().unwrap();
     assert_eq!(orphans.len(), 2, "{status}");
     // The other child of the same sweep is still classified.
@@ -1010,17 +1025,34 @@ fn the_status_lists_an_unclaimed_orphan_once() {
     orphan(&rig, "i1", "w9:p1", "local");
     child(&rig, "working", &tree);
     serve(&rig);
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     let orphans = status["orphans"].as_array().unwrap();
     assert_eq!(orphans.len(), 1, "{status}");
     assert_eq!(orphans[0]["status"], json!("orphaned"), "{status}");
     assert_eq!(orphans[0]["claimed"], json!(false), "{status}");
     // The human status names it once, on its own item line.
-    let human = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
+    let human = String::from_utf8_lossy(
+        &{
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status"])
+        }
+        .stdout,
+    )
+    .into_owned();
     assert!(human.contains("orphaned (unclaimed)"), "{human}");
     assert_eq!(human.matches("orphaned (unclaimed)").count(), 1, "{human}");
     // The brief counts the orphan once.
-    let brief = String::from_utf8_lossy(&rig.run(&["status", "--brief"]).stdout).into_owned();
+    let brief = String::from_utf8_lossy(
+        &{
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status", "--brief"])
+        }
+        .stdout,
+    )
+    .into_owned();
     assert!(brief.contains("1 orphaned"), "{brief}");
     assert_eq!(brief.matches("1 orphaned").count(), 1, "{brief}");
 }
@@ -1049,7 +1081,13 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
         child(&rig, status, &tree);
         let journal = serve(&rig);
         let reason = format!("owner w9:p1 is gone; the child is {status}");
-        assert_eq!(kept_reason(&rig), reason);
+        assert_eq!(
+            {
+                let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+                kept_reason(&rig)
+            },
+            reason
+        );
         assert!(
             journal.contains(&format!(
                 "dogsled sweep: keep orphan w2:p1 on local: {reason}"
@@ -1061,7 +1099,13 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     // Idle without a correlated stopped episode never authorizes closure.
     child(&rig, "idle", &tree);
     serve(&rig);
-    assert_eq!(kept_reason(&rig), "stopped orphan has no recorded episode");
+    assert_eq!(
+        {
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            kept_reason(&rig)
+        },
+        "stopped orphan has no recorded episode"
+    );
     untouched(&rig, "not done");
     // Done, but dirty.
     rig.done("term_child", "w2:p1", 1);
@@ -1075,11 +1119,14 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     rig.put_done(&marks);
     fs::write(tree.join("note"), "x").unwrap();
     serve(&rig);
-    assert!(
-        kept_reason(&rig).contains("uncommitted changes"),
-        "{}",
-        kept_reason(&rig)
-    );
+    {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        assert!(
+            kept_reason(&rig).contains("uncommitted changes"),
+            "{}",
+            kept_reason(&rig)
+        );
+    }
     untouched(&rig, "dirty");
     fs::remove_file(tree.join("note")).unwrap();
     // Done, clean, and local-only: keep the branch, release the child.
@@ -1096,7 +1143,10 @@ fn serve_closes_an_orphan_only_when_done_and_clean_keeping_local_commits() {
     assert!(!tree.exists());
     assert!(branch_exists(&rig, "feat/x"));
     assert!(rig.items()[0]["closed_ms"].is_u64());
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["orphans"], json!([]));
 }
 
@@ -1160,7 +1210,10 @@ fn a_clean_stopped_orphan_closes_and_records_output_not_a_result() {
     rig.put("agents.json", &json!({"result":{"agents":[]}}));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     rig.service();
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
     assert_eq!(
         board["rows"][0]["activity"], "branch feat/x +1 to land",
@@ -1681,13 +1734,21 @@ fn an_open_child_reply_reaches_its_matching_origin_owner_session() {
     let (code, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
     assert_eq!(code, 0, "{claimed}");
     assert_eq!(claimed[0]["kind"], "reply", "{claimed}");
-    let (_, status) = rig.json(&["status"]);
+    let (_, status) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"])
+    };
     assert_eq!(status["orphans"], json!([]), "{status}");
     assert!(!rig.log("herdr.log").contains("agent prompt"));
 }
 
 /// A refused reply stays untold, and status keeps the open child visible for custody.
-fn assert_origin_reply_held(rig: &Rig, tree: &Path, expected_status: &str) {
+fn assert_origin_reply_held(
+    rig: &Rig,
+    tree: &Path,
+    expected_status: &str,
+    published: impl FnOnce() -> Value,
+) {
     serve(rig);
     serve(rig);
     assert!(item_open(rig));
@@ -1727,7 +1788,7 @@ fn assert_origin_reply_held(rig: &Rig, tree: &Path, expected_status: &str) {
         custody[0]["custodian_session"], "origin-session",
         "{custody}"
     );
-    let (_, status) = rig.json(&["status"]);
+    let status = published();
     let orphans = status["orphans"].as_array().unwrap();
     assert_eq!(orphans.len(), 1, "{status}");
     assert_eq!(orphans[0]["item"], "i1", "{status}");
@@ -1767,7 +1828,10 @@ fn an_open_child_reply_is_held_when_its_origin_owner_pane_runs_another_session()
 #[test]
 fn an_open_child_reply_is_held_when_its_origin_owner_session_is_unreadable() {
     let (rig, tree) = open_child_origin_session("sweep-open-origin-session-unreadable", None);
-    assert_origin_reply_held(&rig, &tree, "unknown");
+    assert_origin_reply_held(&rig, &tree, "unknown", || {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["status"]).1
+    });
 }
 
 fn item_open(rig: &Rig) -> bool {
@@ -1865,11 +1929,21 @@ fn serve_hands_off_unlanded_writer_and_keeps_branch_on_board_without_a_pane() {
     rig.put("agents.json", &json!({"result":{"agents":[]}}));
     rig.put("panes.json", &json!({"result":{"panes":[]}}));
     rig.service();
-    let (_, board) = rig.json(&["board"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board"])
+    };
     assert_eq!(board["rows"][0]["group"], "to_land", "{board}");
     assert_eq!(board["rows"][0]["activity"], "branch feat/x +1 to land");
     assert!(board["rows"][0]["pane"].is_null());
-    let status = String::from_utf8_lossy(&rig.run(&["status"]).stdout).into_owned();
+    let status = String::from_utf8_lossy(
+        &{
+            let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+            rig.run(&["status"])
+        }
+        .stdout,
+    )
+    .into_owned();
     assert!(
         status.contains("worker: branch feat/x +1 to land"),
         "{status}"
@@ -1880,7 +1954,10 @@ fn serve_hands_off_unlanded_writer_and_keeps_branch_on_board_without_a_pane() {
     rig.service.lock().unwrap().take();
     git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "feat/x"]);
     serve(&rig);
-    let (_, board) = rig.json(&["board"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board"])
+    };
     assert_eq!(board["rows"], json!([]));
 }
 

@@ -340,8 +340,8 @@ fn dock(
 pub fn command(
     shell: &dyn Shell,
     ledger: &Ledger,
-    policy: &crate::config::Policy,
-    home: String,
+    _policy: &crate::config::Policy,
+    _home: String,
     command: crate::cli::Command,
     json: bool,
 ) -> Result<()> {
@@ -365,9 +365,10 @@ pub fn command(
         };
         return crate::print(true, &result, String::new);
     }
-    let fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home)?;
-    let status = crate::commands::status(&fleet)?;
-    let board = build(&status, owner.as_deref(), crate::ledger::now_ms());
+    let board = crate::observation::read::board(
+        &crate::observation::ipc::Client::at(&ledger.dir).current()?,
+        owner.as_deref(),
+    )?;
     crate::print(json, &board, || board.render())
 }
 
@@ -376,7 +377,7 @@ fn one_line(text: &str) -> String {
 }
 
 /// What the owner must do about a row, in display order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Group {
     /// Finished with commits that are not yet in the default branch, or with uncommitted work.
@@ -399,7 +400,7 @@ impl Group {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<crate::holds::Hold>,
@@ -434,13 +435,14 @@ pub struct Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ahead: Option<u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub dirty: bool,
     /// Canonical `host/owner/name` of the agent's repository, when it is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostLine {
     pub label: String,
     pub service: String,
@@ -457,7 +459,7 @@ pub struct HostLine {
     pub retry_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Board {
     pub hosts: Vec<HostLine>,
     pub rows: Vec<Row>,
@@ -893,23 +895,7 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
     );
 }
 
-/// Add portal metadata on the blocking board reader, never on an HTTP request.
-pub fn enrich(
-    board: &mut Board,
-    status: &Status,
-    todos: &[TodoSections],
-    ledger: &Ledger,
-    shell: &dyn Shell,
-) -> Result<()> {
-    let messages = inbox_messages(ledger)?;
-    enrich_rows(board, status, todos, &messages, shell);
-    Ok(())
-}
-
-fn inbox_messages(ledger: &Ledger) -> Result<Vec<crate::inbox::Record>> {
-    crate::store::read(ledger, crate::web_store::inbox::all_records)
-}
-
+#[cfg(test)]
 fn enrich_rows(
     board: &mut Board,
     status: &Status,
@@ -917,33 +903,66 @@ fn enrich_rows(
     messages: &[crate::inbox::Record],
     shell: &dyn Shell,
 ) {
-    let mut defaults = std::collections::BTreeMap::new();
+    let captured = capture_enrichment(board, status, messages.to_vec(), shell);
+    enrich_captured(board, status, todos, &captured);
+}
+
+#[derive(Debug)]
+pub(crate) struct Enrichment {
+    messages: Vec<crate::inbox::Record>,
+    ancestry: std::collections::BTreeMap<String, i32>,
+}
+
+pub(crate) fn enrich_captured(
+    board: &mut Board,
+    status: &Status,
+    todos: &[TodoSections],
+    captured: &Enrichment,
+) {
     for row in &mut board.rows {
         let item = status.items.iter().find(|item| item.id == row.id);
-        if row.state == "closed" {
-            row.pane = item.map(|item| item.pane.clone());
-        }
-        row.title = todos
-            .iter()
-            .find(|todo| row.pane.as_deref() == Some(todo.pane.as_str()))
-            .map(|todo| todo.current.clone());
         let pane = row
             .pane
             .as_deref()
             .or_else(|| item.map(|item| item.pane.as_str()));
+        row.title = todos
+            .iter()
+            .find(|todo| pane == Some(todo.pane.as_str()))
+            .map(|todo| todo.current.clone());
         let ended = item.is_some_and(|item| {
             item.closed_ms.is_some()
                 || crate::watchdog::turn_ended(crate::items::lifecycle(item, &status.hosts).state)
         });
-        row.unseen = unseen(row, pane, messages, ended);
+        row.unseen = unseen(row, pane, &captured.messages, ended);
+        row.cleanup = if row.dirty {
+            classify_cleanup(row, 0)
+        } else {
+            captured
+                .ancestry
+                .get(&row.id)
+                .and_then(|status| classify_cleanup(row, *status))
+        };
+    }
+}
+
+pub(crate) fn capture_enrichment(
+    board: &Board,
+    status: &Status,
+    messages: Vec<crate::inbox::Record>,
+    shell: &dyn Shell,
+) -> Enrichment {
+    let mut ancestry = std::collections::BTreeMap::new();
+    let mut defaults = std::collections::BTreeMap::new();
+    for row in &board.rows {
         if row.group != Group::ToLand {
             continue;
         }
         if row.dirty {
-            row.cleanup = Some(cleanup(portal_types::CleanupCause::Dirty));
             continue;
         }
-        let Some(item) = item else { continue };
+        let Some(item) = status.items.iter().find(|item| item.id == row.id) else {
+            continue;
+        };
         let local = status
             .hosts
             .iter()
@@ -999,10 +1018,11 @@ fn enrich_rows(
                 default.clone(),
             ],
         );
-        row.cleanup = output
-            .ok()
-            .and_then(|output| classify_cleanup(row, output.status));
+        if let Ok(output) = output {
+            ancestry.insert(row.id.clone(), output.status);
+        }
     }
+    Enrichment { messages, ancestry }
 }
 
 fn cleanup(cause: portal_types::CleanupCause) -> portal_types::Cleanup {
@@ -1915,7 +1935,9 @@ mod tests {
             crate::web_store::inbox::put_records(tx, "term_owner", std::slice::from_ref(&unread))
         })?;
         let shell = crate::shell::Fake::new();
-        enrich(&mut board, &status, &[todo], &ledger, &shell)?;
+        let messages = crate::store::read(&ledger, crate::web_store::inbox::all_records)?;
+        let captured = capture_enrichment(&board, &status, messages, &shell);
+        enrich_captured(&mut board, &status, &[todo], &captured);
         assert_eq!(board.rows[0].owner_pane.as_deref(), Some("w1:p1"));
         assert_eq!(board.rows[0].title.as_deref(), Some("Implement inbox"));
         assert!(board.rows[0].unseen);

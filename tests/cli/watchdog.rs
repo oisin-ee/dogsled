@@ -158,7 +158,15 @@ fn stopped_child_gets_exactly_one_prompt_across_five_restarts() {
     assert_eq!(saved["stopped"]["child"]["turn"]["state_change_seq"], 1);
     assert_eq!(saved["stopped"]["child"]["message_id"], messages[0]["id"]);
     assert_eq!(saved["stopped"]["child"]["delivered"], true);
-    rig.service();
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["activity"] == "stopped; prompted 4s ago")
+            })
+    });
     let out = rig.run(&["board"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("stopped; prompted 4s ago"));
 }
@@ -184,7 +192,15 @@ fn stopped_failed_put_retries_same_id_three_times_only() {
     );
     stopped_tick(&rig, NOW + 6_000, "idle", 1);
     assert_eq!(rig.inbox("term_child"), json!([]));
-    rig.service();
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["activity"] == "stopped; prompt undelivered")
+            })
+    });
     let out = rig.run(&["board"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("stopped; prompt undelivered"));
 }
@@ -264,6 +280,10 @@ fn stalled_snapshot_sidebar_notification_and_brief_survive_serve_restart() {
     let log = rig.log("herdr.log");
     assert_eq!(log.matches("notification show").count(), 1);
     assert!(log.contains("--token dogsled=stalled 48h"));
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["status_display"]["data"]["counts"]["stalls"] == 1
+    });
     let out = rig.run(&["status", "--brief"]);
     let brief = String::from_utf8(out.stdout).unwrap();
     assert!(brief.contains("1 stalls"));
@@ -399,6 +419,14 @@ fn doctor_lists_all_classes_without_mutations_and_remote_uses_ssh() {
         "ssh",
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/ssh.log\"\ncat \"$RIG/plan.json\"\n",
     );
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     assert_eq!(rig.json(&["doctor", "--host", "netcup"]).1, plan);
     assert!(rig.log("ssh.log").contains("host doctor"));
 }

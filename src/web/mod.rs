@@ -1,10 +1,5 @@
-//! The web portal's server: a guarded JSON and SSE API on the loopback
-//! address.
-//!
-//! The board comes from the same read path the sidebar uses: the cached fleet
-//! status, the board built from it, and the cached todo sections. It is never
-//! probed, and it is rebuilt every two seconds. The API pushes a new payload
-//! only when the board changed.
+//! Guarded portal API. One observation subscription supplies board, agents and inbox.
+//! Requests select projections; they never observe or derive state.
 
 pub mod agents;
 pub mod assets;
@@ -15,6 +10,8 @@ pub mod oneshot;
 pub mod questions;
 pub mod reviews;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 pub mod token;
 
 use std::convert::Infallible;
@@ -28,7 +25,7 @@ use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use portal_types::BoardView;
+use portal_types::{PortalAvailability, PortalEvent, PortalSnapshot, PortalStatus};
 use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::WatchStream;
@@ -37,55 +34,57 @@ use tokio_util::sync::CancellationToken;
 use crate::config::Policy;
 use crate::error::Result;
 use crate::ledger::Ledger;
-use crate::shell::System;
 
-/// The reader rebuilds the board this often, like the sidebar does.
-const REFRESH: Duration = Duration::from_secs(2);
-/// The reader waits for the next tick in slices this long.
+/// Connection retries do not perform observation.
+const RETRY: Duration = Duration::from_secs(2);
+/// Bound cancellation checks while waiting for a replacement.
 const TICK: Duration = Duration::from_millis(100);
-/// The stream sends a comment this often, so an idle connection stays open.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
-/// The state every request shares: the last payload and the served port.
+/// A failed connection retains its last publication, but never marks it current.
+#[derive(Debug, Clone)]
+pub struct PortalState {
+    snapshot: Option<PortalSnapshot>,
+    error: Option<String>,
+}
+
+impl Default for PortalState {
+    fn default() -> Self {
+        Self {
+            snapshot: None,
+            error: Some("observation unavailable".to_owned()),
+        }
+    }
+}
+
+/// Shared publication and explicit command services.
 #[derive(Debug, Clone)]
 pub struct AppState {
-    /// The last board payload, as JSON.
-    board: watch::Receiver<String>,
-    /// The port the server listens on.
+    portal: watch::Receiver<PortalState>,
     port: u16,
-    /// The client the agent routes read and write through.
-    agents: Option<Arc<crate::herdr_socket::Client>>,
-    /// The portal's own token. A request that carries it as a `Bearer`
-    /// credential passes the guard's origin rule.
+    agents: Arc<std::sync::OnceLock<Option<Arc<crate::herdr_socket::Client>>>>,
     token: guard::Token,
-    /// The host ledger. Portal records share its typed SQLite database,
-    /// so routes never read a process-global state root.
     web: Ledger,
-    /// The questions that wait for an answer, with the waiters of the long
-    /// polls.
     questions: store::Store,
-    /// Cancels the portal's requests, streams, and background readers together.
     stop: CancellationToken,
 }
 
 impl AppState {
-    /// The state of a portal that serves on the given port.
-    ///
-    /// The `web` ledger names the host database. A new state over the same
-    /// ledger sees the questions that wait.
+    /// Construct command services over the host ledger without reading records.
     #[must_use]
     pub fn new(
-        board: watch::Receiver<String>,
+        portal: watch::Receiver<PortalState>,
         port: u16,
         agents: Option<Arc<crate::herdr_socket::Client>>,
         token: guard::Token,
         web: Ledger,
     ) -> Self {
         let questions = store::Store::new(web.clone());
+        let socket = std::sync::OnceLock::from(agents);
         Self {
-            board,
+            portal,
             port,
-            agents,
+            agents: Arc::new(socket),
             token,
             web,
             questions,
@@ -93,12 +92,33 @@ impl AppState {
         }
     }
 
-    /// The current payload.
-    fn payload(&self) -> String {
-        self.board.borrow().clone()
+    /// Hold one publication through projection selection and response construction.
+    fn projection<T: serde::Serialize>(
+        &self,
+        select: impl FnOnce(&PortalSnapshot) -> Option<T>,
+    ) -> Response {
+        let current = self.portal.borrow();
+        if let Some(error) = &current.error {
+            return observation_error(error);
+        }
+        let Some(snapshot) = &current.snapshot else {
+            return observation_error("observation unavailable");
+        };
+        let Some(data) = select(snapshot) else {
+            return observation_error("observation unavailable: projection was not published");
+        };
+        (
+            [
+                ("x-observation-version", snapshot.version.to_string()),
+                ("x-observation-epoch", snapshot.epoch.clone()),
+                ("x-observation-revision", snapshot.revision.to_string()),
+                ("cache-control", "no-store".to_owned()),
+            ],
+            axum::Json(data),
+        )
+            .into_response()
     }
 
-    /// Finish a response stream as soon as the portal starts to stop.
     fn until_shutdown<S: tokio_stream::Stream>(
         &self,
         stream: S,
@@ -107,46 +127,36 @@ impl AppState {
     }
 }
 
-/// Serve the portal API until the process is asked to stop.
-///
-/// The command deadline does not apply here: a server runs until it is told
-/// to stop.
-pub fn serve(ledger: &Ledger, policy: &Policy, home: &str, port: Option<u16>) -> Result<()> {
+fn observation_error(detail: &str) -> Response {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        [(header::CACHE_CONTROL, "no-store")],
+        axum::Json(serde_json::json!({"error": detail})),
+    )
+        .into_response()
+}
+
+/// Serve until the process is asked to stop, independent of command deadlines.
+pub fn serve(ledger: &Ledger, policy: &Policy, _home: &str, port: Option<u16>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run(ledger, policy, home, port.unwrap_or(policy.web.port)))
+    runtime.block_on(run_until(
+        ledger,
+        port.unwrap_or(policy.web.port),
+        shutdown(),
+    ))
 }
 
-/// The server's own work: read the board, publish it, and serve it.
-async fn run(ledger: &Ledger, policy: &Policy, home: &str, port: u16) -> Result<()> {
-    run_until(ledger, policy, home, port, System::default(), shutdown()).await
-}
-
-/// Keep shell calls and the stop request injectable for lifecycle tests.
 async fn run_until(
     ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
     port: u16,
-    shell: impl crate::shell::Shell + 'static,
     stopping: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    // The first payload is empty: a read that fails must not keep the server
-    // from starting. The reader replaces it within a tick.
-    let (sender, receiver) = watch::channel(empty_payload());
+    let (sender, receiver) = watch::channel(PortalState::default());
     let (listener, state) = listen(ledger, port, receiver).await?;
     let port = state.port;
-    // The reader runs on a blocking thread, like the sidebar's reader. It reads
-    // the cached state and never probes.
-    let _reader = spawn_reader(
-        shell,
-        ledger.clone(),
-        policy.clone(),
-        home.to_owned(),
-        sender,
-        state.stop.clone(),
-    );
+    let _reader = spawn_reader(ledger.clone(), sender, state.stop.clone());
     println!(
         "dogsled web on http://127.0.0.1:{port} (token in {})",
         token::path(ledger).display()
@@ -154,14 +164,12 @@ async fn run_until(
     Ok(serve_until(listener, state, stopping).await?)
 }
 
-/// Stop every response before waiting for the HTTP connections to drain.
 async fn serve_until(
     listener: tokio::net::TcpListener,
     state: AppState,
     stopping: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let stop = state.stop.clone();
-    // An error or a dropped server must also release its background workers.
     let _cancel = stop.clone().drop_guard();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
@@ -171,49 +179,26 @@ async fn serve_until(
         .await
 }
 
-/// Bind first, then build the state and guards from the actual port.
+/// Bind before constructing guards from the actual port. Herdr serves only the
+/// explicit commands and the detail routes, which migrate separately.
 async fn listen(
     ledger: &Ledger,
     port: u16,
-    board: watch::Receiver<String>,
+    portal: watch::Receiver<PortalState>,
 ) -> Result<(tokio::net::TcpListener, AppState)> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     let port = listener.local_addr()?.port();
-    let agents = match tokio::task::spawn_blocking(crate::herdr_socket::Client::discover)
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|result| result.map_err(|error| error.to_string()))
-    {
-        Ok(client) => Some(Arc::new(client)),
-        Err(error) => {
-            eprintln!("dogsled web: herdr socket discovery failed: {error}");
-            None
-        }
-    };
-    let state = AppState::new(
-        board,
+    let mut state = AppState::new(
+        portal,
         port,
-        agents,
+        None,
         guard::Token::new(token::token(ledger)?),
         ledger.clone(),
     );
+    state.agents = Arc::new(std::sync::OnceLock::new());
     Ok((listener, state))
 }
 
-/// The payload the server starts with: an empty board.
-fn empty_payload() -> String {
-    let view = board::view(
-        &crate::board::Board {
-            hosts: Vec::new(),
-            rows: Vec::new(),
-        },
-        &[],
-        crate::ledger::now_ms(),
-    );
-    serde_json::to_string(&view).unwrap_or_else(|_| "{}".to_owned())
-}
-
-/// The routes and the guards that wrap them.
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/board", get(board))
@@ -227,119 +212,109 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// The current board, as JSON.
 async fn board(State(state): State<AppState>) -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        state.payload(),
-    )
-        .into_response()
+    state.projection(|snapshot| snapshot.board.clone())
 }
 
-/// The board, pushed as it changes.
+/// One event carries all portal projections from the same publication.
 async fn stream(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>> {
-    let stream = WatchStream::new(state.board.clone())
-        .map(|payload| Ok(Event::default().event("board").data(payload)));
-    let stream = tokio_stream::StreamExt::merge(stream, inbox::events(state.clone()));
+    let stream = WatchStream::new(state.portal.clone()).map(|current| {
+        let availability = if current.snapshot.is_some() {
+            PortalAvailability::Disconnected
+        } else {
+            PortalAvailability::Unavailable
+        };
+        let frame = match (current.snapshot, current.error) {
+            (_, Some(error)) => PortalEvent::Status(PortalStatus {
+                observation: availability,
+                error,
+            }),
+            (Some(snapshot), None) => PortalEvent::Snapshot(Box::new(snapshot)),
+            (None, None) => PortalEvent::Status(PortalStatus {
+                observation: PortalAvailability::Unavailable,
+                error: "observation unavailable".to_owned(),
+            }),
+        };
+        let event = Event::default()
+            .event("portal")
+            .json_data(frame)
+            .unwrap_or_else(|error| {
+                Event::default().event("portal").data(
+                    serde_json::json!({
+                        "observation": "disconnected", "error": error.to_string(),
+                    })
+                    .to_string(),
+                )
+            });
+        Ok(event)
+    });
     Sse::new(state.until_shutdown(stream)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
-/// Refuse a request from another host, or from another origin while it
-/// changes state.
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let method = request.method().clone();
-    let headers = request.headers().clone();
-    if let Some(response) = guard::check(&method, &headers, state.port, &state.token) {
+    if let Some(response) = guard::check(
+        request.method(),
+        request.headers(),
+        state.port,
+        &state.token,
+    ) {
         return response;
     }
     next.run(request).await
 }
 
-/// The reader has nothing to flush. Do not join it at shutdown: an in-flight
-/// Herdr or SSH call can finish on its own 30-second budget after the server
-/// stops. A plain thread keeps runtime teardown from waiting for that call.
+/// One subscription per portal, independent of HTTP subscriber count. A plain thread
+/// lets HTTP shutdown finish even during the bounded initial socket handshake.
 fn spawn_reader(
-    shell: impl crate::shell::Shell + 'static,
     ledger: Ledger,
-    policy: Policy,
-    home: String,
-    sender: watch::Sender<String>,
+    sender: watch::Sender<PortalState>,
     stop: CancellationToken,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || reader(&shell, &ledger, &policy, &home, &sender, &stop))
+    std::thread::spawn(move || reader(&ledger, &sender, &stop))
 }
 
-/// Rebuild the board every two seconds and publish it when it changed.
-///
-/// The timestamp moves on every read, so it stays out of the comparison. Only
-/// the hosts and the rows decide whether the board changed.
-fn reader(
-    shell: &dyn crate::shell::Shell,
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    sender: &watch::Sender<String>,
-    stop: &CancellationToken,
-) {
-    let mut last = String::new();
-    // The fleet is discovered once and kept, like the sidebar's reader keeps
-    // it. A failed discovery is tried again on the next tick.
-    let mut fleet: Option<crate::hosts::Fleet<'_>> = None;
-    while !stop.is_cancelled() {
-        if fleet.is_none() {
-            fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home.to_owned()).ok();
-        }
-        if stop.is_cancelled() {
-            break;
-        }
-        if let Some(fleet) = &fleet
-            && let Ok(view) = read(fleet)
-        {
-            // The timestamp moves on every read, so it stays out of the
-            // comparison. Only the hosts and the rows decide whether the board
-            // changed.
-            if let Ok(key) = serde_json::to_string(&(&view.hosts, &view.repos))
-                && key != last
-            {
-                last = key;
-                if let Ok(payload) = serde_json::to_string(&view) {
-                    sender.send_replace(payload);
+fn reader(ledger: &Ledger, sender: &watch::Sender<PortalState>, stop: &CancellationToken) {
+    use crate::observation::{ipc, read};
+
+    let client = ipc::Client::at(&ledger.dir);
+    while !stop.is_cancelled() && !sender.is_closed() {
+        let result = client.subscribe().and_then(|mut subscription| {
+            let mut connection = subscription.current();
+            let mut last = None;
+            while !stop.is_cancelled() && !sender.is_closed() {
+                if let ipc::Status::Disconnected(detail) = connection.status {
+                    return Err(crate::error::Error::Invalid(detail));
                 }
+                if last != Some(connection.publication.revision) {
+                    let snapshot = read::view(&connection.publication, "portal")?;
+                    sender.send_replace(PortalState {
+                        snapshot: Some(snapshot),
+                        error: None,
+                    });
+                    last = Some(connection.publication.revision);
+                }
+                connection = subscription.changed(TICK);
             }
+            Ok(())
+        });
+        if let Err(error) = result {
+            sender.send_modify(|current| current.error = Some(error.to_string()));
         }
-        // Wait for the next tick in slices, so a stop is not delayed.
-        let until = std::time::Instant::now() + REFRESH;
-        while std::time::Instant::now() < until && !stop.is_cancelled() {
+        let until = std::time::Instant::now() + RETRY;
+        while std::time::Instant::now() < until && !stop.is_cancelled() && !sender.is_closed() {
             std::thread::sleep(TICK);
         }
     }
 }
 
-/// Read the board the way the sidebar does: the cached fleet status, the board
-/// built from it, and the cached todo sections.
-fn read(fleet: &crate::hosts::Fleet<'_>) -> Result<BoardView> {
-    let status = crate::commands::status(fleet)?;
-    let now = crate::ledger::now_ms();
-    let mut board = crate::board::build(&status, None, now);
-    // A todo cache that cannot be read leaves the todos empty, not the whole
-    // API broken.
-    let todos = crate::board::cached_todos(fleet.ledger).unwrap_or_default();
-    crate::board::enrich(&mut board, &status, &todos, fleet.ledger, fleet.shell)?;
-    Ok(board::view(&board, &todos, now))
-}
-
-/// Stop the server on SIGINT or SIGTERM.
 async fn shutdown() {
     let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
     let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
     match (interrupt, terminate) {
         (Ok(mut interrupt), Ok(mut terminate)) => {
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-            }
+            tokio::select! { _ = interrupt.recv() => {} _ = terminate.recv() => {} }
         }
         (Ok(mut interrupt), Err(_)) => {
             interrupt.recv().await;
@@ -365,9 +340,8 @@ mod tests {
     /// The portal's token, in the state the tests share.
     const TOKEN: &str = "secret";
 
-    fn state(payload: &str) -> AppState {
-        let (sender, receiver) = watch::channel(payload.to_owned());
-        sender.send_replace(payload.to_owned());
+    fn state(payload: &PortalState) -> AppState {
+        let (_sender, receiver) = watch::channel(payload.clone());
         AppState::new(
             receiver,
             PORT,
@@ -380,16 +354,9 @@ mod tests {
         )
     }
 
-    fn board_json() -> String {
-        let view = board::view(
-            &crate::board::Board {
-                hosts: Vec::new(),
-                rows: Vec::new(),
-            },
-            &[],
-            7,
-        );
-        serde_json::to_string(&view).expect("the board payload")
+    fn board_json() -> PortalState {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        test_support::empty(&ledger)
     }
 
     /// A request with the given method, host and origin.
@@ -440,6 +407,36 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).expect("the payload");
         assert_eq!(value["generated_ms"], 7);
         assert!(value["repos"].is_array());
+    }
+
+    #[tokio::test]
+    async fn disconnected_portal_retains_snapshot_but_does_not_serve_it_as_current() {
+        let publication = board_json();
+        let snapshot = publication.snapshot.clone();
+        let (sender, receiver) = watch::channel(publication);
+        let mut state = state(&PortalState::default());
+        state.portal = receiver;
+        sender.send_modify(|current| {
+            current.error = Some("observation publisher disconnected".to_owned());
+        });
+        assert_eq!(state.portal.borrow().snapshot, snapshot);
+        for path in ["/api/board", "/api/agents", "/api/inbox"] {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(header::HOST, format!("localhost:{PORT}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .expect("body");
+            assert!(String::from_utf8_lossy(&bytes).contains("observation publisher disconnected"));
+        }
     }
 
     #[tokio::test]
@@ -600,7 +597,7 @@ mod tests {
                 let size = client.read(&mut buffer).expect("read the stream");
                 assert!(size > 0, "the stream stays open before shutdown");
                 bytes.extend_from_slice(&buffer[..size]);
-                if String::from_utf8_lossy(&bytes).contains("event: board") {
+                if String::from_utf8_lossy(&bytes).contains("event: portal") {
                     break;
                 }
             }
@@ -621,67 +618,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_does_not_wait_for_a_blocked_shell_call() {
-        #[derive(Debug)]
-        struct BlockedShell {
-            entered: std::sync::mpsc::Sender<()>,
-            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-            finished: std::sync::mpsc::Sender<()>,
-        }
+    async fn shutdown_does_not_wait_for_a_blocked_publisher_handshake() {
+        use std::io::BufRead as _;
+        use std::os::unix::net::UnixListener;
 
-        impl crate::shell::Shell for BlockedShell {
-            fn run(&self, _: &str, _: &[String]) -> Result<crate::shell::Output> {
-                self.entered.send(()).expect("report the blocked read");
-                self.release
-                    .lock()
-                    .expect("release lock")
-                    .recv()
-                    .expect("release read");
-                Err(crate::error::Error::Invalid(
-                    "the test read failed".to_owned(),
-                ))
-            }
-        }
-
-        impl Drop for BlockedShell {
-            fn drop(&mut self) {
-                let _ = self.finished.send(());
-            }
-        }
-
-        let ledger = Ledger::new(
-            std::env::temp_dir().join(format!("dogsled-reader-stop-{}", crate::ledger::new_id())),
-        );
-        let owned = ledger.clone();
-        let (entered, reading) = std::sync::mpsc::channel();
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        std::fs::create_dir_all(&ledger.dir).expect("state directory");
+        let path =
+            crate::observation::socket_path(&ledger.dir, "observation.sock").expect("socket path");
+        let listener = UnixListener::bind(path).expect("stalled publisher");
+        let (entered, reading) = tokio::sync::oneshot::channel();
         let (release, resume) = std::sync::mpsc::channel();
-        let (finished, exited) = std::sync::mpsc::channel();
-        let shell = BlockedShell {
-            entered,
-            release: std::sync::Mutex::new(resume),
-            finished,
-        };
-        let (stop, stopping) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            run_until(&owned, &Policy::default(), "/tmp", 0, shell, async {
-                let _ = stopping.await;
-            })
-            .await
+        let publisher = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("subscription connects");
+            let mut request = String::new();
+            std::io::BufReader::new(&socket)
+                .read_line(&mut request)
+                .expect("subscription request");
+            entered.send(()).expect("report blocked handshake");
+            resume.recv().expect("release handshake");
         });
-        reading
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the shell read started");
+        let (sender, receiver) = watch::channel(PortalState::default());
+        let (listener, state) = listen(&ledger, 0, receiver).await.expect("bind portal");
+        let reader = spawn_reader(ledger.clone(), sender, state.stop.clone());
+        let (stop, stopping) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_until(listener, state, async {
+            let _ = stopping.await;
+        }));
+        reading.await.expect("the IPC handshake started");
         stop.send(()).expect("trigger shutdown");
         let result = tokio::time::timeout(Duration::from_secs(2), server).await;
-        // Release the fake even if the server failed, so the test leaks no thread.
-        assert!(
-            exited.try_recv().is_err(),
-            "the shell call is still blocked"
-        );
-        release.send(()).expect("release the fake shell");
-        exited
-            .recv_timeout(Duration::from_secs(2))
-            .expect("reader exits after release");
+        // Release even on failure, without depending on time to finish the blocked read.
+        release.send(()).expect("release publisher");
+        publisher.join().expect("publisher stopped");
+        reader.join().expect("reader stopped");
         result
             .expect("shutdown does not join the reader")
             .expect("server task")

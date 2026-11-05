@@ -138,13 +138,13 @@ impl Rig {
         .unwrap();
     }
     fn fleet(&self) -> Fleet<'_> {
-        Fleet {
-            shell: &self.shell,
-            ledger: &self.ledger,
-            policy: &self.policy,
-            home: "/".into(),
-            hosts: vec![Host::local()],
-        }
+        Fleet::cold(
+            &self.shell,
+            &self.ledger,
+            &self.policy,
+            "/".into(),
+            vec![Host::local()],
+        )
     }
     fn item(&self, kind: &str) {
         crate::items::record(
@@ -191,7 +191,10 @@ impl Rig {
             "panes":panes,"agent_panes":agents}})).unwrap();
         observe(&mut snapshot.probe, None, now);
         crate::host_store::put_snapshot(&self.ledger, &snapshot).unwrap();
-        self.fleet().status(now).unwrap()
+        crate::observation::captured_actions(&self.fleet(), now)
+            .unwrap()
+            .reports()
+            .unwrap()
     }
     /// The check-ins in the owner's inbox, oldest first.
     fn check_ins(&self) -> Vec<String> {

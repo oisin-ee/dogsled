@@ -1,12 +1,12 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
 use crate::error::{Error, Result};
-use crate::hosts::{Fleet, Host, HostReport};
+use crate::hosts::{ActionFleet, Fleet, Host, HostReport, ObserverFleet};
 use crate::plan;
 use crate::prepare::Prepared;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct Status {
     pub hosts: Vec<HostReport>,
     pub items: Vec<crate::items::Item>,
@@ -21,43 +21,9 @@ pub struct Status {
     pub holds: Vec<crate::holds::Hold>,
 }
 
-pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
-    let hosts = fleet.status(crate::ledger::now_ms())?;
-    let mut items = crate::items::list(fleet.ledger)?;
-    crate::items::merge_handoffs(&mut items, &hosts);
-    let mut status = Status {
-        hosts,
-        items,
-        queue: crate::work::queue(fleet.ledger)?,
-        orphans: crate::sweep::list(fleet.ledger)?,
-        sweep: crate::sweep::latest(fleet.ledger)?,
-        stopped_activity: std::collections::BTreeMap::new(),
-        holds: Vec::new(),
-    };
-    status.holds = status
-        .hosts
-        .iter()
-        .flat_map(|host| host.holds.clone())
-        .collect();
-    status.holds.extend(crate::holds::owner(&status));
-    // Prefer the owner-side projection when the execution host reports the same branch.
-    status.holds.retain(|hold| {
-        hold.code != "retained_branch"
-            || !status.items.iter().any(|item| {
-                hold.request_id.as_deref() == Some(item.id.as_str())
-                    && (item.dropped_ms.is_some()
-                        || item.branch.as_ref().is_some_and(|branch| branch.landed))
-            })
-    });
-    status.holds.reverse();
-    let mut resources = std::collections::BTreeSet::new();
-    status.holds.retain(|hold| {
-        resources.insert((hold.host.clone(), hold.code.clone(), hold.resource.clone()))
-    });
-    status.holds.reverse();
-    status.stopped_activity =
-        crate::watchdog::stopped_activity(fleet.ledger, &status, crate::ledger::now_ms())?;
-    Ok(status)
+pub fn status(fleet: &ObserverFleet<'_>) -> Result<Status> {
+    let now = crate::ledger::now_ms();
+    crate::observation::collect::status(fleet.ledger, fleet.status(now)?, now)
 }
 
 #[derive(Debug, Serialize)]
@@ -147,7 +113,7 @@ pub(crate) fn expire_selection(ledger: &crate::ledger::Ledger, id: &str) -> Resu
 /// A placement for a job request. The request's own creation time rides with the
 /// reservation, so the host checks the age before it holds capacity.
 pub fn place_with(
-    fleet: &Fleet,
+    fleet: &ActionFleet,
     host: Option<&str>,
     id: &str,
     now: u64,
@@ -188,7 +154,11 @@ fn reserve_recorded(
     )
 }
 
-fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Result<Placement> {
+fn place_recorded(
+    fleet: &ActionFleet,
+    request: &crate::work::Request,
+    now: u64,
+) -> Result<Placement> {
     use crate::work::PlacementPhase;
     let mut attempt = crate::admissions::get(fleet.ledger, &request.id)?
         .ok_or_else(|| crate::unit_transport::conflict("placement admission is missing"))?;
@@ -213,7 +183,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
         ));
     }
     let pinned = request.host.as_deref().map(|h| fleet.find(h)).transpose()?;
-    let mut reports = fleet.status(now)?;
+    let mut reports = fleet.reports()?;
     let mut candidates: Vec<_> = reports
         .iter()
         .filter(|r| pinned.is_none_or(|h| h.id == r.host.id))
@@ -280,7 +250,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
 }
 
 fn place_locked(
-    fleet: &Fleet,
+    fleet: &ActionFleet,
     host: Option<&str>,
     id: &str,
     now: u64,
@@ -302,7 +272,7 @@ fn place_locked(
         .map(|s| fleet.find(s))
         .transpose()?
         .or(pinned);
-    let mut reports = fleet.status(now)?;
+    let mut reports = fleet.reports()?;
     if saved.is_some() {
         reports.retain(|r| pinned.is_some_and(|h| h.id == r.host.id));
     }
@@ -394,7 +364,8 @@ fn full(reports: Vec<HostReport>, pinned: Option<&Host>) -> Result<Placement> {
 }
 
 /// Whether a host can take work, as `status --line` marks it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HostState {
     Eligible,
     /// Reachable, but admission would refuse new work (` ▲`).
@@ -405,7 +376,7 @@ pub enum HostState {
 
 impl HostState {
     pub fn of(host: &HostReport) -> Self {
-        if !host.reachable || host.service == "down" {
+        if !host.reachable || host.service != "up" {
             Self::Unreachable
         } else if !host.headroom.as_ref().is_some_and(|h| h.eligible) {
             Self::NoHeadroom
@@ -426,7 +397,7 @@ impl HostState {
 
 /// The first line of a host, as typed values. `status --line` and the sidebar both read it,
 /// so they never disagree and nothing parses the rendered text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostBrief {
     pub label: String,
     /// Busy cores over cores (`11/12`), `load N/cores` before the first sample, or `-`.
@@ -458,311 +429,11 @@ fn load(host: &HostReport) -> String {
     )
 }
 
-pub fn line(status: &Status) -> String {
-    format!(
-        "{}\n",
-        status
-            .hosts
-            .iter()
-            .map(|host| {
-                let brief = HostBrief::of(host);
-                if brief.measured {
-                    format!("{} {}{}", brief.label, brief.load, brief.state.marker())
-                } else {
-                    format!("{} ?", brief.label)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" · ")
-    )
-}
-
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn summary(host: &HostReport) -> String {
-    let details = host.probe.as_ref().map_or_else(
-        || "mem ? disk ? agents ?".into(),
-        |p| {
-            let gib = 1024.0 * 1024.0 * 1024.0;
-            let mut states = std::collections::BTreeMap::new();
-            for agent in &p.agent_panes {
-                let state = crate::lifecycle::of_agent(
-                    agent,
-                    if host.reachable && host.service == "up" {
-                        crate::lifecycle::Host::Up
-                    } else {
-                        crate::lifecycle::Host::Unavailable
-                    },
-                )
-                .state;
-                *states.entry(state.as_str()).or_insert(0) += 1;
-            }
-            format!(
-                "mem {:.1}/{:.1}GiB disk {:.0}% free agents {} ({})",
-                p.memory.used_bytes as f64 / gib,
-                p.memory.total_bytes as f64 / gib,
-                p.disk_free_percent,
-                p.agent_panes.len(),
-                states
-                    .iter()
-                    .map(|(state, n)| format!("{} {n}", one_line(state)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        },
-    );
-    let brief = HostBrief::of(host);
-    format!(
-        "{} {}{} {details} {}{}",
-        brief.label,
-        brief.load,
-        brief.state.marker(),
-        host.condition(),
-        host.sampled_ms.map_or_else(String::new, |sampled| format!(
-            " (snapshot {} ago)",
-            crate::watchdog::age(crate::ledger::now_ms().saturating_sub(sampled))
-        ))
-    )
-}
-
-fn lane_failures(host: &HostReport) -> impl Iterator<Item = String> + '_ {
-    host.service_lanes.iter().filter_map(|lane| {
-        let error = lane.error.as_deref()?;
-        let since = lane
-            .since_ms
-            .and_then(|ms| chrono::DateTime::from_timestamp_millis(i64::try_from(ms).ok()?))
-            .map_or_else(
-                || "unknown".into(),
-                |time| time.format("%H:%M UTC").to_string(),
-            );
-        Some(format!(
-            "{} service: {} lane failing since {since} (x{}): {}",
-            one_line(&host.host.label),
-            one_line(&lane.lane),
-            lane.repeats,
-            one_line(error)
-        ))
-    })
-}
-
-/// The fleet brief for `status --brief`: every host, the counts, and the last pass's findings.
+#[cfg(test)]
 pub fn brief(status: &Status) -> String {
-    let mut rows = fleet(status);
-    if let Some(sweep) = &status.sweep
-        && (!sweep.applied.failures.is_empty()
-            || !sweep.applied.repositories.is_empty()
-            || !sweep.applied.unlinked.is_empty())
-    {
-        rows.push(format!("Cleanup at {} ms: {} failures, {} repository warnings, {} held worktrees. Run `dogsled status` for details.", sweep.finished_ms, sweep.applied.failures.len(), sweep.applied.repositories.len(), sweep.applied.unlinked.len()));
-    }
-    format!("{}\n", rows.join("\n"))
-}
-
-/// The host rows and the work counts, without cleanup findings.
-pub fn fleet(status: &Status) -> Vec<String> {
-    // Keep every host even when the fleet exceeds the prompt's line budget.
-    // Larger fleets share rows; no host disappears into an omitted count.
-    let mut rows = vec![String::new(); status.hosts.len().min(5)];
-    let count = rows.len();
-    for (i, host) in status.hosts.iter().enumerate() {
-        let row = &mut rows[i % count];
-        if !row.is_empty() {
-            row.push_str(" · ");
-        }
-        row.push_str(&summary(host));
-    }
-    rows.extend(status.hosts.iter().flat_map(lane_failures));
-    let finished = status
-        .items
-        .iter()
-        .filter(|i| crate::items::finished(i, &status.hosts))
-        .count();
-    let orphans = if status.orphans.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " · {} orphaned",
-            status
-                .orphans
-                .iter()
-                .filter(|orphan| orphan.status == crate::sweep::CustodyState::Orphaned)
-                .count()
-        )
-    };
-    rows.push(format!(
-        "{} open items{}{orphans} · {} queued · {} stalls. Run `dogsled status` for details.",
-        status
-            .items
-            .iter()
-            .filter(|i| i.closed_ms.is_none())
-            .count(),
-        if finished == 0 {
-            String::new()
-        } else {
-            format!(" ({finished} finished)")
-        },
-        status.queue.iter().filter(|t| t.state == "pending").count(),
-        status
-            .hosts
-            .iter()
-            .filter_map(|h| h.probe.as_ref())
-            .flat_map(|p| &p.agent_panes)
-            .filter(|a| a.stalled_since_ms.is_some())
-            .count()
-    ));
-    rows
-}
-
-/// What the status says about a child the sweep keeps: it is orphaned and unclaimed, or its
-/// custody cannot be proven.
-fn orphan_state(orphan: &crate::sweep::Orphan) -> &'static str {
-    match orphan.status {
-        crate::sweep::CustodyState::Orphaned if orphan.claimed => "orphaned (claimed)",
-        crate::sweep::CustodyState::Orphaned => "orphaned (unclaimed)",
-        crate::sweep::CustodyState::Unknown => "unknown",
-    }
-}
-
-fn item_lines(status: &Status, lines: &mut Vec<String>) {
-    for item in &status.items {
-        if let Some(branch) = &item.branch
-            && !branch.landed
-        {
-            lines.push(format!(
-                "{}: branch {} +{} to land",
-                item.name.as_deref().unwrap_or(&item.pane),
-                branch.name,
-                branch.ahead
-            ));
-        }
-        if item.closed_ms.is_some() {
-            continue;
-        }
-        lines.push(format!(
-            "owner {}: {} {} on {} ({}){}",
-            item.owner_pane,
-            item.kind,
-            item.id,
-            item.host,
-            item.pane,
-            if let Some(orphan) = status.orphans.iter().find(|o| o.item == item.id) {
-                format!(" {}: {}", orphan_state(orphan), one_line(&orphan.reason))
-            } else if crate::items::finished(item, &status.hosts) {
-                format!(
-                    " finished; run {}",
-                    crate::items::close_command(item, &status.hosts)
-                )
-            } else {
-                String::new()
-            }
-        ));
-    }
-}
-
-pub fn render(status: &Status) -> String {
-    let mut lines = crate::holds::render(&status.holds);
-    if let Some(sweep) = &status.sweep {
-        lines.push(format!(
-            "Last cleanup: {} ms (started {} ms)",
-            sweep.finished_ms, sweep.started_ms
-        ));
-        lines.extend(sweep.applied.results.iter().map(|r| format!("  {r}")));
-        lines.extend(
-            sweep
-                .applied
-                .skipped
-                .iter()
-                .map(|s| format!("  skipped: {s}")),
-        );
-        lines.extend(
-            sweep
-                .applied
-                .failures
-                .iter()
-                .map(|f| format!("  failed: {f}")),
-        );
-        lines.extend(
-            sweep
-                .applied
-                .repositories
-                .iter()
-                .map(|w| format!("  warning: {}: {}", w.id, w.detail)),
-        );
-        lines.extend(
-            sweep
-                .applied
-                .unlinked
-                .iter()
-                .map(|h| format!("  hold: {}: {}", h.id, h.detail)),
-        );
-    } else {
-        lines.push("Last cleanup: none".into());
-    }
-    for host in &status.hosts {
-        lines.push(summary(host));
-        lines.extend(lane_failures(host));
-        if let Some(reason) = host
-            .headroom
-            .as_ref()
-            .and_then(|headroom| headroom.reason.as_deref())
-        {
-            lines.push(format!("  {reason}"));
-        }
-        if let Some(error) = &host.error {
-            lines.push(format!("  {error}"));
-        }
-        for job in &host.jobs {
-            lines.push(format!(
-                "  job {} {} exit={} {}",
-                job.id,
-                job.state,
-                job.exit.map_or_else(|| "-".into(), |code| code.to_string()),
-                one_line(&job.cmd.join(" "))
-            ));
-        }
-        if let Some(probe) = &host.probe {
-            for agent in &probe.agent_panes {
-                // The lifecycle owner publishes the state beside the raw terminal state.
-                // The status row shows the derived state, so a Herdr `done` never reads
-                // as a finished handoff.
-                let state = crate::lifecycle::of_agent(
-                    agent,
-                    if host.reachable && host.service == "up" {
-                        crate::lifecycle::Host::Up
-                    } else {
-                        crate::lifecycle::Host::Unavailable
-                    },
-                )
-                .state
-                .as_str();
-                lines.push(format!(
-                    "  {} {} {}{}",
-                    agent.pane,
-                    state,
-                    agent.name.as_deref().unwrap_or(""),
-                    agent.stalled_since_ms.map_or_else(String::new, |_| format!(
-                        " stalled {}",
-                        crate::watchdog::age(
-                            host.sampled_ms
-                                .unwrap_or(0)
-                                .saturating_sub(agent.transcript_modified.unwrap_or(0))
-                        )
-                    ))
-                ));
-            }
-            if !probe.reservations.is_empty() {
-                lines.push(format!("  {} reservations", probe.reservations.len()));
-            }
-        }
-    }
-    item_lines(status, &mut lines);
-    for ticket in status.queue.iter().filter(|t| t.state == "pending") {
-        lines.push(format!(
-            "queued {} owner {}",
-            ticket.id, ticket.request.owner
-        ));
-    }
-    format!("{}\n", lines.join("\n"))
+    crate::observation::display::Display::capture(status).brief(crate::ledger::now_ms())
 }

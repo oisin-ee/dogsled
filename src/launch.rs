@@ -628,9 +628,9 @@ pub(crate) fn release_owned(fleet: &crate::hosts::Fleet) -> Result<()> {
     }
     for mut item in crate::items::list(fleet.ledger)? {
         if item.kind == "job" && item.closed_ms.is_none() {
-            let host = fleet.find(&item.host)?;
+            let host = crate::hosts::command_host(fleet, &item.host)?;
             if !host.is_local() {
-                match fleet.remote::<crate::jobs::Job>(host, &["job".into(), item.id.clone()]) {
+                match fleet.remote::<crate::jobs::Job>(&host, &["job".into(), item.id.clone()]) {
                     Ok(job)
                         if job.id == item.id
                             && job.host == item.host
@@ -674,21 +674,21 @@ fn release_owned_item(fleet: &crate::hosts::Fleet, item: &crate::items::Item) ->
     let Some(launch) = attempt.launch else {
         return Ok(());
     };
-    let host = fleet.find(&item.host)?;
+    let host = crate::hosts::command_host(fleet, &item.host)?;
     let intent = if let Some(intent) = attempt.ordinary_release {
         intent
     } else {
         if item.kind != "job" && (!item.native_done || item.reply.is_none()) {
             return Ok(());
         }
-        let evidence = fleet.ordinary_evidence(host, &item.id)?;
+        let evidence = fleet.ordinary_evidence(&host, &item.id)?;
         if evidence.launch != launch {
             return Err(crate::unit_transport::conflict(
                 "origin execution evidence changed",
             ));
         }
         let retained = if item.kind == "job" {
-            crate::watchdog::item_tail(fleet, item, host)?
+            crate::watchdog::item_tail(fleet, item, &host)?
         } else {
             item.reply
                 .as_ref()
@@ -738,7 +738,10 @@ fn release_refused_job(fleet: &crate::hosts::Fleet, launch: &Launch) -> Result<(
     let intent = if let Some(intent) = attempt.ordinary_release {
         intent
     } else {
-        let evidence = fleet.ordinary_evidence(fleet.find(&launch.host)?, &launch.id)?;
+        let evidence = fleet.ordinary_evidence(
+            &crate::hosts::command_host(fleet, &launch.host)?,
+            &launch.id,
+        )?;
         if evidence.launch != *launch {
             return Err(crate::unit_transport::conflict(
                 "origin execution evidence changed",
@@ -759,7 +762,7 @@ fn acknowledge_ordinary_release(
     finished: Option<u64>,
 ) -> Result<()> {
     let id = &intent.certificate.launch.id;
-    let host = fleet.find(&intent.certificate.launch.host)?;
+    let host = crate::hosts::command_host(fleet, &intent.certificate.launch.host)?;
     if intent.acknowledgement.is_some()
         && crate::admissions::get(fleet.ledger, id)?
             .is_some_and(|attempt| attempt.finished_ms.is_some())
@@ -768,7 +771,7 @@ fn acknowledge_ordinary_release(
     }
     let acknowledgement = match &intent.acknowledgement {
         Some(ack) => ack.clone(),
-        None => fleet.release_ordinary(host, &intent.certificate)?,
+        None => fleet.release_ordinary(&host, &intent.certificate)?,
     };
     crate::admissions::lock(fleet.ledger, id, || {
         let mut attempt = crate::admissions::get(fleet.ledger, id)?

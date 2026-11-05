@@ -23,6 +23,7 @@ use crate::probe::Probe;
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "headroom_wire::Headroom", into = "headroom_wire::Headroom")]
 pub struct Headroom {
     pub host: String,
     /// Free cores: the smaller of `cores × (1 − busy) − reservation_load × reservations`
@@ -34,6 +35,88 @@ pub struct Headroom {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub live_agents: usize,
+}
+
+/// JSON cannot represent infinity. Preserve the admission ordering without conflating a
+/// missing CPU sample with a finite measurement or a missing field.
+mod headroom_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    pub struct Headroom {
+        host: String,
+        headroom: Cores,
+        eligible: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        live_agents: usize,
+    }
+
+    impl From<super::Headroom> for Headroom {
+        fn from(value: super::Headroom) -> Self {
+            Self {
+                host: value.host,
+                headroom: Cores(value.headroom),
+                eligible: value.eligible,
+                reason: value.reason,
+                live_agents: value.live_agents,
+            }
+        }
+    }
+
+    impl From<Headroom> for super::Headroom {
+        fn from(value: Headroom) -> Self {
+            Self {
+                host: value.host,
+                headroom: value.headroom.0,
+                eligible: value.eligible,
+                reason: value.reason,
+                live_agents: value.live_agents,
+            }
+        }
+    }
+
+    struct Cores(f64);
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Limit {
+        Unbounded,
+        NoSample,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Cores(f64),
+        Limit(Limit),
+        LegacyNoSample(()),
+    }
+
+    impl Serialize for Cores {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let wire = if self.0.is_finite() {
+                Wire::Cores(self.0)
+            } else if self.0 == f64::NEG_INFINITY {
+                Wire::Limit(Limit::NoSample)
+            } else if self.0 == f64::INFINITY {
+                Wire::Limit(Limit::Unbounded)
+            } else {
+                return Err(serde::ser::Error::custom("headroom cannot be NaN"));
+            };
+            wire.serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Cores {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            Ok(Self(match Wire::deserialize(deserializer)? {
+                Wire::Cores(value) => value,
+                Wire::Limit(Limit::NoSample) | Wire::LegacyNoSample(()) => f64::NEG_INFINITY,
+                Wire::Limit(Limit::Unbounded) => f64::INFINITY,
+            }))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

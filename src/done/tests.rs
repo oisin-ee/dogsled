@@ -711,7 +711,41 @@ fn closed_handoff_deleted_local_landed_branch_settles_once() {
     repo.git(&["branch", "-d", "feature"]);
     repo.mark(&ledger);
 
+    let origin = self::ledger();
+    let retained = list(&ledger).unwrap().remove(0);
+    crate::items::record(
+        &origin,
+        crate::items::Item {
+            id: "launch".into(),
+            kind: "agent".into(),
+            host: "execution".into(),
+            pane: retained.pane.clone(),
+            closed_ms: retained.closed_ms,
+            branch: retained.branch.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let policy = crate::config::Policy::default();
+    let node = crate::node::Node::new(&repo, &ledger, &policy, "/home");
+    let mut observations = crate::observation::peers::Branches::default();
+    assert_eq!(observations.observe(&node, &[], 3).unwrap(), []);
+    crate::observation::peers::import(&origin, "execution", &observations.results()).unwrap();
+    assert_eq!(
+        crate::items::list(&origin).unwrap()[0].branch_checked_ms,
+        Some(3)
+    );
+    repo.calls.lock().unwrap().clear();
     handoff(&ledger, &repo, 3).unwrap();
+    assert_eq!(
+        *repo.calls.lock().unwrap(),
+        ["herdr agent list"],
+        "handoff must not repeat closed-branch Git observation"
+    );
+    assert_eq!(
+        list(&ledger).unwrap()[0].branch,
+        crate::items::list(&origin).unwrap()[0].branch
+    );
     let branch = list(&ledger).unwrap().remove(0).branch.unwrap();
     assert!(branch.landed);
     assert_eq!(branch.ahead, 0);
@@ -742,7 +776,41 @@ fn closed_handoff_pushed_only_branch_still_has_one_commit_to_land() {
     repo.git(&["branch", "-D", "feature"]);
     repo.mark(&ledger);
 
+    let origin = self::ledger();
+    let retained = list(&ledger).unwrap().remove(0);
+    crate::items::record(
+        &origin,
+        crate::items::Item {
+            id: "launch".into(),
+            kind: "agent".into(),
+            host: "execution".into(),
+            pane: retained.pane.clone(),
+            closed_ms: retained.closed_ms,
+            branch: retained.branch.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let policy = crate::config::Policy::default();
+    let node = crate::node::Node::new(&repo, &ledger, &policy, "/home");
+    let mut observations = crate::observation::peers::Branches::default();
+    assert_eq!(observations.observe(&node, &[], 3).unwrap(), []);
+    crate::observation::peers::import(&origin, "execution", &observations.results()).unwrap();
+    assert_eq!(
+        crate::items::list(&origin).unwrap()[0].branch_checked_ms,
+        Some(3)
+    );
+    repo.calls.lock().unwrap().clear();
     handoff(&ledger, &repo, 3).unwrap();
+    assert_eq!(
+        *repo.calls.lock().unwrap(),
+        ["herdr agent list"],
+        "handoff must not repeat closed-branch Git observation"
+    );
+    assert_eq!(
+        list(&ledger).unwrap()[0].branch,
+        crate::items::list(&origin).unwrap()[0].branch
+    );
     let branch = list(&ledger).unwrap().remove(0).branch.unwrap();
     assert!(!branch.landed);
     assert_eq!(branch.ahead, 1);
@@ -754,7 +822,41 @@ fn closed_handoff_missing_both_refs_settles_and_leaves_the_board() {
     let repo = BranchRepo::new();
     repo.mark(&ledger);
 
+    let origin = self::ledger();
+    let retained = list(&ledger).unwrap().remove(0);
+    crate::items::record(
+        &origin,
+        crate::items::Item {
+            id: "launch".into(),
+            kind: "agent".into(),
+            host: "execution".into(),
+            pane: retained.pane.clone(),
+            closed_ms: retained.closed_ms,
+            branch: retained.branch.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let policy = crate::config::Policy::default();
+    let node = crate::node::Node::new(&repo, &ledger, &policy, "/home");
+    let mut observations = crate::observation::peers::Branches::default();
+    assert_eq!(observations.observe(&node, &[], 3).unwrap(), []);
+    crate::observation::peers::import(&origin, "execution", &observations.results()).unwrap();
+    assert_eq!(
+        crate::items::list(&origin).unwrap()[0].branch_checked_ms,
+        Some(3)
+    );
+    repo.calls.lock().unwrap().clear();
     handoff(&ledger, &repo, 3).unwrap();
+    assert_eq!(
+        *repo.calls.lock().unwrap(),
+        ["herdr agent list"],
+        "handoff must not repeat closed-branch Git observation"
+    );
+    assert_eq!(
+        list(&ledger).unwrap()[0].branch,
+        crate::items::list(&origin).unwrap()[0].branch
+    );
     let mark = list(&ledger).unwrap().remove(0);
     let branch = mark.branch.as_ref().unwrap();
     assert!(branch.landed);
@@ -762,13 +864,7 @@ fn closed_handoff_missing_both_refs_settles_and_leaves_the_board() {
 
     let status = crate::commands::Status {
         hosts: vec![],
-        items: vec![crate::items::Item {
-            id: "launch".into(),
-            kind: "agent".into(),
-            closed_ms: mark.closed_ms,
-            branch: mark.branch,
-            ..Default::default()
-        }],
+        items: crate::items::list(&origin).unwrap(),
         queue: vec![],
         orphans: vec![],
         sweep: None,
@@ -801,7 +897,41 @@ fn handoff_local_ref_takes_precedence_over_a_landed_origin_ref() {
     ]);
     repo.mark(&ledger);
 
+    let origin = self::ledger();
+    let retained = list(&ledger).unwrap().remove(0);
+    crate::items::record(
+        &origin,
+        crate::items::Item {
+            id: "launch".into(),
+            kind: "agent".into(),
+            host: "execution".into(),
+            pane: retained.pane.clone(),
+            closed_ms: retained.closed_ms,
+            branch: retained.branch.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let policy = crate::config::Policy::default();
+    let node = crate::node::Node::new(&repo, &ledger, &policy, "/home");
+    let mut observations = crate::observation::peers::Branches::default();
+    assert_eq!(observations.observe(&node, &[], 3).unwrap(), []);
+    crate::observation::peers::import(&origin, "execution", &observations.results()).unwrap();
+    assert_eq!(
+        crate::items::list(&origin).unwrap()[0].branch_checked_ms,
+        Some(3)
+    );
+    repo.calls.lock().unwrap().clear();
     handoff(&ledger, &repo, 3).unwrap();
+    assert_eq!(
+        *repo.calls.lock().unwrap(),
+        ["herdr agent list"],
+        "handoff must not repeat closed-branch Git observation"
+    );
+    assert_eq!(
+        list(&ledger).unwrap()[0].branch,
+        crate::items::list(&origin).unwrap()[0].branch
+    );
     let branch = list(&ledger).unwrap().remove(0).branch.unwrap();
     assert!(!branch.landed);
     assert_eq!(branch.ahead, 1);

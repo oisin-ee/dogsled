@@ -77,6 +77,7 @@ fn send_reaches_only_a_registered_reader_and_ack_ends_redelivery() {
             ("w1:p2", "term_work", "worker"),
         ],
     );
+    let _publisher = super::observation::resolved(&rig);
     // No reader yet: nothing is stored, and the sender hears why.
     let (code, refused) = rig.json(&["send", "worker", "--message", "hi"]);
     assert_eq!(code, 2);
@@ -214,6 +215,8 @@ esac
     let remote = rig.host_at("remote-state");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
+    rig.ingest_peers();
+    let publisher = super::observation::resolved(&rig);
 
     let (code, refused) = rig.json(&["send", "far", "--message", "hi"]);
     assert_eq!(code, 2);
@@ -224,10 +227,12 @@ esac
             .contains("no dogsled inbox reader"),
         "{refused}"
     );
+    drop(publisher);
     rig.put_remote_state(
         &["state", "inbox-reader", "term_far", "--put"],
         &json!({"harness":"pi","pane":"w9:p1","registered_ms":1}),
     );
+    let publisher = super::observation::resolved(&rig);
     let (code, sent) = rig.json(&["send", "far", "--host", "netcup", "--message", "it's done"]);
     assert_eq!(code, 0, "{sent}");
     assert_eq!(sent["host_label"], "netcup");
@@ -243,6 +248,7 @@ esac
     records[0]["state"] = json!("failed");
     records[0]["reason"] = json!("its terminal is gone");
     records[0]["done_ms"] = json!(now());
+    drop(publisher);
     rig.put_remote_state(&["state", "inbox", "term_far", "--put"], &records);
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
@@ -287,6 +293,8 @@ esac
     let remote = rig.host_at("remote-state");
     rig.put("remote.json", &remote);
     agents(&rig, "state", &[("w1:p1", "term_lead", "lead")]);
+    rig.ingest_peers();
+    let publisher = super::observation::resolved(&rig);
 
     let mut seen = Vec::new();
     for args in [
@@ -298,6 +306,7 @@ esac
         seen.push(String::from_utf8_lossy(&out.stdout).into_owned());
         seen.push(String::from_utf8_lossy(&out.stderr).into_owned());
     }
+    drop(publisher);
     let (_, claimed) = as_pane(&rig, "w1:p1", &["inbox", "claim", "--harness", "pi"]);
     seen.push(claimed.to_string());
     // The peer really failed: the send failed with a fixed message, not silently skipped.
@@ -354,6 +363,7 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
         host["probe"]["agent_panes"][2]["done"] = json!(true);
         rig.put_host(&host);
         rig.put_items(&json!([{"id":"child","kind":"agent","host":"local","pane":"w1:p3","owner_pane":"w1:p2","name":"child","created_ms":1,"closed_ms":null}]));
+        let publisher = super::observation::resolved(&rig);
         assert_eq!(
             rig.json(&["send", "owner", "--message", "please review"]).0,
             0
@@ -383,8 +393,10 @@ fn stop_hook_combines_child_reminder_with_inbox_and_deduplicates_both() {
                 .contains("Before you stop")
         );
         // A different child state produces a reminder even with an empty inbox.
+        drop(publisher);
         host["probe"]["agent_panes"][2]["worktree"]["ahead"] = json!(1);
         rig.put_host(&host);
+        let _publisher = super::observation::resolved(&rig);
         let value: Value = serde_json::from_str(&hook(&rig, harness, "Stop")).unwrap();
         assert!(
             value["reason"]
@@ -414,6 +426,7 @@ fn claude_and_codex_hooks_hand_over_the_inbox_without_typing() {
     let mut host: Value = rig.host();
     host["probe"]["agent_panes"][1]["agent"] = json!("claude");
     rig.put_host(&host);
+    let _publisher = super::observation::resolved(&rig);
     // The first hook registers the reader; an empty inbox prints nothing, so a `Stop` with
     // `stop_hook_active` ends the turn as it would.
     assert_eq!(hook(&rig, "claude", "Stop"), "");

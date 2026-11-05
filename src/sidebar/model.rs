@@ -106,7 +106,8 @@ impl Card {
 }
 
 /// How close a host is to the limit admission enforces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Level {
     Ok,
     /// Close to the limit.
@@ -116,7 +117,7 @@ pub enum Level {
 }
 
 /// One host of the Hosts panel, from the same report `dogsled status` prints.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostRow {
     pub label: String,
     /// `11/12`; see [`crate::commands::HostBrief`].

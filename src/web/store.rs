@@ -101,7 +101,7 @@ impl Store {
     /// The questions that wait for an answer, oldest first.
     pub async fn list(&self) -> Result<Vec<Pending>> {
         let ledger = self.ledger.clone();
-        run(move || crate::store::read(&ledger, records::pending)).await
+        run(move || pending(&ledger)).await
     }
 
     /// Keep the owner's answers and wake the long poll of the question.
@@ -280,6 +280,10 @@ impl Store {
 /// The result of work that reads or writes the question files, run on a
 /// blocking thread so it never holds a runtime thread while it waits for the
 /// disk.
+pub(crate) fn pending(ledger: &Ledger) -> Result<Vec<Pending>> {
+    crate::store::read(ledger, records::pending)
+}
+
 async fn run<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     match tokio::task::spawn_blocking(work).await {
         Ok(result) => result,

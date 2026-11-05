@@ -338,43 +338,52 @@ impl<'a> Node<'a> {
     }
 
     pub fn snapshot(&self) -> Result<SnapshotReport> {
-        Ok(SnapshotReport {
-            service_lanes: crate::store::read(self.ledger, crate::tables::failing_lanes)?,
-            snapshot: crate::host_store::snapshot(self.ledger)?,
-            running: Some(self.ledger.locked("service")?),
-            handoffs: crate::done::list(self.ledger)?,
-            job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
-            request_validity: Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION),
-            placement_replay: Some(PLACEMENT_VERSION),
-            holds: crate::holds::local(
-                self.ledger,
-                crate::hosts::LOCAL,
-                crate::ledger::now_ms(),
-                self.thresholds.reservation_ttl_ms,
-            )?,
-        })
+        crate::observation::read::local(
+            &crate::observation::ipc::Client::at(&self.ledger.dir).current()?,
+            "host",
+        )
     }
 
-    /// Publication never waits for prompts, notifications, or cleanup.
-    pub fn tick(&self, now: u64) -> Result<()> {
-        let mut probe = observed_probe(self.ledger, self.shell, self.home)?;
+    /// Collection never waits for prompts, notifications, or cleanup. Return the exact
+    /// persisted sample so publication cannot accidentally reread a newer reservation write.
+    #[cfg(test)]
+    pub(crate) fn tick(&self, now: u64) -> Result<Snapshot> {
+        self.tick_with_terminals(now, probe::terminals(self.shell)?)
+    }
+
+    pub(crate) fn tick_with_terminals(
+        &self,
+        now: u64,
+        terminals: probe::Terminals,
+    ) -> Result<Snapshot> {
+        let probe = probe::local_with_terminals(self.shell, self.home, terminals)?;
+        let mut probe = observe_probe(self.ledger, self.shell, probe)?;
         self.ledger.with_lock("host", || {
             let previous: Option<Snapshot> = crate::host_store::snapshot(self.ledger)?;
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
             if probe.busy.is_none() {
                 probe.busy = busy_since(&probe, previous.as_ref().map(|s| &s.probe));
+                if probe.busy.is_none()
+                    && let Some(previous) = &previous
+                    && probe
+                        .cpu_ticks
+                        .zip(previous.probe.cpu_ticks)
+                        .is_some_and(|(current, baseline)| current.total == baseline.total)
+                {
+                    probe.busy = previous.probe.busy;
+                    probe.cpu_ticks = previous.probe.cpu_ticks;
+                }
             }
             probe.reservations = self.live_reservations(now)?;
             let headroom = evaluate(&probe, &self.thresholds);
             self.append_sample(&probe, &headroom, now)?;
-            crate::host_store::put_snapshot(
-                self.ledger,
-                &Snapshot {
-                    sampled_ms: now,
-                    probe,
-                    jobs: crate::jobs::list(self.ledger)?,
-                },
-            )
+            let snapshot = Snapshot {
+                sampled_ms: now,
+                probe,
+                jobs: crate::jobs::list(self.ledger)?,
+            };
+            crate::host_store::put_snapshot(self.ledger, &snapshot)?;
+            Ok(snapshot)
         })
     }
 
@@ -397,11 +406,23 @@ impl<'a> Node<'a> {
     }
 
     fn live_reservations(&self, now: u64) -> Result<Vec<Reservation>> {
-        let reservations = self
-            .ledger
-            .reservations(now, self.thresholds.reservation_ttl_ms)?;
-        crate::job_store::put_reservations(self.ledger, &reservations)?;
-        Ok(reservations)
+        self.prune_reservations(now)?;
+        self.ledger
+            .reservations(now, self.thresholds.reservation_ttl_ms)
+    }
+
+    /// Prune authoritative expiry values in one transaction, never a previously read set.
+    /// A release or creation committed during collection must not be overwritten.
+    pub(crate) fn prune_reservations(&self, now: u64) -> Result<()> {
+        let ttl = self.thresholds.reservation_ttl_ms;
+        let cutoff = now.checked_sub(ttl).map(crate::rows::integer).transpose()?;
+        crate::store::write(self.ledger, |tx| {
+            tx.execute(
+                "DELETE FROM placements WHERE ?1 OR created_ms <= ?2",
+                rusqlite::params![ttl == 0, cutoff],
+            )?;
+            Ok(())
+        })
     }
 
     /// Preparation fencing precedes the short capacity transaction. No lifecycle work
@@ -694,7 +715,10 @@ pub(crate) fn expire_grants(ledger: &Ledger, now: u64) -> Result<()> {
 
 /// Observe the same lifecycle facts for publication and host-side close verification.
 pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<Probe> {
-    let mut probe = probe::local(shell, home)?;
+    observe_probe(ledger, shell, probe::local(shell, home)?)
+}
+
+fn observe_probe(ledger: &Ledger, shell: &dyn Shell, mut probe: Probe) -> Result<Probe> {
     // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
     // Reading the last snapshot without the lock is safe: writes replace it atomically.
     let last: Option<Snapshot> = crate::host_store::snapshot(ledger)?;
@@ -754,6 +778,41 @@ mod tests {
             free_cores: 2.5,
             eligible: true,
         }
+    }
+
+    #[test]
+    fn zero_delta_capture_keeps_busy_and_cpu_baseline() {
+        use crate::config::Policy;
+        use crate::shell::Fake;
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let shell = Fake::new();
+        shell
+            .on("herdr pane list", r#"{"result":{"panes":[]}}"#)
+            .on("herdr agent list", r#"{"result":{"agents":[]}}"#)
+            .on("read /proc/stat", "cpu 20 0 0 80 0 0 0 0 0 0")
+            .on("read /proc/loadavg", "0.5 0.2 0.1 1/10 42")
+            .on(
+                "read /proc/meminfo",
+                "MemTotal: 100 kB\nMemAvailable: 75 kB",
+            )
+            .on("df -Pk /home", "FS 1000 500 400 60% /");
+        let policy = Policy::default();
+        let node = Node::new(&shell, &ledger, &policy, "/home");
+        assert_eq!(node.tick(100).unwrap().probe.busy, None);
+        shell.on("read /proc/stat", "cpu 30 0 0 90 0 0 0 0 0 0");
+        let measured = node.tick(200).unwrap();
+        assert_eq!(measured.probe.busy, Some(0.5));
+        // Total ticks have not advanced, even though individual counters moved.
+        shell.on("read /proc/stat", "cpu 31 0 0 89 0 0 0 0 0 0");
+        let retained = node.tick(250).unwrap();
+        assert_eq!(retained.probe.busy, measured.probe.busy);
+        assert_eq!(retained.sampled_ms, 250);
+        assert_eq!(retained.probe.cpu_ticks, measured.probe.cpu_ticks);
+        shell.on("read /proc/stat", "cpu 40 0 0 100 0 0 0 0 0 0");
+        let next = node.tick(300).unwrap();
+        assert_eq!(next.probe.busy, Some(0.5));
+        assert_eq!(next.sampled_ms, 300);
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
     }
 
     #[test]

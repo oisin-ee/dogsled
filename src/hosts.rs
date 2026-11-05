@@ -10,6 +10,7 @@ use crate::shell::{Shell, quote};
 use serde::{Deserialize, Serialize};
 
 pub const LOCAL: &str = "local";
+#[cfg(test)]
 const CACHE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,16 +281,154 @@ pub(crate) struct Cached {
     pub(crate) job_validity: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+enum Resolution {
+    Published(std::sync::Arc<crate::observation::Published>),
+    Cold,
+    Producer,
+}
+
+#[derive(Debug, Clone)]
 pub struct Fleet<'a> {
     pub shell: &'a dyn Shell,
     pub ledger: &'a Ledger,
     pub policy: &'a Policy,
     pub home: String,
     pub hosts: Vec<Host>,
+    resolution: Resolution,
 }
 
-impl<'a> Fleet<'a> {
+impl From<crate::node::SnapshotReport> for Cached {
+    fn from(report: crate::node::SnapshotReport) -> Self {
+        Self {
+            fetched_ms: report
+                .snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.sampled_ms),
+            source: Vec::new(),
+            snapshot: report.snapshot,
+            reachable: true,
+            available: true,
+            running: report.running,
+            handoffs: report.handoffs,
+            holds: report.holds,
+            service_lanes: report.service_lanes,
+            job_validity: report.job_validity,
+            ..Self::default()
+        }
+    }
+}
+
+/// Resolve an explicit command target without observation when it is already known.
+pub(crate) fn command_host(fleet: &Fleet<'_>, host: &str) -> Result<Host> {
+    if matches!(fleet.resolution, Resolution::Producer) {
+        return Err(Error::Invalid(
+            "producer fleet cannot resolve command hosts".into(),
+        ));
+    }
+    if matches!(fleet.resolution, Resolution::Published(_)) {
+        return ActionFleet::from_fleet(fleet)?.find(host).cloned();
+    }
+    if let Ok(host) = fleet.find(host) {
+        return Ok(host.clone());
+    }
+    ActionFleet::from_fleet(fleet)?.find(host).cloned()
+}
+
+/// A recorded selection carries its immutable transport target through cold recovery.
+pub(crate) fn request_host(fleet: &Fleet<'_>, request: &str, host: &str) -> Result<Host> {
+    if let Some(selected) =
+        crate::admissions::get(fleet.ledger, request)?.and_then(|attempt| attempt.host)
+        && selected.id == host
+    {
+        return Ok(selected);
+    }
+    command_host(fleet, host)
+}
+
+/// Observation capabilities are separate from the effect-only fleet.
+#[derive(Debug)]
+pub(crate) struct ObserverFleet<'a>(pub(crate) Fleet<'a>);
+
+impl<'a> std::ops::Deref for ObserverFleet<'a> {
+    type Target = Fleet<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Action selection always retains one complete publication. Effects cannot observe status.
+#[derive(Debug)]
+pub(crate) struct ActionFleet<'a> {
+    fleet: Fleet<'a>,
+    pub(crate) published: std::sync::Arc<crate::observation::Published>,
+}
+
+impl<'a> std::ops::Deref for ActionFleet<'a> {
+    type Target = Fleet<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fleet
+    }
+}
+
+impl<'a> ActionFleet<'a> {
+    pub(crate) fn new(
+        shell: &'a dyn Shell,
+        ledger: &'a Ledger,
+        policy: &'a Policy,
+        home: String,
+        published: std::sync::Arc<crate::observation::Published>,
+    ) -> Result<Self> {
+        let reports: Vec<HostReport> = crate::observation::read::view(&published, "hosts")?;
+        Ok(Self {
+            fleet: Fleet {
+                shell,
+                ledger,
+                policy,
+                home,
+                hosts: reports.into_iter().map(|report| report.host).collect(),
+                resolution: Resolution::Published(std::sync::Arc::clone(&published)),
+            },
+            published,
+        })
+    }
+
+    pub(crate) fn from_fleet(fleet: &Fleet<'a>) -> Result<Self> {
+        match &fleet.resolution {
+            Resolution::Published(published) => Self::new(
+                fleet.shell,
+                fleet.ledger,
+                fleet.policy,
+                fleet.home.clone(),
+                std::sync::Arc::clone(published),
+            ),
+            Resolution::Cold => {
+                Self::current(fleet.shell, fleet.ledger, fleet.policy, fleet.home.clone())
+            }
+            Resolution::Producer => Err(Error::Invalid(
+                "producer fleet cannot resolve command hosts".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn current(
+        shell: &'a dyn Shell,
+        ledger: &'a Ledger,
+        policy: &'a Policy,
+        home: String,
+    ) -> Result<Self> {
+        let published = crate::observation::ipc::Client::at(&ledger.dir).current()?;
+        Self::new(shell, ledger, policy, home, std::sync::Arc::new(published))
+    }
+
+    pub(crate) fn reports(&self) -> Result<Vec<HostReport>> {
+        crate::observation::read::view(&self.published, "hosts")
+    }
+}
+
+impl<'a> ObserverFleet<'a> {
     pub fn discover(
         shell: &'a dyn Shell,
         ledger: &'a Ledger,
@@ -299,13 +438,43 @@ impl<'a> Fleet<'a> {
         let out = shell.run_ok("herdr", &["machine".into(), "list".into(), "--json".into()])?;
         let mut hosts = vec![Host::local()];
         hosts.extend(parse_machine_list(&out.stdout)?);
-        Ok(Self {
+        Ok(Self(Fleet::producer(shell, ledger, policy, home, hosts)))
+    }
+}
+
+impl<'a> Fleet<'a> {
+    pub(crate) fn cold(
+        shell: &'a dyn Shell,
+        ledger: &'a Ledger,
+        policy: &'a Policy,
+        home: String,
+        hosts: Vec<Host>,
+    ) -> Self {
+        Self {
             shell,
             ledger,
             policy,
             home,
             hosts,
-        })
+            resolution: Resolution::Cold,
+        }
+    }
+
+    pub(crate) fn producer(
+        shell: &'a dyn Shell,
+        ledger: &'a Ledger,
+        policy: &'a Policy,
+        home: String,
+        hosts: Vec<Host>,
+    ) -> Self {
+        Self {
+            shell,
+            ledger,
+            policy,
+            home,
+            hosts,
+            resolution: Resolution::Producer,
+        }
     }
 
     pub fn thresholds(&self) -> Thresholds {
@@ -654,135 +823,133 @@ impl<'a> Fleet<'a> {
         }
         Ok(outcome)
     }
+}
 
+impl ObserverFleet<'_> {
+    /// Temporary legacy assembly for the sidebar and portal readers.
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
-        let reports: Result<Vec<HostReport>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = self
-                .hosts
-                .iter()
-                .map(|host| (host, scope.spawn(move || self.read_host(host, now))))
-                .collect();
-            handles
-                .into_iter()
-                .map(|(host, handle)| {
-                    handle
-                        .join()
-                        .map_err(|_| Error::Invalid(format!("{} status worker failed", host.label)))
-                })
-                .collect()
-        });
         self.shell.budget().remaining("fleet status")?;
-        let reports = reports?;
-        crate::drop::reconcile(self, &reports, now)?;
-        Ok(reports)
+        Ok(self
+            .hosts
+            .iter()
+            .map(|host| self.read_host(host, now))
+            .collect())
     }
 
     fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
-            self.node().snapshot().map(|report| Cached {
-                service_lanes: report.service_lanes,
-                fetched_ms: now,
-                source: Vec::new(),
-                snapshot: report.snapshot,
-                reachable: true,
-                available: true,
-                running: report.running,
-                handoffs: report.handoffs,
-                holds: report.holds,
-                error: None,
-                failure: None,
-                retry: crate::backoff::Backoff::default(),
-                job_validity: report.job_validity,
-            })
+            (|| {
+                crate::observation::collect::host(
+                    &self.node(),
+                    crate::host_store::snapshot(self.ledger)?,
+                    self.ledger.locked("service")?,
+                    now,
+                )
+            })()
+            .map(Cached::from)
         } else {
-            self.cached_peer(host, now)
+            crate::host_store::peer(self.ledger, &host.id).map(Option::unwrap_or_default)
         };
-        let cached = result.unwrap_or_else(|e| Cached {
-            service_lanes: Vec::new(),
+        let cached = result.unwrap_or_else(|error| Cached {
             fetched_ms: now,
-            source: Vec::new(),
-            snapshot: None,
-            reachable: false,
-            available: false,
-            running: None,
-            handoffs: Vec::new(),
-            holds: Vec::new(),
-            error: None,
-            failure: Some(Failure::of(&e)),
-            retry: crate::backoff::Backoff::default(),
-            job_validity: None,
+            failure: Some(Failure::of(&error)),
+            ..Cached::default()
         });
-        // Only the category describes an unreachable host. This also covers a cache written
-        // before categories existed, which may still hold raw ssh text.
-        let failure = (!cached.reachable).then(|| cached.failure.unwrap_or(Failure::Other));
-        let error = failure.map_or_else(|| cached.error.clone(), |f| Some(f.to_string()));
-        let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
-        // Old peers have no liveness field. Only they retain the age-based fallback.
-        let running = cached.reachable && cached.running.unwrap_or(fresh);
-        let sampled_ms = cached.snapshot.as_ref().map(|s| s.sampled_ms);
-        let jobs = cached
-            .snapshot
-            .as_ref()
-            .map_or_else(Vec::new, |s| s.jobs.clone());
-        let probe = cached.snapshot.map(|s| {
-            let mut probe = s.probe;
-            probe.host.clone_from(&host.id);
-            probe.label.clone_from(&host.label);
-            probe
-                .reservations
-                .retain(|r| now.saturating_sub(r.created_ms) < self.policy.reservation_ttl_ms);
-            probe
-        });
-        let headroom = probe.as_ref().map(|probe| {
-            let mut headroom = evaluate(probe, &self.thresholds());
-            if !running || !fresh {
-                headroom.eligible = false;
-                let reason = if let Some(failure) = failure {
-                    unreachable(failure)
-                } else if running {
-                    "snapshot: stale".into()
-                } else {
-                    "service: down".into()
-                };
-                headroom.reason = Some(sampled_ms.map_or_else(
-                    || reason.clone(),
-                    |sampled| {
-                        format!(
-                            "{reason} (last snapshot {} ago)",
-                            crate::watchdog::age(now.saturating_sub(sampled))
-                        )
-                    },
-                ));
-            }
-            headroom
-        });
-        HostReport {
-            service_lanes: cached.service_lanes,
-            host: host.clone(),
-            service: if running { "up" } else { "down" }.into(),
-            reachable: cached.reachable,
-            sampled_ms,
-            probe,
-            headroom,
-            error,
-            failure,
-            jobs,
-            handoffs: cached.handoffs,
-            holds: cached
-                .holds
-                .into_iter()
-                .map(|hold| hold.on_host(&host.id))
-                .collect(),
-            retry_ms: (!cached.reachable && cached.retry.attempts > 0)
-                .then_some(cached.retry.next_ms),
-            job_validity: cached.job_validity,
+        self.cached_report(host, cached, now)
+    }
+}
+
+pub(crate) fn cached_report(
+    host: &Host,
+    cached: Cached,
+    now: u64,
+    limits: &Thresholds,
+) -> HostReport {
+    // Only the category describes an unreachable host. This also covers a cache written
+    // before categories existed, which may still hold raw ssh text.
+    let failure = (!cached.reachable).then(|| cached.failure.unwrap_or(Failure::Other));
+    let error = failure.map_or_else(|| cached.error.clone(), |f| Some(f.to_string()));
+    let fresh = cached.available && cached.snapshot.as_ref().is_some_and(|s| s.fresh(now));
+    // Old peers have no liveness field. Only they retain the age-based fallback.
+    let running = cached.reachable && cached.running.unwrap_or(fresh);
+    let sampled_ms = cached.snapshot.as_ref().map(|s| s.sampled_ms);
+    let jobs = cached
+        .snapshot
+        .as_ref()
+        .map_or_else(Vec::new, |s| s.jobs.clone());
+    let probe = cached.snapshot.map(|s| {
+        let mut probe = s.probe;
+        probe.host.clone_from(&host.id);
+        probe.label.clone_from(&host.label);
+        probe
+            .reservations
+            .retain(|r| now.saturating_sub(r.created_ms) < limits.reservation_ttl_ms);
+        probe
+    });
+    let headroom = probe.as_ref().map(|probe| {
+        let mut headroom = evaluate(probe, limits);
+        if !running || !fresh {
+            headroom.eligible = false;
+            let reason = if let Some(failure) = failure {
+                unreachable(failure)
+            } else if running {
+                "snapshot: stale".into()
+            } else {
+                "service: down".into()
+            };
+            headroom.reason = Some(sampled_ms.map_or_else(
+                || reason.clone(),
+                |sampled| {
+                    format!(
+                        "{reason} (last snapshot {} ago)",
+                        crate::watchdog::age(now.saturating_sub(sampled))
+                    )
+                },
+            ));
         }
+        headroom
+    });
+    HostReport {
+        service_lanes: cached.service_lanes,
+        host: host.clone(),
+        service: if running { "up" } else { "down" }.into(),
+        reachable: cached.reachable,
+        sampled_ms,
+        probe,
+        headroom,
+        error,
+        failure,
+        jobs,
+        handoffs: cached.handoffs,
+        holds: cached
+            .holds
+            .into_iter()
+            .map(|hold| hold.on_host(&host.id))
+            .collect(),
+        retry_ms: (!cached.reachable && cached.retry.attempts > 0).then_some(cached.retry.next_ms),
+        job_validity: cached.job_validity,
+    }
+}
+
+impl Fleet<'_> {
+    pub(crate) fn cached_report(&self, host: &Host, cached: Cached, now: u64) -> HostReport {
+        cached_report(host, cached, now, &self.thresholds())
     }
 
-    /// Clear `host`'s backoff and cache so the next status reads it at once ("retry now").
-    pub fn retry_now(&self, host: &Host) -> Result<()> {
+    /// Explicit command: reset backoff, wake the observer, and await its publication.
+    /// Neither this command nor the status read starts SSH.
+    pub fn retry_now(&self, host: &Host) -> Result<HostReport> {
         if host.is_local() {
-            return Ok(());
+            let reports: Vec<HostReport> = crate::observation::read::view(
+                &crate::observation::ipc::Client::at(&self.ledger.dir).current()?,
+                "hosts",
+            )?;
+            return reports
+                .into_iter()
+                .find(|report| report.host.id == host.id)
+                .ok_or_else(|| {
+                    Error::Invalid("observation unavailable: local host was not published".into())
+                });
         }
         self.ledger.with_lock(&Self::peer_lock(host), || {
             crate::store::write(self.ledger, |tx| {
@@ -793,7 +960,14 @@ impl<'a> Fleet<'a> {
                 }
                 Ok(())
             })
-        })
+        })?;
+        let client = crate::observation::ipc::Client::at(&self.ledger.dir);
+        let subscription = client.subscribe().map_err(|_| {
+            Error::Invalid(
+                "backoff reset; observation unavailable because serve is not running".into(),
+            )
+        })?;
+        crate::observation::peers::retry_published(&client, subscription, &host.id)
     }
 
     fn peer_lock(host: &Host) -> String {
@@ -812,71 +986,6 @@ impl<'a> Fleet<'a> {
             .collect::<String>();
         format!("peer-{key}")
     }
-
-    fn cached_peer(&self, host: &Host, now: u64) -> Result<Cached> {
-        let source = self.remote_argv(host, &["snapshot".into()]);
-        // Serialize the SSH process for this peer, never all host database writes.
-        self.ledger.with_lock(&Self::peer_lock(host), || {
-            let previous =
-                crate::host_store::peer(self.ledger, &host.id)?.filter(|c| c.source == source);
-            if let Some(cached) = &previous
-                && now.saturating_sub(cached.fetched_ms) < CACHE_MS
-            {
-                return Ok(cached.clone());
-            }
-            if let Some(cached) = &previous
-                && !cached.retry.ready(now)
-            {
-                return Ok(cached.clone());
-            }
-            let mut retry = previous.as_ref().map(|c| c.retry).unwrap_or_default();
-            let previous_holds = previous
-                .as_ref()
-                .map_or_else(Vec::new, |cached| cached.holds.clone());
-            let mut cached = match self
-                .remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])
-            {
-                Ok(Some(report)) => Cached {
-                    available: report.snapshot.is_some(),
-                    snapshot: report
-                        .snapshot
-                        .or_else(|| previous.and_then(|c| c.snapshot)),
-                    reachable: true,
-                    running: report.running,
-                    handoffs: report.handoffs,
-                    holds: report.holds,
-                    service_lanes: report.service_lanes,
-                    job_validity: report.job_validity,
-                    ..Cached::default()
-                },
-                Ok(None) => Cached {
-                    snapshot: previous.and_then(|c| c.snapshot),
-                    reachable: true,
-                    error: Some("host snapshot is missing; service: down".into()),
-                    ..Cached::default()
-                },
-                Err(e) => Cached {
-                    snapshot: previous.and_then(|c| c.snapshot),
-                    holds: previous_holds
-                        .into_iter()
-                        .map(crate::holds::Hold::unavailable)
-                        .collect(),
-                    failure: Some(Failure::of(&e)),
-                    ..Cached::default()
-                },
-            };
-            if cached.reachable {
-                retry.reset();
-            } else {
-                retry.fail(now, &host.id);
-            }
-            cached.fetched_ms = now;
-            cached.source.clone_from(&source);
-            cached.retry = retry;
-            crate::host_store::put_peer(self.ledger, &host.id, &cached)?;
-            Ok(cached)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -886,6 +995,19 @@ mod tests {
     use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
+
+    fn observed_status(fleet: &Fleet<'_>, now: u64) -> Result<Vec<HostReport>> {
+        for host in fleet.hosts.iter().filter(|host| !host.is_local()) {
+            crate::observation::peers::Ingestion::default().refresh(
+                fleet,
+                host,
+                now,
+                Vec::new(),
+                false,
+            )?;
+        }
+        ObserverFleet(fleet.clone()).status(now)
+    }
 
     #[test]
     fn transport_deadline_retains_operation_and_request_without_argv() {
@@ -904,13 +1026,7 @@ mod tests {
             label: "peer".into(),
             target: Some("peer-ssh".into()),
         };
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![host.clone()],
-        };
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/home".into(), vec![host.clone()]);
         let error = fleet
             .remote_setup::<serde_json::Value>(
                 &host,
@@ -997,13 +1113,7 @@ mod tests {
             label: "peer".into(),
             target: Some("peer-ssh".into()),
         };
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![host.clone()],
-        };
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/home".into(), vec![host.clone()]);
         let snapshot = Snapshot {
             sampled_ms: 100,
             jobs: Vec::new(),
@@ -1027,17 +1137,17 @@ mod tests {
             fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
         );
         shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
-        assert_eq!(fleet.status(100).unwrap()[0].service, "up");
+        assert_eq!(observed_status(&fleet, 100).unwrap()[0].service, "up");
         shell.on(&command, "null");
-        assert_eq!(fleet.status(10_099).unwrap()[0].service, "up");
-        let missing = fleet.status(10_100).unwrap();
+        assert_eq!(observed_status(&fleet, 10_099).unwrap()[0].service, "up");
+        let missing = observed_status(&fleet, 10_100).unwrap();
         assert_eq!(missing[0].service, "down");
         assert!(missing[0].reachable);
         assert!(missing[0].probe.is_some());
         shell.on(&command, &serde_json::to_string(&snapshot).unwrap());
-        assert_eq!(fleet.status(30_100).unwrap()[0].service, "up");
-        assert_eq!(fleet.status(30_101).unwrap()[0].service, "down");
-        let stale = fleet.status(44_100).unwrap();
+        assert_eq!(observed_status(&fleet, 30_100).unwrap()[0].service, "up");
+        assert_eq!(observed_status(&fleet, 30_101).unwrap()[0].service, "down");
+        let stale = observed_status(&fleet, 44_100).unwrap();
         assert_eq!(stale[0].service, "down");
         assert_eq!(
             stale[0].headroom.as_ref().unwrap().reason.as_deref(),
@@ -1047,15 +1157,15 @@ mod tests {
         let mut wire = serde_json::to_value(&snapshot).unwrap();
         wire["running"] = serde_json::json!(true);
         shell.on(&command, &wire.to_string());
-        let late = fleet.status(60_100).unwrap();
+        let late = observed_status(&fleet, 60_100).unwrap();
         assert_eq!(late[0].service, "up");
         assert_eq!(late[0].sampled_ms, Some(100));
         assert!(!late[0].headroom.as_ref().unwrap().eligible);
         wire["running"] = serde_json::json!(false);
         shell.on(&command, &wire.to_string());
-        assert_eq!(fleet.status(70_100).unwrap()[0].service, "down");
+        assert_eq!(observed_status(&fleet, 70_100).unwrap()[0].service, "down");
         shell.on(&command, r#"{"running":true}"#);
-        let starting = fleet.status(80_100).unwrap();
+        let starting = observed_status(&fleet, 80_100).unwrap();
         assert_eq!(starting[0].service, "up");
         assert!(!starting[0].headroom.as_ref().unwrap().eligible);
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -1071,13 +1181,7 @@ mod tests {
             label: "peer".into(),
             target: Some("peer-ssh".into()),
         };
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![host.clone()],
-        };
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/home".into(), vec![host.clone()]);
         let command = format!(
             "ssh {}",
             fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
@@ -1104,9 +1208,9 @@ mod tests {
         let snapshot = snapshot.as_str();
         // A reachable host whose service is not running keeps `service: down`.
         shell.on(&command, snapshot);
-        fleet.status(100).unwrap();
+        observed_status(&fleet, 100).unwrap();
         shell.on(&command, "null");
-        let stopped = fleet.status(20_100).unwrap().remove(0);
+        let stopped = observed_status(&fleet, 20_100).unwrap().remove(0);
         assert!(stopped.reachable);
         assert_eq!(stopped.condition(), "service: down");
         assert_eq!(
@@ -1115,12 +1219,9 @@ mod tests {
         );
         // A peer that SSH cannot read is unreachable, with the age of its last snapshot.
         let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
-        let fleet = Fleet {
-            ledger: &ledger,
-            ..fleet
-        };
+        let fleet = Fleet::cold(fleet.shell, &ledger, fleet.policy, fleet.home, fleet.hosts);
         shell.on(&command, snapshot);
-        fleet.status(100).unwrap();
+        observed_status(&fleet, 100).unwrap();
         shell.on_output(
             &command,
             crate::shell::Output {
@@ -1129,7 +1230,7 @@ mod tests {
                 stderr: "ssh: connect to host peer port 22: Operation timed out\n".into(),
             },
         );
-        let asleep = fleet.status(20_100).unwrap().remove(0);
+        let asleep = observed_status(&fleet, 20_100).unwrap().remove(0);
         assert!(!asleep.reachable);
         assert_eq!(asleep.failure, Some(Failure::Timeout));
         assert_eq!(asleep.condition(), "unreachable: timeout");
@@ -1244,13 +1345,7 @@ mod tests {
                 label: "peer".into(),
                 target: Some("peer-ssh".into()),
             };
-            let fleet = Fleet {
-                shell: &shell,
-                ledger: &ledger,
-                policy: &policy,
-                home: "/home".into(),
-                hosts: vec![host.clone()],
-            };
+            let fleet = Fleet::cold(&shell, &ledger, &policy, "/home".into(), vec![host.clone()]);
             let command = format!(
                 "ssh {}",
                 fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
@@ -1263,7 +1358,7 @@ mod tests {
                     stderr,
                 },
             );
-            let report = fleet.status(100).unwrap().remove(0);
+            let report = observed_status(&fleet, 100).unwrap().remove(0);
             assert_eq!(report.condition(), format!("unreachable: {want}"));
             let printed = serde_json::to_string(&report).unwrap();
             assert!(!printed.contains("EXAMPLE_SECRET"), "{printed}");
@@ -1438,13 +1533,7 @@ mod tests {
             label: "peer".into(),
             target: Some("peer-ssh".into()),
         };
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![host.clone()],
-        };
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/home".into(), vec![host.clone()]);
         let old = serde_json::json!({
             "fetched_ms": 100,
             "source": fleet.remote_argv(&host, &["snapshot".into()]),
@@ -1453,7 +1542,7 @@ mod tests {
         });
         crate::host_store::put_peer(&ledger, &host.id, &serde_json::from_value(old).unwrap())
             .unwrap();
-        let report = fleet.status(100).unwrap().remove(0);
+        let report = ObserverFleet(fleet.clone()).status(100).unwrap().remove(0);
         assert_eq!(report.condition(), "unreachable: other");
         assert!(
             !serde_json::to_string(&report)
@@ -1473,43 +1562,37 @@ mod tests {
             label: "peer".into(),
             target: Some("peer-ssh".into()),
         };
-        let fleet = Fleet {
-            shell: &shell,
-            ledger: &ledger,
-            policy: &policy,
-            home: "/home".into(),
-            hosts: vec![host.clone()],
-        };
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/home".into(), vec![host.clone()]);
         let reads = || {
             shell
                 .calls
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|c| c.starts_with("ssh "))
+                .filter(|c| c.starts_with("ssh ") && c.contains("host snapshot"))
                 .count()
         };
         // No scripted answer: every read fails.
-        assert!(!fleet.status(0).unwrap()[0].reachable);
+        assert!(!observed_status(&fleet, 0).unwrap()[0].reachable);
         assert_eq!(reads(), 1);
         // A retry waits for both the cache and the backoff.
         let first = crate::backoff::delay(1, "peer").max(CACHE_MS);
-        fleet.status(first - 1).unwrap();
+        observed_status(&fleet, first - 1).unwrap();
         assert_eq!(reads(), 1);
-        fleet.status(first).unwrap();
+        observed_status(&fleet, first).unwrap();
         assert_eq!(reads(), 2);
         let second = first + crate::backoff::delay(2, "peer");
-        fleet.status(second - 1).unwrap();
+        observed_status(&fleet, second - 1).unwrap();
         assert_eq!(reads(), 2);
         let command = format!(
             "ssh {}",
             fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
         );
         shell.on(&command, "null");
-        fleet.status(second).unwrap();
+        observed_status(&fleet, second).unwrap();
         assert_eq!(reads(), 3);
         // Reachable again: the next read follows the plain cache.
-        fleet.status(second + CACHE_MS).unwrap();
+        observed_status(&fleet, second + CACHE_MS).unwrap();
         assert_eq!(reads(), 4);
         std::fs::remove_dir_all(ledger.dir).unwrap();
     }

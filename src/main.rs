@@ -44,6 +44,7 @@ mod loss_tests;
 mod machines;
 mod mcp;
 mod node;
+mod observation;
 mod plan;
 mod preparation_retirement;
 mod preparation_store;
@@ -209,6 +210,13 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     ledger.budget = budget;
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     let node = Node::new(&shell, &ledger, &policy, &home);
+    let fleet = hosts::Fleet::cold(
+        &shell,
+        &ledger,
+        &policy,
+        home.clone(),
+        vec![hosts::Host::local()],
+    );
     match cli.command {
         Command::Quota(args) => quota_command(&shell, &ledger, &policy, &home, &args, cli.json)?,
         Command::Repo(command) => {
@@ -244,13 +252,9 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             line,
             brief,
         } => {
-            let ask = Watch {
-                watch,
-                interval,
-                line,
-                brief,
-            };
-            status_command(&shell, &ledger, &policy, &home, ask, cli.json)?;
+            let _ = interval;
+            let ask = Watch { watch, line, brief };
+            status_command(&observation::ipc::Client::at(&ledger.dir), ask, cli.json)?;
         }
         command @ Command::Board { .. } => {
             board::command(&shell, &ledger, &policy, home, command, cli.json)?;
@@ -261,14 +265,10 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         command @ (Command::Interview { .. } | Command::Review { .. }) => {
             return web::oneshot::command(&shell, &ledger, command);
         }
-        Command::Unit(command) => {
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            return unit_request::run(&fleet, command);
-        }
+        Command::Unit(command) => return unit_request::run(&fleet, command),
         Command::Mcp => mcp::serve(policy, ledger, home)?,
 
         Command::Drop { id, host } => {
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
             let dropped = drop::drop(&fleet, &id, host.as_deref())?;
             print(cli.json, &dropped, || dropped.line())?;
         }
@@ -295,11 +295,8 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             legacy_continue(&ledger, &shell, ask, cli.json)?;
         }
 
-        Command::Hook(cmd) => hook(cmd, &ledger, &shell, &policy, home)?,
-        command => {
-            let fleet = hosts::Fleet::discover(&shell, &ledger, &policy, home)?;
-            return dispatch(&fleet, command, cli.json);
-        }
+        Command::Hook(cmd) => hook(cmd, &ledger, &shell)?,
+        command => return dispatch(&fleet, command, cli.json),
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -346,39 +343,55 @@ fn dispatch(fleet: &hosts::Fleet<'_>, command: Command, json: bool) -> Result<Ex
 #[derive(Clone, Copy)]
 struct Watch {
     watch: bool,
-    interval: u64,
     line: bool,
     brief: bool,
 }
 
 /// The status command: the fleet's state, printed once or watched.
-fn status_command(
-    shell: &System,
-    ledger: &Ledger,
-    policy: &config::Policy,
-    home: &str,
-    ask: Watch,
-    json: bool,
-) -> Result<()> {
+fn status_command(client: &observation::ipc::Client, ask: Watch, json: bool) -> Result<()> {
+    let mut subscription = ask.watch.then(|| client.subscribe()).transpose()?;
+    let mut published = match &subscription {
+        Some(subscription) => (*subscription.current().publication).clone(),
+        None => client.current()?,
+    };
     loop {
-        let fleet = hosts::Fleet::discover(shell, ledger, policy, home.to_owned())?;
-        let status = commands::status(&fleet)?;
+        let status: commands::Status = observation::read::view(&published, "status")?;
         if ask.watch && !json && !ask.line && !ask.brief {
             print!("\x1b[2J\x1b[H");
         }
-        print(json, &status, || {
+        let text = if json {
+            String::new()
+        } else {
+            let display: observation::display::Display =
+                observation::read::view(&published, "status_display")?;
             if ask.line {
-                commands::line(&status)
+                display.line()
             } else if ask.brief {
-                commands::brief(&status)
+                display.brief(now_ms())
             } else {
-                commands::render(&status)
+                display.render(now_ms())
             }
-        })?;
+        };
+        print(json, &status, || text)?;
         if !ask.watch {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(ask.interval));
+        let subscription = subscription
+            .as_mut()
+            .ok_or_else(|| Error::Invalid("observation subscription missing".into()))?;
+        loop {
+            let connection = subscription.changed(std::time::Duration::from_secs(3600));
+            if let observation::ipc::Status::Disconnected(detail) = connection.status {
+                return Err(Error::Invalid(format!(
+                    "observation disconnected/stale; retained revision {}: {detail}",
+                    connection.publication.revision
+                )));
+            }
+            if connection.publication.revision != published.revision {
+                published = (*connection.publication).clone();
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -420,7 +433,13 @@ fn send_message(
     json: bool,
 ) -> Result<()> {
     let text = inbox::message_text(ask.message, ask.message_file)?;
-    let fleet = hosts::Fleet::discover(shell, ledger, policy, home.to_owned())?;
+    let fleet = hosts::Fleet::cold(
+        shell,
+        ledger,
+        policy,
+        home.to_owned(),
+        vec![crate::hosts::Host::local()],
+    );
     let sent = inbox::send_to(
         &fleet,
         &ask.target,
@@ -480,19 +499,14 @@ fn reservation_validity(
 }
 
 /// The harness hooks: prompt context, and the inbox for Claude Code and Codex.
-fn hook(
-    cmd: HookCommand,
-    ledger: &Ledger,
-    shell: &System,
-    policy: &config::Policy,
-    home: String,
-) -> Result<()> {
+fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
+    let client = observation::ipc::Client::at(&ledger.dir);
     match cmd {
         HookCommand::Inbox { harness, event } => {
             // Keep inbox delivery working even when fleet status is unavailable.
-            let board = if event == inbox::HookEvent::Stop {
+            let published = if event == inbox::HookEvent::Stop {
                 sweep::request_at_stop(ledger);
-                owner_board(ledger, shell, policy, home).ok()
+                client.current().ok()
             } else {
                 None
             };
@@ -502,35 +516,84 @@ fn hook(
                 harness.name(),
                 event,
                 now_ms(),
-                board.as_ref(),
+                published.as_ref(),
             )
         }
         HookCommand::Gate => {
             let owner = inbox::own_pane(None)?;
             sweep::request_at_stop(ledger);
-            let notices = gate::notices(ledger, shell, &owner)?;
-            let board = owner_board(ledger, shell, policy, home)?;
+            let published = client.current()?;
+            let notices = gate::notices(ledger, &published, &owner)?;
+            let board = observation::read::board(&published, Some(&owner))?;
             gate::deliver(ledger, &board, &owner, &notices, |reminder| {
                 print(false, &(), || reminder.unwrap_or_default().to_owned())
             })
         }
         HookCommand::Context { harness, event } => {
-            let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
-            let status = commands::status(&fleet)?;
+            let published = client.current()?;
             let owner = std::env::var("HERDR_PANE_ID").ok();
-            let found = match (&owner, &status.sweep) {
-                (Some(owner), Some(report)) => gate::findings(ledger, shell, owner, report)?,
-                _ => gate::Findings::default(),
-            };
-            print(false, &(), || {
-                context::format(harness, event, &status, owner.as_deref(), &found)
-            })
+            let text = context::format(harness, event, &published, owner.as_deref())?;
+            print(false, &(), || text)
         }
     }
 }
 
 /// Recovery needs no Herdr discovery for local operations.
 fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    // Observation readers do not load policy or discover a fleet.
+    let client = observation::ipc::Client::at(&ledger::default_dir());
+    if let Command::Hook(cmd) = cli.command {
+        let mut ledger = Ledger::new(ledger::default_dir());
+        ledger.budget = budget;
+        hook(cmd, &ledger, &System { budget })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    match &cli.command {
+        Command::Status {
+            watch, line, brief, ..
+        } => {
+            status_command(
+                &client,
+                Watch {
+                    watch: *watch,
+                    line: *line,
+                    brief: *brief,
+                },
+                cli.json,
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Board {
+            owner,
+            all,
+            open: false,
+            toggle: false,
+        } => {
+            let owner = board::owner(owner.clone(), *all)?;
+            let board = observation::read::board(&client.current()?, owner.as_deref())?;
+            print(cli.json, &board, || board.render())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Items { .. } | Command::Ps { .. } => {
+            return runtime::published_inventory(&client.current()?, cli.command, cli.json);
+        }
+        Command::Host(HostCommand::Snapshot) => {
+            let report: node::SnapshotReport =
+                observation::read::local(&client.current()?, "host")?;
+            print(true, &report, String::new)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Host(HostCommand::Todos) => {
+            let todos: Vec<board::TodoSections> =
+                observation::read::view(&client.current()?, "todos")?;
+            print(true, &todos, String::new)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
+    }
+    if let Command::Observation { command } = cli.command {
+        return observation::command(&command);
+    }
     if let Command::TodoPublish { ref pane, clear } = cli.command {
         let ledger = Ledger {
             budget,
@@ -564,21 +627,6 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
     let value = runtime::recovery(&shell, &ledger, &policy, &home, host.as_deref(), command)?;
     print(cli.json, &value, || format!("{value}\n"))?;
     Ok(ExitCode::SUCCESS)
-}
-
-fn owner_board(
-    ledger: &Ledger,
-    shell: &System,
-    policy: &config::Policy,
-    home: String,
-) -> Result<board::Board> {
-    let owner = inbox::own_pane(None)?;
-    let fleet = hosts::Fleet::discover(shell, ledger, policy, home)?;
-    Ok(board::build(
-        &commands::status(&fleet)?,
-        Some(&owner),
-        now_ms(),
-    ))
 }
 
 fn inbox_command(cmd: InboxCommand, ledger: &Ledger, shell: &System, json: bool) -> Result<()> {
@@ -725,7 +773,10 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
         )?,
         HostCommand::RefreshBranches { items } => print(
             true,
-            &drop::refresh(node.shell, serde_json::from_str(&items)?)?,
+            &observation::ipc::Client::at(&node.ledger.dir).peer(observation::peers::Request {
+                interests: serde_json::from_str(&items)?,
+                ..observation::peers::Request::default()
+            })?,
             String::new,
         )?,
         _ => unreachable!("only child commands"),
@@ -1064,6 +1115,8 @@ fn state_authority(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn state(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
     match cmd {
+        #[cfg(debug_assertions)]
+        StateCommand::Project => print(true, &observation::stored::project(ledger)?, String::new)?,
         StateCommand::Schema => println!("{}", store::creation()),
         command @ (StateCommand::Launches
         | StateCommand::Launch { .. }
@@ -1351,8 +1404,21 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             &cleanup::apply(node, &serde_json::from_str(&plan)?, now_ms())?,
             String::new,
         )?,
+        HostCommand::Observation { request } => print(
+            true,
+            &observation::ipc::Client::at(&node.ledger.dir)
+                .peer(serde_json::from_str(&request)?)?,
+            String::new,
+        )?,
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
-        HostCommand::Todos => print(true, &board::cached_todos(node.ledger)?, String::new)?,
+        HostCommand::Todos => print(
+            true,
+            &observation::read::view::<Vec<board::TodoSections>>(
+                &observation::ipc::Client::at(&node.ledger.dir).current()?,
+                "todos",
+            )?,
+            String::new,
+        )?,
         HostCommand::QuotaStore => print(
             true,
             &quota::store(node.ledger, std::io::stdin().lock())?,

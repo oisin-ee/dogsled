@@ -12,7 +12,7 @@ pub mod view;
 use crate::board;
 use crate::config::{Policy, Thresholds};
 use crate::error::{Error, Result};
-use crate::hosts::Fleet;
+use crate::hosts::ObserverFleet;
 use crate::ledger::{Ledger, now_ms};
 use crate::shell::{Shell, System};
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
@@ -42,7 +42,11 @@ enum Msg {
 /// `commands::status` reads the service snapshots and the peer caches in the ledger.
 /// The todo cache is a separate source: when it cannot be read, Hosts and Agents & Jobs
 /// still draw, and the error comes back for the footer.
-fn read(fleet: &Fleet<'_>, limits: &Thresholds, owner: &str) -> Result<(Data, Option<String>)> {
+fn read(
+    fleet: &ObserverFleet<'_>,
+    limits: &Thresholds,
+    owner: &str,
+) -> Result<(Data, Option<String>)> {
     let now = now_ms();
     let status = crate::commands::status(fleet)?;
     let board = board::build(&status, Some(owner), now);
@@ -52,7 +56,7 @@ fn read(fleet: &Fleet<'_>, limits: &Thresholds, owner: &str) -> Result<(Data, Op
         .iter()
         .map(|report| HostRow::from_report(report, limits, now))
         .collect();
-    // Local first, then config order (`Fleet::discover` already lists them so).
+    // Local first, then config order (`ObserverFleet::discover` already lists them so).
     if let Some(local) = hosts.iter().position(|h| {
         status
             .hosts
@@ -86,10 +90,10 @@ fn reader(
     stop: &AtomicBool,
 ) {
     let limits = Thresholds::from(policy);
-    let mut fleet: Option<Fleet<'_>> = None;
+    let mut fleet: Option<ObserverFleet<'_>> = None;
     while !stop.load(Ordering::Relaxed) {
         if fleet.is_none() {
-            fleet = Fleet::discover(shell, ledger, policy, home.to_owned()).ok();
+            fleet = ObserverFleet::discover(shell, ledger, policy, home.to_owned()).ok();
         }
         let messages = match &fleet {
             Some(fleet) => match read(fleet, &limits, owner) {
@@ -134,7 +138,13 @@ fn perform(
             Ok(String::new())
         }
         Effect::Stop(card) => {
-            let fleet = Fleet::discover(&shell, ledger, policy, home.to_owned())?;
+            let fleet = crate::hosts::Fleet::cold(
+                &shell,
+                ledger,
+                policy,
+                home.to_owned(),
+                vec![crate::hosts::Host::local()],
+            );
             crate::runtime::stop(&fleet, &card.id)?;
             Ok(format!("Stopped {}", card.name))
         }
@@ -150,7 +160,13 @@ fn perform(
             let pane = card
                 .pane
                 .ok_or_else(|| Error::Invalid("no pane to close".into()))?;
-            let fleet = Fleet::discover(&shell, ledger, policy, home.to_owned())?;
+            let fleet = crate::hosts::Fleet::cold(
+                &shell,
+                ledger,
+                policy,
+                home.to_owned(),
+                vec![crate::hosts::Host::local()],
+            );
             let (closed, label) = crate::runtime::close(&fleet, &pane, Some("local"))?;
             Ok(crate::runtime::closed_line(&closed, &label)
                 .trim_end()

@@ -30,13 +30,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             label: "peer".into(),
             target: Some("peer-ssh".into()),
         };
-        let fleet = Fleet {
-            ledger: &ledger,
-            shell: &shell,
-            policy: &policy,
-            home: "/".into(),
-            hosts: vec![peer.clone()],
-        };
+        let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![peer.clone()]);
         let remote = |args: &[String]| format!("ssh {}", fleet.remote_argv(&peer, args).join(" "));
         let mut current = missing_pane_snapshot(&peer);
         shell.on(&remote(&["snapshot".into()]), &capable_snapshot(&current));
@@ -50,10 +44,14 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             ..pinned(&ledger, "late-child", "peer")
         };
         let queued_at = 100 + owner_skew;
+        let mut ingestion = crate::observation::peers::Ingestion::default();
+        ingestion
+            .refresh(&fleet, &peer, queued_at, Vec::new(), false)
+            .unwrap();
         work::enqueue(&ledger, request.clone(), false, queued_at).unwrap();
-        work::tick(&fleet, queued_at).unwrap();
+        work::tick(&actions(&fleet, queued_at), queued_at).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "pending");
-        items::reconcile(&ledger, &fleet.status(queued_at).unwrap(), queued_at).unwrap();
+        items::reconcile(&ledger, &reports(&fleet, queued_at), queued_at).unwrap();
         assert!(items::list(&ledger).unwrap().is_empty());
 
         // This snapshot permits admission but still predates the pane's creation.
@@ -65,7 +63,6 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             "owner":"owner","owner_host":"origin","pane":null,"workspace":null,"workspace_name":null
         }))
         .unwrap();
-        let receipt = json!({"host":"peer","pane":"child","launch_confirmed_ms":22_000});
         shell.on(
             &remote(&[
                 "launch".into(),
@@ -76,21 +73,27 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
                 "--request-validity".into(),
                 "1".into(),
             ]),
-            &receipt.to_string(),
+            &json!({"host":"peer","pane":"child","launch_confirmed_ms":22_000}).to_string(),
         );
         // Reservation IDs are generated at runtime; script just that transport operation.
         let reserving = ReservingShell(&shell);
-        let fleet = Fleet {
-            shell: &reserving,
-            ..fleet
-        };
+        let fleet = Fleet::cold(
+            &reserving,
+            fleet.ledger,
+            fleet.policy,
+            fleet.home,
+            fleet.hosts,
+        );
         let admitted_at = 11_000 + owner_skew;
-        work::tick(&fleet, admitted_at).unwrap();
+        ingestion
+            .refresh(&fleet, &peer, admitted_at, Vec::new(), false)
+            .unwrap();
+        work::tick(&actions(&fleet, admitted_at), admitted_at).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
         let item = items::list(&ledger).unwrap().remove(0);
         assert_eq!(item.created_ms, admitted_at);
         assert_eq!(item.launch_confirmed_ms, Some(22_000));
-        let mut reports = fleet.status(admitted_at).unwrap();
+        let mut reports = reports(&fleet, admitted_at);
         for sampled in [11_000, 22_000] {
             reports[0].sampled_ms = Some(sampled);
             items::reconcile(&ledger, &reports, admitted_at).unwrap();
@@ -141,13 +144,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     let mut current = snapshot(200);
     current.jobs.push(
         serde_json::from_value(json!({
@@ -171,7 +168,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
         },
     )
     .unwrap();
-    items::reconcile(&ledger, &fleet.status(200).unwrap(), 200).unwrap();
+    items::reconcile(&ledger, &reports(&fleet, 200), 200).unwrap();
     assert_eq!(items::list(&ledger).unwrap()[0].closed_ms, Some(200));
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -184,13 +181,7 @@ fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
-    let fleet = Fleet {
-        ledger: &ledger,
-        shell: &shell,
-        policy: &policy,
-        home: "/".into(),
-        hosts: vec![Host::local()],
-    };
+    let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
     let mut current = snapshot(200);
     current.probe.panes.clear();
     current.jobs.push(
@@ -216,7 +207,7 @@ fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
     )
     .unwrap();
     for sampled in [200, 300] {
-        let mut reports = fleet.status(sampled).unwrap();
+        let mut reports = reports(&fleet, sampled);
         reports[0].sampled_ms = Some(sampled);
         items::reconcile(&ledger, &reports, sampled).unwrap();
         assert_eq!(
@@ -225,7 +216,7 @@ fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
             "sample {sampled}"
         );
     }
-    let mut reports = fleet.status(301).unwrap();
+    let mut reports = reports(&fleet, 301);
     reports[0].sampled_ms = Some(301);
     items::reconcile(&ledger, &reports, 301).unwrap();
     assert_eq!(items::list(&ledger).unwrap()[0].closed_ms, Some(301));

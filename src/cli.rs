@@ -24,6 +24,14 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ObservationCommand {
+    /// Print the current publication as one JSON line; never reconstruct missing state.
+    Current,
+    /// Stream complete JSON publications until the publisher disconnects.
+    Subscribe,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Inspect and restore local, pinned recovery snapshots.
     Recovery {
@@ -41,10 +49,16 @@ pub enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Read all hosts' snapshots, with a shared 10-second peer cache.
+    /// Read or subscribe to the service's immutable observation publication.
+    Observation {
+        #[command(subcommand)]
+        command: ObservationCommand,
+    },
+    /// Read the published fleet status, or subscribe to replacements.
     Status {
         #[arg(long)]
         watch: bool,
+        /// Reserved for CLI compatibility; watch updates follow publications.
         #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
         #[arg(long, conflicts_with_all = ["brief", "json"])]
@@ -347,6 +361,10 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum StateCommand {
+    /// Project initialized stored fixture rows without observation or mutation.
+    #[cfg(debug_assertions)]
+    #[command(hide = true)]
+    Project,
     Inbox {
         terminal: String,
         #[arg(long)]
@@ -710,12 +728,17 @@ pub enum HostCommand {
         command: RecoveryCommand,
     },
     Snapshot,
+    /// Export host-owned observer facts, optionally waiting for a new local revision.
+    Observation {
+        #[arg(long)]
+        request: String,
+    },
     /// Delete an owner-authorized closed item's branch on this host.
     Drop {
         #[arg(long)]
         item: String,
     },
-    /// Refresh retained branches in one host call.
+    /// Register retained branch interests and return the last published observations.
     RefreshBranches {
         #[arg(long)]
         items: String,

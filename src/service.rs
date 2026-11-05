@@ -9,8 +9,12 @@ use crate::ledger::{Ledger, now_ms};
 use crate::node::Node;
 use crate::shell::System;
 use crate::{items, work};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+#[path = "observation/wake.rs"]
+pub(crate) mod wake;
 
 /// The action lanes, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +94,12 @@ impl LaneDiagnostics {
     }
 }
 
-enum Event {
+#[derive(Debug)]
+pub(crate) enum Event {
     Finished(usize, Result<()>),
     Sweep,
     Swept(Result<()>),
+    Observe,
 }
 
 /// Wake the loop without waiting for its publication interval. The ledger request is durable;
@@ -149,7 +155,13 @@ impl Drop for Listener {
     }
 }
 
-fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result<()> {
+fn actions(
+    ledger: &Ledger,
+    policy: &Policy,
+    home: String,
+    lane: Lane,
+    published: Arc<crate::observation::Published>,
+) -> Result<()> {
     let shell = System::default();
     if lane == Lane::Quota {
         return crate::quota::read(&shell, ledger, policy, &home, false, false).map(|_| ());
@@ -157,20 +169,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }
-    let fleet = if items::list(ledger)?.is_empty()
-        && work::queue(ledger)?.is_empty()
-        && !crate::inbox::pending(ledger)?
-    {
-        Fleet {
-            shell: &shell,
-            ledger,
-            policy,
-            home,
-            hosts: vec![crate::hosts::Host::local()],
-        }
-    } else {
-        Fleet::discover(&shell, ledger, policy, home)?
-    };
+    let fleet = crate::hosts::ActionFleet::new(&shell, ledger, policy, home, published)?;
     if lane == Lane::Retention {
         // Retention owns its synchronization too; no other service lane is required.
         crate::launch::release_owned(&fleet)?;
@@ -179,7 +178,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     match lane {
         Lane::Watchdog => {
             let now = now_ms();
-            let reports = fleet.status(now)?;
+            let reports = fleet.reports()?;
             crate::watchdog::tick(&fleet, &reports, now)?;
             items::reconcile(ledger, &reports, now)
         }
@@ -205,34 +204,208 @@ fn ready(lane: Lane, completed: [bool; LANES.len()]) -> bool {
             .any(|(other, done)| *other == Lane::Handoff && done)
 }
 
-/// Start eligible action lanes without coupling their scheduling to publication or input.
-fn start_lanes(
-    node: &Node<'_>,
-    policy: &Policy,
-    once: bool,
-    workers: &mut [Option<std::thread::JoinHandle<()>>; LANES.len()],
+#[derive(Default)]
+struct Workers {
+    handles: [Option<std::thread::JoinHandle<()>>; LANES.len()],
     completed: [bool; LANES.len()],
-    send: &mpsc::Sender<Event>,
-) {
-    for (lane, worker) in workers.iter_mut().enumerate() {
-        if worker.is_none() && (!once || (!completed[lane] && ready(LANES[lane], completed))) {
-            let mut ledger = node.ledger.clone();
-            ledger.budget = crate::budget::Budget::default();
-            let policy = policy.clone();
-            let home = node.home.to_owned();
-            let send = send.clone();
-            *worker = Some(std::thread::spawn(move || {
-                let _ = send.send(Event::Finished(
-                    lane,
-                    actions(&ledger, &policy, home, LANES[lane]),
-                ));
-            }));
+}
+
+impl Workers {
+    /// Start eligible lanes without coupling their scheduling to publication or input.
+    fn start(
+        &mut self,
+        node: &Node<'_>,
+        policy: &Policy,
+        once: bool,
+        send: &mpsc::Sender<Event>,
+        source: &crate::observation::Publisher,
+    ) -> Result<()> {
+        let published = source.current()?;
+        for (lane, worker) in self.handles.iter_mut().enumerate() {
+            if worker.is_none()
+                && (!once || (!self.completed[lane] && ready(LANES[lane], self.completed)))
+            {
+                let mut ledger = node.ledger.clone();
+                ledger.budget = crate::budget::Budget::default();
+                let policy = policy.clone();
+                let home = node.home.to_owned();
+                let send = send.clone();
+                let published = Arc::clone(&published);
+                *worker = Some(std::thread::spawn(move || {
+                    let _ = send.send(Event::Finished(
+                        lane,
+                        actions(&ledger, &policy, home, LANES[lane], published),
+                    ));
+                }));
+            }
         }
+        Ok(())
+    }
+
+    fn finished(&mut self, lane: usize) -> Result<()> {
+        if let Some(handle) = self.handles[lane].take() {
+            handle
+                .join()
+                .map_err(|_| Error::Invalid("service action worker failed".into()))?;
+        }
+        self.completed[lane] = true;
+        Ok(())
     }
 }
 
+struct Exchange {
+    peers: crate::observation::peers_runtime::Observers,
+    branches: crate::observation::peers::Branches,
+    interests: crate::observation::peers::Interests,
+    diagnostics: crate::observation::diagnostics::Diagnostics,
+    details: crate::observation::details::Collector,
+    dirty: wake::Dirty,
+}
+
+fn publish(
+    node: &Node<'_>,
+    collector: &mut crate::observation::collect::Collector,
+    publisher: &mut crate::observation::Publisher,
+    herdr: &mut wake::Herdr,
+    cycle: (u8, bool),
+    exchange: &mut Exchange,
+    fleet: &Fleet<'_>,
+) -> Result<()> {
+    let (domains, once) = cycle;
+    let Exchange {
+        peers,
+        branches,
+        interests,
+        diagnostics,
+        details,
+        dirty,
+    } = exchange;
+    let now = now_ms();
+    let collection = crate::store::observing(|| -> Result<_> {
+        let gaps = if domains & (wake::LOCAL | wake::BRANCHES) != 0 {
+            branches.observe(node, &interests.current()?, now)?
+        } else {
+            branches.gaps()
+        };
+        let mut collection = if domains & wake::LOCAL == wake::LOCAL {
+            collector.collect(node, now)
+        } else if domains & (wake::LEDGER | wake::BRANCHES) != 0 {
+            collector.refresh(node, now, false)
+        } else {
+            crate::observation::collect::Collection {
+                input: collector.publication(now),
+                sample: Ok(()),
+            }
+        };
+        let results = branches.results();
+        if !results.is_empty() {
+            collection
+                .input
+                .local
+                .insert("branches".into(), serde_json::to_value(&results)?);
+            if let Some(measured) = results.iter().map(|result| result.measured_ms).max() {
+                collection
+                    .input
+                    .sources
+                    .local
+                    .insert("branches".into(), measured);
+            }
+        }
+        collection.input.gaps.extend(gaps);
+        peers.compose(fleet, &mut collection.input, now, collector.reports())?;
+        details.refresh(&mut collection.input, dirty)?;
+        Ok(collection)
+    })?;
+    herdr.interests(collector.panes());
+    diagnostics.publish(publisher, collection.input, now, |line| eprintln!("{line}"))?;
+    if once {
+        collection.sample?;
+    }
+    Ok(())
+}
+
+struct Observation {
+    publisher: crate::observation::Publisher,
+    _server: crate::observation::ipc::Server,
+    collector: crate::observation::collect::Collector,
+    exchange: Exchange,
+    _commits: Option<wake::Commits>,
+    herdr: wake::Herdr,
+}
+
+impl Observation {
+    fn new(node: &Node<'_>, interval: Duration, dirty: &wake::Dirty) -> Result<Self> {
+        let mut publisher = crate::observation::Publisher::new()?;
+        let mut server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
+        let interests = crate::observation::peers::Interests::default();
+        server.branches(interests.clone(), dirty.clone());
+        let details = crate::observation::details::Collector::default();
+        server.details(details.interests.clone());
+        publisher.details(details.payloads.clone());
+        if let Err(error) = server.bind(publisher.subscribe()) {
+            eprintln!("observation socket unavailable: {error}");
+        }
+        let commits = match wake::Commits::start(node.ledger, dirty.clone()) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                eprintln!("dogsled service: observation commit wake unavailable: {error}");
+                None
+            }
+        };
+        Ok(Self {
+            publisher,
+            _server: server,
+            collector: crate::observation::collect::Collector::default(),
+            exchange: Exchange {
+                peers: crate::observation::peers_runtime::Observers::default(),
+                branches: crate::observation::peers::Branches::default(),
+                interests,
+                diagnostics: crate::observation::diagnostics::Diagnostics::default(),
+                details,
+                dirty: dirty.clone(),
+            },
+            _commits: commits,
+            herdr: wake::Herdr::start(dirty.clone(), interval),
+        })
+    }
+
+    fn refresh(
+        &mut self,
+        node: &Node<'_>,
+        policy: &Policy,
+        dirty: &wake::Dirty,
+        cycle: (u8, bool),
+    ) -> Result<()> {
+        let (domains, once) = cycle;
+        let fleet = Fleet::producer(
+            node.shell,
+            node.ledger,
+            policy,
+            node.home.to_owned(),
+            vec![crate::hosts::Host::local()],
+        );
+        self.exchange.peers.retry(dirty.take_peers());
+        if let Err(error) = self.exchange.peers.discover(&fleet, dirty, once) {
+            eprintln!("dogsled peer discovery: {error}");
+        }
+        publish(
+            node,
+            &mut self.collector,
+            &mut self.publisher,
+            &mut self.herdr,
+            (domains, once),
+            &mut self.exchange,
+            &fleet,
+        )
+    }
+}
+
+const BASELINE_SAMPLE_DELAY: Duration = Duration::from_secs(1);
+
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
+    let dirty = wake::Dirty::new(send.clone());
+    let mut observation = Observation::new(node, interval, &dirty)?;
     let _listener = match Listener::start(node.ledger, send.clone()) {
         Ok(listener) => Some(listener),
         Err(error) => {
@@ -242,20 +415,37 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     };
     let mut sweep: Option<std::thread::JoinHandle<()>> = None;
     let mut requested = false;
-    let mut workers: [Option<std::thread::JoinHandle<()>>; LANES.len()] = Default::default();
-    let mut completed = [false; LANES.len()];
+    let mut workers = Workers::default();
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
+    let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);
     loop {
+        let scheduled = Instant::now() >= next;
+        let baseline_due = baseline.is_some_and(|at| Instant::now() >= at);
+        if baseline_due {
+            baseline = None;
+        }
+        let domains = dirty.take();
         // The socket only reduces latency. Recover pending requests on every publication
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= crate::sweep::pending(node.ledger)?;
-        node.tick(now_ms())?;
-        if let Err(error) = crate::board::collect_todos(node.ledger) {
-            eprintln!("dogsled service: todo intake failed: {error}");
+        observation.refresh(
+            node,
+            policy,
+            &dirty,
+            (
+                if scheduled || baseline_due {
+                    domains | wake::LOCAL
+                } else {
+                    domains
+                },
+                once,
+            ),
+        )?;
+        if scheduled {
+            workers.start(node, policy, once, &send, &observation.publisher)?;
+            next += interval;
         }
-        start_lanes(node, policy, once, &mut workers, completed, &send);
-        next += interval;
         loop {
             if requested && sweep.is_none() {
                 requested = false;
@@ -270,12 +460,19 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
                 }));
             }
-            if once && completed.iter().all(|done| *done) && sweep.is_none() {
+            if once && workers.completed.iter().all(|done| *done) && sweep.is_none() {
                 return Ok(());
             }
-            match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            let observation_due = baseline.map_or(next, |at| next.min(at));
+            match recv.recv_timeout(observation_due.saturating_duration_since(Instant::now())) {
                 Ok(Event::Sweep) => requested = true,
+                Ok(Event::Observe) => {
+                    if dirty.pending() && !once {
+                        break;
+                    }
+                }
                 Ok(Event::Swept(result)) => {
+                    dirty.mark(wake::LOCAL);
                     if let Some(handle) = sweep.take() {
                         handle
                             .join()
@@ -286,15 +483,14 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     }
                 }
                 Ok(Event::Finished(lane, result)) => {
-                    if let Some(handle) = workers[lane].take() {
-                        handle
-                            .join()
-                            .map_err(|_| Error::Invalid("service action worker failed".into()))?;
-                    }
-                    completed[lane] = true;
+                    workers.finished(lane)?;
                     diagnostics.record(node.ledger, LANES[lane], result);
+                    dirty.mark(wake::LEDGER);
                     if once {
-                        start_lanes(node, policy, once, &mut workers, completed, &send);
+                        if LANES[lane] == Lane::Handoff {
+                            observation.refresh(node, policy, &dirty, (wake::LEDGER, once))?;
+                        }
+                        workers.start(node, policy, once, &send, &observation.publisher)?;
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,

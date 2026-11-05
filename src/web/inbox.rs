@@ -1,10 +1,8 @@
 //! Unified actionable inbox, derived from the existing stores and board snapshot.
 
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::sse::Event;
-use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::get};
+use axum::response::Response;
+use axum::{Router, routing::get};
 use portal_types::agents::AgentView;
 use portal_types::inbox::{InboxItem, InboxKind, InboxView};
 use portal_types::questions::Pending;
@@ -12,51 +10,16 @@ use portal_types::reviews::{Review, plan_title};
 use portal_types::{BoardView, RowView};
 
 use super::AppState;
-use crate::error::{Error, Result};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/inbox", get(list))
 }
 
 async fn list(State(state): State<AppState>) -> Response {
-    match read(&state).await {
-        Ok(view) => Json(view).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": error.to_string(),
-            })),
-        )
-            .into_response(),
-    }
+    state.projection(|snapshot| snapshot.inbox.clone())
 }
 
-async fn read(state: &AppState) -> Result<InboxView> {
-    let board: BoardView = serde_json::from_str(&state.payload())?;
-    let questions = state.questions.list().await?;
-    let web = state.web.clone();
-    let socket = state.agents.clone();
-    let (reviews, agents) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let reviews = super::reviews::pending(&web)?;
-        let agents = socket
-            .as_ref()
-            .map(|socket| super::agents::views(socket))
-            .transpose()?
-            .unwrap_or_default();
-        Ok((reviews, agents))
-    })
-    .await
-    .map_err(|error| Error::Invalid(format!("inbox read failed: {error}")))??;
-    Ok(view(
-        &board,
-        &reviews,
-        &questions,
-        &agents,
-        crate::ledger::now_ms(),
-    ))
-}
-
-fn view(
+pub(crate) fn view(
     board: &BoardView,
     reviews: &[Review],
     questions: &[Pending],
@@ -164,48 +127,12 @@ fn view(
     }
 }
 
-/// Poll the authoritative stores, but emit only actionable changes, not the ticking ages.
-pub(super) fn events(
-    state: AppState,
-) -> impl tokio_stream::Stream<Item = std::result::Result<Event, std::convert::Infallible>> {
-    futures_util::stream::unfold(
-        (state, String::new(), tokio::time::interval(super::REFRESH)),
-        |(state, mut previous, mut interval)| async move {
-            loop {
-                interval.tick().await;
-                let event = match read(&state).await {
-                    Ok(view) => {
-                        let mut comparison = view.clone();
-                        for item in &mut comparison.items {
-                            item.age_ms = 0;
-                        }
-                        let key = serde_json::to_string(&comparison).unwrap_or_default();
-                        if key == previous {
-                            continue;
-                        }
-                        previous = key;
-                        Event::default().event("inbox").json_data(&view).ok()?
-                    }
-                    Err(error) => {
-                        let key = format!("error: {error}");
-                        if key == previous {
-                            continue;
-                        }
-                        previous.clone_from(&key);
-                        Event::default().event("inbox_error").data(key)
-                    }
-                };
-                return Some((Ok(event), (state, previous, interval)));
-            }
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{Error, Result};
     use axum::body::Body;
-    use axum::http::{Request, header};
+    use axum::http::{Request, StatusCode, header};
     use portal_types::agents::BlockedPrompt;
     use portal_types::questions::AskBody;
     use serde_json::json;
@@ -282,7 +209,13 @@ mod tests {
         let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
         let mut board = board()?;
         board.repos.clear();
-        let (_sender, receiver) = tokio::sync::watch::channel(serde_json::to_string(&board)?);
+        let mut publisher = crate::observation::Publisher::new()?;
+        let (sender, receiver) = tokio::sync::watch::channel(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board.clone(),
+            vec![],
+        )?);
         let state = AppState::new(
             receiver,
             7465,
@@ -309,7 +242,7 @@ mod tests {
                     .expect("SSE stays open")
                     .expect("SSE bytes");
                 let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 event");
-                if text.contains("event: inbox\n") {
+                if text.contains("event: portal\n") {
                     return (text, stream);
                 }
             }
@@ -321,11 +254,23 @@ mod tests {
             "pane": "worker-pane", "session": "session", "cwd": "/repo",
             "questions": {"title": "Choose", "questions": [{"id": "q", "type": "text", "question": "Which?"}]}
         }))?).await?;
+        sender.send_replace(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board.clone(),
+            vec![],
+        )?);
         let (changed, remaining) = next_inbox(stream).await;
         assert!(changed.contains("\"count\":1"));
         assert!(changed.contains(&id));
         stream = remaining;
         state.questions.answer(&id, vec![]).await?;
+        sender.send_replace(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board,
+            vec![],
+        )?);
         let (answered, mut stream) = next_inbox(stream).await;
         assert!(answered.contains("\"count\":0"));
         state.stop.cancel();
@@ -339,10 +284,29 @@ mod tests {
         Ok(())
     }
 
+    async fn served_inbox(state: &AppState) -> Result<InboxView> {
+        let response = super::super::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/inbox")
+                    .header(header::HOST, "localhost:7465")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("body");
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
     #[tokio::test]
     async fn inbox_counts_every_kind_and_excludes_answered_and_decided() -> Result<()> {
         let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        let (_sender, receiver) = tokio::sync::watch::channel(serde_json::to_string(&board()?)?);
+        let mut publisher = crate::observation::Publisher::new()?;
+        let (sender, receiver) = tokio::sync::watch::channel(super::super::PortalState::default());
         let state = AppState::new(
             receiver,
             7465,
@@ -398,28 +362,25 @@ mod tests {
                 .iter()
                 .all(|item| item.repository.as_deref() == Some("github.com/owner/repo"))
         );
-        let request = || {
-            Request::builder()
-                .uri("/api/inbox")
-                .header(header::HOST, "localhost:7465")
-                .body(Body::empty())
-                .expect("request")
-        };
-        let response = super::super::router(state.clone())
-            .oneshot(request())
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), 65536)
-            .await
-            .expect("body");
-        let served: InboxView = serde_json::from_slice(&bytes)?;
+        sender.send_replace(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board()?,
+            vec![],
+        )?);
+        let served = served_inbox(&state).await?;
         assert_eq!(served.count, 3);
         assert_eq!(served.count, served.items.len());
         state.questions.answer(&id, vec![]).await?;
         review.decision = Some(portal_types::reviews::Decision::Approved { notes: None });
         save_review(&review)?;
-        let served = read(&state).await?;
+        sender.send_replace(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board()?,
+            vec![],
+        )?);
+        let served = served_inbox(&state).await?;
         assert_eq!(served.count, 1);
         assert_eq!(served.items[0].kind, InboxKind::UnseenWorker);
         let response = super::super::router(state)

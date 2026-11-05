@@ -2,6 +2,13 @@ use super::*;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+fn replace(rig: &Rig, publisher: &super::observation::Supplied, publication: &mut Value) {
+    let revision = publication["revision"].as_u64().unwrap() + 1;
+    publication["revision"] = json!(revision);
+    publisher.replace(publication.clone());
+    wait_publication(rig, |frame| frame["revision"] == revision);
+}
+
 // Keep stdin open deliberately: lifecycle hooks must never wait for its EOF.
 fn bounded(mut command: Command) -> Output {
     let mut child = command
@@ -39,6 +46,10 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
          "name":"other","created_ms":1,"closed_ms":null}
     ]);
     rig.put_items(&items);
+    let mut publication = super::observation::fixtures::context_pre_handoff();
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"][0]["dirty"] = json!(true);
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"][0]["ahead"] = Value::Null;
+    let publisher = super::observation::Supplied::start(&rig, publication.clone());
     let gate = || {
         let mut cmd = rig.cmd(&["hook", "gate"]);
         cmd.env("HERDR_ENV", "1");
@@ -62,22 +73,35 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
     host["probe"]["agent_panes"][0]["worktree"]["landed"] = json!(false);
     host["probe"]["agent_panes"][0]["state"] = json!("done");
     rig.put_host(&host);
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"][0]["dirty"] = json!(false);
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"][0]["ahead"] = json!(1);
+    replace(&rig, &publisher, &mut publication);
     assert!(gate().contains("worker (+1)"));
     assert_eq!(gate(), "");
     // Closed children, working writers and clean landed writers do not block.
     items[0]["closed_ms"] = json!(2);
     rig.put_items(&items);
+    let row = publication["views"]["boards"]["data"]["w1:p1"]["rows"][0].clone();
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"] = json!([]);
+    replace(&rig, &publisher, &mut publication);
     assert_eq!(gate(), "");
     items[0]["closed_ms"] = Value::Null;
     rig.put_items(&items);
     for state in ["working", "blocked", "unknown"] {
         host["probe"]["agent_panes"][0]["state"] = json!(state);
         rig.put_host(&host);
+        let mut active = row.clone();
+        active["group"] = json!("running");
+        active["state"] = json!(state);
+        publication["views"]["boards"]["data"]["w1:p1"]["rows"] = json!([active]);
+        replace(&rig, &publisher, &mut publication);
         assert_eq!(gate(), "");
     }
     host["probe"]["agent_panes"][0]["state"] = json!("idle");
     host["probe"]["agent_panes"][0]["worktree"]["landed"] = json!(true);
     rig.put_host(&host);
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"] = json!([]);
+    replace(&rig, &publisher, &mut publication);
     assert_eq!(gate(), "");
     // A missing owner never falls back to the fleet's children.
     let out = rig
@@ -93,6 +117,52 @@ fn stop_gate_is_owner_scoped_durable_and_tracks_changed_work() {
         .output()
         .unwrap();
     assert!(out.status.success() && out.stdout.is_empty());
+}
+
+#[test]
+fn context_selects_the_supplied_revision_with_store_and_observers_unavailable() {
+    let rig = Rig::short("context-isolated");
+    let publication = super::observation::fixtures::context_pre_handoff();
+    let _publisher = super::observation::Supplied::start(&rig, publication);
+    for program in ["git", "herdr", "ssh"] {
+        rig.script(
+            program,
+            "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$RIG/reader-access.log\"\nexit 97\n",
+        );
+    }
+    fs::create_dir(rig.dir.join("state/state.db")).unwrap();
+    let _locks: Vec<_> = [
+        "service",
+        "state-db",
+        "host",
+        "branch-checks",
+        "observation",
+    ]
+    .into_iter()
+    .map(|name| {
+        let file = fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(rig.dir.join(format!("state/{name}.lock")))
+            .unwrap();
+        file.try_lock().unwrap();
+        file
+    })
+    .collect();
+    let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
+    cmd.env("HERDR_ENV", "1");
+    let out = bounded(cmd);
+    assert!(out.status.success());
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let context = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        context
+            .starts_with("Your children and jobs: 1 ready to merge\nReady to merge: worker (+2)."),
+        "{context}"
+    );
+    assert_eq!(rig.log("reader-access.log"), "");
 }
 
 #[test]
@@ -126,9 +196,19 @@ fn context_without_snapshot_exits_silently() {
 #[test]
 fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
     let rig = Rig::new("context-output");
-    // A minute-old snapshot renders its age as `1m` for half a minute either side, so the brief
-    // stays identical across the calls below however slowly a loaded machine runs them.
+    // All readers share one frozen real publication and a fixed clock.
     rig.snapshot("state", now() - 60_000, 1.0, 8);
+    fs::write(rig.dir.join("clock"), now().to_string()).unwrap();
+    let observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    let publication = wait_publication(&rig, |frame| {
+        let samples: i64 = rig
+            .database()
+            .query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))
+            .unwrap();
+        samples >= 2 && frame["local"]["host"]["probe"] == rig.host()["probe"]
+    });
+    drop(observer);
+    let _publisher = super::observation::Supplied::start(&rig, publication);
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     for harness in ["claude", "codex", "pi"] {
         for event in ["SessionStart", "UserPromptSubmit"] {
@@ -155,6 +235,7 @@ fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
 fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
     let rig = Rig::new("context-failure");
     rig.snapshot("state", now(), 1.0, 8);
+    let observer = rig.serve();
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "claude"]);
     cmd.env("HERDR_ENV", "1");
     let out = bounded(cmd);
@@ -162,6 +243,15 @@ fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
     assert_eq!(
         value["hookSpecificOutput"]["hookEventName"],
         "UserPromptSubmit"
+    );
+    drop(observer);
+    let (code, unavailable) = rig.json(&["observation", "current"]);
+    assert_eq!(code, 2, "{unavailable}");
+    assert!(
+        unavailable["error"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
     );
     rig.script("herdr", "#!/bin/sh\nexec sleep 60\n");
     let mut cmd = rig.cmd(&[
@@ -194,19 +284,18 @@ fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
 fn context_names_only_the_callers_children_with_work_to_land() {
     let rig = Rig::new("context-close");
     rig.snapshot("state", now(), 1.0, 8);
-    // The snapshot's idle agent is in pane w1:p1. Both items name it; only one is the caller's.
-    let mut host = rig.host();
-    host["probe"]["agent_panes"][0]["worktree"] = json!({
-        "path":"/t","branch":"feat/x","ahead":2,"dirty":false,"landed":false,"head":"h","base":"b"
-    });
-    host["probe"]["agent_panes"][0]["done"] = json!(true);
+    // The real producer fixture captures the open-finished window before handoff.
+    let publication = super::observation::fixtures::context_pre_handoff();
+    fs::write(
+        rig.dir.join("clock"),
+        publication["published_ms"].to_string(),
+    )
+    .unwrap();
+    let mut host = publication["local"]["host"].clone();
     rig.put_host(&host);
-    rig.put_items(&json!([
-        {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
-         "name":"worker","created_ms":1,"closed_ms":null},
-        {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
-         "name":"other","created_ms":1,"closed_ms":null}
-    ]));
+    rig.put_items(&publication["views"]["status"]["data"]["items"]);
+    let mut publication = publication;
+    let publisher = super::observation::Supplied::start(&rig, publication.clone());
     let status = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert!(status.contains("(2 finished)"), "{status}");
     assert!(!status.contains("dogsled close"), "{status}");
@@ -235,6 +324,8 @@ fn context_names_only_the_callers_children_with_work_to_land() {
     // A finished reader with nothing to land is not named.
     host["probe"]["agent_panes"][0]["worktree"]["ahead"] = json!(0);
     rig.put_host(&host);
+    publication["views"]["boards"]["data"]["w1:p1"]["rows"] = json!([]);
+    replace(&rig, &publisher, &mut publication);
     let mut cmd = rig.cmd(&["hook", "context", "--harness", "pi"]);
     cmd.env("HERDR_ENV", "1");
     let out = String::from_utf8(bounded(cmd).stdout).unwrap();
@@ -254,6 +345,12 @@ fn status_rows_derive_lifecycle_even_without_a_published_label() {
         host["probe"]["agent_panes"][0]["state"] = json!(terminal);
         host["probe"]["agent_panes"][0]["lifecycle"] = json!("done");
         rig.put_host(&host);
+        rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":terminal}]}}));
+        let _observer = rig.serve();
+        super::wait_publication(&rig, |frame| {
+            frame["views"]["status"]["data"]["hosts"][0]["probe"]["agent_panes"][0]["state"]
+                == terminal
+        });
         let output = rig.run(&["status"]);
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
@@ -277,6 +374,14 @@ fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
     );
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"unknown"}]}}),
+    );
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"][0]["id"] == "mine"
+    });
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     let row = &board["rows"][0];
@@ -296,6 +401,10 @@ fn an_unobserved_child_is_unknown_and_never_claims_a_landed_result() {
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p2","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
     );
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"][0]["id"] == "mine"
+    });
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     let row = &board["rows"][0];

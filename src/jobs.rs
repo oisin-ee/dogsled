@@ -140,7 +140,12 @@ pub fn request_validity(ledger: &Ledger, id: &str) -> Result<Option<Validity>> {
 }
 
 /// Fresh origin issuance. The marker prevents transport from repairing deleted authority.
-pub fn issue_request_validity(ledger: &Ledger, id: &str) -> Result<Validity> {
+pub fn issue_request_validity(
+    ledger: &Ledger,
+    id: &str,
+    owner: &str,
+    origin_host: &str,
+) -> Result<Validity> {
     validate_id(id)?;
     let validity = origin_validity(ledger)?;
     crate::store::write(ledger, |tx| {
@@ -149,6 +154,7 @@ pub fn issue_request_validity(ledger: &Ledger, id: &str) -> Result<Validity> {
         }
         crate::job_store::put_ingress(tx, id)?;
         crate::job_store::put_validity(tx, id, validity)?;
+        crate::job_store::remember_owner_in(tx, id, owner, Some(origin_host))?;
         Ok(validity)
     })
 }
@@ -215,16 +221,22 @@ pub fn record_request_validity(
     id: &str,
     validity: Option<Validity>,
 ) -> Result<()> {
+    crate::store::write(ledger, |tx| record_request_validity_in(tx, id, validity))
+}
+
+pub(crate) fn record_request_validity_in(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    validity: Option<Validity>,
+) -> Result<()> {
     validate_id(id)?;
-    crate::store::write(ledger, |tx| {
-        match (crate::job_store::validity(tx, id)?, validity) {
-            (Some(saved), Some(incoming)) if saved != incoming => {
-                Err(Error::Invalid(format!("job {id} request validity changed")))
-            }
-            (None, Some(incoming)) => crate::job_store::put_validity(tx, id, incoming),
-            _ => Ok(()),
+    match (crate::job_store::validity(tx, id)?, validity) {
+        (Some(saved), Some(incoming)) if saved != incoming => {
+            Err(Error::Invalid(format!("job {id} request validity changed")))
         }
-    })
+        (None, Some(incoming)) => crate::job_store::put_validity(tx, id, incoming),
+        _ => Ok(()),
+    }
 }
 
 /// The host's job validity clock. Its high-water time never moves back, so a host clock

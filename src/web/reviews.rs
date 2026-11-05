@@ -780,7 +780,7 @@ fn summary(record: &Record) -> ReviewSummary {
 }
 
 /// Pending reviews for the portal inbox, from the same durable store.
-pub(super) fn pending(web: &Ledger) -> Result<Vec<Review>> {
+pub(crate) fn pending(web: &Ledger) -> Result<Vec<Review>> {
     crate::store::read(web, |tx| {
         Ok(records::select(tx, "decision IS NULL", &[])?
             .into_iter()
@@ -1002,7 +1002,7 @@ mod tests {
     /// A state over a fresh directory. Every test has its own, so the tests
     /// run side by side.
     fn fresh_state() -> AppState {
-        let (_sender, receiver) = tokio::sync::watch::channel(String::new());
+        let (_sender, receiver) = tokio::sync::watch::channel(crate::web::PortalState::default());
         let web =
             Ledger::new(std::env::temp_dir().join(format!("dogsled-reviews-{}", ledger::new_id())))
                 .clone();

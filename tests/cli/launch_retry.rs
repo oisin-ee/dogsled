@@ -202,6 +202,8 @@ fn remote_preparation_accepts_owning_hosts_symlink_equivalence() {
         "ssh",
         &script.replacen("case \"$*\" in", &format!("case \"$*\" in\n{handler}"), 1),
     );
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, placed) = rig.json(&[
         "place",
         "--host",
@@ -213,6 +215,7 @@ fn remote_preparation_accepts_owning_hosts_symlink_equivalence() {
         "--base",
         "main",
     ]);
+    drop(observer);
     assert_eq!(
         code,
         0,
@@ -286,6 +289,8 @@ fn remote_preparation_release_requires_correlated_ack() {
             "ssh",
             &format!("{}{}{}", &script[..start], handler, &script[end..]),
         );
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, result) = rig.json(&[
             "place",
             "--host",
@@ -297,6 +302,7 @@ fn remote_preparation_release_requires_correlated_ack() {
             "--base",
             "main",
         ]);
+        drop(observer);
         assert_eq!(code == 0, case == "exact", "{case}: {result}");
         assert_eq!(rig.preparations(), other);
         assert!(!rig.dir.join("state/unit-requests").exists());
@@ -349,7 +355,10 @@ fn old_preparation_peer_refuses_at_reserve_before_preparation() {
             "  *'host reserve'*) echo 'unexpected argument --preparation-protocol' >&2; exit 2;",
         ),
     );
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, error) = remote_agent(&rig, Some(&repo));
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     let log = rig.log("ssh.log");
     assert!(
@@ -1703,14 +1712,20 @@ fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() 
             "reason":"reservation raced with another request"
         }}),
     );
+    rig.ingest_peers();
+    let observer = super::observation::seeded(&rig);
     let (code, result) = remote_agent(&rig, None);
+    drop(observer);
     assert_eq!(code, 1, "{result}");
     let ticket = rig.tickets()[0].clone();
     assert_eq!(
         ticket["wait_reason"],
         "netcup: reservation raced with another request"
     );
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     assert_ne!(ticket["id"], ticket["request"]["id"], "{ticket}");
     assert_eq!(board["rows"].as_array().unwrap().len(), 1, "{board}");
     assert_eq!(board["rows"][0]["id"], ticket["id"], "{board}");
@@ -1743,7 +1758,10 @@ fn unpinned_refusal_keeps_one_line_per_host() {
     rig.put("reserve.json", &json!({"reserved":false,"headroom":{
         "host":"8103","headroom":0.0,"eligible":false,"live_agents":0,"reason":"peer reservation refused"
     }}));
+    rig.ingest_peers();
+    let observer = super::observation::seeded(&rig);
     let (code, queued) = rig.json(&["agent", "--name", "worker", "--message", "go"]);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     let ticket = rig.tickets()[0].clone();
     let lines: Vec<_> = ticket["wait_reason"].as_str().unwrap().lines().collect();
@@ -1758,18 +1776,28 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     rig.peer();
     rig.snapshot("state", now(), 20.0, 8);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
+    rig.ingest_peers();
+    let observer = super::observation::seeded(&rig);
     assert_eq!(remote_agent(&rig, None).0, 1);
+    drop(observer);
     let mut queue = rig.tickets();
     queue[0].as_object_mut().unwrap().remove("wait_reason");
     rig.put_tickets(&queue);
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     assert_eq!(
         board["rows"][0]["activity"], "for a host with room",
         "{board}"
     );
     rig.snapshot("remote.json", now(), 100.0, 16);
     rig.expire_cache();
-    let (_, board) = rig.json(&["board", "--all"]);
+    rig.ingest_peers();
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     let reason = board["rows"][0]["activity"].as_str().unwrap();
     assert!(reason.starts_with("for netcup: "), "{board}");
     assert!(!reason.contains("local:"), "{board}");
@@ -1788,7 +1816,10 @@ fn ssh_failure_before_launch_retries_reservation_checkout_and_preparation() {
             &format!("  *'host {step}'*)"),
             &format!("  *'host {step}'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo 'connection reset' >&2; exit 255; fi;"),
         ));
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, result) = remote_agent(&rig, Some(&repo));
+        drop(observer);
         assert_eq!(code, 1, "{step}: {result}");
         let ticket = rig.tickets()[0].clone();
         assert_eq!(ticket["state"], "pending", "{step}: {ticket}");
@@ -1841,7 +1872,10 @@ fn persistent_prelaunch_ssh_failure_exhausts_the_launch_attempt_budget() {
                 &format!("  *'host {step}'*) echo 'connection refused' >&2; exit 255;"),
             ),
         );
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         assert_eq!(remote_agent(&rig, Some(&repo)).0, 1);
+        drop(observer);
         assert_eq!(advance(&rig)["retry"]["attempts"], 2);
         let ticket = advance(&rig);
         assert_eq!(ticket["state"], "failed", "{ticket}");
@@ -1883,7 +1917,10 @@ fn prelaunch_deadlines_structured_refusals_and_invalid_requests_are_terminal() {
                 &format!("  *'host reserve'*) echo '{response}'; exit 2;"),
             ),
         );
+        rig.ingest_peers();
+        let observer = super::place::peer_observer(&rig);
         let (code, result) = remote_agent(&rig, None);
+        drop(observer);
         assert_eq!(code, 2, "{case}: {result}");
         assert_eq!(rig.tickets(), json!([]), "{case}");
     }
@@ -1983,7 +2020,10 @@ fn terminal_ssh_categories_never_enter_the_retry_queue() {
                     &format!("  *'host {step}'*) {response}; exit {status};"),
                 ),
             );
+            rig.ingest_peers();
+            let observer = super::place::peer_observer(&rig);
             let (code, error) = remote_agent(&rig, Some(&repo));
+            drop(observer);
             assert_eq!(code, 2, "{step}/{case}: {error}");
             assert!(
                 rig.tickets().as_array().unwrap().is_empty(),
@@ -2018,7 +2058,10 @@ fn expired_agent_preparation_reservations_revalidate_on_the_same_host_and_keep_r
     rig.script("ssh", &script
             .replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", &reserve)
             .replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, queued) = remote_agent(&rig, Some(&repo));
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     let mut holds = rig.peer_state(&["reservations"]);
     holds[0]["created_ms"] = json!(1);
@@ -2150,7 +2193,10 @@ fn lost_successful_reservation_reply_reuses_one_hold_on_the_selected_host() {
         "ssh",
         &script.replace("  *'host reserve'*)\n    for remote do :; done\n    sh -c \"$RIG/bin/peer-fixture $remote\" ;;", &handler),
     );
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, queued) = remote_agent(&rig, None);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     assert_eq!(rig.tickets()[0]["retry"]["attempts"], 1);
     let before = rig.peer_state(&["reservations"]);
@@ -2239,7 +2285,10 @@ fn lost_successful_preparation_reply_reuses_the_completed_worktree_and_pane() {
     let script = format!("{}{}{}", &script[..begin], handler, &script[end..]);
     let script = script.replacen("case \"$*\" in", &format!("case \"$*\" in\n{routing}"), 1);
     rig.script("ssh", &script);
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, queued) = remote_agent(&rig, Some(&repo));
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     assert_eq!(rig.tickets()[0]["retry"]["attempts"], 1);
     let ticket = advance(&rig);
@@ -2271,6 +2320,7 @@ fn advance(rig: &Rig) -> Value {
 fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
     let (rig, repo) = place::place_rig("branch-retry");
     fs::write(rig.dir.join("start-fails"), "").unwrap();
+    let observer = super::place::placement_observer(&rig);
     let (code, queued) = rig.json(&[
         "agent",
         "--cwd",
@@ -2284,6 +2334,7 @@ fn branch_retry_keeps_preparation_host_and_terminal_across_service_restart() {
         "--message",
         "go",
     ]);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     assert!(
         queued["retrying"]
@@ -2388,7 +2439,9 @@ fn cli_spawn_error_and_progress_include_the_child_startup_failure() {
     let rig = Rig::new("cli-startup-output");
     rig.snapshot("state", now(), 0.0, 8);
     npm_start_fails(&rig);
+    let observer = super::place::placement_observer(&rig);
     let (code, queued) = rig.json(&["agent", "--name", "worker", "--message", "go"]);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     assert!(
         queued["retrying"].as_str().unwrap().contains(NPM_FAILURE),
@@ -2751,7 +2804,9 @@ fn a_refused_start_is_not_retried_by_the_service() {
     let rig = Rig::new("refused-retry");
     rig.snapshot("state", now(), 0.0, 8);
     refusing_start(&rig);
+    let observer = super::place::placement_observer(&rig);
     let (code, error) = rig.json(&["agent", "--name", "w", "--message", "go"]);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert!(
         error["error"]
@@ -2898,6 +2953,8 @@ fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
     rig.script("ssh", &fs::read_to_string(rig.dir.join("bin/ssh")).unwrap().replace(
         "  *'host launch'*)", "  *'host launch'*) if ! test -f \"$RIG/response-lost\"; then touch \"$RIG/response-lost\"; echo 'connection lost after launch' >&2; exit 255; fi;",
     ));
+    rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let (code, queued) = rig.json(&[
         "agent",
         "--host",
@@ -2913,6 +2970,7 @@ fn remote_retry_keeps_selected_host_and_skips_checkout_and_prepare() {
         "--message",
         "go",
     ]);
+    drop(observer);
     assert_eq!(code, 1, "{queued}");
     // Selection must not run again, even when the chosen host now refuses reservations.
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));

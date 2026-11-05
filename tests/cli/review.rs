@@ -93,6 +93,8 @@ fn deadline_includes_discovery_and_placement_ssh() {
     ] {
         let rig = Rig::new(name);
         rig.peer();
+        rig.ingest_peers();
+        let _publisher = super::observation::seeded(&rig);
         rig.script("ssh", "#!/bin/sh\nexec sleep 30\n");
         let start = Instant::now();
         let out = rig.run(&args);
@@ -103,12 +105,22 @@ fn deadline_includes_discovery_and_placement_ssh() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(start.elapsed() < Duration::from_secs(2), "{diagnostic}");
-        if name == "agent-placement" {
+        if name == "wait-discovery" {
+            // Unknown-name lookup consumes the publication; there is no discovery SSH deadline.
+            assert_eq!(out.status.code(), Some(2), "{diagnostic}");
+            assert!(
+                !String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
+                "{diagnostic}"
+            );
+        } else if name == "agent-placement" {
             assert_eq!(out.status.code(), Some(2), "{diagnostic}");
             assert!(
                 String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
                 "{diagnostic}"
             );
+            let (code, report) = rig.json(&args);
+            assert_eq!(code, 2, "{report}");
+            assert_eq!(report["deadline"], true, "{report}");
         } else {
             assert_eq!(out.status.code(), Some(124), "{diagnostic}");
             assert_eq!(out.stdout, b"still running\n", "{diagnostic}");
@@ -119,6 +131,8 @@ fn deadline_includes_discovery_and_placement_ssh() {
 #[test]
 fn command_deadline_bounds_local_git_and_remote_report() {
     let rig = Rig::new("hung-git");
+    rig.snapshot("state", now(), 0.0, 8);
+    let _publisher = super::observation::seeded(&rig);
     rig.script("git", "#!/bin/sh\nexec sleep 30\n");
     let start = Instant::now();
     let out = rig.run(&["run", "--wait", "--max", "50ms", "--", "true"]);
@@ -128,16 +142,21 @@ fn command_deadline_bounds_local_git_and_remote_report() {
     let rig = Rig::new("remote-deadline-report");
     rig.peer();
     rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
+    rig.ingest_peers();
+    let _publisher = super::observation::seeded(&rig);
     rig.script("ssh", "#!/bin/sh\nprintf '%s\\n' '{\"deadline\":true,\"error\":\"deadline reached: git clone\"}'; exit 2\n");
+    let start = Instant::now();
     let out = rig.run(&["wait", "remote", "--max", "1s"]);
     assert_eq!(out.status.code(), Some(124));
     assert_eq!(out.stdout, b"still running\n");
+    assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
 fn command_deadline_bounds_host_lock_wait() {
     let rig = Rig::new("locked-placement");
     rig.snapshot("state", now(), 0.0, 8);
+    let _publisher = super::observation::seeded(&rig);
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -178,33 +197,72 @@ fn service_publishes_snapshots_while_remote_action_times_out() {
     rig.peer();
     rig.snapshot("state", now(), 9999.0, 1);
     rig.config("free_core_fraction_min = 2\n");
+    rig.ingest_peers();
     // Queue without consulting a hung peer, then make that peer hang for admission.
+    let publisher = super::observation::seeded(&rig);
     let (_, ticket) = rig.json(&["place", "--host", "netcup"]);
+    drop(publisher);
     rig.expire_cache();
-    rig.script("ssh", "#!/bin/sh\nexec sleep 60\n");
-    // Every agent-list call, which only a publication tick makes, reads the previous published
-    // snapshot. This observes publication at each service tick without sleeps or polling.
-    rig.script("herdr", r#"#!/bin/sh
+    // Admission must have an eligible peer; only the reservation call should hang.
+    rig.config("");
+    // The blocked admission itself records publications, so every record proves SSH was
+    // still running. It never replies: the real SSH deadline must end the admission.
+    rig.script(
+        "ssh",
+        r#"#!/bin/sh
 case "$*" in
- 'machine list --json') cat "$RIG/machines.json" ;;
- 'agent list') "$DOGSLED_BINARY" state host --json >> "$RIG/publications"; printf '\n---\n' >> "$RIG/publications"; cat "$RIG/agents.json" ;;
- 'pane list') cat "$RIG/panes.json" ;;
+ *'host observation'*) exit 2 ;;
+ *'host snapshot'*) cat "$RIG/remote.json" ;;
+ *'host reserve'*)
+    "$DOGSLED_BINARY" observation subscribe > "$RIG/publications" &
+    subscriber=$!
+    printf '%s\n' "$$" > "$RIG/ssh-pid"
+    printf '%s\n' "$subscriber" > "$RIG/subscriber-pid"
+    ps -o pgid= -p "$$" > "$RIG/ssh-group"
+    ps -o pgid= -p "$subscriber" > "$RIG/subscriber-group"
+    # Keep SSH blocked even if subscribing fails; both processes inherit its group.
+    exec sleep 60
+    ;;
  *) exit 2 ;;
 esac
-"#);
+"#,
+    );
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let records: Vec<Value> = rig
+    let group: u32 = rig.log("ssh-group").trim().parse().unwrap();
+    let subscriber_group: u32 = rig.log("subscriber-group").trim().parse().unwrap();
+    assert_eq!(subscriber_group, group);
+    for role in ["ssh", "subscriber"] {
+        let pid: u32 = rig.log(&format!("{role}-pid")).trim().parse().unwrap();
+        if role == "ssh" {
+            assert_eq!(pid, group);
+        }
+        assert!(
+            wait_gone(pid, PROCESS_DEADLINE),
+            "{role} outlived the admission deadline"
+        );
+    }
+    let mut records: Vec<Value> = rig
         .log("publications")
-        .split("\n---\n")
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| serde_json::from_str(s).unwrap())
+        .split_inclusive('\n')
+        // The deadline can interrupt the subscriber while it writes its final frame.
+        .filter(|line| line.ends_with('\n'))
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["local"]["host"].clone())
         .collect();
-    assert!(records.len() >= 3);
+    // Ledger-only publications can retain the same capacity sample.
+    records.dedup_by(|a, b| a["sampled_ms"] == b["sampled_ms"]);
+    // The subscription starts inside admission SSH. A newer sample on that connection
+    // proves publication advanced while SSH was blocked, regardless of interval counts.
+    assert!(
+        records.windows(2).any(|pair| {
+            pair[1]["sampled_ms"].as_u64().unwrap() > pair[0]["sampled_ms"].as_u64().unwrap()
+        }),
+        "no sample advanced while admission SSH was blocked: {records:?}"
+    );
     for pair in records.windows(2) {
         assert!(pair[1]["sampled_ms"].as_u64().unwrap() > pair[0]["sampled_ms"].as_u64().unwrap());
     }

@@ -683,6 +683,27 @@ pub fn dropped(ledger: &Ledger, item: &crate::items::Item, now: u64) -> Result<(
     })
 }
 
+/// Import display observation only for the same retained branch. Destructive handoff
+/// still measures and validates its current checkout independently.
+pub(crate) fn observed_branch(ledger: &Ledger, checked: &crate::drop::Checked) -> Result<()> {
+    marks_transaction(ledger, |tx| {
+        let mut marks = crate::host_store::marks_rows(tx)?;
+        for mark in marks.values_mut() {
+            if mark.item.as_deref() == Some(&checked.item)
+                && mark.closed_ms.is_some()
+                && mark.dropped_ms.is_none()
+                && let Some(branch) = &mut mark.branch
+                && branch.repo == checked.branch.repo
+                && branch.name == checked.branch.name
+                && !branch.landed
+            {
+                branch.clone_from(&checked.branch);
+            }
+        }
+        crate::host_store::replace_marks(tx, &marks)
+    })
+}
+
 fn save(ledger: &Ledger, mark: &Mark) -> Result<()> {
     marks_transaction(ledger, |tx| {
         let mut marks: Marks = crate::host_store::marks_rows(tx)?;
@@ -1018,7 +1039,7 @@ fn handoff_locked(
             continue;
         }
         if let Some(branch) = &mut mark.branch
-            && !(mark.closed_ms.is_some() && branch.landed)
+            && mark.closed_ms.is_none()
         {
             if let Err(error) = refresh_branch(shell, branch) {
                 warnings.add(

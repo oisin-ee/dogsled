@@ -5,7 +5,9 @@ pub(super) fn launched(name: &str) -> (Rig, Value, Value) {
     let rig = rig(name, false);
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
+    let observer = super::place::placement_observer(&rig);
     assert_eq!(operation(&rig, "commit", &input).0, 0);
+    drop(observer);
     (rig, execution, input)
 }
 
@@ -82,7 +84,9 @@ fn refused_unit(name: &str) -> (Rig, Value, Value) {
     ));
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
+    let observer = super::place::placement_observer(&rig);
     let (code, error) = operation(&rig, "commit", &input);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert!(error.to_string().contains("native refusal"), "{error}");
     (rig, execution, input)
@@ -398,7 +402,9 @@ fn refused_prepared_unit(name: &str) -> (Rig, Value, Value) {
     ]);
     assert_eq!(code, 0, "{execution}");
     let input = commit_input(&execution, 0);
+    let observer = super::place::placement_observer(&rig);
     let (code, error) = operation(&rig, "commit", &input);
+    drop(observer);
     assert_eq!(code, 2, "{error}");
     assert!(error.to_string().contains("native refusal"), "{error}");
     assert_eq!(
@@ -442,11 +448,14 @@ fn over_budget_prepared_unit_releases_only_its_claim_and_settles_idempotently() 
         ]);
         assert_eq!(code, 0, "{execution}");
         let input = commit_input(&execution, 0);
+        drop(original.service.lock().unwrap().take());
+        let observer = super::place::placement_observer(&rig);
         let mut cmd = rig.cmd(&["unit", "commit", "--input", &input.to_string()]);
         if point == "preflight-refusal-persisted" {
             cmd.env("DOGSLED_TEST_UNIT_CRASH", point);
         }
         let out = cmd.output().unwrap();
+        drop(observer);
         assert_eq!(
             out.status.code(),
             Some(if point == "preflight-refusal-persisted" {
@@ -602,7 +611,9 @@ fn refusal_release_recovers_each_boundary_through_symlinked_home() {
             "call-1",
         ]);
         assert_eq!(code, 0, "{execution}");
+        let observer = super::observation::seeded(&rig);
         let (code, error) = operation(&rig, "commit", &commit_input(&execution, 0));
+        drop(observer);
         assert_eq!(code, 2, "{error}");
         assert!(
             error.to_string().contains("native refusal"),
@@ -1042,7 +1053,9 @@ fn successful_agent_place_and_failed_preparation_release_only_owned_preparation(
                 "main",
             ]
         };
+        let observer = super::place::placement_observer(&rig);
         let (code, result) = rig.json(&args);
+        drop(observer);
         assert_eq!(
             code,
             if matches!(action, "setup-failure" | "already-open") {
@@ -1063,6 +1076,8 @@ fn remote_preparation_and_placement_release_route_the_same_request_id() {
     repository(&repo);
     rig.peer();
     rig.snapshot("remote.json", now(), 0.0, 8);
+    rig.ingest_peers();
+    let observer = super::observation::seeded(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -1074,6 +1089,7 @@ fn remote_preparation_and_placement_release_route_the_same_request_id() {
         "--base",
         "main",
     ]);
+    drop(observer);
     assert_eq!(code, 0, "{result}");
     let log = rig.log("ssh.log");
     let prepare = log
@@ -1465,6 +1481,7 @@ fn selected_remote_host_receives_exact_seed_and_durable_receipt_refresh() {
     );
     rig.snapshot("remote.json", now(), 0.0, 2);
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
+    rig.ingest_peers();
     let (_, execution) = rig.json(&[
         "unit",
         "prepare",
@@ -1475,7 +1492,9 @@ fn selected_remote_host_receives_exact_seed_and_durable_receipt_refresh() {
     ]);
     assert!(execution["requestId"].is_string(), "{execution}");
     let input = commit_input(&execution, 0);
+    let observer = super::observation::seeded(&rig);
     let (code, result) = operation(&rig, "commit", &input);
+    drop(observer);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["disposition"], "launched");
     let mut seed = input.clone();
@@ -1564,7 +1583,9 @@ fn commit_as(rig: &Rig, owner: &str, call: &str) -> (i32, Value) {
     );
     let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
     let commit = commit_input(&execution, 0).to_string();
+    let observer = super::place::placement_observer(rig);
     let out = run(&["unit", "commit", "--input", &commit]);
+    drop(observer);
     (out.status.code().unwrap(), execution)
 }
 

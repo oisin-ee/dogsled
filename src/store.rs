@@ -120,7 +120,66 @@ pub(crate) fn write<T>(
     ledger: &Ledger,
     f: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
-    transact(ledger, TransactionBehavior::Immediate, f)
+    let (result, changed) = transact(ledger, TransactionBehavior::Immediate, |tx| {
+        let before = tx.total_changes();
+        let result = f(tx)?;
+        Ok((result, tx.total_changes() != before))
+    })?;
+    // `transact` has committed and released its transaction before notifying. Collector
+    // output is not an input change, and must not feed back into another collection.
+    if changed && !OBSERVING.get() {
+        crate::service::wake::notify(ledger);
+    }
+    Ok(result)
+}
+
+thread_local! {
+    #[cfg(debug_assertions)]
+    static READ_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static OBSERVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(debug_assertions)]
+fn open_read_only(ledger: &Ledger) -> Result<Connection> {
+    let connection = Connection::open_with_flags(
+        database(ledger)?,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    connection.busy_timeout(ledger.budget.remaining("state.db")?)?;
+    let current = version(&connection)?;
+    if current != VERSION {
+        return Err(Error::Invalid(format!(
+            "read-only state.db schema version {current} does not match {VERSION}"
+        )));
+    }
+    connection.execute_batch("PRAGMA query_only=ON;")?;
+    Ok(connection)
+}
+
+/// The debug fixture projector cannot initialize, repair or modify a store.
+#[cfg(debug_assertions)]
+pub(crate) fn read_only<T>(ledger: &Ledger, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            READ_ONLY.set(self.0);
+        }
+    }
+    let _connection = open_read_only(ledger)?;
+    let _reset = Reset(READ_ONLY.replace(true));
+    f()
+}
+
+/// Producer writes on this thread do not invalidate their own inputs.
+pub(crate) fn observing<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OBSERVING.set(self.0);
+        }
+    }
+    let _reset = Reset(OBSERVING.replace(true));
+    f()
 }
 
 /// The file a cached connection opened. A replaced or removed `state.db` has a new identity.
@@ -196,6 +255,14 @@ fn transact<T>(
     f: impl FnOnce(&Transaction<'_>) -> Result<T>,
 ) -> Result<T> {
     (|| {
+        #[cfg(debug_assertions)]
+        if READ_ONLY.get() {
+            let mut connection = open_read_only(ledger)?;
+            let tx = connection.transaction_with_behavior(behavior)?;
+            let result = f(&tx);
+            tx.rollback()?;
+            return result;
+        }
         let path = database(ledger)?;
         if matches!(behavior, TransactionBehavior::Deferred) && identity(&path)?.is_none() {
             // A read never creates the store: a host without one has empty tables. The
@@ -286,6 +353,72 @@ mod tests {
                 .collect::<std::result::Result<_, _>>()?)
         })
         .unwrap()
+    }
+
+    #[test]
+    fn commit_wake_is_after_commit_and_ignores_rollback_noop_and_producer_writes() {
+        use std::os::unix::net::UnixDatagram;
+        let ledger = ledger();
+        std::fs::create_dir_all(&ledger.dir).unwrap();
+        let listener = UnixDatagram::bind(ledger.dir.join("observation-wake.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut bytes = [0; 16];
+        let empty = |bytes: &mut [u8]| {
+            assert_eq!(
+                listener.recv(bytes).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        };
+        write(&ledger, |tx| {
+            sync_items(tx, &[item("committed")])?;
+            empty(&mut bytes);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(listener.recv(&mut bytes).unwrap(), 6);
+        assert_eq!(items(&ledger).unwrap()[0]["id"], "committed");
+        assert!(
+            write(&ledger, |tx| {
+                sync_items(tx, &[item("rolled-back")])?;
+                Err::<(), _>(Error::Invalid("rollback".into()))
+            })
+            .is_err()
+        );
+        empty(&mut bytes);
+        write(&ledger, |tx| sync_items(tx, &[item("committed")])).unwrap();
+        empty(&mut bytes);
+        observing(|| write(&ledger, |tx| sync_items(tx, &[item("producer")]))).unwrap();
+        empty(&mut bytes);
+        write(&ledger, |tx| sync_items(tx, &[item("next-input")])).unwrap();
+        assert_eq!(listener.recv(&mut bytes).unwrap(), 6);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn read_only_fixture_refuses_writes_and_mismatched_versions_without_touching_the_store() {
+        let ledger = ledger();
+        write(&ledger, |tx| sync_items(tx, &[item("saved")])).unwrap();
+        release();
+        let path = ledger.dir.join("state.db");
+        let before = std::fs::read(&path).unwrap();
+        let error = read_only(&ledger, || {
+            write(&ledger, |tx| sync_items(tx, &[item("forbidden")]))
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("readonly"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .pragma_update(None, "user_version", VERSION - 1)
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let error = read_only(&ledger, || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("does not match"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
     #[test]

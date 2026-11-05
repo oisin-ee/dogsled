@@ -98,6 +98,7 @@ fn r1b_last_job_identity_expiry_never_resolves_a_reused_agent() {
             "pane_id":"replacement","agent":"pi","name":"reused","agent_status":"idle"
         }]}}),
     );
+    let _publisher = super::observation::resolved(&rig);
     for target in ["r-old-job", "never-known"] {
         let (code, value) = rig.json(&["read", target]);
         assert_eq!(code, 2, "{value}");
@@ -117,6 +118,7 @@ fn r1a_settled_placement_family_expires_without_reallocation() {
     let (rig, repo) = place::place_rig("r1-placement");
     let ended = rig.now_ms();
     clock(&rig, ended);
+    let publisher = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -129,6 +131,7 @@ fn r1a_settled_placement_family_expires_without_reallocation() {
         "main",
     ]);
     assert_eq!(code, 0, "{result}");
+    drop(publisher);
     let id = result["request_id"].as_str().unwrap();
     clock(&rig, ended + WINDOW + 1);
     serve(&rig);
@@ -160,6 +163,7 @@ fn r1b_live_nonchild_agent_reads_still_work_by_name_and_pane() {
         "pane":"w2:p1","terminal_id":"term_child","agent":"pi","state":"idle","name":"live-agent"
     }]);
     rig.put_host(&snapshot);
+    let _publisher = super::observation::resolved(&rig);
     for target in ["live-agent", "w2:p1"] {
         let (code, value) = rig.json(&["read", target]);
         assert_eq!(code, 0, "{value}");
@@ -343,6 +347,7 @@ fn r1a_grant_expiry_requires_origin_terminal_proof() {
     let (rig, repo) = place::place_rig("r1-grant-proof");
     let ended = rig.now_ms();
     clock(&rig, ended);
+    let publisher = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -355,6 +360,7 @@ fn r1a_grant_expiry_requires_origin_terminal_proof() {
         "main",
     ]);
     assert_eq!(code, 0, "{result}");
+    drop(publisher);
     let id = result["request_id"].as_str().unwrap();
     let lifecycle = rig.preparation_record("state", "lifecycle", id);
     let proof = lifecycle.read();
@@ -372,6 +378,7 @@ fn r1a_deleted_grant_replay_without_expectation_never_allocates() {
     let (rig, repo) = place::place_rig("r1-grant-replay");
     let ended = rig.now_ms();
     clock(&rig, ended);
+    let publisher = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -384,6 +391,7 @@ fn r1a_deleted_grant_replay_without_expectation_never_allocates() {
         "main",
     ]);
     assert_eq!(code, 0, "{result}");
+    drop(publisher);
     let id = result["request_id"].as_str().unwrap();
     let grant = rig.preparation_record("state", "grant", id).read();
     clock(&rig, ended + WINDOW + 1);
@@ -454,7 +462,10 @@ fn unstarted_release_fence_expires_only_after_its_completion_window() {
     clock(&rig, ended + WINDOW);
     serve(&rig);
     assert!(!rig.validity("unstarted").is_null());
+    let observer = rig.serve();
+    super::wait_publication(&rig, |frame| frame["local"]["host"]["holds"] == json!([]));
     assert_eq!(rig.json(&["host", "snapshot"]).1["holds"], json!([]));
+    drop(observer);
     assert_eq!(
         rig.json(&[
             "host",
@@ -483,8 +494,10 @@ fn r1a_unknown_cancelled_ticket_remains_unsettled_despite_age() {
     clock(&rig, issued);
     rig.config("free_core_fraction_min = 2\n");
     rig.snapshot("state", issued, 0.0, 8);
+    let publisher = super::observation::seeded(&rig);
     let (code, queued) = rig.json(&["agent", "--name", "cancelled", "--message", "test"]);
     assert_eq!(code, 1, "{queued}");
+    drop(publisher);
     let ticket = queued["ticket"].as_str().unwrap();
     clock(&rig, issued + WINDOW - 1);
     let (code, result) = rig.json(&["cancel", ticket]);
@@ -504,6 +517,10 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
     let rig = Rig::short("r1-local-job");
     rig.snapshot("state", rig.now_ms(), 0.0, 8);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+    let publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"][0]["headroom"]["eligible"] == true
+    });
     let (code, result) = rig.json(&["run", "--host", "local", "--", "true"]);
     assert_eq!(code, 0, "{result}");
     let id = result["id"].as_str().unwrap();
@@ -515,6 +532,7 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
+    drop(publisher);
     serve(&rig);
     let attempt = rig.admission(id);
     assert_eq!(

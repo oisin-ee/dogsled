@@ -49,6 +49,7 @@ fn remote_wait_deadline_bounds_a_silent_ssh_process() {
     let rig = Rig::new("bounded-ssh");
     rig.peer();
     rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
+    let _publisher = super::observation::seeded(&rig);
     rig.script("ssh", "#!/bin/sh\nsleep 30\n");
     let output = rig.run(&["wait", "remote", "--max", "20ms"]);
     assert_eq!(output.status.code(), Some(124));
@@ -85,6 +86,7 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
     // Queueing, the service pass, and observing admission each need scheduling
     // headroom. This is only a failure bound: the output handshake drives progress.
     let admission_deadline = format!("{}s", (PROCESS_DEADLINE * 3).as_secs());
+    let publisher = super::observation::seeded(&rig);
     let mut command = rig.cmd(&[
         "run",
         "--wait",
@@ -102,6 +104,7 @@ fn waiting_queue_caller_observes_service_admission_without_sleep() {
     let (line, _output) = first_line(child.child_mut().stdout.take().unwrap());
     let queued: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(queued["queued"], true);
+    drop(publisher);
     // The fixture supplies admission capacity, not the CI runner's current load.
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
@@ -127,7 +130,10 @@ fn remote_repository_clone_precedes_prepare_and_failures_do_not_fall_back() {
         "--branch",
         "feature",
     ];
+    rig.ingest_peers();
+    let publisher = super::place::peer_observer(&rig);
     assert_eq!(rig.json(&args).0, 0);
+    drop(publisher);
     let log = rig.log("ssh.log");
     assert!(log.find("host checkout").unwrap() < log.find("host prepare").unwrap());
     assert!(log.contains("--origin https://example.invalid/repo.git"));
@@ -142,6 +148,7 @@ case "$*" in
  *) echo 'must not prepare after clone failure' >&2; exit 2 ;;
 esac
 "#);
+    let _publisher = super::place::peer_observer(&rig);
     let (code, error) = rig.json(&args);
     assert_eq!(code, 2);
     // The typed cause maps to a fixed message; the peer's own text stays hidden.
