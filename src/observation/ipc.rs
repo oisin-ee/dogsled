@@ -339,28 +339,31 @@ async fn connection(
                     .pane
                     .as_deref()
                     .ok_or_else(|| Error::Invalid("missing detail pane".into()))?;
-                if let Some(payload) = frame.details.get(pane) {
-                    let identity = selected_agent(&frame.published, pane)?;
-                    let signature = (payload.reference.revision, identity.clone());
-                    if sent_detail.as_ref() != Some(&signature) {
-                        write_detail(&socket, &frame.published, identity, true, &payload.bytes)
-                            .await?;
-                        sent_detail = Some(signature);
-                    }
-                } else if frame
+                // The published agent list decides whether the pane exists. Serve captures a
+                // detail for every pane a reader asks about, an unknown one included, so a
+                // detail payload alone never makes a pane found.
+                let identity = selected_agent(&frame.published, pane)?;
+                let listed = frame
                     .published
                     .views
                     .get("portal")
                     .and_then(|view| view.pointer("/data/agents"))
-                    .is_some_and(serde_json::Value::is_array)
-                    && selected_agent(&frame.published, pane)?.is_none()
-                {
+                    .is_some_and(serde_json::Value::is_array);
+                if listed && identity.is_none() {
                     let missing = serde_json::to_vec(&super::details::Detail::unavailable(
                         None,
                         "agent unavailable",
                     ))?;
                     write_detail(&socket, &frame.published, None, false, &missing).await?;
                     return Ok(());
+                }
+                if let Some(payload) = frame.details.get(pane) {
+                    let signature = (payload.reference.revision, identity.clone());
+                    if sent_detail.as_ref() != Some(&signature) {
+                        write_detail(&socket, &frame.published, identity, true, &payload.bytes)
+                            .await?;
+                        sent_detail = Some(signature);
+                    }
                 }
             }
             Some(frame) => write(&socket, &frame.bytes).await?,
@@ -552,7 +555,10 @@ fn selected_agent(
     };
     agents
         .iter()
-        .find(|agent| agent["pane"].as_str() == Some(pane))
+        .find(|agent| {
+            agent["host"].as_str() == Some(crate::hosts::LOCAL)
+                && agent["pane"].as_str() == Some(pane)
+        })
         .map(|agent| serde_json::from_value(agent.clone()).map_err(Into::into))
         .transpose()
 }
@@ -611,13 +617,20 @@ impl Client {
     }
 
     fn connect(&self) -> Result<UnixStream> {
-        let path = super::socket_path(&self.state, SOCKET)?;
+        let not_running =
+            || Error::Invalid("observation unavailable: dogsled serve is not running".into());
+        // A long state path resolves its socket through the state directory itself, so a
+        // missing state directory is the same fact as a missing socket: nothing serves it.
+        let path = super::socket_path(&self.state, SOCKET).map_err(|error| match error {
+            Error::Io(io) if io.kind() == std::io::ErrorKind::NotFound => not_running(),
+            other => other,
+        })?;
         UnixStream::connect(path).map_err(|error| {
             if matches!(
                 error.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
             ) {
-                Error::Invalid("observation unavailable: dogsled serve is not running".into())
+                not_running()
             } else {
                 unavailable(&error)
             }

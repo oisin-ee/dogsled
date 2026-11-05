@@ -100,8 +100,9 @@ pub fn ReviewView(
     #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
 ) -> Element {
-    let local_selected = use_signal(|| None::<String>);
-    let mut selected = try_use_context::<Signal<Option<String>>>().unwrap_or(local_selected);
+    let local_selected = use_signal(|| None::<portal_types::agents::AgentAddress>);
+    let mut selected = try_use_context::<Signal<Option<portal_types::agents::AgentAddress>>>()
+        .unwrap_or(local_selected);
     let mut list = use_signal(Vec::<ReviewSummary>::new);
     let mut opened = use_signal(|| None::<String>);
     let mut error = use_signal(|| None::<String>);
@@ -132,12 +133,15 @@ pub fn ReviewView(
         reviews
             .iter()
             .find(|item| {
-                Some(&item.pane) == selected().as_ref() && Some(&item.id) == opened().as_ref()
+                selected()
+                    .is_some_and(|address| address.host == "local" && item.pane == address.pane)
+                    && Some(&item.id) == opened().as_ref()
             })
             .or_else(|| {
-                reviews
-                    .iter()
-                    .find(|item| Some(&item.pane) == selected().as_ref())
+                reviews.iter().find(|item| {
+                    selected()
+                        .is_some_and(|address| address.host == "local" && item.pane == address.pane)
+                })
             })
             .map(|item| item.id.clone())
     });
@@ -152,7 +156,7 @@ pub fn ReviewView(
                         onclick: {
                             let pane = item.pane.clone();
                             let id = item.id.clone();
-                            move |_| { selected.set(Some(pane.clone())); opened.set(Some(id.clone())); }
+                            move |_| { selected.set(Some(portal_types::agents::AgentAddress::local(pane.clone()))); opened.set(Some(id.clone())); }
                         },
                         "{item.path} · {item.pane}"
                     }

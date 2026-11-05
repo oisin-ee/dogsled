@@ -56,6 +56,7 @@ impl LeadPanel {
 /// `AgentView` as its `review` or `question` prop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InboxSelection {
+    pub host: String,
     pub kind: InboxKind,
     pub id: String,
     pub pane: String,
@@ -143,6 +144,7 @@ impl InboxState {
                     .iter()
                     .map(|item| InboxItem {
                         selection: InboxSelection {
+                            host: "local".into(),
                             kind: item.kind.into(),
                             id: item.id.clone(),
                             pane: item.pane.clone(),
@@ -162,6 +164,7 @@ impl InboxState {
 
 #[derive(Clone, Default)]
 struct DeepLink {
+    host: Option<String>,
     review: Option<String>,
     question: Option<String>,
     pane: Option<String>,
@@ -178,6 +181,7 @@ impl DeepLink {
         };
         let get = |name| params.get(name).filter(|value| !value.is_empty());
         Self {
+            host: get("host"),
             review: get("review"),
             question: get("question"),
             pane: get("pane"),
@@ -191,6 +195,7 @@ impl DeepLink {
             .map(|id| (InboxKind::Review, id))
             .or_else(|| self.question.as_ref().map(|id| (InboxKind::Question, id)))?;
         Some(InboxSelection {
+            host: self.host.clone().unwrap_or_else(|| "local".into()),
             kind,
             id: id.clone(),
             pane: self.pane.clone().unwrap_or_default(),
@@ -292,7 +297,16 @@ pub fn App() -> Element {
     let inbox_state = use_memo(move || publication.read().inbox.clone());
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
-    let mut selected = use_context_provider(|| Signal::new(link.pane.clone()));
+    let mut selected = use_context_provider(|| {
+        Signal::new(
+            link.pane
+                .clone()
+                .map(|pane| portal_types::agents::AgentAddress {
+                    host: link.host.clone().unwrap_or_else(|| "local".into()),
+                    pane,
+                }),
+        )
+    });
     let mut selection = use_context_provider(|| Signal::new(link.selection()));
     use_context_provider(|| Draft(Signal::new(String::new())));
     let conversation = use_context_provider(|| NewConversation {
@@ -307,7 +321,7 @@ pub fn App() -> Element {
             agents
                 .peek()
                 .iter()
-                .find(|agent| agent.pane == pane)
+                .find(|agent| agent.host == pane.host && agent.pane == pane.pane)
                 .and_then(|agent| agent.repository.clone())
         }));
         selected.set(None);
@@ -333,7 +347,23 @@ pub fn App() -> Element {
     });
     use_interval(RETRY, move |()| now.set(clock_ms()));
 
-    let inbox = use_memo(move || inbox_state.read().items());
+    let inbox = use_memo(move || {
+        let mut items = inbox_state.read().items();
+        if let Some(board) = &publication.read().board {
+            for item in &mut items {
+                if item.selection.kind == InboxKind::UnseenWorker
+                    && let Some(row) = board
+                        .repos
+                        .iter()
+                        .flat_map(|repo| &repo.rows)
+                        .find(|row| row.id == item.selection.id)
+                {
+                    item.selection.host.clone_from(&row.host);
+                }
+            }
+        }
+        items
+    });
     use_effect(move || {
         if let Some(mut current) = selection()
             && current.pane.is_empty()
@@ -342,7 +372,11 @@ pub fn App() -> Element {
                 .find(|item| item.selection.kind == current.kind && item.selection.id == current.id)
         {
             current.pane.clone_from(&item.selection.pane);
-            selected.set(Some(current.pane.clone()));
+            current.host.clone_from(&item.selection.host);
+            selected.set(Some(portal_types::agents::AgentAddress {
+                host: current.host.clone(),
+                pane: current.pane.clone(),
+            }));
             selection.set(Some(current));
         }
     });
@@ -427,11 +461,11 @@ pub fn App() -> Element {
             main { class: "console-main",
                 match selected() {
                     Some(pane) => {
-                        let picked = selection().filter(|item| item.pane == pane);
+                        let picked = selection().filter(|item| item.host == pane.host && item.pane == pane.pane);
                         let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
                         let review = pick(InboxKind::Review);
                         let question = pick(InboxKind::Question);
-                        rsx! { AgentView { key: "{pane}", pane, review, question, agent_count } }
+                        rsx! { AgentView { key: "{pane.host}:{pane.pane}", host: pane.host, pane: pane.pane, review, question, agent_count } }
                     }
                     None if composing() => rsx! { NewLead {} },
                     None => rsx! { div { class: "empty-lead",
@@ -495,7 +529,7 @@ pub(crate) fn InboxList(
     agents: Vec<Agent>,
     reachable: bool,
 ) -> Element {
-    let mut selected = use_context::<Signal<Option<String>>>();
+    let mut selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     let mut panel = use_context::<Signal<LeadPanel>>();
     let mut busy = use_signal(|| false);
@@ -511,7 +545,7 @@ pub(crate) fn InboxList(
                     let repository = item.repository.as_deref().map(repository_name);
                     let age = age(item.age_ms.saturating_add(elapsed_ms));
                     let open = selection().as_ref() == Some(&item.selection);
-                    let options = agents.iter().find(|agent| agent.pane == item.selection.pane)
+                    let options = agents.iter().find(|agent| agent.host == item.selection.host && agent.pane == item.selection.pane)
                         .and_then(|agent| agent.blocked.as_ref()).map(|prompt| prompt.options.clone()).unwrap_or_default();
                     rsx! {
                         div { class: "inbox-row", key: "{kind:?}:{item.selection.id}", "data-open": open,
@@ -520,7 +554,7 @@ pub(crate) fn InboxList(
                                 onclick: {
                                     let item = item.clone();
                                     move |_| {
-                                        selected.set(Some(item.selection.pane.clone()));
+                                        selected.set(Some(portal_types::agents::AgentAddress { host: item.selection.host.clone(), pane: item.selection.pane.clone() }));
                                         selection.set(Some(item.selection.clone()));
                                         panel.set(LeadPanel::Chat);
                                     }
@@ -541,7 +575,7 @@ pub(crate) fn InboxList(
                                 div { class: "inbox-keys",
                                     for option in options {
                                         {
-                                            let pane = item.selection.pane.clone();
+                                            let pane = portal_types::agents::AgentAddress { host: item.selection.host.clone(), pane: item.selection.pane.clone() };
                                             let send_key = option.key.clone();
                                             rsx! {
                                                 Button { key: "{option.key}", variant: ButtonVariant::Secondary, r#type: "button",
@@ -730,6 +764,7 @@ mod shell_tests {
     #[test]
     fn deep_link_keeps_pending_item_and_pane() {
         let link = DeepLink {
+            host: Some("local".into()),
             review: Some("plan".to_owned()),
             question: None,
             pane: Some("pane".to_owned()),
@@ -739,6 +774,7 @@ mod shell_tests {
             Some(InboxSelection {
                 kind: InboxKind::Review,
                 id: "plan".to_owned(),
+                host: "local".into(),
                 pane: "pane".to_owned(),
             })
         );

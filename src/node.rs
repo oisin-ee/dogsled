@@ -310,7 +310,6 @@ pub struct Node<'a> {
     pub thresholds: Thresholds,
     pub home: &'a str,
     pub cleanup: &'a crate::config::Cleanup,
-    pub repos: &'a [crate::config::Repo],
 }
 
 impl<'a> Node<'a> {
@@ -326,7 +325,6 @@ impl<'a> Node<'a> {
             thresholds: Thresholds::from(policy),
             home,
             cleanup: &policy.cleanup,
-            repos: &policy.repos,
         }
     }
 

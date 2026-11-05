@@ -17,9 +17,27 @@ pub struct BlockedPrompt {
     pub options: Vec<PromptOption>,
 }
 
+/// A pane is unique only within its fleet host.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AgentAddress {
+    pub host: String,
+    pub pane: String,
+}
+
+impl AgentAddress {
+    #[must_use]
+    pub fn local(pane: impl Into<String>) -> Self {
+        Self {
+            host: "local".into(),
+            pane: pane.into(),
+        }
+    }
+}
+
 /// One agent in the list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentView {
+    pub host: String,
     pub pane: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -187,22 +205,26 @@ pub struct CreateLeadBody {
     pub prompt: String,
 }
 
-/// A registered repository a lead can start in.
+/// One accessible, non-archived GitHub repository. Forks are included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoChoice {
-    pub origin: String,
-    pub path: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub pushed_at: Option<String>,
+    pub private: bool,
 }
 
-/// The registered repositories, in config order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The published catalogue, newest push first. Failed refreshes retain the last list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoList {
     pub repos: Vec<RepoChoice>,
+    pub error: Option<String>,
 }
 
 /// A lead that started and accepted its first prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatedLead {
+    pub host: String,
     pub pane: String,
 }
 

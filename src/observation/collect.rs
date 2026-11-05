@@ -1,6 +1,9 @@
 //! Service-owned local evidence capture. Legacy readers share these capture functions until
 //! their reader cuts land; observation clients never call them or reconstruct a publication.
 
+#[path = "catalogue.rs"]
+mod catalogue;
+
 use super::{Availability, Domains, Gap, Publication, Sources};
 use crate::commands::Status;
 use crate::error::Result;
@@ -103,6 +106,7 @@ pub(crate) struct Collector {
     snapshot: Option<Snapshot>,
     sample_error: Option<String>,
     report: Option<HostReport>,
+    catalogue: catalogue::Catalogue,
 }
 
 impl Collector {
@@ -193,6 +197,9 @@ impl Collector {
     /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
     /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
     pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
+        if let Some(catalogue) = self.catalogue.refresh(node.shell, now) {
+            self.record("repos", now, Ok(catalogue));
+        }
         let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
         let mut terminals = if capture_terminals {
             crate::probe::terminals(node.shell)
@@ -282,16 +289,7 @@ impl Collector {
             super::sidebar::preferences(node.ledger),
         );
         Collection {
-            input: Publication {
-                published_ms: now,
-                sources: Sources {
-                    local: self.measured.clone(),
-                    peers: BTreeMap::new(),
-                },
-                local: self.local.clone(),
-                views: Domains::new(),
-                gaps: self.gaps.values().cloned().collect(),
-            },
+            input: self.publication(now),
             sample,
         }
     }

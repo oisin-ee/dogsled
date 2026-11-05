@@ -235,7 +235,7 @@ pub enum Command {
         #[command(flatten)]
         placement: WorkArgs,
     },
-    /// Start a top-level Pi lead in a registered repository and send it the first prompt. A
+    /// Start a top-level Pi lead in a GitHub repository on the roomiest fleet host. A
     /// lead has no owner, no done/ask/blocked contract, and no capacity cost; it stays open
     /// until `dogsled close lead-<id>`.
     Lead(LeadArgs),
@@ -316,7 +316,7 @@ pub enum Command {
     /// The saved Herdr machines dogsled uses as hosts.
     #[command(subcommand)]
     Machine(MachineCommand),
-    /// Configure the repositories available on the fleet.
+    /// Read the published GitHub repository catalogue.
     #[command(subcommand)]
     Repo(RepoCommand),
     /// Send a message to an agent on any host, through its inbox. Nothing types into its
@@ -617,11 +617,7 @@ pub enum UnitCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RepoCommand {
-    /// Add a repository, or the current directory when no path is given.
-    Add { path: Option<String> },
-    /// Remove a repository by origin or checkout path.
-    Remove { selector: String },
-    /// Show the configured repositories.
+    /// Show accessible GitHub repositories, newest first.
     List,
 }
 
@@ -730,12 +726,25 @@ pub enum HookCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
+    /// Start a lead on this host only, using a versioned delivery read from stdin.
+    #[command(hide = true)]
+    Lead {
+        #[arg(long, value_parser = ["-"])]
+        input: String,
+    },
     /// Explicit-host recovery transport; never enters placement.
     Recovery {
         #[command(subcommand)]
         command: RecoveryCommand,
     },
     Snapshot,
+    /// Forward one portal detail request to this host's serve publication.
+    #[command(hide = true)]
+    AgentDetail {
+        pane: String,
+        #[arg(long)]
+        input: String,
+    },
     /// Export host-owned observer facts, optionally waiting for a new local revision.
     Observation {
         #[arg(long)]
@@ -975,12 +984,10 @@ impl ThresholdArgs {
 /// `dogsled lead`: the repository and the first prompt.
 #[derive(Debug, clap::Args)]
 pub struct LeadArgs {
-    /// The repository's registered origin or path (`dogsled repo list`).
-    #[arg(long)]
+    /// The GitHub repository slug: owner/name.
     pub repo: String,
     /// The first prompt. Use `--message-file` for a long or multi-line prompt.
     #[arg(
-        long,
         required_unless_present = "message_file",
         conflicts_with = "message_file"
     )]

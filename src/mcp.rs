@@ -27,7 +27,7 @@ struct Context {
     policy: Policy,
     ledger: Ledger,
     home: String,
-    /// Leads reload it on every call, so a long-lived server sees `repo add`.
+    /// Leads reload it on every call, so a long-lived server sees host policy changes.
     config_path: std::path::PathBuf,
 }
 
@@ -161,7 +161,7 @@ pub struct Target {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LeadArgs {
-    /// The repository's registered origin or path.
+    /// The GitHub repository slug: owner/name.
     pub repo: String,
     /// The lead's first prompt. Multi-line text is fine; stdin is not available here.
     pub message: String,
@@ -494,20 +494,19 @@ impl Server {
     }
 
     #[tool(
-        description = "Start a top-level Pi lead in a registered repository and send its first prompt. \
+        description = "Start a top-level Pi lead in a GitHub repository on the roomiest fleet host and send its first prompt. \
         A lead has no owner, no done/ask/blocked contract, and no capacity cost. It stays open until \
         `close` names it."
     )]
     async fn lead(&self, Parameters(args): Parameters<LeadArgs>) -> Result<String, String> {
         let config_path = self.context.config_path.clone();
         self.call_bounded(crate::budget::SETUP_LIMIT, move |fleet| {
-            let herdr = crate::herdr_socket::Client::discover()?;
             let context = crate::leads::CreateContext {
                 shell: fleet.shell,
                 ledger: fleet.ledger,
                 config_path: &config_path,
                 home: &fleet.home,
-                herdr: &herdr,
+                herdr: None,
             };
             let started = crate::leads::create(&context, &args.repo, &args.message)?;
             Ok(serde_json::to_value(started)?)

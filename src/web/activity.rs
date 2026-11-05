@@ -11,6 +11,7 @@ use portal_types::agents::{
 use tokio_stream::StreamExt as _;
 
 use super::AppState;
+use super::agents::{PeerOperation, peer_events, peer_response};
 use crate::observation::{
     ipc,
     live_activity::{self, Command},
@@ -18,9 +19,15 @@ use crate::observation::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/agents/{pane}/activity", get(current).put(publish))
-        .route("/api/agents/{pane}/activity/producer", post(register))
-        .route("/api/agents/{pane}/activity/events", get(events))
+        .route(
+            "/api/agents/{host}/{pane}/activity",
+            get(current).put(publish),
+        )
+        .route(
+            "/api/agents/{host}/{pane}/activity/producer",
+            post(register),
+        )
+        .route("/api/agents/{host}/{pane}/activity/events", get(events))
 }
 
 pub(super) fn failure(error: ActivityError) -> Response {
@@ -44,9 +51,15 @@ fn value(view: ActivityView) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
 }
 
-async fn current(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+async fn current(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
     if let Err(error) = live_activity::validate_pane(&pane) {
         return failure(error);
+    }
+    if host != crate::hosts::LOCAL {
+        return peer_response(state, host, pane, PeerOperation::Activity).await;
     }
     match tokio::task::spawn_blocking(move || ipc::Client::at(&state.web.dir).activity(&pane)).await
     {
@@ -61,10 +74,10 @@ async fn current(State(state): State<AppState>, Path(pane): Path<String>) -> Res
 
 async fn register(
     State(state): State<AppState>,
-    Path(pane): Path<String>,
+    Path((host, pane)): Path<(String, String)>,
     request: Request,
 ) -> Response {
-    mutation(state, pane, request, |bytes| {
+    mutation(state, pane, host, request, |bytes| {
         serde_json::from_slice::<RegisterProducer>(bytes).map(Command::Register)
     })
     .await
@@ -72,10 +85,10 @@ async fn register(
 
 async fn publish(
     State(state): State<AppState>,
-    Path(pane): Path<String>,
+    Path((host, pane)): Path<(String, String)>,
     request: Request,
 ) -> Response {
-    mutation(state, pane, request, |bytes| {
+    mutation(state, pane, host, request, |bytes| {
         serde_json::from_slice::<PublishActivity>(bytes).map(Command::Publish)
     })
     .await
@@ -84,6 +97,7 @@ async fn publish(
 async fn mutation(
     state: AppState,
     pane: String,
+    host: String,
     request: Request,
     decode: fn(&[u8]) -> serde_json::Result<Command>,
 ) -> Response {
@@ -127,6 +141,13 @@ async fn mutation(
             ));
         }
     };
+    if host != crate::hosts::LOCAL {
+        let operation = match command {
+            Command::Register(body) => PeerOperation::Register(body),
+            Command::Publish(body) => PeerOperation::Publish(body),
+        };
+        return peer_response(state, host, pane, operation).await;
+    }
     match tokio::task::spawn_blocking(move || {
         ipc::Client::at(&state.web.dir).activity_command(&pane, command)
     })
@@ -141,9 +162,15 @@ async fn mutation(
     }
 }
 
-async fn events(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+async fn events(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
     if let Err(error) = live_activity::validate_pane(&pane) {
         return failure(error);
+    }
+    if host != crate::hosts::LOCAL {
+        return peer_events(state, host, pane, PeerOperation::Activity, "activity").await;
     }
     let client = ipc::Client::at(&state.web.dir);
     let mut subscription =
@@ -253,8 +280,10 @@ mod tests {
         let fixture = Fixture::new();
         let app = super::super::router(state(&fixture));
         for (method, path) in [
-            (Method::POST, "/api/agents/w1:p1/activity/producer"),
-            (Method::PUT, "/api/agents/w1:p1/activity"),
+            (Method::POST, "/api/agents/local/w1:p1/activity/producer"),
+            (Method::PUT, "/api/agents/local/w1:p1/activity"),
+            (Method::POST, "/api/agents/netcup/w1:p1/activity/producer"),
+            (Method::PUT, "/api/agents/netcup/w1:p1/activity"),
         ] {
             let response = app
                 .clone()
@@ -276,7 +305,7 @@ mod tests {
             .clone()
             .oneshot(request(
                 Method::POST,
-                "/api/agents/w1:p1/activity/producer",
+                "/api/agents/local/w1:p1/activity/producer",
                 serde_json::to_vec(&fixture.registration).unwrap(),
                 true,
             ))
@@ -303,7 +332,7 @@ mod tests {
             .clone()
             .oneshot(request(
                 Method::PUT,
-                "/api/agents/w1:p1/activity",
+                "/api/agents/local/w1:p1/activity",
                 serde_json::to_vec(&update).unwrap(),
                 true,
             ))
@@ -317,7 +346,7 @@ mod tests {
                 .clone()
                 .oneshot(request(
                     Method::GET,
-                    "/api/agents/w1:p1/activity",
+                    "/api/agents/local/w1:p1/activity",
                     Body::empty(),
                     false,
                 ))
@@ -334,7 +363,7 @@ mod tests {
         let response = app
             .oneshot(request(
                 Method::GET,
-                "/api/agents/w1:p1/activity/events",
+                "/api/agents/local/w1:p1/activity/events",
                 Body::empty(),
                 false,
             ))
@@ -361,7 +390,7 @@ mod tests {
             .clone()
             .oneshot(request(
                 Method::POST,
-                "/api/agents/w1:p1/activity/producer",
+                "/api/agents/local/w1:p1/activity/producer",
                 registration.to_string(),
                 true,
             ))
@@ -373,7 +402,7 @@ mod tests {
             .clone()
             .oneshot(request(
                 Method::PUT,
-                "/api/agents/w1:p1/activity",
+                "/api/agents/local/w1:p1/activity",
                 vec![b' '; 65537],
                 true,
             ))
@@ -386,7 +415,7 @@ mod tests {
             .clone()
             .oneshot(request(
                 Method::POST,
-                "/api/agents/w1:p1/activity/producer",
+                "/api/agents/local/w1:p1/activity/producer",
                 serde_json::to_vec(&registration).unwrap(),
                 true,
             ))
@@ -399,7 +428,7 @@ mod tests {
         let response = app
             .oneshot(request(
                 Method::POST,
-                "/api/agents/w1:p1/activity/producer",
+                "/api/agents/local/w1:p1/activity/producer",
                 serde_json::to_vec(&registration).unwrap(),
                 true,
             ))

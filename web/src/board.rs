@@ -1,7 +1,7 @@
 //! Repository navigation, joined by the server's explicit owner relationships.
 
 use dioxus::prelude::*;
-use portal_types::agents::AgentView;
+use portal_types::agents::{AgentAddress, AgentView};
 use portal_types::{BoardView, GroupView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
@@ -56,13 +56,13 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
         agent.state != "closed"
             && !rows
                 .iter()
-                .any(|row| row.pane.as_deref() == Some(&agent.pane))
+                .any(|row| row.host == agent.host && row.pane.as_deref() == Some(&agent.pane))
     }) {
         let title = board
             .repos
             .iter()
             .flat_map(|repo| &repo.todos)
-            .find(|todo| todo.pane == agent.pane)
+            .find(|todo| agent.host == "local" && todo.pane == agent.pane)
             .map(|todo| todo.current.as_str());
         let title = agent_title(title, agent);
         repository_group(&mut navigation.repos, agent.repository.clone())
@@ -71,7 +71,7 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 pane: Some(agent.pane.clone()),
                 title,
                 role: "lead".to_owned(),
-                host: String::new(),
+                host: agent.host.clone(),
                 state: agent.state.clone(),
                 worker: false,
                 unseen: false,
@@ -81,7 +81,7 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                         .repos
                         .iter()
                         .flat_map(|repo| &repo.todos)
-                        .find(|todo| todo.pane == agent.pane),
+                        .find(|todo| agent.host == "local" && todo.pane == agent.pane),
                 ),
             });
     }
@@ -94,7 +94,9 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 .cloned();
             let live = row.state != "closed"
                 && agents.iter().any(|agent| {
-                    agent.state != "closed" && row.pane.as_deref() == Some(&agent.pane)
+                    agent.state != "closed"
+                        && row.host == agent.host
+                        && row.pane.as_deref() == Some(&agent.pane)
                 });
             if repository.is_none() && !live {
                 navigation.finished_without_repository += 1;
@@ -112,7 +114,10 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 .iter_mut()
                 .flat_map(|repo| &mut repo.rows)
                 .find(|lead| {
-                    !lead.worker && row.owner_pane.is_some() && lead.pane == row.owner_pane
+                    !lead.worker
+                        && lead.host == row.host
+                        && row.owner_pane.is_some()
+                        && lead.pane == row.owner_pane
                 })
             {
                 lead.workers.push(worker);
@@ -268,11 +273,12 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
 
 #[component]
 fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
-    let mut selected = use_context::<Signal<Option<String>>>();
+    let mut selected = use_context::<Signal<Option<AgentAddress>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
     let pending = inbox.iter().find(|item| {
-        Some(&item.selection.pane) == row.pane.as_ref()
+        item.selection.host == row.host
+            && Some(&item.selection.pane) == row.pane.as_ref()
             && (!row.worker || item.selection.kind == InboxKind::Prompt)
     });
     let tag = pending.map(|item| item.selection.kind);
@@ -282,7 +288,8 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
         || row.title.clone(),
         |kind| format!("{} · {}", row.title, kind.tag()),
     );
-    let is_selected = row.pane.is_some() && selected() == row.pane;
+    let is_selected = selected()
+        .is_some_and(|address| address.host == row.host && Some(address.pane) == row.pane);
     let status = if needs_owner || (!row.worker && tag.is_some()) {
         "waiting"
     } else if !row.worker && matches!(row.state.as_str(), "working" | "running") {
@@ -310,13 +317,14 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
             title: "{label}",
             r#as: move |attributes: Vec<Attribute>| {
                 let body = body.clone();
+                let host = row.host.clone();
                 match row.pane.clone() {
                     Some(pane) => rsx! {
                         button {
                             r#type: "button",
                             aria_current: is_selected.then_some("true"),
                             onclick: move |_| {
-                                selected.set(Some(pane.clone()));
+                                selected.set(Some(AgentAddress { host: host.clone(), pane: pane.clone() }));
                                 selection.set(None);
                                 panel.set(crate::app::LeadPanel::Chat);
                             },
@@ -357,9 +365,9 @@ mod shell_tests {
 
     fn agents() -> Result<Vec<AgentView>, serde_json::Error> {
         serde_json::from_value(json!([
-            { "pane": "lead-a", "name": "First lead", "state": "working", "repository": "github.com/owner/repo", "cwd": "/unrelated" },
-            { "pane": "worker-b", "state": "done", "repository": "github.com/owner/repo" },
-            { "pane": "lead-b", "name": "Second lead", "state": "idle", "repository": "github.com/owner/repo" }
+            { "host": "netcup", "pane": "lead-a", "name": "First lead", "state": "working", "repository": "github.com/owner/repo", "cwd": "/unrelated" },
+            { "host": "netcup", "pane": "worker-b", "state": "done", "repository": "github.com/owner/repo" },
+            { "host": "netcup", "pane": "lead-b", "name": "Second lead", "state": "idle", "repository": "github.com/owner/repo" }
         ]))
     }
 
@@ -373,6 +381,25 @@ mod shell_tests {
                 todos: vec![],
             }],
         }
+    }
+
+    #[test]
+    fn equal_panes_on_different_hosts_remain_distinct_navigation_targets()
+    -> Result<(), serde_json::Error> {
+        let mut agents = agents()?;
+        let mut local = agents[0].clone();
+        local.host = "local".into();
+        agents.push(local);
+        let navigation = navigation_groups(&board(vec![row("lead-a", None, "working")?]), &agents);
+        let rows = &navigation.repos[0].rows;
+        let targets: Vec<_> = rows
+            .iter()
+            .filter(|row| row.pane.as_deref() == Some("lead-a"))
+            .map(|row| (row.host.as_str(), row.worker))
+            .collect();
+        assert!(targets.contains(&("local", false)));
+        assert!(targets.contains(&("netcup", true)));
+        Ok(())
     }
 
     #[test]
@@ -455,6 +482,7 @@ mod shell_tests {
     #[test]
     fn a_lead_title_falls_back_from_todo_to_first_message_to_name_to_worktree() {
         let mut agent = AgentView {
+            host: "local".into(),
             pane: "p".to_owned(),
             name: Some("u-0cc2".to_owned()),
             title: None,

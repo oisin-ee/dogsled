@@ -246,7 +246,7 @@ async fn conversation_over_main_frame_limit_loads_only_through_detail_route() {
     let response = crate::web::agents::test_request(
         state,
         Request::builder()
-            .uri("/api/agents/w1:p1/conversation")
+            .uri("/api/agents/local/w1:p1/conversation")
             .header("host", "localhost:7465")
             .body(Body::empty())
             .unwrap(),

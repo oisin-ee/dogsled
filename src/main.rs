@@ -32,7 +32,6 @@ mod job_store;
 mod jobs;
 mod launch;
 mod launch_store;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by lead launch in L3"))]
 mod lead_store;
 #[cfg_attr(not(test), expect(dead_code, reason = "wired by lead lifetime in L2"))]
 mod leads;
@@ -219,8 +218,8 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     );
     match cli.command {
         Command::Quota(args) => quota_command(&ledger, &args, cli.json)?,
-        Command::Repo(command) => {
-            repo_command(&shell, &home, &config_path, &policy, command, cli.json)?;
+        Command::Repo(cli::RepoCommand::List) => {
+            repo_command(&observation::ipc::Client::at(&ledger.dir), cli.json)?;
         }
         Command::Lead(args) => lead_command(&node, &config_path, args, cli.json)?,
         Command::Serve { interval, once } => service::serve(
@@ -229,6 +228,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             std::time::Duration::from_secs(interval),
             once,
         )?,
+        Command::Host(HostCommand::Lead { .. }) => host_lead(&node, &config_path)?,
         Command::Host(cmd) => return host(cmd, &node),
         Command::Exec {
             id,
@@ -310,46 +310,36 @@ fn lead_command(
     json: bool,
 ) -> Result<()> {
     let prompt = inbox::message_text(args.message, args.message_file)?;
-    let herdr = herdr_socket::Client::discover()?;
     let context = leads::CreateContext {
         shell: node.shell,
         ledger: node.ledger,
         config_path,
         home: node.home,
-        herdr: &herdr,
+        herdr: None,
     };
     let started = leads::create(&context, &args.repo, &prompt)?;
     print(json, &started, || {
-        format!("{}\t{}\n", started.name, started.pane)
+        format!("{}\t{}\t{}\n", started.host, started.name, started.pane)
     })
 }
 
-fn repo_command(
-    shell: &dyn shell::Shell,
-    home: &str,
-    config_path: &std::path::Path,
-    policy: &config::Policy,
-    command: cli::RepoCommand,
-    json: bool,
-) -> Result<()> {
-    match command {
-        cli::RepoCommand::Add { path } => {
-            let path = path.map_or_else(
-                || std::env::current_dir().map(|path| path.display().to_string()),
-                Ok,
-            )?;
-            let repo = repos::add(shell, home, config_path, &path)?;
-            print(json, &repo, || repos::render(std::slice::from_ref(&repo)))
-        }
-        cli::RepoCommand::Remove { selector } => {
-            let repo = repos::remove(config_path, &selector)?;
-            print(json, &repo, || repos::render(std::slice::from_ref(&repo)))
-        }
-        cli::RepoCommand::List => {
-            let repos = repos::list(policy);
-            print(json, &repos, || repos::render(repos))
-        }
-    }
+fn host_lead(node: &Node<'_>, config_path: &std::path::Path) -> Result<()> {
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)?;
+    let context = leads::CreateContext {
+        shell: node.shell,
+        ledger: node.ledger,
+        config_path,
+        home: node.home,
+        herdr: None,
+    };
+    print(true, &leads::peer(&context, &input)?, String::new)
+}
+
+fn repo_command(client: &observation::ipc::Client, json: bool) -> Result<()> {
+    let list: portal_types::agents::RepoList =
+        observation::read::view(&client.current()?, "repos")?;
+    print(json, &list, || repos::render(&list))
 }
 
 /// Route commands after fleet discovery, keeping their adapters with their owners.
@@ -555,21 +545,18 @@ fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
 }
 
 /// Recovery needs no Herdr discovery for local operations.
-fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
-    // Observation readers do not load policy or discover a fleet.
-    let client = observation::ipc::Client::at(&ledger::default_dir());
-    if let Command::Hook(cmd) = cli.command {
-        let mut ledger = Ledger::new(ledger::default_dir());
-        ledger.budget = budget;
-        hook(cmd, &ledger, &System { budget })?;
-        return Ok(ExitCode::SUCCESS);
-    }
+/// Commands that only read the local observer's publication. `None` routes onward.
+fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Option<ExitCode>> {
     match &cli.command {
+        Command::Repo(cli::RepoCommand::List) => {
+            repo_command(client, cli.json)?;
+            return Ok(Some(ExitCode::SUCCESS));
+        }
         Command::Status {
             watch, line, brief, ..
         } => {
             status_command(
-                &client,
+                client,
                 Watch {
                     watch: *watch,
                     line: *line,
@@ -577,7 +564,7 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
                 },
                 cli.json,
             )?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Board {
             owner,
@@ -590,29 +577,50 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
             if *watch {
                 let owner =
                     owner.ok_or_else(|| Error::Invalid("board --watch needs an owner".into()))?;
-                board::watch(&client, &owner, cli.json)?;
-                return Ok(ExitCode::SUCCESS);
+                board::watch(client, &owner, cli.json)?;
+                return Ok(Some(ExitCode::SUCCESS));
             }
             let board = observation::read::board(&client.current()?, owner.as_deref())?;
             print(cli.json, &board, || board.render())?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
-        Command::Items { .. } | Command::Ps { .. } => {
-            return runtime::published_inventory(&client.current()?, cli.command, cli.json);
+        Command::Host(HostCommand::AgentDetail { pane, input }) => {
+            let reply =
+                web::agents::peer_command(pane.clone(), input, Ledger::new(ledger::default_dir()))?;
+            print(true, &reply, String::new)?;
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Snapshot) => {
             let report: node::SnapshotReport =
                 observation::read::local(&client.current()?, "host")?;
             print(true, &report, String::new)?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Todos) => {
             let todos: Vec<board::TodoSections> =
                 observation::read::view(&client.current()?, "todos")?;
             print(true, &todos, String::new)?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         _ => {}
+    }
+    Ok(None)
+}
+
+fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    // Observation readers do not load policy or discover a fleet.
+    let client = observation::ipc::Client::at(&ledger::default_dir());
+    if let Command::Hook(cmd) = cli.command {
+        let mut ledger = Ledger::new(ledger::default_dir());
+        ledger.budget = budget;
+        hook(cmd, &ledger, &System { budget })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(code) = published_command(&client, &cli)? {
+        return Ok(code);
+    }
+    if let Command::Items { .. } | Command::Ps { .. } = cli.command {
+        return runtime::published_inventory(&client.current()?, cli.command, cli.json);
     }
     if let Command::Observation { command } = cli.command {
         return observation::command(&command);
@@ -1366,6 +1374,11 @@ fn state_jobs(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
+        HostCommand::Lead { .. } | HostCommand::AgentDetail { .. } => {
+            return Err(Error::Invalid(
+                "this host command is dispatched before host routing".into(),
+            ));
+        }
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
             inbox::host(node.ledger, node.shell, cmd)?;
         }

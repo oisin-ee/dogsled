@@ -76,16 +76,20 @@ pub async fn fetch_agents() -> Result<Vec<AgentView>, String> {
 }
 
 /// The agent in `pane`, with the prompt it waits on while it is blocked.
-pub async fn fetch_agent(pane: &str) -> Result<Option<AgentView>, String> {
+pub async fn fetch_agent(
+    address: &portal_types::agents::AgentAddress,
+) -> Result<Option<AgentView>, String> {
     Ok(fetch_agents()
         .await?
         .into_iter()
-        .find(|agent| agent.pane == pane))
+        .find(|agent| agent.host == address.host && agent.pane == address.pane))
 }
 
 /// The turns of the agent in `pane`, or `None` when the agent no longer exists.
-pub async fn fetch_conversation(pane: &str) -> Result<Option<Conversation>, String> {
-    let response = Request::get(&format!("{BASE}/api/agents/{}/conversation", encode(pane)))
+pub async fn fetch_conversation(
+    address: &portal_types::agents::AgentAddress,
+) -> Result<Option<Conversation>, String> {
+    let response = Request::get(&agent_url(address, "conversation"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -96,9 +100,11 @@ pub async fn fetch_conversation(pane: &str) -> Result<Option<Conversation>, Stri
 }
 
 /// Read a complete activity snapshot, separately from transcript and lifecycle reads.
-pub async fn fetch_activity(pane: &str) -> Result<ActivityView, crate::activity::Gap> {
+pub async fn fetch_activity(
+    address: &portal_types::agents::AgentAddress,
+) -> Result<ActivityView, crate::activity::Gap> {
     use crate::activity::Gap;
-    let response = Request::get(&format!("{BASE}/api/agents/{}/activity", encode(pane)))
+    let response = Request::get(&agent_url(address, "activity"))
         .header("Cache-Control", "no-cache")
         .send()
         .await
@@ -112,15 +118,12 @@ pub async fn fetch_activity(pane: &str) -> Result<ActivityView, crate::activity:
 /// Follow only activity. Subscribe to error events explicitly: EventSource reconnecting
 /// errors must clear detail too, even while the browser intends to reconnect.
 pub async fn watch_activity(
-    pane: &str,
+    address: &portal_types::agents::AgentAddress,
     mut on_frame: impl FnMut(ActivityView) -> Result<(), crate::activity::Gap>,
 ) -> Result<(), crate::activity::Gap> {
     use crate::activity::Gap;
-    let mut source = EventSource::new(&format!(
-        "{BASE}/api/agents/{}/activity/events",
-        encode(pane)
-    ))
-    .map_err(|_| Gap::Disconnected)?;
+    let mut source =
+        EventSource::new(&agent_url(address, "activity/events")).map_err(|_| Gap::Disconnected)?;
     let activity = source
         .subscribe("activity")
         .map_err(|_| Gap::Disconnected)?;
@@ -145,8 +148,8 @@ pub async fn watch_activity(
 }
 
 /// Read the terminal of the agent in `pane`.
-pub async fn fetch_screen(pane: &str) -> Result<Screen, String> {
-    let response = Request::get(&format!("{BASE}/api/agents/{}/screen", encode(pane)))
+pub async fn fetch_screen(address: &portal_types::agents::AgentAddress) -> Result<Screen, String> {
+    let response = Request::get(&agent_url(address, "screen"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -154,8 +157,8 @@ pub async fn fetch_screen(pane: &str) -> Result<Screen, String> {
 }
 
 /// Open the agent in Herdr.
-pub async fn focus_agent(pane: &str) -> Result<(), String> {
-    let response = Request::post(&format!("{BASE}/api/agents/{}/focus", encode(pane)))
+pub async fn focus_agent(address: &portal_types::agents::AgentAddress) -> Result<(), String> {
+    let response = Request::post(&agent_url(address, "focus"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -167,26 +170,30 @@ pub async fn focus_agent(pane: &str) -> Result<(), String> {
 }
 
 /// Send a prompt to the agent in `pane`.
-pub async fn send_prompt(pane: &str, text: &str) -> Result<(), String> {
+pub async fn send_prompt(
+    address: &portal_types::agents::AgentAddress,
+    text: &str,
+) -> Result<(), String> {
     let body = PromptBody {
         text: text.to_owned(),
     };
-    post(&format!("{BASE}/api/agents/{}/prompt", encode(pane)), &body).await
+    post(&agent_url(address, "prompt"), &body).await
 }
 
 /// The repositories a lead can start in.
-pub async fn fetch_repos() -> Result<Vec<portal_types::agents::RepoChoice>, String> {
+pub async fn fetch_repos() -> Result<portal_types::agents::RepoList, String> {
     let response = Request::get(&format!("{BASE}/api/repos"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
-    read_json::<portal_types::agents::RepoList>(response)
-        .await
-        .map(|list| list.repos)
+    read_json::<portal_types::agents::RepoList>(response).await
 }
 
 /// Start a lead in `repo` with its first prompt. The result is the lead's pane.
-pub async fn create_lead(repo: &str, prompt: &str) -> Result<String, String> {
+pub async fn create_lead(
+    repo: &str,
+    prompt: &str,
+) -> Result<portal_types::agents::AgentAddress, String> {
     let body = portal_types::agents::CreateLeadBody {
         repo: repo.to_owned(),
         prompt: prompt.to_owned(),
@@ -197,17 +204,18 @@ pub async fn create_lead(repo: &str, prompt: &str) -> Result<String, String> {
         .send()
         .await
         .map_err(|error| error.to_string())?;
-    read_json::<portal_types::agents::CreatedLead>(response)
-        .await
-        .map(|lead| lead.pane)
+    read_json::<portal_types::agents::AgentAddress>(response).await
 }
 
 /// Answer a blocked prompt with one key.
-pub async fn send_key(pane: &str, key: &str) -> Result<(), String> {
+pub async fn send_key(
+    address: &portal_types::agents::AgentAddress,
+    key: &str,
+) -> Result<(), String> {
     let body = KeysBody {
         keys: vec![key.to_owned()],
     };
-    post(&format!("{BASE}/api/agents/{}/keys", encode(pane)), &body).await
+    post(&agent_url(address, "keys"), &body).await
 }
 
 async fn post<T: serde::Serialize>(url: &str, body: &T) -> Result<(), String> {
@@ -224,19 +232,40 @@ async fn post<T: serde::Serialize>(url: &str, body: &T) -> Result<(), String> {
     }
 }
 
+fn agent_url(address: &portal_types::agents::AgentAddress, operation: &str) -> String {
+    format!(
+        "{BASE}/api/agents/{}/{}/{operation}",
+        encode(&address.host),
+        encode(&address.pane)
+    )
+}
+
 /// A pane id as a path segment.
 fn encode(pane: &str) -> String {
     String::from(js_sys::encode_uri_component(pane))
 }
 
 /// Call `on_event` for each change the agent in `pane` pushes, until the stream fails.
-pub async fn watch_agent(pane: &str, mut on_event: impl FnMut(AgentEvent)) -> Result<(), String> {
-    let mut source = EventSource::new(&format!("{BASE}/api/agents/{}/events", encode(pane)))
-        .map_err(|error| error.to_string())?;
-    let mut stream = source
+pub async fn watch_agent(
+    address: &portal_types::agents::AgentAddress,
+    mut on_event: impl FnMut(AgentEvent),
+) -> Result<(), String> {
+    let mut source =
+        EventSource::new(&agent_url(address, "events")).map_err(|error| error.to_string())?;
+    let agents = source
         .subscribe("agent")
         .map_err(|error| error.to_string())?;
-    while let Some(item) = stream.next().await {
+    let errors = source
+        .subscribe("error")
+        .map_err(|error| error.to_string())?;
+    let mut stream = futures_util::stream::select(
+        agents.map(|item| (false, item)),
+        errors.map(|item| (true, item)),
+    );
+    while let Some((failed, item)) = stream.next().await {
+        if failed {
+            return Err(format!("host {}: agent stream disconnected", address.host));
+        }
         let (_, message) = item.map_err(|error| error.to_string())?;
         if let Some(text) = message.data().as_string() {
             let event = serde_json::from_str::<AgentEvent>(&text)
