@@ -103,6 +103,8 @@ function rig() {
 	const components = new Map<string, any>();
 	const ctx = { mode: "tui", hasUI: true, cwd: process.cwd(), sessionManager: manager, isIdle: () => true, ui: { theme: plain,
 		setWidget: (...args: any[]) => {
+			// This fixture observes the board, not the independent pi-todo widget.
+			if (args[0] !== "dogsled") { drawn(); return; }
 			components.get(args[0])?.dispose?.();
 			widgets.push(args);
 			const component = typeof args[1] === "function" ? args[1]({ terminal: { rows: 24 }, requestRender() { drawn(); } }, plain) : undefined;
@@ -111,10 +113,10 @@ function rig() {
 			drawn();
 		}, notify: (...args: unknown[]) => { notices.push(args); drawn(); } } };
 	/** Resolves at the next widget or notice: the end of a timer refresh. */
-	const next = () => new Promise<void>(resolve => { drawn = resolve; });
+	const next = () => new Promise<void>(resolve => { drawn = () => { drawn = () => {}; resolve(); }; });
 	/** Resolves once `check` holds after a widget or notice; frames arrive from another process. */
 	const until = (check: () => boolean) => new Promise<void>(resolve => {
-		const poll = () => { if (check()) resolve(); else drawn = poll; };
+		const poll = () => { if (check()) { drawn = () => {}; resolve(); } else drawn = poll; };
 		poll();
 	});
 	const frame = (line: unknown) => appendFileSync(frames, `${JSON.stringify(line)}\n`);
@@ -439,6 +441,8 @@ test("Alt+W and /work expand the same above-editor widget without an overlay or 
 	assert.deepEqual(r.widget().render(100), compact);
 	const drawn = r.next();
 	t.mock.timers.tick(10_000);
+	// Unchanged observations do not redraw on a timer; deliver the next publication.
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
 	await drawn;
 	assert.equal(historyReads(), 0);
 	await r.invoke("session_shutdown");
@@ -471,17 +475,17 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	await r.until(r.showsBoard);
 	let confirmed!: () => void;
 	const finished = new Promise<void>(resolve => { confirmed = resolve; });
-	const ctx = { ...r.ctx, ui: { ...r.ctx.ui,
+	Object.assign(r.ctx.ui, {
 		confirm: async (_title: string, _body: string, options: { signal: AbortSignal }) => {
 			signal = options.signal;
 			await r.invoke("session_shutdown");
 			confirmed();
 			return true;
 		},
-	} };
-	await r.commands.get("work").handler("", ctx);
+	});
+	await r.commands.get("work").handler("", r.ctx);
 	r.widget().render(100);
-	await r.shortcuts.get("alt+s").handler(ctx);
+	await r.shortcuts.get("alt+s").handler(r.ctx);
 	await finished;
 	assert.equal(signal?.aborted, true);
 	assert.equal(r.calls.some(args => args[1] === "stop"), false);
