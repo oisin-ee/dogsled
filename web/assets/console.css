@@ -753,3 +753,37 @@ textarea {
   scrollbar-width: thin;
   scrollbar-color: var(--console-line) transparent;
 }
+.console-provider .console-shell .console-new {
+  flex-shrink: 0;
+  height: 28px;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+.console-provider .console-shell .new-lead {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: 52px minmax(0, 1fr) auto auto;
+}
+.console-provider .console-shell .new-lead-header h1 {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.console-provider .console-shell .new-lead-repo {
+  width: min(320px, 50%);
+}
+@media (max-width: 600px) {
+  .console-provider .console-shell .new-lead {
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+  }
+  .console-provider .console-shell .new-lead-header {
+    flex-wrap: wrap;
+    padding: 10px 16px;
+  }
+  .console-provider .console-shell .new-lead-repo {
+    width: 100%;
+  }
+}

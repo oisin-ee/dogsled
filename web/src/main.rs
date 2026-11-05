@@ -9,6 +9,7 @@ mod component_tests;
 pub mod components;
 mod conversations;
 mod highlight;
+mod new_lead;
 mod notice;
 mod question_form;
 mod review_view;

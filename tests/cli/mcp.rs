@@ -31,7 +31,13 @@ pub(super) struct Client {
 
 impl Client {
     pub(super) fn start(rig: &Rig) -> Self {
+        Self::start_with(rig, &[])
+    }
+
+    /// Start the server with extra environment, such as a fake Herdr socket.
+    pub(super) fn start_with(rig: &Rig, env: &[(&str, &Path)]) -> Self {
         let mut command = rig.cmd(&["mcp"]);
+        command.envs(env.iter().copied());
         command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut owned = Owned::spawn(&mut command);
         let stdout = owned.child_mut().stdout.take().unwrap();
@@ -345,6 +351,7 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("done", &[]),
             expect("drop", &["id"]),
             expect("inbox", &[]),
+            expect("lead", &["message", "repo"]),
             expect("place", &[]),
             expect("read", &["target"]),
             expect("recovery_list", &["repo"]),

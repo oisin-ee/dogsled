@@ -352,6 +352,19 @@ pub fn close(
     pane: &str,
     host: Option<&str>,
 ) -> Result<(crate::close::Closed, String)> {
+    // A local lead's name closes its pane only while the stored terminal still runs there.
+    if host.is_none_or(|host| host == crate::hosts::LOCAL)
+        && let Some(lead) = crate::leads::resolve_local(fleet.ledger, pane)?
+        && lead.name == pane
+    {
+        let closed = crate::close::lead(
+            fleet.shell,
+            fleet.ledger,
+            &lead,
+            &crate::close::Caller::from_env(),
+        )?;
+        return Ok((closed, crate::hosts::LOCAL.to_owned()));
+    }
     let host = match host {
         Some(host) => crate::hosts::command_host(fleet, host)?,
         None => close_host(fleet, pane)?,

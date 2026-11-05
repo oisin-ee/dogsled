@@ -27,6 +27,8 @@ struct Context {
     policy: Policy,
     ledger: Ledger,
     home: String,
+    /// Leads reload it on every call, so a long-lived server sees `repo add`.
+    config_path: std::path::PathBuf,
 }
 
 #[derive(Clone)]
@@ -157,8 +159,17 @@ pub struct Target {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LeadArgs {
+    /// The repository's registered origin or path.
+    pub repo: String,
+    /// The lead's first prompt. Multi-line text is fine; stdin is not available here.
+    pub message: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CloseArgs {
-    /// The child's Herdr pane.
+    /// The child's Herdr pane, or a lead's name.
     pub pane: String,
     #[serde(default)]
     pub host: Option<String>,
@@ -483,9 +494,31 @@ impl Server {
     }
 
     #[tool(
+        description = "Start a top-level Pi lead in a registered repository and send its first prompt. \
+        A lead has no owner, no done/ask/blocked contract, and no capacity cost. It stays open until \
+        `close` names it."
+    )]
+    async fn lead(&self, Parameters(args): Parameters<LeadArgs>) -> Result<String, String> {
+        let config_path = self.context.config_path.clone();
+        self.call_bounded(crate::budget::SETUP_LIMIT, move |fleet| {
+            let herdr = crate::herdr_socket::Client::discover()?;
+            let context = crate::leads::CreateContext {
+                shell: fleet.shell,
+                ledger: fleet.ledger,
+                config_path: &config_path,
+                home: &fleet.home,
+                herdr: &herdr,
+            };
+            let started = crate::leads::create(&context, &args.repo, &args.message)?;
+            Ok(serde_json::to_value(started)?)
+        })
+        .await
+    }
+
+    #[tool(
         description = "Close a finished child now: its pane, its worktree, and its item. \
         Refuses busy or unsupported work; saves eligible dirty work to a pinned recovery. Saving never completes a task. Dogsled closes finished children at handoff; \
-        use this to end one explicitly.",
+        use this to end one explicitly. A lead, named by `lead-<id>`, loses only its idle pane.",
         annotations(destructive_hint = true)
     )]
     async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<String, String> {
@@ -688,12 +721,18 @@ impl Server {
 impl ServerHandler for Server {}
 
 /// Serve the tools on stdin and stdout until the client disconnects.
-pub fn serve(policy: Policy, ledger: Ledger, home: String) -> crate::error::Result<()> {
+pub fn serve(
+    policy: Policy,
+    ledger: Ledger,
+    home: String,
+    config_path: std::path::PathBuf,
+) -> crate::error::Result<()> {
     let server = Server {
         context: std::sync::Arc::new(Context {
             policy,
             ledger,
             home,
+            config_path,
         }),
     };
     let runtime = tokio::runtime::Builder::new_current_thread()

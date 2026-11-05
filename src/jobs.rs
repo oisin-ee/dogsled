@@ -146,6 +146,21 @@ pub fn issue_request_validity(
     owner: &str,
     origin_host: &str,
 ) -> Result<Validity> {
+    issue_validity(ledger, id, |tx| {
+        crate::job_store::remember_owner_in(tx, id, owner, Some(origin_host))
+    })
+}
+
+/// A lead's request validity: the same stamp and ingress, with no owner or reservation.
+pub fn issue_unowned_validity(ledger: &Ledger, id: &str) -> Result<Validity> {
+    issue_validity(ledger, id, |_| Ok(()))
+}
+
+fn issue_validity(
+    ledger: &Ledger,
+    id: &str,
+    record: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
+) -> Result<Validity> {
     validate_id(id)?;
     let validity = origin_validity(ledger)?;
     crate::store::write(ledger, |tx| {
@@ -154,7 +169,7 @@ pub fn issue_request_validity(
         }
         crate::job_store::put_ingress(tx, id)?;
         crate::job_store::put_validity(tx, id, validity)?;
-        crate::job_store::remember_owner_in(tx, id, owner, Some(origin_host))?;
+        record(tx)?;
         Ok(validity)
     })
 }

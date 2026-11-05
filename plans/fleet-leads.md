@@ -49,6 +49,8 @@ A lead is a top-level agent. It has no owner pane, no done/ask/blocked contract,
 
 ### 1c. Portal New button
 
+Status (2026-11-05): built on `lead/lead-lifetime` with L2 to L4. The button sits in the Agents header, the narrow lead header, and the no-agents empty state. `GET /api/repos` rereads the config for the picker. The picker is the official Dioxus `select`.
+
 - Put **New** in the Agents column header (`web/src/app.rs:309`) and in the narrow-screen tab header. Replace the "Start an agent with `dogsled spawn`" empty state with the same button.
 - The blank conversation reuses the composer and the `Draft` context. The project picker lists the repo list. Its default is the repo of the selected agent.
 - Add `POST /api/leads` with `{ repo, prompt }`. It calls the `dogsled lead` code on a blocking task and returns `201 { pane }`. The portal then selects that pane.

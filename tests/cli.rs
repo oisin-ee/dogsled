@@ -21,6 +21,8 @@ mod inbox;
 mod jobs;
 #[path = "cli/launch_retry.rs"]
 mod launch_retry;
+#[path = "cli/lead.rs"]
+mod lead;
 #[path = "cli/legacy_continue.rs"]
 mod legacy_continue;
 #[path = "cli/lifecycle.rs"]
@@ -578,7 +580,9 @@ printf '%s %s\n' "${DOGSLED_TEST_ROLE:-actor}" "$*" >> "$RIG/herdr-roles.log"
 # A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
 if test "$1 $2" = 'agent start'; then
   (
-    kind=$5; shift 8
+    # A child passes its arguments after `--`; a lead passes none.
+    kind=$5; shift 7
+    if test "$1" = --; then shift; fi
     typed=$kind
     for arg in "$@"; do
       q=$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")
@@ -1646,9 +1650,11 @@ fn serve_once_publishes_local_facts_and_discovers_peers_once_without_ssh() {
             .count(),
         1
     );
+    // The event subscription asks Herdr for its socket; the fixture has none, so serve
+    // keeps its fallback timer. That lookup is not a collection tick.
     let herdr = herdr
         .lines()
-        .filter(|line| *line != "machine list --json")
+        .filter(|line| !["machine list --json", "status server --json"].contains(line))
         .fold(String::new(), |mut text, line| {
             text.push_str(line);
             text.push('\n');

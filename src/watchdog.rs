@@ -218,10 +218,18 @@ fn marks(fleet: &Fleet, reports: &[HostReport], state: &mut State, now: u64) -> 
     };
     let parents = parents(fleet.ledger, probe)?;
     let owned = crate::items::list(fleet.ledger)?;
-    let live: BTreeSet<_> = probe.agent_panes.iter().map(|a| a.pane.clone()).collect();
+    let leads = crate::lead_store::list(fleet.ledger)?;
+    // A lead is the user's own session: no stall marks or notifications. Deliveries about
+    // its children still reach it through the inbox.
+    let watched: Vec<_> = probe
+        .agent_panes
+        .iter()
+        .filter(|agent| !crate::leads::protected(&leads, &agent.pane, agent.terminal_id.as_deref()))
+        .collect();
+    let live: BTreeSet<_> = watched.iter().map(|a| a.pane.clone()).collect();
     state.marks.retain(|pane, _| live.contains(pane));
     state.notified.retain(|pane, _| live.contains(pane));
-    for agent in &probe.agent_panes {
+    for agent in watched {
         if let Some(since) = agent.stalled_since_ms {
             let token = format!(
                 "stalled {}",

@@ -1303,7 +1303,34 @@ fn start_while_busy(
             elapsed: &|| began.elapsed(),
             pause: &std::thread::sleep,
         },
-        request,
+        &|| work::check_launch_validity(ledger, request),
+    )
+}
+
+/// Run a native `agent start` in `pane` for a caller without a child launch, such as a lead.
+/// Only Herdr's busy refusal repeats, after the pane proves it still runs `terminal`;
+/// `valid` runs before every attempt.
+pub(crate) fn start_native(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    args: &[String],
+    pane: &str,
+    terminal: &str,
+    valid: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let began = std::time::Instant::now();
+    start_with_busy_wait(
+        ledger,
+        shell,
+        args,
+        pane,
+        terminal,
+        &BusyWait {
+            window: busy_window(),
+            elapsed: &|| began.elapsed(),
+            pause: &std::thread::sleep,
+        },
+        valid,
     )
 }
 
@@ -1321,7 +1348,7 @@ fn start_with_busy_wait(
     pane: &str,
     terminal: &str,
     wait: &BusyWait<'_>,
-    request: &Launch,
+    valid: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let mut pause = BUSY_FIRST_PAUSE;
     let mut retry = false;
@@ -1346,7 +1373,7 @@ fn start_with_busy_wait(
                 ))
             })?;
         }
-        work::check_launch_validity(ledger, request)?;
+        valid()?;
         retry = true;
         match shell.run_setup_ok("herdr", args) {
             Err(error) if is_busy(&error) => {
@@ -2195,7 +2222,7 @@ fn start_or_reconcile(
     Ok(())
 }
 
-fn startup_error(shell: &dyn Shell, pane: &str, error: Error) -> Error {
+pub(crate) fn startup_error(shell: &dyn Shell, pane: &str, error: Error) -> Error {
     match startup_output(shell, pane) {
         Some(output) => Error::Startup {
             source: Box::new(error),
@@ -2635,7 +2662,7 @@ fn same_terminal(shell: &dyn Shell, pane: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
-fn terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
+pub(crate) fn terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
     let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: Value = serde_json::from_str(&out.stdout)?;
     value

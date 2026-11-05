@@ -1026,3 +1026,58 @@ fn check_ins_do_not_report_orphans_the_sweep_keeps() {
     assert!(!prompt.contains("Orphaned children"), "{prompt}");
     assert!(!prompt.contains("lost-child"), "{prompt}");
 }
+
+fn lead(rig: &Rig, pane: &str, terminal: Option<&str>) {
+    crate::lead_store::insert(
+        &rig.ledger,
+        &crate::leads::Record {
+            id: pane.into(),
+            name: format!("lead-{pane}"),
+            repository: crate::checkout::Repository {
+                path: "/repo".into(),
+                origin: "https://example.org/repo.git".into(),
+                relative: "repo".into(),
+                working_root: "/repo".into(),
+            },
+            prompt: "first".into(),
+            validity: crate::jobs::Validity::new(1),
+            created_ms: 1,
+            phase: crate::leads::Phase::Ready,
+            pane: Some(pane.into()),
+            terminal: terminal.map(str::to_owned),
+            workspace: None,
+            updated_ms: 1,
+            error: None,
+            close_requested_ms: None,
+            closed_ms: None,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn lead_has_no_watchdog_intervention() {
+    // A stalled lead is the user's own session: no stall mark and no notification.
+    let rig = Rig::new();
+    lead(&rig, "child", None);
+    for now in [600_001, 660_001, 720_001] {
+        let reports = rig.reports(now, "idle", "working", Some(1));
+        tick(&rig.fleet(), &reports, now).unwrap();
+    }
+    let calls = rig.shell.calls.lock().unwrap().clone();
+    assert!(
+        !calls
+            .iter()
+            .any(|s| s.contains("report-metadata child") || s.starts_with("herdr notification")),
+        "{calls:?}"
+    );
+    assert_eq!(rig.prompts(), 0);
+    // A lead that owns a stalled child still hears about it.
+    let rig = Rig::new();
+    lead(&rig, "owner", Some("term_owner"));
+    rig.item("agent");
+    let reports = rig.reports(660_001, "idle", "working", Some(1));
+    tick(&rig.fleet(), &reports, 660_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+    assert!(rig.check_ins()[0].contains("test-child on local: stalled"));
+}

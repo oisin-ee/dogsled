@@ -1416,7 +1416,15 @@ fn idle_panes(node: &Node<'_>, now: u64, seen: &Seen) -> Result<BTreeMap<String,
     let panes = &seen.panes;
     let agents = &seen.agents;
     let caller = std::env::var("HERDR_PANE_ID").ok();
-    let eligible = |pane: &Pane| !pane.focused && caller.as_deref() != Some(pane.pane_id.as_str());
+    // A lead and the shell it leaves behind close only explicitly. Without a terminal to
+    // compare, a recorded lead pane stays protected; so does its workspace, which closes
+    // only when every pane in it is idle.
+    let leads = crate::lead_store::list(node.ledger)?;
+    let eligible = |pane: &Pane| {
+        !pane.focused
+            && caller.as_deref() != Some(pane.pane_id.as_str())
+            && !crate::leads::protected(&leads, &pane.pane_id, None)
+    };
     let mut idle = BTreeMap::new();
     let jobs = crate::jobs::list(node.ledger)?;
     let items = crate::items::list(node.ledger)?;
@@ -1665,6 +1673,22 @@ fn young_shells(node: &Node<'_>, usage: &Usage) -> Result<Vec<String>> {
 }
 
 /// Holds are independent of loss and identical in both scopes.
+/// Leads working in the checkout. Reread on every check, including the final one under
+/// the repository lock.
+fn lead_holds(ledger: &crate::ledger::Ledger, usage: &Usage) -> Result<Vec<String>> {
+    let leads = crate::lead_store::list(ledger)?;
+    Ok(usage
+        .holders
+        .iter()
+        .filter_map(|pane| {
+            leads
+                .iter()
+                .find(|lead| crate::leads::protects_pane(lead, &pane.pane_id, None))
+        })
+        .map(|lead| format!("lead {} works in this checkout", lead.name))
+        .collect())
+}
+
 fn held(
     node: &Node<'_>,
     tree: &Tree,
@@ -1675,6 +1699,7 @@ fn held(
     decider: Decider,
 ) -> Result<Vec<String>> {
     let mut held = pane_holds(usage, seen, decider);
+    held.extend(lead_holds(node.ledger, usage)?);
     if !matches!(
         decider,
         Decider::Close {
@@ -3330,6 +3355,63 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("pane close wVR:p1")),
             "the pane was closed"
+        );
+    }
+
+    #[test]
+    fn lead_shell_survives_cleanup() {
+        let rig = Rig::new(json!([]));
+        rig.panes(&[("wVR:p1", "wVR", true), ("wVR:p2", "wVR", true)]);
+        rig.shell
+            .on("herdr pane close wVR:p1", r#"{"result":{}}"#)
+            .on("herdr workspace close wVR", r#"{"result":{}}"#);
+        let lead = crate::leads::Record {
+            id: "lead".into(),
+            name: "lead-lead".into(),
+            repository: crate::checkout::Repository {
+                path: "/repo".into(),
+                origin: "https://example.org/repo.git".into(),
+                relative: "repo".into(),
+                working_root: "/repo".into(),
+            },
+            prompt: "first".into(),
+            validity: crate::jobs::Validity::new(1),
+            created_ms: 1,
+            phase: crate::leads::Phase::Ready,
+            pane: Some("wVR:p1".into()),
+            terminal: Some("lead-terminal".into()),
+            workspace: Some("wVR".into()),
+            updated_ms: 1,
+            error: None,
+            close_requested_ms: None,
+            closed_ms: None,
+        };
+        crate::lead_store::insert(&rig.ledger, &lead).unwrap();
+        // The lead's exited shell is old and idle, and its workspace holds only idle shells.
+        let plan = rig.plan();
+        assert!(
+            plan.entries
+                .iter()
+                .all(|e| e.id != "wVR:p1" && e.id != "wVR"),
+            "{plan:?}"
+        );
+        // A plan made before the lead existed is rechecked and closes neither.
+        for (class, id) in [("panes", "wVR:p1"), ("workspaces", "wVR")] {
+            let stale = entry(class, id.into(), "idle".into(), true);
+            let plan = Plan {
+                entries: vec![stale.clone()],
+            };
+            let outcome = apply_one(&rig.node(), &plan, &stale, 2_000_000).unwrap();
+            assert!(matches!(outcome, Outcome::Skipped(_)), "{outcome:?}");
+        }
+        assert!(
+            !rig.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("close wVR")),
+            "the lead's shell or workspace was closed"
         );
     }
 

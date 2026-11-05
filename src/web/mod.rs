@@ -57,6 +57,15 @@ impl Default for PortalState {
     }
 }
 
+/// What the portal needs to start a lead. One-shot servers have none.
+#[derive(Debug, Clone)]
+pub struct LeadLaunch {
+    /// Reloaded for every lead, so `dogsled repo add` needs no portal restart.
+    pub config_path: std::path::PathBuf,
+    pub home: String,
+    pub shell: Arc<dyn crate::shell::Shell>,
+}
+
 /// Shared publication and explicit command services.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -67,6 +76,7 @@ pub struct AppState {
     web: Ledger,
     questions: store::Store,
     stop: CancellationToken,
+    leads: Option<Arc<LeadLaunch>>,
 }
 
 impl AppState {
@@ -89,7 +99,15 @@ impl AppState {
             web,
             questions,
             stop: CancellationToken::new(),
+            leads: None,
         }
+    }
+
+    /// Let this server start leads.
+    #[must_use]
+    pub fn with_leads(mut self, launch: LeadLaunch) -> Self {
+        self.leads = Some(Arc::new(launch));
+        self
     }
 
     /// Hold one publication through projection selection and response construction.
@@ -137,13 +155,25 @@ fn observation_error(detail: &str) -> Response {
 }
 
 /// Serve until the process is asked to stop, independent of command deadlines.
-pub fn serve(ledger: &Ledger, policy: &Policy, _home: &str, port: Option<u16>) -> Result<()> {
+pub fn serve(
+    ledger: &Ledger,
+    policy: &Policy,
+    home: &str,
+    port: Option<u16>,
+    config_path: &std::path::Path,
+) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    let leads = LeadLaunch {
+        config_path: config_path.to_path_buf(),
+        home: home.to_owned(),
+        shell: Arc::new(crate::shell::System::default()),
+    };
     runtime.block_on(run_until(
         ledger,
         port.unwrap_or(policy.web.port),
+        leads,
         shutdown(),
     ))
 }
@@ -151,10 +181,12 @@ pub fn serve(ledger: &Ledger, policy: &Policy, _home: &str, port: Option<u16>) -
 async fn run_until(
     ledger: &Ledger,
     port: u16,
+    leads: LeadLaunch,
     stopping: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let (sender, receiver) = watch::channel(PortalState::default());
     let (listener, state) = listen(ledger, port, receiver).await?;
+    let state = state.with_leads(leads);
     let port = state.port;
     let _reader = spawn_reader(ledger.clone(), sender, state.stop.clone());
     println!(
