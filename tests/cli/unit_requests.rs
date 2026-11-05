@@ -113,7 +113,9 @@ fn prepared_listing_is_owner_scoped_and_never_abandons_or_launches() {
         json!([])
     );
     no_launch(&rig);
+    let publisher = super::observation::seeded(&rig);
     assert_eq!(operation(&rig, "commit", &commit_input(&execution, 0)).0, 0);
+    drop(publisher);
     assert_eq!(rig.json(&["unit", "prepared"]).1, json!([]));
 }
 
@@ -194,6 +196,7 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
     });
     assert!(executions.iter().all(|e| e == &executions[0]));
     let input = commit_input(&executions[0], 0);
+    let publisher = super::observation::seeded(&rig);
     let receipts = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..6)
             .map(|_| scope.spawn(|| operation(&rig, "commit", &input)))
@@ -203,6 +206,7 @@ fn concurrent_prepare_and_commit_return_one_request_and_one_ticket() {
             .map(|h| h.join().unwrap())
             .collect::<Vec<_>>()
     });
+    drop(publisher);
     assert!(receipts.iter().all(|r| r == &receipts[0]), "{receipts:?}");
     assert_eq!(receipts[0].0, 0);
     assert_eq!(receipts[0].1["disposition"], "queued");
@@ -395,7 +399,9 @@ fn dispatch_before_cancel_preserves_possible_execution() {
         "lost-launch",
     ]);
     assert_eq!(code, 0, "{execution}");
+    let publisher = super::observation::seeded(&rig);
     let (code, queued) = operation(&rig, "commit", &commit_input(&execution, 0));
+    drop(publisher);
     assert_eq!(code, 0, "{queued}");
     let ticket = queued["ticket"].as_str().unwrap();
     admission_service(&rig);
@@ -521,7 +527,9 @@ fn remotely_prepared_queued(name: &str) -> (Rig, Value, String) {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     let execution: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let publisher = super::observation::seeded(&rig);
     let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    drop(publisher);
     assert_eq!(code, 0, "{receipt}");
     let ticket = receipt["ticket"].as_str().unwrap().to_owned();
     admission_service(&rig);
@@ -764,7 +772,9 @@ fn unreachable_host_keeps_cancel_release_pending() {
 fn committed_queued(name: &str) -> (Rig, Value, String) {
     let rig = rig(name, true);
     let execution = prepare(&rig);
+    let publisher = super::observation::seeded(&rig);
     let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    drop(publisher);
     assert_eq!(code, 0, "{receipt}");
     assert_eq!(receipt["disposition"], "queued");
     let ticket = receipt["ticket"].as_str().unwrap().to_owned();
@@ -878,7 +888,9 @@ fn unknown_release_does_not_settle_possibly_launched_unit() {
             "call-ambiguous",
         ]);
         assert_eq!(code, 0, "{execution}");
+        let publisher = super::observation::seeded(&rig);
         let (code, reply) = operation(&rig, "commit", &commit_input(&execution, 0));
+        drop(publisher);
         assert_eq!(code, 2, "{reply}");
         let attempt = admission(&rig, &execution);
         assert!(attempt["launch"]["preparation"].is_object(), "{attempt}");
@@ -964,11 +976,13 @@ fn abandon_and_commit_are_serialized_before_any_launch() {
     let execution = prepare(&rig);
     let commit = commit_input(&execution, 0);
     let abandon = execution_input(&execution);
+    let publisher = super::observation::seeded(&rig);
     let (committed, abandoned) = std::thread::scope(|scope| {
         let a = scope.spawn(|| operation(&rig, "commit", &commit));
         let b = scope.spawn(|| operation(&rig, "abandon-prepared", &abandon));
         (a.join().unwrap(), b.join().unwrap())
     });
+    drop(publisher);
     assert_ne!(committed.0, abandoned.0, "{committed:?} {abandoned:?}");
     if abandoned.0 == 0 {
         no_launch(&rig);
@@ -980,11 +994,13 @@ fn abandon_and_commit_are_serialized_before_any_launch() {
 }
 
 fn crash(rig: &Rig, input: &Value, point: &str) {
+    let publisher = super::observation::seeded(rig);
     let out = rig
         .cmd(&["unit", "commit", "--input", &input.to_string()])
         .env("DOGSLED_TEST_UNIT_CRASH", point)
         .output()
         .unwrap();
+    drop(publisher);
     assert_eq!(
         out.status.code(),
         Some(86),
@@ -1120,7 +1136,9 @@ fn lost_commit_response_reuses_launched_receipt_and_exact_profile() {
 fn captured_reply_without_terminal_evidence_never_projects_returned() {
     let rig = rig("unit-prose-not-terminal", false);
     let execution = prepare(&rig);
+    let publisher = super::observation::seeded(&rig);
     let (code, receipt) = operation(&rig, "commit", &commit_input(&execution, 0));
+    drop(publisher);
     assert_eq!(code, 0, "{receipt}");
     assert_eq!(receipt["disposition"], "launched");
     let input = execution_input(&execution);
@@ -1226,7 +1244,9 @@ fn uuid_unit_names_fit_native_limits_and_native_collisions_stay_final() {
         rig.script("herdr", &fs::read_to_string(rig.dir.join("bin/herdr")).unwrap().replace(
             "  'agent start'*|", &format!("  'agent start'*) name=\"$3\"; case \"$name\" in [a-z]*) ;; *) exit 2 ;; esac; case \"$name\" in *[!a-z0-9_-]*) exit 2 ;; esac; if test \"${{#name}}\" -gt 32; then echo '{{\"error\":{{\"code\":\"invalid_agent_name\",\"message\":\"name exceeds 32 bytes\"}}}}' >&2; exit 1; fi; {result} ;;\n  "),
         ));
+        let publisher = super::observation::seeded(&rig);
         let (code, response) = operation(&rig, "commit", &input);
+        drop(publisher);
         if collision {
             assert_eq!(code, 2, "{response}");
             assert!(
@@ -1290,7 +1310,9 @@ fn task_domain_policy_is_not_validated_by_dogsled() {
     input["exported"] = serde_json::from_str(&canonical).unwrap();
     input["exported"]["digest"] = json!(digest);
     input["binding"]["exportDigest"] = json!(digest);
+    let publisher = super::observation::seeded(&rig);
     let (code, receipt) = operation(&rig, "commit", &input);
+    drop(publisher);
     assert_eq!(code, 0, "{receipt}");
     assert_eq!(receipt["disposition"], "queued");
 }
@@ -1338,7 +1360,9 @@ fn unknown_host_launch_outcome_reuses_attempt_without_safe_release() {
     );
     let execution = prepare(&rig);
     let input = commit_input(&execution, 0);
+    let publisher = super::observation::seeded(&rig);
     let (code, receipt) = operation(&rig, "commit", &input);
+    drop(publisher);
     assert_eq!(code, 0, "{receipt}");
     assert_eq!(receipt["disposition"], "queued");
     assert_eq!(operation(&rig, "commit", &input).1, receipt);

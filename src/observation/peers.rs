@@ -15,7 +15,20 @@ pub(crate) fn retry_command(
     host: &str,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    let report = fleet.retry_now(fleet.find(host)?)?;
+    let client = super::ipc::Client::at(&fleet.ledger.dir);
+    let report = if let Ok(subscription) = client.subscribe() {
+        retry_published(&client, subscription, host)?
+    } else {
+        // host_peer uses fixed SQL columns, not serialized topology. This cold-only
+        // observer control is the single CLI discovery exception outside serve.
+        let observed = crate::hosts::ObserverFleet::discover(
+            fleet.shell,
+            fleet.ledger,
+            fleet.policy,
+            fleet.home.clone(),
+        )?;
+        fleet.retry_now(observed.find(host)?)?
+    };
     crate::print(json, &report, || {
         format!(
             "{}: {}\n",
@@ -28,6 +41,54 @@ pub(crate) fn retry_command(
         )
     })?;
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+pub(crate) fn retry_published(
+    client: &super::ipc::Client,
+    mut subscription: super::ipc::Subscription,
+    host: &str,
+) -> Result<crate::hosts::HostReport> {
+    let reports: Vec<crate::hosts::HostReport> =
+        super::read::view(&subscription.current().publication, "hosts")?;
+    if let Some(local) = reports.into_iter().find(|report| {
+        report.host.is_local() && (report.host.id == host || report.host.label == host)
+    }) {
+        return Ok(local);
+    }
+    let retry_token = client.retry(host)?;
+    let deadline =
+        std::time::Instant::now() + crate::budget::CALL_LIMIT + std::time::Duration::from_secs(10);
+    loop {
+        let connection = subscription.current();
+        if let Some((id, _)) = connection
+            .publication
+            .sources
+            .peers
+            .iter()
+            .find(|(_, source)| source.retry_tokens.contains(&retry_token))
+        {
+            let reports: Vec<crate::hosts::HostReport> =
+                super::read::view(&connection.publication, "hosts")?;
+            return reports
+                .into_iter()
+                .find(|report| report.host.id == *id)
+                .ok_or_else(|| {
+                    Error::Invalid("observation unavailable: peer host was not published".into())
+                });
+        }
+        if matches!(connection.status, super::ipc::Status::Disconnected(_)) {
+            return Err(Error::Invalid(
+                "backoff reset; observation unavailable because serve stopped".into(),
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::Invalid(
+                "backoff reset; peer observation pending".into(),
+            ));
+        }
+        let _ = subscription.changed(remaining);
+    }
 }
 
 const CHECK_INTERVAL_MS: u64 = 3_600_000;

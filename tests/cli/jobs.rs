@@ -538,6 +538,16 @@ fn first_unavailable_peer_ingestion_keeps_unknown_job_capability_refused() {
     rig.script("ssh", "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/ssh.log\"\necho 'Connection refused' >&2\nexit 255\n");
     rig.ingest_peers();
     assert!(rig.state(&["peer", "8103"])["job_validity"].is_null());
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts
+                    .iter()
+                    .any(|host| host["id"] == "8103" && host["reachable"] == false)
+            })
+    });
     let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(
@@ -557,7 +567,9 @@ fn v1_only_host_refuses_jobs_before_dispatch() {
     peer["job_validity"] = json!(1);
     rig.put("remote.json", &peer);
     rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     let out = rig.run(&["run", "--host", "netcup", "--", "true"]);
+    drop(observer);
     assert_eq!(out.status.code(), Some(2));
     let error = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -940,6 +952,7 @@ fn exec_refuses_options_that_differ_from_the_claim() {
 fn run_wait_captures_exit_output_metadata_and_owner() {
     let rig = Rig::new("run-wait");
     rig.snapshot("state", now(), 0.0, 8);
+    let observer = super::place::placement_observer(&rig);
     let output = rig.run(&[
         "run",
         "--wait",
@@ -948,6 +961,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
         "-c",
         "echo hi; echo err >&2; exit 3",
     ]);
+    drop(observer);
     assert_eq!(
         output.status.code(),
         Some(3),
@@ -1174,6 +1188,7 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     let confirmed = now();
     fs::write(rig.dir.join("clock"), confirmed.to_string()).unwrap();
     rig.snapshot("state", confirmed, 0.0, 8);
+    let observer = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&[
         "agent",
         "--kind",
@@ -1183,6 +1198,7 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
         "--message",
         "literal ' message",
     ]);
+    drop(observer);
     assert_eq!(code, 0, "{result}");
     assert_eq!(
         result,
@@ -1231,6 +1247,7 @@ fn concurrent_item_and_queue_writers_keep_every_record() {
     let rig = Rig::new("concurrent-items-queue");
     let barrier = std::sync::Barrier::new(8);
     rig.snapshot("state", now(), 99.0, 2);
+    let _publisher = super::observation::seeded(&rig);
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|i| {
@@ -1257,6 +1274,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     let rig = Rig::new("queue-admit");
     rig.config("free_core_fraction_min = 2\n");
     rig.snapshot("state", now(), 0.0, 8);
+    let publisher = super::observation::seeded(&rig);
     let (_, first) = rig.json(&["place"]);
     let (_, second) = rig.json(&[
         "agent",
@@ -1277,6 +1295,7 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     );
     let tickets = rig.tickets();
     assert_eq!(tickets.as_array().unwrap().len(), 3);
+    drop(publisher);
     let observer = rig.serve();
     super::wait_publication(&rig, |frame| {
         frame["views"]["inventory"]["data"]["queue"][2]["waiting"] == false
@@ -1350,6 +1369,7 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
         "id":"remote-job","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","created_ms":0,"closed_ms":null,"name":null
     }]));
     rig.ingest_peers();
+    let observer = super::place::peer_observer(&rig);
     assert_eq!(
         rig.run(&["wait", "remote-job", "--max", "30s"])
             .status
@@ -1362,6 +1382,7 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
             .status
             .success()
     );
+    drop(observer);
     let _observer = rig.serve();
     super::wait_publication(&rig, |frame| {
         frame["views"]["jobs"]["data"][0]["host"] == "8103"
@@ -1694,7 +1715,9 @@ fn remote_stream_expiry_after_partial_output_prints_the_full_marker_once() {
         "output already consumed before retention\n",
     )
     .unwrap();
+    let observer = super::place::peer_observer(&rig);
     let mut reader = partially_read_logs(&rig);
+    drop(observer);
     // The owner keeps its item after remote retention removes the record.
     rig.peer_state(&["job", "aged", "--delete"]);
     assert_stream_expired_once(&rig, &mut reader);
@@ -1785,6 +1808,7 @@ fn remote_expired_item_rig(name: &str) -> Rig {
 #[test]
 fn remote_expired_record_read_reports_expiry_to_the_owner() {
     let rig = remote_expired_item_rig("remote-expired-read");
+    let _observer = super::place::peer_observer(&rig);
     let (code, read) = rig.json(&["read", "aged"]);
     assert_eq!(code, 0, "{read}");
     assert_eq!(read["tail"], EXPIRED, "{read}");
@@ -1795,6 +1819,7 @@ fn remote_expired_record_read_reports_expiry_to_the_owner() {
 #[test]
 fn remote_expired_record_tail_reports_expiry_to_the_owner() {
     let rig = remote_expired_item_rig("remote-expired-tail");
+    let _observer = super::place::peer_observer(&rig);
     let output = rig.run(&["read", "w9:p1", "--host", "netcup"]);
     assert!(
         output.status.success(),
@@ -1809,6 +1834,7 @@ fn remote_expired_record_tail_reports_expiry_to_the_owner() {
 #[test]
 fn remote_expired_record_logs_report_expiry_to_the_owner_once() {
     let rig = remote_expired_item_rig("remote-expired-logs");
+    let _observer = super::place::peer_observer(&rig);
     for args in [vec!["logs", "aged"], vec!["logs", "aged", "--follow"]] {
         let mut command = rig.start(&args);
         assert!(command.wait().success());
@@ -1836,6 +1862,7 @@ fn remote_expired_chunks_ignore_wire_bytes() {
             "case \"$*\" in\n  *'host logs'*) cat \"$RIG/logs.json\" ;;",
         ),
     );
+    let _observer = super::place::peer_observer(&rig);
     let mut reader = rig.start(&["logs", "aged", "--follow"]);
     assert!(reader.wait().success());
     let (stdout, stderr) = reader.output();
@@ -1995,6 +2022,7 @@ fn settled_local_jobs_release_holds_without_discarding_replay_evidence() {
         let rig = Rig::short(&format!("settled-job-{exit}"));
         rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
         rig.snapshot("state", now(), 0.0, 8);
+        let observer = super::place::placement_observer(&rig);
         let mut command = rig.start(&[
             "run",
             "--host",
@@ -2010,6 +2038,7 @@ fn settled_local_jobs_release_holds_without_discarding_replay_evidence() {
         assert_eq!(status.code(), Some(exit), "{stderr}");
         let result: Value = serde_json::from_str(&stdout).unwrap();
         let id = result["id"].as_str().unwrap();
+        drop(observer);
         settle_job_resources(&rig);
         {
             let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
@@ -2096,6 +2125,17 @@ case "$*" in"#,
 fn settled_remote_job_releases_holds_on_both_hosts() {
     let (rig, _peer_service) = settled_peer_rig("settled-peer-job");
     rig.ingest_peers();
+    let observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts.iter().any(|host| {
+                    host["id"] == "8103"
+                        && host["sampled_ms"] == rig.host_at("peer-state")["sampled_ms"]
+                })
+            })
+    });
     let mut command = rig.start(&[
         "run",
         "--host",
@@ -2113,6 +2153,7 @@ fn settled_remote_job_releases_holds_on_both_hosts() {
     assert_eq!(status.code(), Some(0), "{stderr}");
     let job: Value = serde_json::from_str(&stdout).unwrap();
     let id = job["id"].as_str().unwrap();
+    drop(observer);
     settle_job_resources(&rig);
     {
         let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
@@ -2160,6 +2201,8 @@ fn peer_refused_job_reports_once_and_releases_holds() {
 "#,
         ),
     );
+    let observer = rig.serve();
+    wait_publication(&rig, peer_unavailable);
     let mut command = rig.start(&[
         "run",
         "--host",
@@ -2174,6 +2217,7 @@ fn peer_refused_job_reports_once_and_releases_holds() {
     let status = command.wait();
     let (stdout, stderr) = command.output();
     assert_eq!(status.code(), Some(1), "{stdout}\n{stderr}");
+    drop(observer);
     let _peer_service = rig.serve_at(&rig.dir.join("peer-state"), "3600");
     wait_publication_at(&rig, &rig.dir.join("peer-state"), |frame| {
         frame["local"]["host"]["running"] == true && frame["local"]["headroom"]["eligible"] == true
@@ -2246,7 +2290,9 @@ fn peer_allocation_refusal_settles_its_non_executable_intent() {
         ),
     );
     rig.ingest_peers();
+    let observer = super::observation::seeded(&rig);
     let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
+    drop(observer);
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -2308,7 +2354,9 @@ fn peer_reserve_failure_releases_unstarted_evidence_and_fences_dispatch() {
         } else {
             rig.ingest_peers();
         }
+        let observer = super::observation::seeded(&rig);
         let output = rig.run(&["run", "--host", "netcup", "--", "true"]);
+        drop(observer);
         assert_eq!(
             output.status.code(),
             Some(if queued { 1 } else { 2 }),
@@ -2418,7 +2466,9 @@ fn stopped_job_releases_holds_after_terminal_capture() {
     startup_herdr(&rig);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     rig.snapshot("state", now(), 0.0, 8);
+    let observer = super::place::placement_observer(&rig);
     let (code, result) = rig.json(&["run", "--host", "local", "--", "sh", "-c", "sleep 90"]);
+    drop(observer);
     assert_eq!(code, 0, "{result}");
     let id = result["id"].as_str().unwrap();
     let mut wrapper = rig.spawn_recorded(&rig.dir.join("startup-wrapper"), "stopped job wrapper");

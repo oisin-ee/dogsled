@@ -9,6 +9,10 @@ pub(crate) mod peers;
 pub(crate) mod peers_runtime;
 pub(crate) mod project;
 pub(crate) mod read;
+mod socket;
+#[cfg(debug_assertions)]
+pub(crate) mod stored;
+pub(crate) use socket::socket_path;
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -102,6 +106,14 @@ impl Publisher {
         self.sender.subscribe()
     }
 
+    pub fn current(&self) -> Result<Arc<Published>> {
+        self.sender
+            .borrow()
+            .as_ref()
+            .map(|frame| Arc::clone(&frame.published))
+            .ok_or_else(|| Error::Invalid("observation unavailable: no publication".into()))
+    }
+
     pub fn replace(&mut self, mut input: Publication) -> Result<Arc<Published>> {
         let increment = |value: u64| {
             value.checked_add(1).ok_or_else(|| {
@@ -184,6 +196,57 @@ pub(crate) fn command(command: &crate::cli::ObservationCommand) -> Result<std::p
         }
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Test inputs use the real capture and projector, without running action lanes.
+#[cfg(test)]
+pub(crate) fn captured_actions<'a>(
+    fleet: &crate::hosts::Fleet<'a>,
+    now: u64,
+) -> Result<crate::hosts::ActionFleet<'a>> {
+    captured_actions_with_terminals(fleet, now, None)
+}
+
+#[cfg(test)]
+pub(crate) fn captured_actions_with_terminals<'a>(
+    fleet: &crate::hosts::Fleet<'a>,
+    now: u64,
+    terminals: Option<crate::probe::Terminals>,
+) -> Result<crate::hosts::ActionFleet<'a>> {
+    let reports = crate::hosts::ObserverFleet(fleet.clone()).status(now)?;
+    let status = collect::status(fleet.ledger, reports.clone(), now)?;
+    let mut input = Publication {
+        published_ms: now,
+        sources: Sources {
+            local: BTreeMap::from([("status".into(), now)]),
+            peers: BTreeMap::new(),
+        },
+        local: BTreeMap::from([
+            ("status".into(), serde_json::to_value(status)?),
+            (
+                "todos".into(),
+                serde_json::to_value(crate::board::cached_todos(fleet.ledger)?)?,
+            ),
+        ]),
+        views: Domains::new(),
+        gaps: Vec::new(),
+    };
+    if let Some(terminals) = terminals {
+        input
+            .local
+            .insert("terminals".into(), serde_json::to_value(terminals)?);
+        input.sources.local.insert("terminals".into(), now);
+    }
+    let local = project::Projector::default().inputs(fleet, &input);
+    project::derive(&local, reports, &fleet.policy.into(), &mut input)?;
+    let published = Publisher::new()?.replace(input)?;
+    crate::hosts::ActionFleet::new(
+        fleet.shell,
+        fleet.ledger,
+        fleet.policy,
+        fleet.home.clone(),
+        published,
+    )
 }
 
 #[cfg(test)]

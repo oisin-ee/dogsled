@@ -19,6 +19,29 @@ fn gate(rig: &Rig, pane: &str) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// Project terminal observations and stored findings without consuming a sweep request.
+fn findings_publication(rig: &Rig) -> super::observation::Supplied {
+    let publisher = super::observation::seeded(rig);
+    let (_, frame) = rig.json(&["observation", "current"]);
+    assert!(
+        frame["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gap| !matches!(gap["domain"].as_str(), Some("agents" | "findings"))),
+        "stored stop findings have gaps: {}",
+        frame["gaps"]
+    );
+    assert!(
+        frame["gaps"].as_array().unwrap().is_empty(),
+        "unexpected projection gap: {}",
+        frame["gaps"]
+    );
+    assert!(!frame["views"]["agents"]["data"].is_null());
+    assert!(!frame["views"]["findings"]["data"].is_null());
+    publisher
+}
+
 fn serve(rig: &Rig) -> String {
     let out = rig.run(&["serve", "--once", "--interval", "1"]);
     assert!(
@@ -409,7 +432,10 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
     git(&repo, &["worktree", "prune"]);
     assert!(!git(&repo, &["worktree", "list"]).contains(".worktrees/x"));
 
+    let publisher = findings_publication(&rig);
     gate(&rig, "w1:p1");
+    assert!(!rig.state(&["sweep-request"]).is_null());
+    drop(publisher);
     let log = serve(&rig);
     let reason = format!(
         "worktree unregistered by git; directory remains: {}",
@@ -442,22 +468,32 @@ fn git_pruned_worktree_whose_directory_remains_is_held_once_and_never_removed() 
         human.contains(&format!("hold: {}", tree.display())),
         "{human}"
     );
+    let publisher = findings_publication(&rig);
     // Only the agent that launched work into the worktree hears about it.
     assert_eq!(gate(&rig, "w1:p1"), "");
+    drop(publisher);
     launched_into(&rig, "creator", "w1:p1", &tree);
+    let publisher = findings_publication(&rig);
     assert_eq!(gate(&rig, "w2:p1"), "");
     let message = gate(&rig, "w1:p1");
     assert!(message.contains(&reason), "{message}");
     assert!(message.contains("do not delete it yourself"));
     // The same hold speaks once, and later passes neither fail nor touch the directory.
     assert_eq!(gate(&rig, "w1:p1"), "");
+    assert!(!rig.state(&["sweep-request"]).is_null());
+    drop(publisher);
     assert!(!serve(&rig).contains("failed:"));
+    let publisher = findings_publication(&rig);
     assert_eq!(gate(&rig, "w1:p1"), "");
     assert!(tree.join("build/generated").is_file());
 
     // The owner checked the directory and deleted it: the next pass drops the registration.
+    drop(publisher);
     fs::remove_dir_all(&tree).unwrap();
+    let publisher = findings_publication(&rig);
     gate(&rig, "w1:p1");
+    assert!(!rig.state(&["sweep-request"]).is_null());
+    drop(publisher);
     let log = serve(&rig);
     assert!(!log.contains("failed:"), "{log}");
     assert_eq!(rig.state(&["worktrees"]), json!([]));
@@ -569,6 +605,7 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
                 "kind":"unlinked","tree":{"repo":"/host","path":"/host/orphan","branch":"feat/orphan"}}
         ]}),
     );
+    let publisher = findings_publication(&rig);
     // Neither a pane Dogsled did not launch, an unrelated child, nor the child working in the
     // checkout created it. None of them hears, and none consumes the owner's history.
     assert_eq!(gate(&rig, "w1:p1"), "");
@@ -583,7 +620,9 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
             .unwrap();
         String::from_utf8(out.stdout).unwrap()
     };
+    drop(publisher);
     rig.snapshot("state", now(), 0.0, 8);
+    let publisher = findings_publication(&rig);
     assert!(!context("w1:p1").contains("Cleanup at"));
     assert!(
         context("w3:p1").contains("Cleanup at 2 ms: 1 failures and 1 held worktrees in your work")
@@ -601,10 +640,14 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
         .as_array_mut()
         .unwrap()
         .retain(|pane| pane["pane_id"] != "w4:p1");
+    drop(publisher);
     rig.put("panes.json", &panes);
+    let publisher = findings_publication(&rig);
     assert_eq!(gate(&rig, "w1:p1"), "");
     assert_eq!(gate(&rig, "w3:p1"), "");
+    drop(publisher);
     rig.state(&["gate", "--delete"]);
+    let _publisher = findings_publication(&rig);
     assert!(gate(&rig, "w3:p1").contains("child teardown refused"));
     assert_eq!(gate(&rig, "w1:p1"), "");
 }
@@ -626,8 +669,12 @@ fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
     // The creator recorded the launch through a symlinked path; it still names the worktree.
     launched_into(&rig, "creator", "w1:p1", &alias.join(".worktrees/x"));
     fs::write(tree.join("notes.txt"), "keep this work").unwrap();
+    let publisher = findings_publication(&rig);
     gate(&rig, "w1:p1");
+    assert!(!rig.state(&["sweep-request"]).is_null());
+    drop(publisher);
     serve(&rig);
+    let publisher = findings_publication(&rig);
     assert!(tree.exists());
     // An agent in the same repository that created nothing there hears nothing.
     assert_eq!(gate(&rig, "w3:p1"), "");
@@ -653,7 +700,9 @@ fn landed_dirty_reaches_only_the_agent_that_created_the_worktree() {
         .as_array_mut()
         .unwrap()
         .push(json!({"pane_id":"w4:p1","terminal_id":"linked","cwd":tree}));
+    drop(publisher);
     rig.put("panes.json", &panes);
+    let _publisher = findings_publication(&rig);
     assert_eq!(gate(&rig, "w4:p1"), "");
     let report = rig.state(&["sweep"]);
     assert_eq!(report["landed_dirty"][0]["kind"], "landed_dirty");
@@ -681,6 +730,7 @@ fn claude_and_codex_stop_deliver_cleanup_and_request_the_next_pass() {
             (&child, "survey unavailable: w2:p1"),
         ],
     );
+    let _publisher = findings_publication(&rig);
     for (harness, pane) in [("claude", "w1:p1"), ("codex", "w2:p1")] {
         let run = || {
             rig.cmd(&["hook", "inbox", "--harness", harness, "--event", "Stop"])
@@ -816,8 +866,11 @@ fn long_state_path_without_a_socket_still_consumes_stop_requests() {
 }
 
 #[test]
-fn long_state_path_keeps_collecting_without_an_observation_endpoint() {
-    let rig = Rig::new("observation-long-path");
+fn long_state_path_keeps_collecting_with_a_private_observation_endpoint() {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    let rig = Rig::short("observation-long-path");
+    let runtime = rig.dir.join("runtime");
+    fs::create_dir(&runtime).unwrap();
     let state = rig
         .dir
         .join("state")
@@ -828,6 +881,7 @@ fn long_state_path_keeps_collecting_without_an_observation_endpoint() {
     let mut service = rig.cmd(&["serve", "--interval", "1"]);
     service
         .env("DOGSLED_STATE", &state)
+        .env("XDG_RUNTIME_DIR", &runtime)
         .stdout(Stdio::null())
         .stderr(journal);
     let _service = Service(Owned::spawn(&mut service));
@@ -843,17 +897,74 @@ fn long_state_path_keeps_collecting_without_an_observation_endpoint() {
     let journal = fs::read_to_string(&journal_path).unwrap();
     assert_eq!(
         journal.matches("observation socket unavailable:").count(),
-        1
+        0
     );
     assert!(state.join("observation.lock").is_file());
     assert!(!state.join("observation.sock").exists());
+    let private = runtime.join("dogsled");
+    let metadata = fs::symlink_metadata(&private).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
+    assert!(
+        fs::read_dir(&private).unwrap().any(|entry| entry
+            .unwrap()
+            .file_type()
+            .unwrap()
+            .is_socket())
+    );
     let out = rig
         .cmd(&["observation", "current"])
         .env("DOGSLED_STATE", &state)
+        .env("XDG_RUNTIME_DIR", &runtime)
         .output()
         .unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("observation unavailable"));
+    assert!(out.status.success(), "{out:?}");
+    assert!(serde_json::from_slice::<Value>(&out.stdout).unwrap()["revision"].is_u64());
+}
+
+#[test]
+fn unsafe_observation_runtime_directory_is_refused_without_following_it() {
+    for case in ["mode", "symlink"] {
+        let rig = Rig::short(&format!("unsafe-runtime-{case}"));
+        let state = rig
+            .dir
+            .join("state")
+            .join("long-state-directory-".repeat(8));
+        fs::create_dir_all(&state).unwrap();
+        let runtime = rig.dir.join("runtime");
+        fs::create_dir(&runtime).unwrap();
+        let private = runtime.join("dogsled");
+        let target = rig.dir.join("target");
+        fs::create_dir(&target).unwrap();
+        if case == "mode" {
+            fs::create_dir(&private).unwrap();
+            fs::set_permissions(&private, fs::Permissions::from_mode(0o755)).unwrap();
+        } else {
+            std::os::unix::fs::symlink(&target, &private).unwrap();
+        }
+        let out = rig
+            .cmd(&["serve", "--once"])
+            .env("DOGSLED_STATE", &state)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("owned, non-symlink directory with mode 0700"),
+            "{out:?}"
+        );
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        if case == "mode" {
+            assert_eq!(
+                fs::symlink_metadata(&private).unwrap().permissions().mode() & 0o7777,
+                0o755
+            );
+        } else {
+            assert_eq!(fs::read_link(&private).unwrap(), target);
+        }
+    }
 }
 
 #[test]
@@ -874,6 +985,7 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
             let mut snapshot = rig.host();
             snapshot["probe"]["agent_panes"][0]["terminal_id"] = json!("term_owner");
             rig.put_host(&snapshot);
+            let publisher = findings_publication(&rig);
             let registered = rig
                 .cmd(&[
                     "hook",
@@ -892,9 +1004,11 @@ fn request_write_failure_warns_without_losing_gate_or_inbox_delivery() {
                     .0,
                 0
             );
+            drop(publisher);
         }
         // A failed request insert leaves inbox, report, and gate tables writable.
         rig.fault_host_store("sweep-request", true);
+        let _publisher = findings_publication(&rig);
         let args = if harness == "pi" {
             vec!["hook", "gate"]
         } else {

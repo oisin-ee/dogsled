@@ -80,6 +80,12 @@ pub(crate) fn board(published: &Published, owner: Option<&str>) -> Result<crate:
     owned(published, "boards", owner, "board", "empty_board")
 }
 
+pub(crate) fn findings(published: &Published, owner: &str) -> Result<crate::gate::Findings> {
+    let mut findings: std::collections::BTreeMap<String, crate::gate::Findings> =
+        view(published, "findings")?;
+    Ok(findings.remove(owner).unwrap_or_default())
+}
+
 pub(crate) fn inventory(published: &Published, owner: Option<&str>) -> Result<Value> {
     owned(
         published,

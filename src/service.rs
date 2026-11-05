@@ -9,6 +9,7 @@ use crate::ledger::{Ledger, now_ms};
 use crate::node::Node;
 use crate::shell::System;
 use crate::{items, work};
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -154,7 +155,13 @@ impl Drop for Listener {
     }
 }
 
-fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result<()> {
+fn actions(
+    ledger: &Ledger,
+    policy: &Policy,
+    home: String,
+    lane: Lane,
+    published: Arc<crate::observation::Published>,
+) -> Result<()> {
     let shell = System::default();
     if lane == Lane::Quota {
         return crate::quota::read(&shell, ledger, policy, &home, false, false).map(|_| ());
@@ -162,20 +169,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }
-    let fleet = if items::list(ledger)?.is_empty()
-        && work::queue(ledger)?.is_empty()
-        && !crate::inbox::pending(ledger)?
-    {
-        Fleet {
-            shell: &shell,
-            ledger,
-            policy,
-            home,
-            hosts: vec![crate::hosts::Host::local()],
-        }
-    } else {
-        Fleet::discover(&shell, ledger, policy, home)?
-    };
+    let fleet = crate::hosts::ActionFleet::new(&shell, ledger, policy, home, published)?;
     if lane == Lane::Retention {
         // Retention owns its synchronization too; no other service lane is required.
         crate::launch::release_owned(&fleet)?;
@@ -184,7 +178,7 @@ fn actions(ledger: &Ledger, policy: &Policy, home: String, lane: Lane) -> Result
     match lane {
         Lane::Watchdog => {
             let now = now_ms();
-            let reports = fleet.status(now)?;
+            let reports = fleet.reports()?;
             crate::watchdog::tick(&fleet, &reports, now)?;
             items::reconcile(ledger, &reports, now)
         }
@@ -210,29 +204,52 @@ fn ready(lane: Lane, completed: [bool; LANES.len()]) -> bool {
             .any(|(other, done)| *other == Lane::Handoff && done)
 }
 
-/// Start eligible action lanes without coupling their scheduling to publication or input.
-fn start_lanes(
-    node: &Node<'_>,
-    policy: &Policy,
-    once: bool,
-    workers: &mut [Option<std::thread::JoinHandle<()>>; LANES.len()],
+#[derive(Default)]
+struct Workers {
+    handles: [Option<std::thread::JoinHandle<()>>; LANES.len()],
     completed: [bool; LANES.len()],
-    send: &mpsc::Sender<Event>,
-) {
-    for (lane, worker) in workers.iter_mut().enumerate() {
-        if worker.is_none() && (!once || (!completed[lane] && ready(LANES[lane], completed))) {
-            let mut ledger = node.ledger.clone();
-            ledger.budget = crate::budget::Budget::default();
-            let policy = policy.clone();
-            let home = node.home.to_owned();
-            let send = send.clone();
-            *worker = Some(std::thread::spawn(move || {
-                let _ = send.send(Event::Finished(
-                    lane,
-                    actions(&ledger, &policy, home, LANES[lane]),
-                ));
-            }));
+}
+
+impl Workers {
+    /// Start eligible lanes without coupling their scheduling to publication or input.
+    fn start(
+        &mut self,
+        node: &Node<'_>,
+        policy: &Policy,
+        once: bool,
+        send: &mpsc::Sender<Event>,
+        source: &crate::observation::Publisher,
+    ) -> Result<()> {
+        let published = source.current()?;
+        for (lane, worker) in self.handles.iter_mut().enumerate() {
+            if worker.is_none()
+                && (!once || (!self.completed[lane] && ready(LANES[lane], self.completed)))
+            {
+                let mut ledger = node.ledger.clone();
+                ledger.budget = crate::budget::Budget::default();
+                let policy = policy.clone();
+                let home = node.home.to_owned();
+                let send = send.clone();
+                let published = Arc::clone(&published);
+                *worker = Some(std::thread::spawn(move || {
+                    let _ = send.send(Event::Finished(
+                        lane,
+                        actions(&ledger, &policy, home, LANES[lane], published),
+                    ));
+                }));
+            }
         }
+        Ok(())
+    }
+
+    fn finished(&mut self, lane: usize) -> Result<()> {
+        if let Some(handle) = self.handles[lane].take() {
+            handle
+                .join()
+                .map_err(|_| Error::Invalid("service action worker failed".into()))?;
+        }
+        self.completed[lane] = true;
+        Ok(())
     }
 }
 
@@ -351,13 +368,13 @@ impl Observation {
         cycle: (u8, bool),
     ) -> Result<()> {
         let (domains, once) = cycle;
-        let fleet = Fleet {
-            shell: node.shell,
-            ledger: node.ledger,
+        let fleet = Fleet::producer(
+            node.shell,
+            node.ledger,
             policy,
-            home: node.home.to_owned(),
-            hosts: vec![crate::hosts::Host::local()],
-        };
+            node.home.to_owned(),
+            vec![crate::hosts::Host::local()],
+        );
         self.exchange.peers.retry(dirty.take_peers());
         if let Err(error) = self.exchange.peers.discover(&fleet, dirty, once) {
             eprintln!("dogsled peer discovery: {error}");
@@ -374,6 +391,8 @@ impl Observation {
     }
 }
 
+const BASELINE_SAMPLE_DELAY: Duration = Duration::from_secs(1);
+
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
     let dirty = wake::Dirty::new(send.clone());
@@ -387,12 +406,16 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     };
     let mut sweep: Option<std::thread::JoinHandle<()>> = None;
     let mut requested = false;
-    let mut workers: [Option<std::thread::JoinHandle<()>>; LANES.len()] = Default::default();
-    let mut completed = [false; LANES.len()];
+    let mut workers = Workers::default();
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
+    let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);
     loop {
         let scheduled = Instant::now() >= next;
+        let baseline_due = baseline.is_some_and(|at| Instant::now() >= at);
+        if baseline_due {
+            baseline = None;
+        }
         let domains = dirty.take();
         // The socket only reduces latency. Recover pending requests on every publication
         // iteration, including when the socket cannot bind or a notification was lost.
@@ -402,7 +425,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             policy,
             &dirty,
             (
-                if scheduled {
+                if scheduled || baseline_due {
                     domains | wake::LOCAL
                 } else {
                     domains
@@ -411,7 +434,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             ),
         )?;
         if scheduled {
-            start_lanes(node, policy, once, &mut workers, completed, &send);
+            workers.start(node, policy, once, &send, &observation.publisher)?;
             next += interval;
         }
         loop {
@@ -428,10 +451,11 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
                 }));
             }
-            if once && completed.iter().all(|done| *done) && sweep.is_none() {
+            if once && workers.completed.iter().all(|done| *done) && sweep.is_none() {
                 return Ok(());
             }
-            match recv.recv_timeout(next.saturating_duration_since(Instant::now())) {
+            let observation_due = baseline.map_or(next, |at| next.min(at));
+            match recv.recv_timeout(observation_due.saturating_duration_since(Instant::now())) {
                 Ok(Event::Sweep) => requested = true,
                 Ok(Event::Observe) => {
                     if dirty.pending() && !once {
@@ -450,16 +474,14 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     }
                 }
                 Ok(Event::Finished(lane, result)) => {
-                    if let Some(handle) = workers[lane].take() {
-                        handle
-                            .join()
-                            .map_err(|_| Error::Invalid("service action worker failed".into()))?;
-                    }
-                    completed[lane] = true;
+                    workers.finished(lane)?;
                     diagnostics.record(node.ledger, LANES[lane], result);
                     dirty.mark(wake::LEDGER);
                     if once {
-                        start_lanes(node, policy, once, &mut workers, completed, &send);
+                        if LANES[lane] == Lane::Handoff {
+                            observation.refresh(node, policy, &dirty, (wake::LEDGER, once))?;
+                        }
+                        workers.start(node, policy, once, &send, &observation.publisher)?;
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,

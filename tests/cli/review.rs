@@ -93,6 +93,8 @@ fn deadline_includes_discovery_and_placement_ssh() {
     ] {
         let rig = Rig::new(name);
         rig.peer();
+        rig.ingest_peers();
+        let _publisher = super::observation::seeded(&rig);
         rig.script("ssh", "#!/bin/sh\nexec sleep 30\n");
         let start = Instant::now();
         let out = rig.run(&args);
@@ -103,12 +105,22 @@ fn deadline_includes_discovery_and_placement_ssh() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(start.elapsed() < Duration::from_secs(2), "{diagnostic}");
-        if name == "agent-placement" {
+        if name == "wait-discovery" {
+            // Unknown-name lookup consumes the publication; there is no discovery SSH deadline.
+            assert_eq!(out.status.code(), Some(2), "{diagnostic}");
+            assert!(
+                !String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
+                "{diagnostic}"
+            );
+        } else if name == "agent-placement" {
             assert_eq!(out.status.code(), Some(2), "{diagnostic}");
             assert!(
                 String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
                 "{diagnostic}"
             );
+            let (code, report) = rig.json(&args);
+            assert_eq!(code, 2, "{report}");
+            assert_eq!(report["deadline"], true, "{report}");
         } else {
             assert_eq!(out.status.code(), Some(124), "{diagnostic}");
             assert_eq!(out.stdout, b"still running\n", "{diagnostic}");
@@ -119,6 +131,8 @@ fn deadline_includes_discovery_and_placement_ssh() {
 #[test]
 fn command_deadline_bounds_local_git_and_remote_report() {
     let rig = Rig::new("hung-git");
+    rig.snapshot("state", now(), 0.0, 8);
+    let _publisher = super::observation::seeded(&rig);
     rig.script("git", "#!/bin/sh\nexec sleep 30\n");
     let start = Instant::now();
     let out = rig.run(&["run", "--wait", "--max", "50ms", "--", "true"]);
@@ -128,16 +142,21 @@ fn command_deadline_bounds_local_git_and_remote_report() {
     let rig = Rig::new("remote-deadline-report");
     rig.peer();
     rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
+    rig.ingest_peers();
+    let _publisher = super::observation::seeded(&rig);
     rig.script("ssh", "#!/bin/sh\nprintf '%s\\n' '{\"deadline\":true,\"error\":\"deadline reached: git clone\"}'; exit 2\n");
+    let start = Instant::now();
     let out = rig.run(&["wait", "remote", "--max", "1s"]);
     assert_eq!(out.status.code(), Some(124));
     assert_eq!(out.stdout, b"still running\n");
+    assert!(start.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
 fn command_deadline_bounds_host_lock_wait() {
     let rig = Rig::new("locked-placement");
     rig.snapshot("state", now(), 0.0, 8);
+    let _publisher = super::observation::seeded(&rig);
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -180,7 +199,9 @@ fn service_publishes_snapshots_while_remote_action_times_out() {
     rig.config("free_core_fraction_min = 2\n");
     rig.ingest_peers();
     // Queue without consulting a hung peer, then make that peer hang for admission.
+    let publisher = super::observation::seeded(&rig);
     let (_, ticket) = rig.json(&["place", "--host", "netcup"]);
+    drop(publisher);
     rig.expire_cache();
     rig.script("ssh", "#!/bin/sh\nexec sleep 60\n");
     // Every agent-list call, which only a publication tick makes, reads the previous published

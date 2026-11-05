@@ -99,16 +99,32 @@ impl Fixture {
     }
 
     pub(super) fn fleet(&self) -> Fleet<'_> {
-        Fleet {
-            shell: &self.shell,
-            ledger: &self.ledger,
-            policy: &self.policy,
-            home: "/home".into(),
-            hosts: vec![Host::local()],
-        }
+        Fleet::cold(
+            &self.shell,
+            &self.ledger,
+            &self.policy,
+            "/home".into(),
+            vec![Host::local()],
+        )
     }
 
     pub(super) fn input(&self) -> Publication {
+        let probe = self.local.probe.as_ref().unwrap();
+        let agents: Vec<_> = probe.agent_panes.iter().map(|agent| json!({
+            "pane_id":agent.pane,"agent":agent.agent,"agent_status":agent.state,"name":agent.name,
+            "agent_session":agent.agent_session.as_ref().map(|session| json!({"kind":"path","value":session})),
+            "terminal_id":agent.terminal_id,"cwd":agent.cwd,
+            "completion_seq":agent.completion_seq,"state_change_seq":agent.state_change_seq,"state_since_ms":agent.state_since_ms
+        })).collect();
+        self.shell.on(
+            "herdr agent list",
+            &json!({"result":{"agents":agents}}).to_string(),
+        );
+        self.shell.on(
+            "herdr pane list",
+            &json!({"result":{"panes":probe.panes}}).to_string(),
+        );
+        let terminals = crate::probe::terminals(&self.shell).unwrap();
         let status =
             crate::observation::collect::status(&self.ledger, vec![self.local.clone()], NOW)
                 .unwrap();
@@ -117,10 +133,15 @@ impl Fixture {
         Publication {
             published_ms: NOW,
             sources: Sources {
-                local: BTreeMap::from([("status".into(), NOW), ("todos".into(), NOW)]),
+                local: BTreeMap::from([
+                    ("status".into(), NOW),
+                    ("todos".into(), NOW),
+                    ("terminals".into(), NOW),
+                ]),
                 ..Sources::default()
             },
             local: Domains::from([
+                ("terminals".into(), serde_json::to_value(terminals).unwrap()),
                 ("status".into(), serde_json::to_value(status).unwrap()),
                 ("todos".into(), json!([todo])),
             ]),
@@ -520,6 +541,10 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
     )
     .unwrap();
     for (key, view) in &input.views {
+        if key == "agents" {
+            assert_eq!(view["gaps"], json!([]));
+            continue;
+        }
         assert!(
             view["gaps"]
                 .as_array()
@@ -535,11 +560,11 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
         "boards",
         "job_history",
         "portal_board",
-        "agents",
         "inbox",
     ] {
         assert!(input.views[key]["data"].is_null(), "{key}");
     }
+    assert!(input.views["agents"]["data"].is_array());
     assert_ne!(
         input.views["portal"]["data"]["gaps"]
             .as_array()
@@ -547,6 +572,38 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
             .as_slice(),
         [] as [Value; 0]
     );
+}
+
+#[test]
+fn failed_terminal_capture_gaps_agents_and_owner_findings() {
+    let fixture = Fixture::new();
+    let _ = fixture.input();
+    fixture
+        .shell
+        .on("herdr agent list", "unavailable terminal source");
+    let mut collector = super::super::collect::Collector::default();
+    let collected = collector.collect(&fixture.fleet().node(), NOW);
+    assert!(collected.sample.is_err());
+    let mut input = collected.input;
+    let captured = project::Projector::default().inputs(&fixture.fleet(), &input);
+    project::derive(
+        &captured,
+        collector.reports(),
+        &(&fixture.policy).into(),
+        &mut input,
+    )
+    .unwrap();
+    for key in ["agents", "findings"] {
+        assert!(input.views[key]["data"].is_null(), "{key}");
+        assert!(
+            input.views[key]["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap["domain"] == "terminals" && gap["availability"] == "failed"),
+            "{key}"
+        );
+    }
 }
 
 #[test]

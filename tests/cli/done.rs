@@ -187,6 +187,7 @@ fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
         "term_child",
         &json!({"pane":"w2:p1","harness":"pi","registered_ms":1}),
     );
+    let publisher = super::observation::resolved(&rig);
     assert!(done(&rig).status.success());
     let (code, _) = rig.json(&["send", "worker", "--message", "more work during this turn"]);
     assert_eq!(code, 0);
@@ -201,7 +202,9 @@ fn inbox_after_done_turn_is_rejected_but_during_turn_cancels_done() {
     assert!(out.status.success());
     assert_eq!(rig.state(&["done"]), json!({}));
     assert!(done(&rig).status.success());
+    drop(publisher);
     worker(&rig, &tree, "idle");
+    let _publisher = super::observation::resolved(&rig);
     // The published snapshot is deliberately stale-working; live state must win.
     let (code, refused) = rig.json(&["send", "worker", "--message", "too late"]);
     assert_eq!(code, 2);

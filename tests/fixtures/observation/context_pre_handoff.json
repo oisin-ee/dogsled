@@ -244,6 +244,40 @@
       "stopped_activity": {},
       "sweep": null
     },
+    "terminals": {
+      "agents": [
+        {
+          "agent": "pi",
+          "agent_session": "worker-session",
+          "completion_seq": 1,
+          "cwd": "/fixture/context/worker",
+          "done": true,
+          "handoff": "recorded",
+          "lifecycle": "done",
+          "name": "worker",
+          "pane": "w2:p1",
+          "repository": "github.com/fixture/context",
+          "signal": null,
+          "stalled_since_ms": null,
+          "state": "idle",
+          "state_change_seq": 1,
+          "state_since_ms": 10000,
+          "terminal_id": "term_worker",
+          "transcript": null,
+          "transcript_modified": null,
+          "worktree": {
+            "ahead": 2,
+            "base": "5fc2dec4f6afe2b119ae56279a5ab3801025db68",
+            "branch": "feat/x",
+            "dirty": false,
+            "head": "c222478b5f14c09c9c0aa7921c3c0afc7ce17707",
+            "landed": false,
+            "path": "/fixture/context/worker"
+          }
+        }
+      ],
+      "panes": []
+    },
     "todos": []
   },
   "local_revision": 1,
@@ -260,6 +294,7 @@
       "reviews": 10000,
       "status": 10000,
       "stopped_activity": 10000,
+      "terminals": 10000,
       "todos": 10000
     },
     "peers": {}

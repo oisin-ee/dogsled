@@ -152,7 +152,15 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
     let input = collection.input;
     assert_eq!(input.gaps, []);
     assert!(input.views.is_empty(), "fleet projections belong to O6");
-    assert_eq!(input.local.len(), 4);
+    assert_eq!(input.local.len(), 5);
+    assert_eq!(
+        input.local["terminals"]["agents"],
+        input.local["host"]["probe"]["agent_panes"]
+    );
+    assert_eq!(
+        input.local["terminals"]["panes"],
+        input.local["host"]["probe"]["panes"]
+    );
     assert!(input.sources.local.values().all(|time| *time == 100));
     let host = &input.local["host"];
     assert_eq!(host["sampled_ms"], 100);
@@ -226,9 +234,26 @@ fn ledger_refresh_reuses_terminal_sample_and_preserves_failed_sample_gaps() {
     fixture.fail_probe();
     let failed = collector.collect(&fixture.node(), 300).input;
     let calls = fixture.shell.calls.lock().unwrap().len();
+    assert_eq!(
+        failed.sources.local["terminals"],
+        original.sources.local["terminals"]
+    );
+    let terminal_failure = failed
+        .gaps
+        .iter()
+        .find(|gap| gap.domain == "terminals")
+        .unwrap();
     let ledger_only = collector.refresh(&fixture.node(), 400, false).input;
+    assert_eq!(
+        ledger_only
+            .gaps
+            .iter()
+            .find(|gap| gap.domain == "terminals")
+            .unwrap(),
+        terminal_failure
+    );
     assert_eq!(ledger_only.local, failed.local);
-    for domain in ["host", "status", "headroom"] {
+    for domain in ["host", "status", "headroom", "terminals"] {
         assert_eq!(
             ledger_only.sources.local[domain],
             failed.sources.local[domain]
@@ -252,12 +277,12 @@ fn failed_collection_retains_values_and_times_then_recovers() {
     let failed = publisher.replace(collection.input).unwrap();
     assert_eq!(failed.published_ms, 200);
     assert_eq!(failed.local, old.local);
-    for domain in ["host", "headroom", "status"] {
+    for domain in ["host", "headroom", "status", "terminals"] {
         assert_eq!(failed.sources.local[domain], old.sources.local[domain]);
     }
     assert_eq!(failed.sources.local["todos"], 200);
     assert_eq!(failed.local_revision, old.local_revision);
-    assert_eq!(failed.gaps.len(), 3);
+    assert_eq!(failed.gaps.len(), 4);
     assert!(
         failed
             .gaps
@@ -293,8 +318,8 @@ fn cold_collection_failure_is_not_empty_success() {
     assert_eq!(input.local.len(), 1);
     assert_eq!(input.local["todos"], json!([]));
     assert_eq!(input.sources.local, BTreeMap::from([("todos".into(), 100)]));
-    assert_eq!(input.gaps.len(), 3);
-    for domain in ["host", "headroom", "status"] {
+    assert_eq!(input.gaps.len(), 4);
+    for domain in ["host", "headroom", "status", "terminals"] {
         assert!(input.gaps.iter().any(|gap| gap.domain == domain));
     }
 }
@@ -319,10 +344,14 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
     collection.sample.unwrap();
     let mut publisher = Publisher::new().unwrap();
     let frame = publisher.replace(collection.input).unwrap();
-    assert_eq!(frame.local.len(), 1);
+    assert_eq!(frame.local.len(), 2);
+    assert_eq!(frame.local["terminals"]["agents"][0]["pane"], "worker");
     assert_eq!(frame.local["todos"][0]["revision"], 7);
     assert_eq!(frame.local["todos"][0]["pane"], "worker");
-    assert_eq!(frame.sources.local, BTreeMap::from([("todos".into(), 100)]));
+    assert_eq!(
+        frame.sources.local,
+        BTreeMap::from([("todos".into(), 100), ("terminals".into(), 100)])
+    );
     assert_eq!(frame.gaps.len(), 3);
     for domain in ["host", "headroom", "status"] {
         let gap = frame.gaps.iter().find(|gap| gap.domain == domain).unwrap();
@@ -400,7 +429,10 @@ fn failed_endpoint_bind_retains_exclusive_publication_ownership() {
     let state = fixture.ledger.dir.join("long-state-directory-".repeat(8));
     let publisher = Publisher::new().unwrap();
     let mut server = ipc::Server::new(&state).unwrap();
+    let endpoint = super::super::socket_path(&state, "observation.sock").unwrap();
+    std::fs::write(&endpoint, b"not a socket").unwrap();
     assert!(server.bind(publisher.subscribe()).is_err());
+    assert_eq!(std::fs::read(&endpoint).unwrap(), b"not a socket");
     assert!(ipc::Server::new(&state).is_err());
     assert!(
         ipc::Client::at(&state)
@@ -410,8 +442,11 @@ fn failed_endpoint_bind_retains_exclusive_publication_ownership() {
             .contains("unavailable")
     );
     drop(server);
+    assert_eq!(std::fs::read(&endpoint).unwrap(), b"not a socket");
     let owner = ipc::Server::new(&state).unwrap();
     drop(owner);
+    assert_eq!(std::fs::read(&endpoint).unwrap(), b"not a socket");
+    std::fs::remove_file(endpoint).unwrap();
 }
 
 #[test]
@@ -428,13 +463,13 @@ fn failed_local_capture_keeps_inventory_and_peer_only_composition_immutable() {
         }
         fixture.fail_probe();
         let mut input = collector.collect(&fixture.node(), 30_101).input;
-        let fleet = Fleet {
-            shell: &fixture.shell,
-            ledger: &fixture.ledger,
-            policy: &fixture.policy,
-            home: "/home".into(),
-            hosts: vec![Host::local()],
-        };
+        let fleet = Fleet::cold(
+            &fixture.shell,
+            &fixture.ledger,
+            &fixture.policy,
+            "/home".into(),
+            vec![Host::local()],
+        );
         let mut projector = project::Projector::default();
         let captured = projector.inputs(&fleet, &input);
         project::derive(

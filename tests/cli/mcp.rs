@@ -219,7 +219,7 @@ fn p2_recovery_tools_share_the_runtime() {
 
 #[test]
 fn mcp_place_resume_replays_original_request_and_rejects_overrides() {
-    let (rig, _, id) = place::interrupted_placement("placement-result-saved");
+    let (rig, _, id, _observer) = place::interrupted_placement("placement-result-saved");
     let original = rig.admission(&id);
     let mut client = Client::start(&rig);
     for field in ["host", "branch", "base", "cwd"] {
@@ -246,6 +246,7 @@ fn mcp_place_resume_replays_original_request_and_rejects_overrides() {
 #[test]
 fn review_plain_preparation_error_contains_resumable_request_id() {
     let (rig, repo) = place::place_rig("mcp-plain-error");
+    let _observer = place::placement_observer(&rig);
     let mut client = Client::start(&rig);
     let (error, failed) = client.call(
         "place",
@@ -281,6 +282,7 @@ fn review_plain_preparation_error_contains_resumable_request_id() {
 fn mcp_place_initial_and_resume_share_branchless_result() {
     let rig = Rig::short("mcp-place-resume");
     rig.snapshot("state", rig.origin_ms, 0.0, 8);
+    let _observer = place::placement_observer(&rig);
     let mut client = Client::start(&rig);
     let (result, failed) = client.call("place", &json!({"host":"local"}));
     assert!(!failed, "{result}");
@@ -500,6 +502,16 @@ fn mcp_send_writes_one_inbox_record_from_the_callers_pane() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"][0]["probe"]["agent_panes"]
+            .as_array()
+            .is_some_and(|agents| {
+                agents
+                    .iter()
+                    .any(|agent| agent["name"] == "worker" && agent["terminal_id"] == "term_work")
+            })
+    });
     let mut client = Client::start(&rig);
     let (sent, error) = client.call(
         "send",

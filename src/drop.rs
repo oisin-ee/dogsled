@@ -55,7 +55,7 @@ pub fn drop(fleet: &Fleet<'_>, id: &str, host: Option<&str>) -> Result<Dropped> 
             item.owner_pane
         )));
     }
-    let target = fleet.find(host.unwrap_or(&item.host))?;
+    let target = crate::hosts::command_host(fleet, host.unwrap_or(&item.host))?;
     if target.id != item.host {
         return Err(Error::Invalid(format!(
             "{id} belongs to host {}",
@@ -66,7 +66,7 @@ pub fn drop(fleet: &Fleet<'_>, id: &str, host: Option<&str>) -> Result<Dropped> 
         local(fleet.shell, fleet.ledger, &item)?
     } else {
         fleet.remote_setup(
-            target,
+            &target,
             &[
                 "drop".into(),
                 "--item".into(),

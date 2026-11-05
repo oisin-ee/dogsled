@@ -261,6 +261,7 @@ impl Observer {
     fn start(name: &str, interval: &str) -> Self {
         use std::io::{BufRead as _, BufReader, Write as _};
         let rig = Rig::short(name);
+        rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
         let path = rig.dir.join("herdr.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -303,6 +304,18 @@ impl Observer {
             db.query_row::<i64, _, _>("SELECT count(*) FROM service_lanes", [], |row| row.get(0))
                 .unwrap()
                 == 7
+        });
+        observer.wait(|frame| {
+            let samples: i64 = observer
+                .rig
+                .database()
+                .query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))
+                .unwrap();
+            samples >= 2
+                && frame["local"]["host"]["sampled_ms"]
+                    .as_u64()
+                    .is_some_and(|at| at >= observer.rig.origin_ms + 1_000)
+                && frame["local"]["host"]["probe"]["busy"].is_number()
         });
         observer.quiet();
         observer
@@ -372,6 +385,40 @@ impl Drop for Observer {
     fn drop(&mut self) {
         self.child.terminate();
     }
+}
+
+#[test]
+fn cold_serve_samples_cpu_before_long_interval_without_local_events() {
+    let rig = Rig::short("observe-baseline");
+    rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
+    let mut command = rig.cmd(&["serve", "--interval", "3600"]);
+    command.env("HERDR_SOCKET_PATH", rig.dir.join("no-herdr-events.sock"));
+    let began = Instant::now();
+    let _observer = Rig::background(command);
+    let frame = wait_publication(&rig, |frame| {
+        frame["local"]["host"]["probe"]["busy"].is_number()
+            && frame["local"]["host"]["sampled_ms"]
+                .as_u64()
+                .is_some_and(|at| at >= rig.origin_ms + 1_000)
+    });
+    assert!(began.elapsed() < Duration::from_secs(5), "{frame}");
+    let probe = &frame["local"]["host"]["probe"];
+    let cores = probe["cores"].as_f64().unwrap();
+    let busy = probe["busy"].as_f64().unwrap();
+    let memory = &probe["memory"];
+    let free_memory =
+        memory["total_bytes"].as_u64().unwrap() - memory["used_bytes"].as_u64().unwrap();
+    // The untouched default policy requires 25% free cores, 3 GiB free RAM and 15% disk.
+    let expected = cores * (1.0 - busy) >= cores * 0.25
+        && free_memory >= 3 * 1024 * 1024 * 1024
+        && probe["disk_free_percent"].as_f64().unwrap() >= 15.0
+        && memory["pressure_level"]
+            .as_u64()
+            .is_none_or(|level| level < 4);
+    assert_eq!(frame["local"]["headroom"]["eligible"], expected, "{frame}");
+    assert_ne!(frame["local"]["headroom"]["reason"], "no CPU sample yet");
+    assert!(frame["local"]["host"]["probe"]["busy"].is_number());
+    assert_eq!(rig.state(&["samples"]).as_array().unwrap().len(), 2);
 }
 
 #[test]

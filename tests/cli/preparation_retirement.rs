@@ -240,6 +240,14 @@ fn retirement_replay_rejects_changed_completion_or_provenance() {
 fn lost_ack_replays_the_same_retirement() {
     let (rig, _) = prepared("retire-lost-ack", "a");
     remote(&rig);
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     fs::write(rig.dir.join("lose-retirement-ack"), "").unwrap();
     let (code, pending) = remote_retire(&rig);
     assert_eq!(code, 1, "{pending}");
@@ -270,6 +278,14 @@ fn lost_ack_replays_the_same_retirement() {
 fn unreachable_peer_reports_pending_not_released() {
     let (rig, _) = prepared("retire-unreachable", "a");
     remote(&rig);
+    let publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     // Capture and authorize once, then lose transport before the host transaction.
     let output = rig
         .cmd(&[
@@ -294,6 +310,7 @@ fn unreachable_peer_reports_pending_not_released() {
         rig.preparation_record("peer-state", "claims", "").read(),
         claims
     );
+    drop(publisher);
     service(&rig);
     assert_eq!(
         rig.preparation_record("peer-state", "claims", "").read(),
@@ -301,6 +318,14 @@ fn unreachable_peer_reports_pending_not_released() {
     );
     fs::remove_file(rig.dir.join("unreachable-release")).unwrap();
     service(&rig);
+    let _publisher = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     let (code, result) = remote_retire(&rig);
     assert_eq!(code, 0, "{result}");
     retired(&result);

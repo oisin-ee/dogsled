@@ -104,21 +104,19 @@ impl LocalInputs {
         );
         let launches = capture("findings", crate::launch::requests(fleet.ledger), &mut gaps);
         let custody = capture("findings", crate::custody::list(fleet.ledger), &mut gaps);
-        let agents = status.as_ref().and_then(|status| {
-            let agents = status
-                .hosts
-                .iter()
-                .find(|host| host.host.is_local())
-                .and_then(|host| host.probe.as_ref())
-                .map(|probe| probe.agent_panes.as_slice());
-            capture(
-                "agents",
-                agents
-                    .ok_or_else(|| Error::Invalid("agent observation unavailable".into()))
-                    .and_then(|agents| crate::web::agents::capture(agents, titles)),
-                &mut gaps,
-            )
-        });
+        let terminals = capture::<crate::probe::Terminals>(
+            "agents",
+            domain(&input.local, "terminals"),
+            &mut gaps,
+        );
+        let agents = capture(
+            "agents",
+            terminals
+                .as_ref()
+                .ok_or_else(|| Error::Invalid("agent observation unavailable".into()))
+                .and_then(|terminals| crate::web::agents::capture(&terminals.agents, titles)),
+            &mut gaps,
+        );
         let questions = capture(
             "questions",
             crate::web::store::pending(fleet.ledger),
@@ -137,6 +135,7 @@ impl LocalInputs {
                     todos.as_deref().unwrap_or_default(),
                     launches.as_deref()?,
                     custody.as_deref()?,
+                    terminals.as_ref(),
                 ),
                 &mut gaps,
             )
@@ -169,21 +168,16 @@ fn captured_findings(
     todos: &[TodoSections],
     launches: &[crate::work::Launch],
     custody: &[crate::custody::Custody],
+    terminals: Option<&crate::probe::Terminals>,
 ) -> Result<BTreeMap<String, crate::gate::Findings>> {
+    let terminals = terminals
+        .ok_or_else(|| Error::Invalid("owner findings: local panes unavailable".into()))?;
     owners(status, todos)
         .into_iter()
         .map(|owner| {
             let finding = if let Some(report) = &status.sweep {
-                let probe = status
-                    .hosts
-                    .iter()
-                    .find(|host| host.host.is_local())
-                    .and_then(|host| host.probe.as_ref())
-                    .ok_or_else(|| {
-                        Error::Invalid("owner findings: local panes unavailable".into())
-                    })?;
-                let session = probe
-                    .agent_panes
+                let session = terminals
+                    .agents
                     .iter()
                     .find(|agent| agent.pane == owner)
                     .and_then(|agent| agent.agent_session.as_deref());
@@ -191,7 +185,7 @@ fn captured_findings(
                     owner,
                     report,
                     &status.items,
-                    &probe.panes,
+                    &terminals.panes,
                     launches,
                     custody,
                     session,
@@ -373,7 +367,7 @@ pub(crate) fn derive(
     insert(views, "active_jobs", Some(active_jobs), &gaps)?;
     scoped_views(views, status.as_ref(), local, &reports, &jobs, &gaps)?;
     insert(views, "findings", local.findings.as_ref(), &gaps)?;
-    insert(views, "agents", local.agents.as_ref(), &gaps)?;
+    agents_view(views, local, &gaps)?;
     let portal = portal(
         local,
         board.as_ref(),
@@ -386,6 +380,15 @@ pub(crate) fn derive(
     insert(views, "portal", Some(portal), &gaps)?;
     input.gaps = gaps;
     Ok(())
+}
+
+fn agents_view(views: &mut super::Domains, local: &LocalInputs, gaps: &[Gap]) -> Result<()> {
+    let gaps: Vec<_> = gaps
+        .iter()
+        .filter(|gap| matches!(gap.domain.as_str(), "agents" | "terminals"))
+        .cloned()
+        .collect();
+    insert(views, "agents", local.agents.as_ref(), &gaps)
 }
 
 fn scoped_views(

@@ -287,10 +287,11 @@ fn reader(
     let mut last = String::new();
     // The fleet is discovered once and kept, like the sidebar's reader keeps
     // it. A failed discovery is tried again on the next tick.
-    let mut fleet: Option<crate::hosts::Fleet<'_>> = None;
+    let mut fleet: Option<crate::hosts::ObserverFleet<'_>> = None;
     while !stop.is_cancelled() {
         if fleet.is_none() {
-            fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home.to_owned()).ok();
+            fleet =
+                crate::hosts::ObserverFleet::discover(shell, ledger, policy, home.to_owned()).ok();
         }
         if stop.is_cancelled() {
             break;
@@ -320,7 +321,7 @@ fn reader(
 
 /// Read the board the way the sidebar does: the cached fleet status, the board
 /// built from it, and the cached todo sections.
-fn read(fleet: &crate::hosts::Fleet<'_>) -> Result<BoardView> {
+fn read(fleet: &crate::hosts::ObserverFleet<'_>) -> Result<BoardView> {
     let status = crate::commands::status(fleet)?;
     let now = crate::ledger::now_ms();
     let mut board = crate::board::build(&status, None, now);

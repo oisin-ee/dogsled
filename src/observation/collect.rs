@@ -106,7 +106,7 @@ pub(crate) struct Collector {
 }
 
 impl Collector {
-    fn record<T: Serialize>(&mut self, domain: &str, now: u64, value: Result<T>) {
+    pub(super) fn record<T: Serialize>(&mut self, domain: &str, now: u64, value: Result<T>) {
         match value.and_then(|value| serde_json::to_value(value).map_err(Into::into)) {
             Ok(value) => {
                 self.local.insert(domain.into(), value);
@@ -164,9 +164,22 @@ impl Collector {
             })
     }
 
+    fn retained_terminals(&self) -> Result<crate::probe::Terminals> {
+        self.local
+            .get("terminals")
+            .ok_or_else(|| crate::error::Error::Invalid("terminal observation unavailable".into()))
+            .and_then(|value| serde_json::from_value(value.clone()).map_err(Into::into))
+    }
+
     /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
     /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
     pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
+        let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
+        let mut terminals = if capture_terminals {
+            crate::probe::terminals(node.shell)
+        } else {
+            self.retained_terminals()
+        };
         let snapshot = if let Some(error) = self.sample_error.as_ref().filter(|_| !sample) {
             Err(crate::error::Error::Invalid(error.clone()))
         } else if let Some(snapshot) = self.snapshot.as_ref().filter(|_| !sample) {
@@ -179,7 +192,14 @@ impl Collector {
                 Ok(snapshot)
             })()
         } else {
-            match node.tick(now) {
+            let captured = match terminals {
+                Ok(ref terminals) => node.tick_with_terminals(now, terminals.clone()),
+                Err(error) => {
+                    terminals = Err(crate::error::Error::Invalid(error.to_string()));
+                    Err(error)
+                }
+            };
+            match captured {
                 Ok(snapshot) => {
                     self.snapshot = Some(snapshot.clone());
                     self.sample_error = None;
@@ -192,7 +212,13 @@ impl Collector {
             }
         };
         let (host, sample) = match snapshot {
-            Ok(snapshot) => (host(node, Some(snapshot), true, now), Ok(())),
+            Ok(snapshot) => {
+                terminals = Ok(crate::probe::Terminals {
+                    agents: snapshot.probe.agent_panes.clone(),
+                    panes: snapshot.probe.panes.clone(),
+                });
+                (host(node, Some(snapshot), true, now), Ok(()))
+            }
             Err(error) => (
                 Err(crate::error::Error::Invalid(error.to_string())),
                 Err(error),
@@ -204,28 +230,14 @@ impl Collector {
                     .snapshot
                     .as_ref()
                     .map(|snapshot| crate::plan::evaluate(&snapshot.probe, &node.thresholds));
-                let report = HostReport {
-                    service_lanes: host.service_lanes.clone(),
-                    host: Host::local(),
-                    service: "up".into(),
-                    reachable: true,
-                    sampled_ms: host.snapshot.as_ref().map(|snapshot| snapshot.sampled_ms),
-                    probe: host
-                        .snapshot
-                        .as_ref()
-                        .map(|snapshot| snapshot.probe.clone()),
-                    headroom: headroom.clone(),
-                    error: None,
-                    failure: None,
-                    jobs: host
-                        .snapshot
-                        .as_ref()
-                        .map_or_else(Vec::new, |s| s.jobs.clone()),
-                    handoffs: host.handoffs.clone(),
-                    holds: host.holds.clone(),
-                    retry_ms: None,
-                    job_validity: host.job_validity,
-                };
+                let mut report = crate::hosts::cached_report(
+                    &Host::local(),
+                    host.clone().into(),
+                    now,
+                    &node.thresholds,
+                );
+                // Local refresh preserves the service-owned sample between native ticks.
+                report.headroom.clone_from(&headroom);
                 self.report = Some(report.clone());
                 (Ok(headroom), status(node.ledger, vec![report], now))
             }
@@ -237,6 +249,9 @@ impl Collector {
             }
         };
         let todos = todos(node.ledger);
+        if capture_terminals {
+            self.record("terminals", now, terminals);
+        }
         self.record("host", now, host);
         self.record("headroom", now, headroom);
         self.record("status", now, status);

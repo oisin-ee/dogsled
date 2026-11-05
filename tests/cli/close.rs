@@ -999,6 +999,16 @@ fn close_shuts_a_pane_outside_any_worktree_and_routes_remote_items_over_ssh() {
     assert_eq!(rig.log("hook.log"), "");
 
     rig.peer();
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts
+                    .iter()
+                    .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+            })
+    });
     item(&rig, "8103");
     rig.script(
         "ssh",

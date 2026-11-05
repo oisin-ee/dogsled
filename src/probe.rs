@@ -375,9 +375,15 @@ pub struct Probe {
     pub panes: Vec<Pane>,
 }
 
-pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
-    let agent_panes = agent_list(shell)?;
-    let agents = AgentCounts::from_agents(&agent_panes);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Terminals {
+    pub agents: Vec<Agent>,
+    pub panes: Vec<Pane>,
+}
+
+/// The collector's read-only Herdr domain, independent of native capacity sampling.
+pub(crate) fn terminals(shell: &dyn Shell) -> Result<Terminals> {
+    let agents = agent_list(shell)?;
     let panes = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&panes.stdout)?;
     let mut panes: Vec<Pane> = serde_json::from_value(
@@ -398,6 +404,23 @@ pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
             });
         }
     });
+    Ok(Terminals { agents, panes })
+}
+
+pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
+    local_with_terminals(shell, home, terminals(shell)?)
+}
+
+pub(crate) fn local_with_terminals(
+    shell: &dyn Shell,
+    home: &str,
+    terminals: Terminals,
+) -> Result<Probe> {
+    let Terminals {
+        agents: agent_panes,
+        panes,
+    } = terminals;
+    let agents = AgentCounts::from_agents(&agent_panes);
     Ok(Probe {
         host: "local".into(),
         label: "local".into(),

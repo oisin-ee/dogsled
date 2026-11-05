@@ -307,6 +307,14 @@ fn observe_branches(rig: &Rig, execution: &Rig) -> Background {
 fn remote_drop_uses_ssh_and_settles_origin_item() {
     let (rig, repo) = rig("drop-remote");
     let (_execution, _observer) = remote(&rig);
+    let origin = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+    });
     let (code, dropped) = rig.json(&["drop", "i1", "--host", "netcup"]);
     assert_eq!(code, 0, "{dropped}");
     assert_eq!(dropped["discarded"], 1);
@@ -316,6 +324,7 @@ fn remote_drop_uses_ssh_and_settles_origin_item() {
         git(&repo, &["ls-remote", "origin", "refs/heads/feat/x"]),
         ""
     );
+    drop(origin);
     let _serve = rig.serve();
     wait_publication(&rig, |frame| {
         frame["views"]["status"]["data"]["items"][0]["dropped_ms"].is_u64()
@@ -403,7 +412,7 @@ fn concurrent_status_reads_share_the_hourly_check() {
     );
     let calls = rig.log("ssh-roles.log");
     assert!(
-        calls.lines().any(|line| line.starts_with("producer ")),
+        calls.lines().any(|line| line.starts_with("observer ")),
         "{calls}"
     );
     assert_eq!(

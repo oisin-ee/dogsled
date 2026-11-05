@@ -1,7 +1,7 @@
 //! User-facing status formatting and placement. No agent spawning or queue.
 
 use crate::error::{Error, Result};
-use crate::hosts::{Fleet, Host, HostReport};
+use crate::hosts::{ActionFleet, Fleet, Host, HostReport, ObserverFleet};
 use crate::plan;
 use crate::prepare::Prepared;
 use serde::Serialize;
@@ -21,7 +21,7 @@ pub struct Status {
     pub holds: Vec<crate::holds::Hold>,
 }
 
-pub fn status(fleet: &Fleet<'_>) -> Result<Status> {
+pub fn status(fleet: &ObserverFleet<'_>) -> Result<Status> {
     let now = crate::ledger::now_ms();
     crate::observation::collect::status(fleet.ledger, fleet.status(now)?, now)
 }
@@ -113,7 +113,7 @@ pub(crate) fn expire_selection(ledger: &crate::ledger::Ledger, id: &str) -> Resu
 /// A placement for a job request. The request's own creation time rides with the
 /// reservation, so the host checks the age before it holds capacity.
 pub fn place_with(
-    fleet: &Fleet,
+    fleet: &ActionFleet,
     host: Option<&str>,
     id: &str,
     now: u64,
@@ -154,7 +154,11 @@ fn reserve_recorded(
     )
 }
 
-fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Result<Placement> {
+fn place_recorded(
+    fleet: &ActionFleet,
+    request: &crate::work::Request,
+    now: u64,
+) -> Result<Placement> {
     use crate::work::PlacementPhase;
     let mut attempt = crate::admissions::get(fleet.ledger, &request.id)?
         .ok_or_else(|| crate::unit_transport::conflict("placement admission is missing"))?;
@@ -179,7 +183,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
         ));
     }
     let pinned = request.host.as_deref().map(|h| fleet.find(h)).transpose()?;
-    let mut reports = fleet.status(now)?;
+    let mut reports = fleet.reports()?;
     let mut candidates: Vec<_> = reports
         .iter()
         .filter(|r| pinned.is_none_or(|h| h.id == r.host.id))
@@ -246,7 +250,7 @@ fn place_recorded(fleet: &Fleet, request: &crate::work::Request, now: u64) -> Re
 }
 
 fn place_locked(
-    fleet: &Fleet,
+    fleet: &ActionFleet,
     host: Option<&str>,
     id: &str,
     now: u64,
@@ -268,7 +272,7 @@ fn place_locked(
         .map(|s| fleet.find(s))
         .transpose()?
         .or(pinned);
-    let mut reports = fleet.status(now)?;
+    let mut reports = fleet.reports()?;
     if saved.is_some() {
         reports.retain(|r| pinned.is_some_and(|h| h.id == r.host.id));
     }
@@ -427,11 +431,6 @@ fn load(host: &HostReport) -> String {
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Legacy non-reader callers move to the published display in O8.
-pub fn fleet(status: &Status) -> Vec<String> {
-    crate::observation::display::Display::capture(status).fleet(crate::ledger::now_ms())
 }
 
 #[cfg(test)]
