@@ -610,16 +610,7 @@ mod tests {
 
     impl AppState {
         async fn oneshot_lead(self, body: &str) -> Response {
-            super::test_request(
-                self,
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/leads")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_owned()))
-                    .unwrap(),
-            )
-            .await
+            super::test_request(self, request(Method::POST, "/api/leads", Some(body))).await
         }
     }
 
@@ -672,14 +663,8 @@ mod tests {
         let launch = launch("[[repos]]\npath = \"~/a\"\norigin = \"https://example.org/a.git\"\n");
         let config = launch.config_path.clone();
         let get = |state: AppState| async move {
-            let response = super::test_request(
-                state,
-                Request::builder()
-                    .uri("/api/repos")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await;
+            let response =
+                super::test_request(state, request(Method::GET, "/api/repos", None)).await;
             let status = response.status();
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
