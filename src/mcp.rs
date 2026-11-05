@@ -18,7 +18,8 @@ use rmcp::{ServerHandler, ServiceExt as _, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// The most one tool call may take, below the harnesses' 60 s request timeout.
+/// The default tool budget, below the harnesses' 60 s request timeout.
+/// Close uses its setup budget: started blocking work survives client disconnects.
 const CALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What a call needs to build a fleet, kept for the server's life.
@@ -252,10 +253,18 @@ impl Server {
         &self,
         call: impl FnOnce(&Fleet) -> crate::error::Result<Value> + Send + 'static,
     ) -> Result<String, String> {
+        self.call_bounded(CALL_BUDGET, call).await
+    }
+
+    async fn call_bounded(
+        &self,
+        limit: std::time::Duration,
+        call: impl FnOnce(&Fleet) -> crate::error::Result<Value> + Send + 'static,
+    ) -> Result<String, String> {
         let context = self.context.clone();
         tokio::task::spawn_blocking(move || {
             // A hung peer fails the call; it never holds the harness.
-            let budget = crate::budget::Budget::until(std::time::Instant::now() + CALL_BUDGET);
+            let budget = crate::budget::Budget::until(std::time::Instant::now() + limit);
             let mut ledger = context.ledger.clone();
             ledger.budget = budget;
             let shell = System { budget };
@@ -480,7 +489,7 @@ impl Server {
         annotations(destructive_hint = true)
     )]
     async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<String, String> {
-        self.call(move |fleet| {
+        self.call_bounded(crate::budget::SETUP_LIMIT, move |fleet| {
             let (closed, _) = crate::runtime::close(fleet, &args.pane, args.host.as_deref())?;
             Ok(serde_json::to_value(closed)?)
         })

@@ -918,6 +918,7 @@ fn execute_removal(
             recovery: Some(operation.recovery()?),
         });
         operation.save(ledger)?;
+        crate::work::launch_test_barrier("PRESERVATION_CAPTURED")?;
     }
     let evidence = if tree.branch.is_empty() {
         operation
@@ -1164,4 +1165,64 @@ fn outside(tree: &worktree::Linked, caller: &Caller) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_blocker_recording_retains_both_errors_and_original_classification() {
+        let path = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::write(&path, b"not a directory").unwrap();
+        let ledger = Ledger::new(path.clone());
+        let request = crate::preservation::CloseRequest {
+            item: "child".into(),
+            created_ms: 1,
+            owner_pane: "w1:p1".into(),
+            owner_session: None,
+            host: "local".into(),
+        };
+        let error =
+            crate::runtime::close_failed(&ledger, Some(&request), Error::Deadline("ssh".into()));
+        assert!(matches!(error.root(), Error::Deadline(step) if step == "ssh"));
+        assert!(
+            error
+                .to_string()
+                .contains("recording the blocker also failed:"),
+            "{error}"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn spent_close_budget_records_the_original_failure() {
+        let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let item = crate::items::Item {
+            id: "child".into(),
+            host: "local".into(),
+            pane: "w2:p1".into(),
+            owner_pane: "w1:p1".into(),
+            ..Default::default()
+        };
+        crate::store::put_items(&ledger, &vec![item.clone()]).unwrap();
+        let request = crate::preservation::CloseRequest::of(&item);
+        // Inject the boundary after a slow step has consumed the whole command budget.
+        // No wall-clock wait is needed to reach the same error-recording path as MCP close.
+        ledger.budget = crate::budget::Budget::until(std::time::Instant::now());
+        let error =
+            crate::runtime::close_failed(&ledger, Some(&request), Error::Deadline("git".into()));
+        assert!(
+            matches!(error.root(), Error::Deadline(step) if step == "git"),
+            "{error}"
+        );
+        ledger.budget = crate::budget::Budget::default();
+        assert_eq!(
+            crate::items::list(&ledger).unwrap()[0]
+                .resource_close_reason
+                .as_deref(),
+            Some("deadline reached: git")
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
 }

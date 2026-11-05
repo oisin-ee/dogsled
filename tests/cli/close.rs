@@ -138,6 +138,139 @@ pub(super) fn branch_exists(rig: &Rig, branch: &str) -> bool {
 }
 
 #[test]
+fn native_close_forwards_its_declared_setup_budget_instead_of_the_generic_call_budget() {
+    let (rig, _) = close_rig("close-mcp-budget");
+    rig.peer();
+    let _observer = rig.serve();
+    wait_publication(&rig, |frame| {
+        frame["views"]["hosts"]["data"]
+            .as_array()
+            .is_some_and(|hosts| {
+                hosts
+                    .iter()
+                    .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
+            })
+    });
+    item(&rig, "8103");
+    rig.script(
+        "ssh",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+printf '%s\n' '{"pane":"w2:p1","worktree":null,"pane_closed":true}'
+"#,
+    );
+    let mut client = super::mcp::Client::start(&rig);
+    let (closed, error) = client.call("close", &json!({"pane":"w2:p1","host":"netcup"}));
+    assert!(!error, "{closed}");
+    let log = rig.log("ssh.log");
+    let call = log
+        .lines()
+        .find(|line| line.contains("host close w2:p1"))
+        .unwrap();
+    let args: Vec<_> = call.split_whitespace().collect();
+    let budget: u64 = args
+        .windows(2)
+        .find(|pair| pair[0] == "--budget-ms")
+        .unwrap()[1]
+        .trim_matches('\'')
+        .parse()
+        .unwrap();
+    assert!(budget > 30_000 && budget <= 600_000, "{call}");
+}
+
+#[test]
+fn mcp_disconnect_finishes_preservation_and_owner_retry_replays_the_result() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::process::Stdio;
+    for (phase, stage) in [
+        ("INTENT", "intent"),
+        ("CAPTURED", "captured"),
+        ("TEARDOWN_COMPLETE", "teardown_complete"),
+    ] {
+        let (rig, tree) = close_rig(&format!("close-disconnect-{phase}"));
+        advance_main(&rig);
+        panes(&rig, "done", &tree);
+        item(&rig, "local");
+        let base = rig.dir.join("disconnect");
+        let fifo = Fifo::new(&rig.dir, "disconnect.go");
+        let mut release = fifo.hold();
+        let mut command = rig.cmd(&["mcp"]);
+        command
+            .env(format!("DOGSLED_TEST_LAUNCH_PRESERVATION_{phase}"), &base)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut server = Owned::spawn(&mut command);
+        let mut stdin = server.child_mut().stdin.take().unwrap();
+        let stdout = server.child_mut().stdout.take().unwrap();
+        let (lines, responses) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if lines.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}})).unwrap();
+        stdin.flush().unwrap();
+        let initialized: Value =
+            serde_json::from_str(&responses.recv_timeout(PROCESS_DEADLINE).unwrap()).unwrap();
+        assert_eq!(initialized["id"], 1);
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"close","arguments":{"pane":"w2:p1","host":"local"}}})
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        while !base.with_extension("ready").exists() {
+            assert!(Instant::now() < deadline, "no {phase} barrier");
+            assert!(
+                server.child_mut().try_wait().unwrap().is_none(),
+                "MCP exited before {phase}"
+            );
+            std::thread::yield_now();
+        }
+        let operations = rig.state(&["preservation-operations"]);
+        let saved = operations
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        assert_eq!(saved["stage"], stage);
+        assert!(tree.exists());
+        // Disconnect while the blocking close is at a committed stage, before releasing it.
+        drop(stdin);
+        writeln!(release, "go").unwrap();
+        assert!(server.wait().success());
+        reader.join().unwrap();
+        assert!(!tree.exists());
+        let finished = rig.state(&["preservation-operations"]);
+        let finished = finished.as_object().unwrap().values().next().unwrap();
+        assert_eq!(finished["stage"], "finished");
+        assert_eq!(finished["id"], saved["id"]);
+        assert_eq!(finished["initial_id"], saved["initial_id"]);
+        assert!(rig.items()[0]["closed_ms"].is_number());
+        assert_eq!(rig.log("hook.log").lines().count(), 1);
+        let (code, replay) = rig.json(&["close", "w2:p1"]);
+        assert_eq!(code, 0, "{replay}");
+        assert_eq!(replay["recovery"], finished["result"]["recovery"]);
+        assert_eq!(rig.log("hook.log").lines().count(), 1);
+    }
+}
+
+#[test]
 fn close_runs_teardown_removes_the_worktree_and_deletes_an_integrated_branch() {
     let (rig, tree) = close_rig("close-worktree");
     advance_main(&rig);

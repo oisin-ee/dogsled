@@ -72,6 +72,13 @@ pub enum Error {
         source: Box<Error>,
         diagnostic: Box<crate::diagnostic::Diagnostic>,
     },
+    /// A secondary failure never replaces the step that prevented close.
+    #[error("{source}; recording the blocker also failed: {recording}")]
+    CloseRecording {
+        #[source]
+        source: Box<Error>,
+        recording: Box<Error>,
+    },
     /// An agent launch failed after placement; admission retries it with backoff.
     #[error("launch failed: {0}")]
     Launch(String),
@@ -174,7 +181,9 @@ impl Error {
     /// Classify a failure without discarding its startup diagnostics.
     pub fn root(&self) -> &Self {
         match self {
-            Self::Startup { source, .. } | Self::Diagnostic { source, .. } => source.root(),
+            Self::Startup { source, .. }
+            | Self::Diagnostic { source, .. }
+            | Self::CloseRecording { source, .. } => source.root(),
             error => error,
         }
     }
@@ -224,7 +233,9 @@ impl Error {
     pub fn diagnostic(&self) -> Option<&crate::diagnostic::Diagnostic> {
         match self {
             Self::Diagnostic { diagnostic, .. } => Some(diagnostic),
-            Self::Startup { source, .. } => source.diagnostic(),
+            Self::Startup { source, .. } | Self::CloseRecording { source, .. } => {
+                source.diagnostic()
+            }
             _ => None,
         }
     }

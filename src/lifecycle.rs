@@ -760,6 +760,9 @@ mod tests {
             marked_ms: 1,
             done_turn: None,
             signal: None,
+            signal_history: Vec::new(),
+            signal_inputs: std::collections::BTreeSet::default(),
+            signal_delivered: false,
             branch: None,
             detached: false,
             reply: Some(crate::items::Reply {
@@ -830,6 +833,9 @@ mod tests {
             marked_ms: 1,
             done_turn: None,
             signal: None,
+            signal_history: Vec::new(),
+            signal_inputs: std::collections::BTreeSet::default(),
+            signal_delivered: false,
             branch: None,
             detached: false,
             reply: Some(crate::items::Reply {
