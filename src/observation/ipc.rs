@@ -593,21 +593,27 @@ impl Client {
         let socket = self.open(operation, pane)?;
         let mut reader = BufReader::new(socket.try_clone()?);
         let publication = Arc::new(read_value::<T>(&mut reader)?);
-        socket.set_read_timeout(None)?;
+        // The first publication is authoritative even when the publisher closes after it.
+        // Darwin refuses socket options once the peer has shut down (EINVAL); Linux accepts
+        // them and the receiver then reads EOF. Both are a disconnect after one publication.
+        let (status, receiving) = match socket.set_read_timeout(None) {
+            Ok(()) => (Status::Connected, true),
+            Err(error) => (Status::Disconnected(error.to_string()), false),
+        };
         let shared = Arc::new((
             Mutex::new(Connection {
                 publication,
-                status: Status::Connected,
+                status,
                 generation: 0,
             }),
             Condvar::new(),
         ));
         let output = Arc::clone(&shared);
-        let thread = std::thread::spawn(move || receive(&mut reader, &output));
+        let thread = receiving.then(|| std::thread::spawn(move || receive(&mut reader, &output)));
         Ok(Subscription {
             socket,
             shared,
-            thread: Some(thread),
+            thread,
             seen: 0,
         })
     }

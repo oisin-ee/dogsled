@@ -17,3 +17,34 @@ fn publication_shutdown_unlocks_even_with_an_inherited_descriptor() {
     drop(server);
     std::fs::remove_dir_all(state).unwrap();
 }
+
+/// A publisher may send one final publication and close before the subscriber clears its
+/// read timeout. Darwin then refuses the socket option (EINVAL); the delivered publication
+/// is still authoritative and the subscription reports a disconnect instead of failing.
+#[test]
+fn a_publication_followed_by_an_immediate_close_is_delivered() {
+    let state = PathBuf::from("/tmp").join(crate::ledger::new_id());
+    std::fs::create_dir_all(&state).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(state.join(SOCKET)).unwrap();
+    let publisher = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        BufReader::new(socket.try_clone().unwrap())
+            .read_line(&mut request)
+            .unwrap();
+        let detail = super::super::details::Detail::unavailable(None, "agent unavailable");
+        let mut frame = serde_json::to_vec(&serde_json::json!({
+            "version": VERSION, "epoch": "e", "revision": 1, "found": false,
+            "agent": null, "detail": detail,
+        }))
+        .unwrap();
+        frame.push(b'\n');
+        (&socket).write_all(&frame).unwrap();
+        socket.shutdown(std::net::Shutdown::Both).unwrap();
+    });
+    let subscription = Client::at(&state).detail("w9:p9").unwrap();
+    publisher.join().unwrap();
+    assert!(!subscription.current().publication.found);
+    drop(subscription);
+    std::fs::remove_dir_all(state).unwrap();
+}
