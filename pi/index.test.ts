@@ -165,7 +165,7 @@ test("the extension publishes real activity through PortalClient with bearer aut
 	const closure = new Promise<void>(resolve => { closed = resolve; });
 	const publications: any[] = [];
 	t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-		assert.match(String(url), /\/api\/agents\/w1%3Ap1\/activity(?:\/producer)?$/);
+		assert.match(String(url), /\/api\/agents\/local\/w1%3Ap1\/activity(?:\/producer)?$/);
 		assert.equal((init.headers as Record<string, string>)["authorization"], "Bearer fixture-token");
 		if (init.method === "GET") return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", producer: { generation: 0 } });
 		const body = JSON.parse(String(init.body));

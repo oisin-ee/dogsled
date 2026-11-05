@@ -545,25 +545,18 @@ fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
 }
 
 /// Recovery needs no Herdr discovery for local operations.
-fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
-    // Observation readers do not load policy or discover a fleet.
-    let client = observation::ipc::Client::at(&ledger::default_dir());
-    if let Command::Hook(cmd) = cli.command {
-        let mut ledger = Ledger::new(ledger::default_dir());
-        ledger.budget = budget;
-        hook(cmd, &ledger, &System { budget })?;
-        return Ok(ExitCode::SUCCESS);
-    }
+/// Commands that only read the local observer's publication. `None` routes onward.
+fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Option<ExitCode>> {
     match &cli.command {
         Command::Repo(cli::RepoCommand::List) => {
-            repo_command(&client, cli.json)?;
-            return Ok(ExitCode::SUCCESS);
+            repo_command(client, cli.json)?;
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Status {
             watch, line, brief, ..
         } => {
             status_command(
-                &client,
+                client,
                 Watch {
                     watch: *watch,
                     line: *line,
@@ -571,7 +564,7 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
                 },
                 cli.json,
             )?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Board {
             owner,
@@ -584,35 +577,50 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
             if *watch {
                 let owner =
                     owner.ok_or_else(|| Error::Invalid("board --watch needs an owner".into()))?;
-                board::watch(&client, &owner, cli.json)?;
-                return Ok(ExitCode::SUCCESS);
+                board::watch(client, &owner, cli.json)?;
+                return Ok(Some(ExitCode::SUCCESS));
             }
             let board = observation::read::board(&client.current()?, owner.as_deref())?;
             print(cli.json, &board, || board.render())?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Items { .. } | Command::Ps { .. } => {
-            return runtime::published_inventory(&client.current()?, cli.command, cli.json);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::AgentDetail { pane, input }) => {
             let reply =
                 web::agents::peer_command(pane.clone(), input, Ledger::new(ledger::default_dir()))?;
             print(true, &reply, String::new)?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Snapshot) => {
             let report: node::SnapshotReport =
                 observation::read::local(&client.current()?, "host")?;
             print(true, &report, String::new)?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Todos) => {
             let todos: Vec<board::TodoSections> =
                 observation::read::view(&client.current()?, "todos")?;
             print(true, &todos, String::new)?;
-            return Ok(ExitCode::SUCCESS);
+            return Ok(Some(ExitCode::SUCCESS));
         }
         _ => {}
+    }
+    Ok(None)
+}
+
+fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    // Observation readers do not load policy or discover a fleet.
+    let client = observation::ipc::Client::at(&ledger::default_dir());
+    if let Command::Hook(cmd) = cli.command {
+        let mut ledger = Ledger::new(ledger::default_dir());
+        ledger.budget = budget;
+        hook(cmd, &ledger, &System { budget })?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(code) = published_command(&client, &cli)? {
+        return Ok(code);
+    }
+    if let Command::Items { .. } | Command::Ps { .. } = cli.command {
+        return runtime::published_inventory(&client.current()?, cli.command, cli.json);
     }
     if let Command::Observation { command } = cli.command {
         return observation::command(&command);
@@ -1366,9 +1374,9 @@ fn state_jobs(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
-        HostCommand::Lead { .. } => {
+        HostCommand::Lead { .. } | HostCommand::AgentDetail { .. } => {
             return Err(Error::Invalid(
-                "lead dispatch requires its config path".into(),
+                "this host command is dispatched before host routing".into(),
             ));
         }
         HostCommand::InboxPut { .. } | HostCommand::InboxState { .. } => {
@@ -1438,11 +1446,6 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
                 .peer(serde_json::from_str(&request)?)?,
             String::new,
         )?,
-        HostCommand::AgentDetail { .. } => {
-            return Err(Error::Invalid(
-                "agent detail requires the observation reader".into(),
-            ));
-        }
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
         HostCommand::Todos => print(
             true,
