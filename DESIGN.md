@@ -244,6 +244,9 @@ The console uses the official Dioxus components for every control and restyles t
 - **Segmented tabs:** a 7px-rounded panel track with 2px padding; each tab is 24px high in 12px/500 muted text, and the active tab takes the hairline fill with white text.
 - **Agents sidebar:** repository groups with the name on the left and the count on the right; leads show a status dot, workers are indented and muted with their state on the right.
 
+### Message timeline
+The conversation is one centred 640px column with a 46px time gutter, a 12px marker track and the message body. The gutter shows the recorded time in the 12px label style with tabular numerals, or "—" when no time is recorded. A hairline runs down the marker track. Each message starts with the author (600) and its source in muted steel. Only owner messages take the raised panel. Adjacent tool records fold into one collapsed row that shows the count and tool names. The activity row sits between the history and the composer and never scrolls with the history. It names the live state only when a producer reports it; otherwise it shows the coarse agent state and says that detail is unavailable.
+
 ### Inbox row
 The signature component. Each row shows the kind icon and kind in yellow, the age, the title (500 weight) and `agent · repository` in muted steel, with inline actions. The open row takes the raised tone and a yellow left edge.
 
