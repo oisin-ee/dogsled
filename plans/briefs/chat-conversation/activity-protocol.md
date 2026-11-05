@@ -46,13 +46,16 @@ type ProducerPayload =
   | { kind: "snapshot"; state: LiveState }
   | { kind: "unavailable"; reason: "resyncing" | "overflow" }
   | { kind: "closed" };
+// The producer cannot compute the serve-side key, so it presents native evidence.
+// serve verifies the evidence against its current binding and returns the key.
+type ProducerEvidence = { session_file: string; session_id: string };
 type RegisterProducer = {
-  version: 1; epoch: string; expected_generation: number;
-  producer_id: string; session: string;
+  version: 1; epoch: string | null; expected_generation: number;
+  producer_id: string; evidence: ProducerEvidence;
 };
 type PublishActivity = {
   version: 1; epoch: string; generation: number;
-  producer_id: string; session: string; sequence: number;
+  producer_id: string; session: string; sequence: number; // session echoes the acked key
   payload: ProducerPayload;
 };
 type ActivityAck = {
