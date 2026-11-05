@@ -22,6 +22,19 @@ struct State {
     cached: Option<crate::hosts::Cached>,
 }
 
+pub(super) fn receipt(
+    source: &mut PeerSource,
+    previous: Option<&PeerSource>,
+    token: Option<String>,
+) {
+    source.retry_tokens = previous.map_or_else(Vec::new, |source| source.retry_tokens.clone());
+    if let Some(token) = token {
+        source.retry_tokens.push(token);
+        let excess = source.retry_tokens.len().saturating_sub(64);
+        source.retry_tokens.drain(..excess);
+    }
+}
+
 type Shared = Arc<(Mutex<State>, Condvar)>;
 
 struct Worker {
@@ -142,53 +155,64 @@ impl Observers {
                 })
                 .unwrap_or_default();
             let report = fleet.cached_report(host, state.cached.unwrap_or_default(), now);
-            let mut source = state.sources.get(&host.id).cloned().unwrap_or(PeerSource {
+            let source = state.sources.get(&host.id).cloned().unwrap_or(PeerSource {
                 epoch: String::new(),
                 local_revision: 0,
                 received_ms: 0,
+                retry_tokens: Vec::new(),
                 availability: Availability::Unavailable,
             });
-            if source.availability == Availability::Available && !report.fresh(now) {
-                source.availability = Availability::Stale;
-            }
-            if source.availability == Availability::Stale {
-                input.gaps.push(Gap {
-                    domain: format!("peer:{}:branches", host.id),
-                    availability: Availability::Stale,
-                    detail: "branch observation requires fresh execution-host facts".into(),
-                });
-            }
-            if source.availability != Availability::Available {
-                input.gaps.push(Gap {
-                    domain: format!("peer:{}", host.id),
-                    availability: source.availability.clone(),
-                    detail: report.condition(),
-                });
-            }
-            input.gaps.extend(
-                state
-                    .gaps
-                    .iter()
-                    .filter(|gap| {
-                        gap.availability != Availability::Stale
-                            || source.availability != Availability::Stale
-                    })
-                    .map(|gap| Gap {
-                        domain: format!("peer:{}:branches", host.id),
-                        availability: gap.availability.clone(),
-                        detail: if gap.availability == Availability::Stale {
-                            "branch observation requires fresh execution-host facts"
-                        } else {
-                            "peer branch observation failed"
-                        }
-                        .into(),
-                    }),
-            );
-            input.sources.peers.insert(host.id.clone(), source);
+            peer_gaps(host, &report, source, &state.gaps, input, now);
             reports.push(report);
         }
         super::project::derive(&local, reports, &fleet.policy.into(), input)
     }
+}
+
+pub(super) fn peer_gaps(
+    host: &Host,
+    report: &HostReport,
+    mut source: PeerSource,
+    branches: &[Gap],
+    input: &mut Publication,
+    now: u64,
+) {
+    if source.availability == Availability::Available && !report.fresh(now) {
+        source.availability = Availability::Stale;
+    }
+    if source.availability == Availability::Stale {
+        input.gaps.push(Gap {
+            domain: format!("peer:{}:branches", host.id),
+            availability: Availability::Stale,
+            detail: "branch observation requires fresh execution-host facts".into(),
+        });
+    }
+    if source.availability != Availability::Available {
+        input.gaps.push(Gap {
+            domain: format!("peer:{}", host.id),
+            availability: source.availability.clone(),
+            detail: report.condition(),
+        });
+    }
+    input.gaps.extend(
+        branches
+            .iter()
+            .filter(|gap| {
+                gap.availability != Availability::Stale
+                    || source.availability != Availability::Stale
+            })
+            .map(|gap| Gap {
+                domain: format!("peer:{}:branches", host.id),
+                availability: gap.availability.clone(),
+                detail: if gap.availability == Availability::Stale {
+                    "branch observation requires fresh execution-host facts"
+                } else {
+                    "peer branch observation failed"
+                }
+                .into(),
+            }),
+    );
+    input.sources.peers.insert(host.id.clone(), source);
 }
 
 fn poll(
@@ -219,20 +243,21 @@ fn poll(
         {
             break;
         }
-        let retry = {
+        {
             let mut state = shared
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut state.retry)
-        };
-        if retry {
+            state.retry = false;
+        }
+        let retry = dirty.take_peer(&host.id);
+        if retry.is_some() {
             ingestion.reset();
         }
         let result = crate::store::observing(|| {
             let now = now_ms();
             let interests = peers::interests(&ledger, &host.id, now)?;
-            ingestion.refresh(&fleet, host, now, interests, !once && !retry)
+            ingestion.refresh(&fleet, host, now, interests, !once && retry.is_none())
         });
         let local_changes = ingestion.take_local_changes();
         let mut state = shared
@@ -240,6 +265,9 @@ fn poll(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = state.sources.get(&host.id).cloned();
+        if let Some(source) = &mut ingestion.source {
+            receipt(source, previous.as_ref(), retry);
+        }
         state.cached.clone_from(&ingestion.cached);
         let gaps = ingestion.gaps();
         let gaps_changed = state.gaps != gaps;

@@ -1714,7 +1714,10 @@ fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() 
         ticket["wait_reason"],
         "netcup: reservation raced with another request"
     );
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     assert_ne!(ticket["id"], ticket["request"]["id"], "{ticket}");
     assert_eq!(board["rows"].as_array().unwrap().len(), 1, "{board}");
     assert_eq!(board["rows"][0]["id"], ticket["id"], "{board}");
@@ -1768,7 +1771,10 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     let mut queue = rig.tickets();
     queue[0].as_object_mut().unwrap().remove("wait_reason");
     rig.put_tickets(&queue);
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     assert_eq!(
         board["rows"][0]["activity"], "for a host with room",
         "{board}"
@@ -1776,7 +1782,10 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     rig.snapshot("remote.json", now(), 100.0, 16);
     rig.expire_cache();
     rig.ingest_peers();
-    let (_, board) = rig.json(&["board", "--all"]);
+    let (_, board) = {
+        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        rig.json(&["board", "--all"])
+    };
     let reason = board["rows"][0]["activity"].as_str().unwrap();
     assert!(reason.starts_with("for netcup: "), "{board}");
     assert!(!reason.contains("local:"), "{board}");

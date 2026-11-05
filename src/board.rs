@@ -340,8 +340,8 @@ fn dock(
 pub fn command(
     shell: &dyn Shell,
     ledger: &Ledger,
-    policy: &crate::config::Policy,
-    home: String,
+    _policy: &crate::config::Policy,
+    _home: String,
     command: crate::cli::Command,
     json: bool,
 ) -> Result<()> {
@@ -365,9 +365,10 @@ pub fn command(
         };
         return crate::print(true, &result, String::new);
     }
-    let fleet = crate::hosts::Fleet::discover(shell, ledger, policy, home)?;
-    let status = crate::commands::status(&fleet)?;
-    let board = build(&status, owner.as_deref(), crate::ledger::now_ms());
+    let board = crate::observation::read::board(
+        &crate::observation::ipc::Client::at(&ledger.dir).current()?,
+        owner.as_deref(),
+    )?;
     crate::print(json, &board, || board.render())
 }
 
@@ -376,7 +377,7 @@ fn one_line(text: &str) -> String {
 }
 
 /// What the owner must do about a row, in display order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Group {
     /// Finished with commits that are not yet in the default branch, or with uncommitted work.
@@ -399,7 +400,7 @@ impl Group {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<crate::holds::Hold>,
@@ -434,13 +435,14 @@ pub struct Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ahead: Option<u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub dirty: bool,
     /// Canonical `host/owner/name` of the agent's repository, when it is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostLine {
     pub label: String,
     pub service: String,
@@ -457,7 +459,7 @@ pub struct HostLine {
     pub retry_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Board {
     pub hosts: Vec<HostLine>,
     pub rows: Vec<Row>,
@@ -936,17 +938,14 @@ pub(crate) fn enrich_captured(
 ) {
     for row in &mut board.rows {
         let item = status.items.iter().find(|item| item.id == row.id);
-        if row.state == "closed" {
-            row.pane = item.map(|item| item.pane.clone());
-        }
-        row.title = todos
-            .iter()
-            .find(|todo| row.pane.as_deref() == Some(todo.pane.as_str()))
-            .map(|todo| todo.current.clone());
         let pane = row
             .pane
             .as_deref()
             .or_else(|| item.map(|item| item.pane.as_str()));
+        row.title = todos
+            .iter()
+            .find(|todo| pane == Some(todo.pane.as_str()))
+            .map(|todo| todo.current.clone());
         let ended = item.is_some_and(|item| {
             item.closed_ms.is_some()
                 || crate::watchdog::turn_ended(crate::items::lifecycle(item, &status.hosts).state)

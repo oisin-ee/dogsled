@@ -44,6 +44,11 @@ struct Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct RetryAck {
+    retry_token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct Failure {
     error: FailureDetail,
 }
@@ -262,10 +267,12 @@ async fn connection(
         if let Some(host) = request.host
             && let Some(dirty) = dirty.as_ref()
         {
-            dirty.retry_peer(host);
-        } else {
-            return failure(&socket, "unavailable", "peer observer unavailable").await;
+            let token = dirty.retry_peer(host);
+            let mut bytes = serde_json::to_vec(&RetryAck { retry_token: token })?;
+            bytes.push(b'\n');
+            return write(&socket, &bytes).await;
         }
+        return failure(&socket, "unavailable", "peer observer unavailable").await;
     }
     if matches!(request.operation, Operation::Peer) {
         let Some(peer) = request.peer else {
@@ -356,7 +363,16 @@ impl Client {
     }
 
     fn open(&self, operation: Operation) -> Result<UnixStream> {
-        let mut socket = UnixStream::connect(&self.path).map_err(|error| unavailable(&error))?;
+        let mut socket = UnixStream::connect(&self.path).map_err(|error| {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) {
+                Error::Invalid("observation unavailable: dogsled serve is not running".into())
+            } else {
+                unavailable(&error)
+            }
+        })?;
         socket
             .set_write_timeout(Some(TIMEOUT))
             .map_err(|error| unavailable(&error))?;
@@ -378,7 +394,7 @@ impl Client {
         Ok(socket)
     }
 
-    pub fn retry(&self, host: &str) -> Result<()> {
+    pub fn retry(&self, host: &str) -> Result<String> {
         let mut socket = UnixStream::connect(&self.path).map_err(|error| unavailable(&error))?;
         socket.set_write_timeout(Some(TIMEOUT))?;
         socket.set_read_timeout(Some(TIMEOUT))?;
@@ -392,8 +408,14 @@ impl Client {
             },
         )?;
         socket.write_all(b"\n")?;
-        read(&mut BufReader::new(socket))?;
-        Ok(())
+        let mut line = String::new();
+        BufReader::new(socket)
+            .take(MAX_FRAME_BYTES as u64 + 1)
+            .read_line(&mut line)?;
+        let ack: RetryAck = serde_json::from_str(&line).map_err(|_| {
+            Error::Invalid("observation unavailable: invalid retry acknowledgment".into())
+        })?;
+        Ok(ack.retry_token)
     }
 
     pub fn peer(&self, request: super::peers::Request) -> Result<super::peers::Export> {

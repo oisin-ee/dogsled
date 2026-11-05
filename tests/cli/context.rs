@@ -126,9 +126,17 @@ fn context_without_snapshot_exits_silently() {
 #[test]
 fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
     let rig = Rig::new("context-output");
-    // A minute-old snapshot renders its age as `1m` for half a minute either side, so the brief
-    // stays identical across the calls below however slowly a loaded machine runs them.
+    // Both paths share a real observation and a fixed clock, so formatting is stable.
     rig.snapshot("state", now() - 60_000, 1.0, 8);
+    fs::write(rig.dir.join("clock"), now().to_string()).unwrap();
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    wait_publication(&rig, |frame| {
+        let samples: i64 = rig
+            .database()
+            .query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))
+            .unwrap();
+        samples >= 2 && frame["local"]["host"]["probe"] == rig.host()["probe"]
+    });
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     for harness in ["claude", "codex", "pi"] {
         for event in ["SessionStart", "UserPromptSubmit"] {
@@ -194,19 +202,17 @@ fn context_default_event_is_prompt_submit_and_failures_do_not_block() {
 fn context_names_only_the_callers_children_with_work_to_land() {
     let rig = Rig::new("context-close");
     rig.snapshot("state", now(), 1.0, 8);
-    // The snapshot's idle agent is in pane w1:p1. Both items name it; only one is the caller's.
-    let mut host = rig.host();
-    host["probe"]["agent_panes"][0]["worktree"] = json!({
-        "path":"/t","branch":"feat/x","ahead":2,"dirty":false,"landed":false,"head":"h","base":"b"
-    });
-    host["probe"]["agent_panes"][0]["done"] = json!(true);
+    // The real producer fixture captures the open-finished window before handoff.
+    let publication = super::observation::fixtures::context_pre_handoff();
+    fs::write(
+        rig.dir.join("clock"),
+        publication["published_ms"].to_string(),
+    )
+    .unwrap();
+    let mut host = publication["local"]["host"].clone();
     rig.put_host(&host);
-    rig.put_items(&json!([
-        {"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
-         "name":"worker","created_ms":1,"closed_ms":null},
-        {"id":"theirs","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w9:p9",
-         "name":"other","created_ms":1,"closed_ms":null}
-    ]));
+    rig.put_items(&publication["views"]["status"]["data"]["items"]);
+    let _publisher = super::observation::Supplied::start(&rig, publication);
     let status = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
     assert!(status.contains("(2 finished)"), "{status}");
     assert!(!status.contains("dogsled close"), "{status}");
@@ -254,6 +260,12 @@ fn status_rows_derive_lifecycle_even_without_a_published_label() {
         host["probe"]["agent_panes"][0]["state"] = json!(terminal);
         host["probe"]["agent_panes"][0]["lifecycle"] = json!("done");
         rig.put_host(&host);
+        rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":terminal}]}}));
+        let _observer = rig.serve();
+        super::wait_publication(&rig, |frame| {
+            frame["views"]["status"]["data"]["hosts"][0]["probe"]["agent_panes"][0]["state"]
+                == terminal
+        });
         let output = rig.run(&["status"]);
         assert!(output.status.success());
         let text = String::from_utf8(output.stdout).unwrap();
@@ -277,6 +289,14 @@ fn the_board_publishes_the_lifecycle_state_beside_its_own_word() {
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p1","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
     );
+    rig.put(
+        "agents.json",
+        &json!({"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"unknown"}]}}),
+    );
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"][0]["id"] == "mine"
+    });
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     let row = &board["rows"][0];
@@ -296,6 +316,10 @@ fn an_unobserved_child_is_unknown_and_never_claims_a_landed_result() {
         &json!([{"id":"mine","kind":"agent","host":"local","pane":"w1:p2","owner_pane":"w1:p1",
              "name":"worker","created_ms":1,"closed_ms":null}]),
     );
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["board"]["data"]["rows"][0]["id"] == "mine"
+    });
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     let row = &board["rows"][0];

@@ -74,10 +74,21 @@ fn lane_errors_persist_across_service_runs_and_recover_once() {
     // Only the quota lane reads this cache. Publication and status remain available.
     rig.fault_host_store("quota", false);
     let mut journal = String::new();
-    for pass in 0..3 {
+    for pass in 0..2 {
         fs::write(rig.dir.join("clock"), (first_ms + pass * 1_000).to_string()).unwrap();
         journal.push_str(&serve(&rig));
     }
+    fs::write(rig.dir.join("clock"), (first_ms + 2_000).to_string()).unwrap();
+    let mut observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["hosts"][0]["service_lanes"]
+            .as_array()
+            .is_some_and(|lanes| {
+                lanes
+                    .iter()
+                    .any(|lane| lane["lane"] == "quota" && lane["repeats"] == 3)
+            })
+    });
     assert_eq!(
         journal.matches("dogsled service lane quota:").count(),
         1,
@@ -106,8 +117,22 @@ fn lane_errors_persist_across_service_runs_and_recover_once() {
     let (_, snapshot) = rig.json(&["host", "snapshot"]);
     assert_eq!(snapshot["service_lanes"], failing);
 
+    assert_eq!(lanes(&rig)[0]["repeats"], 3);
+    observer.owned.terminate();
+    journal.push_str(&observer.output().1);
+    drop(observer);
+    assert_eq!(
+        journal.matches("dogsled service lane quota:").count(),
+        1,
+        "{journal}"
+    );
     rig.fault_host_store("clear-quota", false);
-    let recovered = serve(&rig);
+    let mut observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    super::wait_publication(&rig, |frame| {
+        frame["local"]["host"]["service_lanes"] == json!([])
+    });
+    observer.owned.terminate();
+    let recovered = observer.output().1;
     assert_eq!(
         recovered
             .matches("dogsled service lane quota: recovered")
@@ -115,8 +140,13 @@ fn lane_errors_persist_across_service_runs_and_recover_once() {
         1,
         "{recovered}"
     );
-    assert_eq!(lanes(&rig), json!([]));
+    drop(observer);
     assert!(!serve(&rig).contains("dogsled service lane quota:"));
+    let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+    super::wait_publication(&rig, |frame| {
+        frame["local"]["host"]["service_lanes"] == json!([])
+    });
+    assert_eq!(lanes(&rig), json!([]));
     for args in [vec!["status"], vec!["status", "--brief"]] {
         let out = rig.start(&args).output().0;
         assert!(!out.contains("lane failing"), "{out}");
@@ -142,7 +172,10 @@ fn remote_lane_failures_reach_full_brief_and_context_status() {
         "since_ms":43_260_000, "last_ms":43_600_000, "repeats":340
     }]);
     rig.put("remote.json", &remote);
-    rig.ingest_peers();
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| {
+        frame["views"]["status"]["data"]["hosts"][1]["service_lanes"] == remote["service_lanes"]
+    });
     let expected = "netcup service: admission lane failing since 12:01 UTC (x340): remote admission cannot read state";
     for args in [vec!["status"], vec!["status", "--brief"]] {
         let out = rig.start(&args).output().0;
@@ -163,6 +196,7 @@ fn handoff_passes_take_no_handoff_file_lock() {
     serve(&rig);
     serve(&rig);
     assert!(!rig.dir.join("state/handoff.lock").exists());
+    let _observer = rig.serve();
     let failing = lanes(&rig);
     assert!(
         failing

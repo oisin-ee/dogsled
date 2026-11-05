@@ -240,6 +240,7 @@ struct Exchange {
     peers: crate::observation::peers_runtime::Observers,
     branches: crate::observation::peers::Branches,
     interests: crate::observation::peers::Interests,
+    diagnostics: crate::observation::diagnostics::Diagnostics,
 }
 
 fn publish(
@@ -256,6 +257,7 @@ fn publish(
         peers,
         branches,
         interests,
+        diagnostics,
     } = exchange;
     let now = now_ms();
     let collection = crate::store::observing(|| -> Result<_> {
@@ -294,16 +296,7 @@ fn publish(
     })?;
     herdr.interests(collector.panes());
     let frame = publisher.replace(collection.input)?;
-    for gap in &frame.gaps {
-        if gap.domain == "todos" {
-            eprintln!("dogsled service: todo intake failed: {}", gap.detail);
-        } else {
-            eprintln!(
-                "dogsled service: {} collection failed: {}",
-                gap.domain, gap.detail
-            );
-        }
-    }
+    diagnostics.record(&frame.gaps, now, |line| eprintln!("{line}"));
     if once {
         collection.sample?;
     }
@@ -343,6 +336,7 @@ impl Observation {
                 peers: crate::observation::peers_runtime::Observers::default(),
                 branches: crate::observation::peers::Branches::default(),
                 interests,
+                diagnostics: crate::observation::diagnostics::Diagnostics::default(),
             },
             _commits: commits,
             herdr: wake::Herdr::start(dirty.clone(), interval),

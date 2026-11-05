@@ -338,11 +338,9 @@ impl<'a> Node<'a> {
     }
 
     pub fn snapshot(&self) -> Result<SnapshotReport> {
-        crate::observation::collect::host(
-            self,
-            crate::host_store::snapshot(self.ledger)?,
-            self.ledger.locked("service")?,
-            crate::ledger::now_ms(),
+        crate::observation::read::local(
+            &crate::observation::ipc::Client::at(&self.ledger.dir).current()?,
+            "host",
         )
     }
 
@@ -355,6 +353,16 @@ impl<'a> Node<'a> {
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
             if probe.busy.is_none() {
                 probe.busy = busy_since(&probe, previous.as_ref().map(|s| &s.probe));
+                if probe.busy.is_none()
+                    && let Some(previous) = &previous
+                    && probe
+                        .cpu_ticks
+                        .zip(previous.probe.cpu_ticks)
+                        .is_some_and(|(current, baseline)| current.total == baseline.total)
+                {
+                    probe.busy = previous.probe.busy;
+                    probe.cpu_ticks = previous.probe.cpu_ticks;
+                }
             }
             probe.reservations = self.live_reservations(now)?;
             let headroom = evaluate(&probe, &self.thresholds);
@@ -745,6 +753,41 @@ mod tests {
             free_cores: 2.5,
             eligible: true,
         }
+    }
+
+    #[test]
+    fn zero_delta_capture_keeps_busy_and_cpu_baseline() {
+        use crate::config::Policy;
+        use crate::shell::Fake;
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let shell = Fake::new();
+        shell
+            .on("herdr pane list", r#"{"result":{"panes":[]}}"#)
+            .on("herdr agent list", r#"{"result":{"agents":[]}}"#)
+            .on("read /proc/stat", "cpu 20 0 0 80 0 0 0 0 0 0")
+            .on("read /proc/loadavg", "0.5 0.2 0.1 1/10 42")
+            .on(
+                "read /proc/meminfo",
+                "MemTotal: 100 kB\nMemAvailable: 75 kB",
+            )
+            .on("df -Pk /home", "FS 1000 500 400 60% /");
+        let policy = Policy::default();
+        let node = Node::new(&shell, &ledger, &policy, "/home");
+        assert_eq!(node.tick(100).unwrap().probe.busy, None);
+        shell.on("read /proc/stat", "cpu 30 0 0 90 0 0 0 0 0 0");
+        let measured = node.tick(200).unwrap();
+        assert_eq!(measured.probe.busy, Some(0.5));
+        // Total ticks have not advanced, even though individual counters moved.
+        shell.on("read /proc/stat", "cpu 31 0 0 89 0 0 0 0 0 0");
+        let retained = node.tick(250).unwrap();
+        assert_eq!(retained.probe.busy, measured.probe.busy);
+        assert_eq!(retained.sampled_ms, 250);
+        assert_eq!(retained.probe.cpu_ticks, measured.probe.cpu_ticks);
+        shell.on("read /proc/stat", "cpu 40 0 0 100 0 0 0 0 0 0");
+        let next = node.tick(300).unwrap();
+        assert_eq!(next.probe.busy, Some(0.5));
+        assert_eq!(next.sampled_ms, 300);
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
     }
 
     #[test]

@@ -208,6 +208,7 @@ fn empty_payload() -> String {
             rows: Vec::new(),
         },
         &[],
+        &[],
         crate::ledger::now_ms(),
     );
     serde_json::to_string(&view).unwrap_or_else(|_| "{}".to_owned())
@@ -327,7 +328,7 @@ fn read(fleet: &crate::hosts::Fleet<'_>) -> Result<BoardView> {
     // API broken.
     let todos = crate::board::cached_todos(fleet.ledger).unwrap_or_default();
     crate::board::enrich(&mut board, &status, &todos, fleet.ledger, fleet.shell)?;
-    Ok(board::view(&board, &todos, now))
+    Ok(board::view(&board, &status.items, &todos, now))
 }
 
 /// Stop the server on SIGINT or SIGTERM.
@@ -386,6 +387,7 @@ mod tests {
                 hosts: Vec::new(),
                 rows: Vec::new(),
             },
+            &[],
             &[],
             7,
         );

@@ -351,6 +351,7 @@ pub(crate) struct Ingestion {
     pub source: Option<PeerSource>,
     pub cached: Option<Cached>,
     local_changed: bool,
+    forced: bool,
 }
 
 impl Ingestion {
@@ -365,6 +366,7 @@ impl Ingestion {
 
     pub fn reset(&mut self) {
         self.export = None;
+        self.forced = true;
     }
 
     pub fn gaps(&self) -> Vec<Gap> {
@@ -435,6 +437,7 @@ impl Ingestion {
             epoch: export.epoch.clone(),
             local_revision: export.local_revision,
             received_ms,
+            retry_tokens: Vec::new(),
             availability,
         });
         self.export = Some(export);
@@ -446,6 +449,7 @@ impl Ingestion {
             epoch: String::new(),
             local_revision: 0,
             received_ms: now,
+            retry_tokens: Vec::new(),
             availability: availability.clone(),
         });
         source.availability = availability;
@@ -465,6 +469,7 @@ impl Ingestion {
             epoch: "legacy".into(),
             local_revision: snapshot.map_or(0, |snapshot| snapshot.sampled_ms),
             received_ms: now,
+            retry_tokens: Vec::new(),
             availability: if snapshot.is_some_and(|snapshot| snapshot.fresh(now)) {
                 Availability::Available
             } else {
@@ -527,7 +532,9 @@ impl Ingestion {
         let source = fleet.remote_argv(host, &["snapshot".into()]);
         let previous = crate::host_store::peer(fleet.ledger, &host.id)?
             .filter(|cached| cached.source == source);
-        if let Some(cached) = &previous
+        let forced = std::mem::take(&mut self.forced);
+        if !forced
+            && let Some(cached) = &previous
             && (!cached.retry.ready(now)
                 || (!wait && now.saturating_sub(cached.fetched_ms) < CACHE_MS))
         {
@@ -628,12 +635,16 @@ fn cache(
         },
         Ok(None) => Cached {
             snapshot: previous_snapshot(),
+            job_validity: previous.and_then(|cached| cached.job_validity),
             reachable: true,
             error: Some("host snapshot is missing; service: down".into()),
             ..Cached::default()
         },
         Err(failure) => Cached {
             snapshot: previous_snapshot(),
+            // Retain the last advertisement with its original snapshot/source identity.
+            // It permits queueing only; unavailable facts cannot authorize placement.
+            job_validity: previous.and_then(|cached| cached.job_validity),
             holds: previous.map_or_else(Vec::new, |cached| {
                 cached
                     .holds

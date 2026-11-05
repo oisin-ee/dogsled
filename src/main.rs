@@ -245,13 +245,9 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             line,
             brief,
         } => {
-            let ask = Watch {
-                watch,
-                interval,
-                line,
-                brief,
-            };
-            status_command(&shell, &ledger, &policy, &home, ask, cli.json)?;
+            let _ = interval;
+            let ask = Watch { watch, line, brief };
+            status_command(&observation::ipc::Client::at(&ledger.dir), ask, cli.json)?;
         }
         command @ Command::Board { .. } => {
             board::command(&shell, &ledger, &policy, home, command, cli.json)?;
@@ -347,39 +343,55 @@ fn dispatch(fleet: &hosts::Fleet<'_>, command: Command, json: bool) -> Result<Ex
 #[derive(Clone, Copy)]
 struct Watch {
     watch: bool,
-    interval: u64,
     line: bool,
     brief: bool,
 }
 
 /// The status command: the fleet's state, printed once or watched.
-fn status_command(
-    shell: &System,
-    ledger: &Ledger,
-    policy: &config::Policy,
-    home: &str,
-    ask: Watch,
-    json: bool,
-) -> Result<()> {
+fn status_command(client: &observation::ipc::Client, ask: Watch, json: bool) -> Result<()> {
+    let mut subscription = ask.watch.then(|| client.subscribe()).transpose()?;
+    let mut published = match &subscription {
+        Some(subscription) => (*subscription.current().publication).clone(),
+        None => client.current()?,
+    };
     loop {
-        let fleet = hosts::Fleet::discover(shell, ledger, policy, home.to_owned())?;
-        let status = commands::status(&fleet)?;
+        let status: commands::Status = observation::read::view(&published, "status")?;
         if ask.watch && !json && !ask.line && !ask.brief {
             print!("\x1b[2J\x1b[H");
         }
-        print(json, &status, || {
+        let text = if json {
+            String::new()
+        } else {
+            let display: observation::display::Display =
+                observation::read::view(&published, "status_display")?;
             if ask.line {
-                commands::line(&status)
+                display.line()
             } else if ask.brief {
-                commands::brief(&status)
+                display.brief(now_ms())
             } else {
-                commands::render(&status)
+                display.render(now_ms())
             }
-        })?;
+        };
+        print(json, &status, || text)?;
         if !ask.watch {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_secs(ask.interval));
+        let subscription = subscription
+            .as_mut()
+            .ok_or_else(|| Error::Invalid("observation subscription missing".into()))?;
+        loop {
+            let connection = subscription.changed(std::time::Duration::from_secs(3600));
+            if let observation::ipc::Status::Disconnected(detail) = connection.status {
+                return Err(Error::Invalid(format!(
+                    "observation disconnected/stale; retained revision {}: {detail}",
+                    connection.publication.revision
+                )));
+            }
+            if connection.publication.revision != published.revision {
+                published = (*connection.publication).clone();
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -532,6 +544,51 @@ fn hook(
 
 /// Recovery needs no Herdr discovery for local operations.
 fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
+    // Observation readers do not load policy or discover a fleet.
+    let client = observation::ipc::Client::at(&ledger::default_dir());
+    match &cli.command {
+        Command::Status {
+            watch, line, brief, ..
+        } => {
+            status_command(
+                &client,
+                Watch {
+                    watch: *watch,
+                    line: *line,
+                    brief: *brief,
+                },
+                cli.json,
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Board {
+            owner,
+            all,
+            open: false,
+            toggle: false,
+        } => {
+            let owner = board::owner(owner.clone(), *all)?;
+            let board = observation::read::board(&client.current()?, owner.as_deref())?;
+            print(cli.json, &board, || board.render())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Items { .. } | Command::Ps { .. } => {
+            return runtime::published_inventory(&client.current()?, cli.command, cli.json);
+        }
+        Command::Host(HostCommand::Snapshot) => {
+            let report: node::SnapshotReport =
+                observation::read::local(&client.current()?, "host")?;
+            print(true, &report, String::new)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Host(HostCommand::Todos) => {
+            let todos: Vec<board::TodoSections> =
+                observation::read::view(&client.current()?, "todos")?;
+            print(true, &todos, String::new)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
+    }
     if let Command::Observation { command } = cli.command {
         return observation::command(&command);
     }
@@ -1365,7 +1422,14 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             String::new,
         )?,
         HostCommand::Snapshot => print(true, &node.snapshot()?, String::new)?,
-        HostCommand::Todos => print(true, &board::cached_todos(node.ledger)?, String::new)?,
+        HostCommand::Todos => print(
+            true,
+            &observation::read::view::<Vec<board::TodoSections>>(
+                &observation::ipc::Client::at(&node.ledger.dir).current()?,
+                "todos",
+            )?,
+            String::new,
+        )?,
         HostCommand::QuotaStore => print(
             true,
             &quota::store(node.ledger, std::io::stdin().lock())?,

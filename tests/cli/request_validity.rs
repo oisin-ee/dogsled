@@ -965,6 +965,8 @@ fn a_running_job_survives_the_age_expiry() {
     set_clock(&rig, created + 2 * WINDOW_MS);
     let job = rig.job("job-1");
     assert_eq!(job["exit"], 0, "{job}");
+    let _observer = rig.serve();
+    super::wait_publication(&rig, |frame| frame["views"]["jobs"]["data"][0]["exit"] == 0);
     assert_eq!(rig.json(&["ps", "--all"]).1[0]["exit"], 0);
 }
 

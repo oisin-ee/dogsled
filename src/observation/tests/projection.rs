@@ -137,6 +137,87 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn status_display_derives_lifecycle_without_trusting_a_published_label() {
+    let fixture = Fixture::new();
+    for (terminal, expected) in [
+        ("idle", "stopped"),
+        ("done", "stopped"),
+        ("blocked", "blocked"),
+    ] {
+        let mut report = host("local", terminal);
+        report.probe.as_mut().unwrap().agent_panes[0].lifecycle = Some("done".into());
+        let status = super::super::collect::status(&fixture.ledger, vec![report], NOW).unwrap();
+        let display = super::super::display::Display::capture(&status);
+        let text = display.render(NOW);
+        assert!(
+            text.contains(&format!("local-worker {expected} ")),
+            "{text}"
+        );
+        assert!(text.contains(&format!("({expected} 1)")), "{text}");
+    }
+}
+
+#[test]
+fn closed_branch_has_no_cli_pane_but_keeps_portal_identity() {
+    let mut fixture = Fixture::new();
+    fixture.local.probe.as_mut().unwrap().agent_panes.clear();
+    let mut closed = item("local-child", "local", "agent");
+    closed.closed_ms = Some(NOW - 1);
+    closed.branch = Some(crate::done::Branch {
+        repo: "/execution-only/repo".into(),
+        name: "feat/retained".into(),
+        ahead: 2,
+        landed: false,
+    });
+    let mut items = crate::items::list(&fixture.ledger).unwrap();
+    let previous = items.iter_mut().find(|item| item.id == closed.id).unwrap();
+    *previous = closed;
+    crate::store::put_items(&fixture.ledger, &items).unwrap();
+    let mut input = fixture.input();
+    let captured = project::Projector::default().inputs(&fixture.fleet(), &input);
+    project::derive(
+        &captured,
+        vec![fixture.local.clone()],
+        &(&fixture.policy).into(),
+        &mut input,
+    )
+    .unwrap();
+    let rows = input.views["board"]["data"]["rows"].as_array().unwrap();
+    let row = rows.iter().find(|row| row["id"] == "local-child").unwrap();
+    assert!(row["pane"].is_null());
+    assert_eq!(row["title"], "Captured title");
+    let portal = &input.views["portal_board"]["data"];
+    let row = portal["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|repo| repo["rows"].as_array().unwrap())
+        .find(|row| row["id"] == "local-child")
+        .unwrap();
+    assert_eq!(row["pane"], "local-worker");
+    assert_eq!(row["title"], "Captured title");
+    let mut previous: crate::board::Board =
+        serde_json::from_value(input.views["board"]["data"].clone()).unwrap();
+    previous
+        .rows
+        .iter_mut()
+        .find(|row| row.id == "local-child")
+        .unwrap()
+        .pane = Some("local-worker".into());
+    previous
+        .rows
+        .iter_mut()
+        .find(|row| row.id == "local-child")
+        .unwrap()
+        .title = Some("Captured title".into());
+    let todos =
+        serde_json::from_value::<Vec<crate::board::TodoSections>>(input.local["todos"].clone())
+            .unwrap();
+    let expected = crate::web::board::view(&previous, &[], &todos, NOW);
+    assert_eq!(*portal, serde_json::to_value(expected).unwrap());
+}
+
+#[test]
 fn all_views_share_one_capture_and_published_revision() {
     let fixture = Fixture::new();
     let mut input = fixture.input();

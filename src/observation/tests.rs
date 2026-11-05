@@ -1,3 +1,4 @@
+mod context_fixture;
 mod local;
 mod peer;
 mod projection;
@@ -277,6 +278,7 @@ mod publication {
                 epoch: "remote-epoch".into(),
                 local_revision: 8,
                 received_ms: 44,
+                retry_tokens: Vec::new(),
                 availability: Availability::Stale,
             },
         );

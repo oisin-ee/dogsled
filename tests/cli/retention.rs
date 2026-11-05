@@ -454,7 +454,10 @@ fn unstarted_release_fence_expires_only_after_its_completion_window() {
     clock(&rig, ended + WINDOW);
     serve(&rig);
     assert!(!rig.validity("unstarted").is_null());
+    let observer = rig.serve();
+    super::wait_publication(&rig, |frame| frame["local"]["host"]["holds"] == json!([]));
     assert_eq!(rig.json(&["host", "snapshot"]).1["holds"], json!([]));
+    drop(observer);
     assert_eq!(
         rig.json(&[
             "host",

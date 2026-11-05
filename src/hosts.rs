@@ -656,6 +656,8 @@ impl<'a> Fleet<'a> {
         Ok(outcome)
     }
 
+    /// Service-lane inputs only. O8 replaces this assembly with the in-process publication.
+    /// CLI and MCP readers must select published views through the observation client.
     pub fn status(&self, now: u64) -> Result<Vec<HostReport>> {
         self.shell.budget().remaining("fleet status")?;
         Ok(self
@@ -665,9 +667,17 @@ impl<'a> Fleet<'a> {
             .collect())
     }
 
-    pub(crate) fn read_host(&self, host: &Host, now: u64) -> HostReport {
+    fn read_host(&self, host: &Host, now: u64) -> HostReport {
         let result = if host.is_local() {
-            self.node().snapshot().map(|report| Cached {
+            (|| {
+                crate::observation::collect::host(
+                    &self.node(),
+                    crate::host_store::snapshot(self.ledger)?,
+                    self.ledger.locked("service")?,
+                    now,
+                )
+            })()
+            .map(|report| Cached {
                 service_lanes: report.service_lanes,
                 fetched_ms: now,
                 source: Vec::new(),
@@ -683,24 +693,12 @@ impl<'a> Fleet<'a> {
                 job_validity: report.job_validity,
             })
         } else {
-            // Interim reader until O7 cuts all store reads to publication. Only serve
-            // refreshes this row; a status call never starts SSH or takes a peer lock.
             crate::host_store::peer(self.ledger, &host.id).map(Option::unwrap_or_default)
         };
-        let cached = result.unwrap_or_else(|e| Cached {
-            service_lanes: Vec::new(),
+        let cached = result.unwrap_or_else(|error| Cached {
             fetched_ms: now,
-            source: Vec::new(),
-            snapshot: None,
-            reachable: false,
-            available: false,
-            running: None,
-            handoffs: Vec::new(),
-            holds: Vec::new(),
-            error: None,
-            failure: Some(Failure::of(&e)),
-            retry: crate::backoff::Backoff::default(),
-            job_validity: None,
+            failure: Some(Failure::of(&error)),
+            ..Cached::default()
         });
         self.cached_report(host, cached, now)
     }
@@ -777,9 +775,17 @@ impl<'a> Fleet<'a> {
     /// Neither this command nor the status read starts SSH.
     pub fn retry_now(&self, host: &Host) -> Result<HostReport> {
         if host.is_local() {
-            return Ok(self.read_host(host, crate::ledger::now_ms()));
+            let reports: Vec<HostReport> = crate::observation::read::view(
+                &crate::observation::ipc::Client::at(&self.ledger.dir).current()?,
+                "hosts",
+            )?;
+            return reports
+                .into_iter()
+                .find(|report| report.host.id == host.id)
+                .ok_or_else(|| {
+                    Error::Invalid("observation unavailable: local host was not published".into())
+                });
         }
-        let reset_ms = crate::ledger::now_ms();
         self.ledger.with_lock(&Self::peer_lock(host), || {
             crate::store::write(self.ledger, |tx| {
                 if let Some(mut cached) = crate::host_store::peer_row(tx, &host.id)? {
@@ -796,18 +802,25 @@ impl<'a> Fleet<'a> {
                 "backoff reset; observation unavailable because serve is not running".into(),
             )
         })?;
-        client.retry(&host.id)?;
+        let retry_token = client.retry(&host.id)?;
         let deadline = std::time::Instant::now()
             + crate::budget::CALL_LIMIT
             + std::time::Duration::from_secs(10);
         loop {
             let connection = subscription.current();
             if let Some(source) = connection.publication.sources.peers.get(&host.id)
-                && source.received_ms > reset_ms
+                && source.retry_tokens.contains(&retry_token)
             {
-                // O7 removes this final interim cache projection together with status.
-                // The wait itself is publication-only, never a store-polling loop.
-                return Ok(self.read_host(host, crate::ledger::now_ms()));
+                let reports: Vec<HostReport> =
+                    crate::observation::read::view(&connection.publication, "hosts")?;
+                return reports
+                    .into_iter()
+                    .find(|report| report.host.id == host.id)
+                    .ok_or_else(|| {
+                        Error::Invalid(
+                            "observation unavailable: peer host was not published".into(),
+                        )
+                    });
             }
             if matches!(
                 connection.status,

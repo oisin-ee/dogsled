@@ -836,34 +836,21 @@ fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
     Ok(())
 }
 
-fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
+pub(crate) fn published_inventory(
+    published: &crate::observation::Published,
+    command: Command,
+    json_output: bool,
+) -> Result<ExitCode> {
     match command {
         Command::Items { owner } => {
-            let items: Vec<_> = items::list(fleet.ledger)?
-                .into_iter()
-                .filter(|i| owner.as_ref().is_none_or(|o| *o == i.owner_pane))
-                .collect();
-            let queue: Vec<_> = work::queue(fleet.ledger)?
-                .into_iter()
-                .filter(|t| owner.as_ref().is_none_or(|o| *o == t.request.owner))
-                .collect();
-            let output = json!({"items":items,"queue":queue});
+            let output = crate::observation::read::inventory(published, owner.as_deref())?;
             crate::print(json_output, &output, || format!("{output}\n"))?;
         }
         Command::Ps { all } => {
-            let mut jobs = Vec::new();
-            for host in fleet.status(now_ms())? {
-                let host_jobs = if host.host.is_local() {
-                    jobs::list(fleet.ledger)?
-                } else {
-                    host.jobs
-                };
-                jobs.extend(
-                    host_jobs
-                        .into_iter()
-                        .filter(|j| all || j.ended_ms.is_none()),
-                );
-            }
+            let jobs: Vec<jobs::Job> = crate::observation::read::view(
+                published,
+                if all { "jobs" } else { "active_jobs" },
+            )?;
             crate::print(json_output, &jobs, || {
                 jobs.iter()
                     .map(|j| {
@@ -880,6 +867,24 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
                     .join("\n")
                     + "\n"
             })?;
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "expected published inventory command".into(),
+            ));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCode> {
+    match command {
+        command @ (Command::Items { .. } | Command::Ps { .. }) => {
+            return published_inventory(
+                &crate::observation::ipc::Client::at(&fleet.ledger.dir).current()?,
+                command,
+                json_output,
+            );
         }
         Command::Cancel { ticket } => {
             let result = work::cancel(fleet.ledger, &ticket)?;
