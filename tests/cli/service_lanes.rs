@@ -267,15 +267,16 @@ fn repeated_handoff_warning_prints_once_across_lane_threads() {
     assert_eq!(rig.state(&["done"]), original);
 }
 
-struct Observer {
-    rig: Rig,
+/// A real serve whose lanes and baseline sample have finished, with Herdr events held by the test.
+pub(super) struct Observer {
+    pub(super) rig: Rig,
     child: Owned,
     events: std::os::unix::net::UnixStream,
     subscriptions: Vec<Value>,
 }
 
 impl Observer {
-    fn start(name: &str, interval: &str) -> Self {
+    pub(super) fn start(name: &str, interval: &str) -> Self {
         use std::io::{BufRead as _, BufReader, Write as _};
         let rig = Rig::short(name);
         rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
@@ -338,7 +339,7 @@ impl Observer {
         observer
     }
 
-    fn current(&self) -> Value {
+    pub(super) fn current(&self) -> Value {
         use std::io::{BufRead as _, BufReader, Write as _};
         let mut stream =
             std::os::unix::net::UnixStream::connect(self.rig.dir.join("state/observation.sock"))
@@ -350,7 +351,7 @@ impl Observer {
         serde_json::from_str(&line).unwrap()
     }
 
-    fn wait(&self, condition: impl Fn(&Value) -> bool) -> Value {
+    pub(super) fn wait(&self, condition: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + PROCESS_DEADLINE;
         loop {
             let frame = self.current();
@@ -365,7 +366,7 @@ impl Observer {
         }
     }
 
-    fn quiet(&self) -> Value {
+    pub(super) fn quiet(&self) -> Value {
         let deadline = Instant::now() + PROCESS_DEADLINE;
         let mut frame = self.current();
         let mut stable = Instant::now();
@@ -383,7 +384,7 @@ impl Observer {
         }
     }
 
-    fn event(&mut self, name: &str) {
+    pub(super) fn event(&mut self, name: &str) {
         use std::io::Write as _;
         writeln!(
             self.events,
@@ -393,7 +394,7 @@ impl Observer {
         .unwrap();
     }
 
-    fn samples(&self) -> usize {
+    pub(super) fn samples(&self) -> usize {
         self.rig.state(&["samples"]).as_array().unwrap().len()
     }
 }

@@ -1,0 +1,650 @@
+{
+  "fileName": "fleet-leads",
+  "look": {
+    "theme": "graphite",
+    "paper": "subtle",
+    "font": "sans",
+    "grid": false
+  },
+  "nodes": {
+    "title": {
+      "seed": 1,
+      "id": "title",
+      "w": 1400,
+      "h": 36.4,
+      "fontSize": 28,
+      "text": "Fleet leads: New conversation",
+      "x": 0,
+      "y": -130,
+      "groupIds": [
+        "leads"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "note": {
+      "seed": 1,
+      "id": "note",
+      "w": 1600,
+      "h": 20.8,
+      "fontSize": 16,
+      "text": "The New button opens a blank conversation in the main panel. The project picker sits in its header; the normal composer sits below. The first Send creates the lead and selects its pane. Existing palette and panels stay unchanged.",
+      "x": 0,
+      "y": -78,
+      "groupIds": [
+        "leads"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "w-frame": {
+      "seed": 1,
+      "id": "w-frame",
+      "w": 1440,
+      "h": 900,
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "component",
+      "kind": "frame",
+      "props": {
+        "label": "Leads / wide / 1440 \u00d7 900",
+        "preset": "free",
+        "statusBar": false
+      }
+    },
+    "w-top": {
+      "seed": 1,
+      "id": "w-top",
+      "w": 1440,
+      "h": 44,
+      "shape": "rect",
+      "fill": "none",
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-brand": {
+      "seed": 1,
+      "id": "w-brand",
+      "w": 120,
+      "h": 20.8,
+      "fontSize": 16,
+      "text": "Dogsled",
+      "x": 16,
+      "y": 12,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "w-new": {
+      "seed": 1,
+      "id": "w-new",
+      "w": 72,
+      "h": 28,
+      "shape": "rect",
+      "fill": "none",
+      "x": 150,
+      "y": 8,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-new-t": {
+      "seed": 1,
+      "id": "w-new-t",
+      "w": 50,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "+ New",
+      "x": 166,
+      "y": 13,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "w-hosts": {
+      "seed": 1,
+      "id": "w-hosts",
+      "w": 320,
+      "h": 15.600000000000001,
+      "fontSize": 12,
+      "text": "local \u25ae\u25ae\u25af 8/12   netcup \u25ae\u25af\u25af 5/16",
+      "x": 1100,
+      "y": 14,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "w-inbox": {
+      "seed": 1,
+      "id": "w-inbox",
+      "w": 300,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 0,
+      "y": 44,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-inbox-h": {
+      "seed": 1,
+      "id": "w-inbox-h",
+      "w": 260,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "Waiting on you   2",
+      "x": 16,
+      "y": 60,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "w-agents": {
+      "seed": 1,
+      "id": "w-agents",
+      "w": 300,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 300,
+      "y": 44,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-agents-h": {
+      "seed": 1,
+      "id": "w-agents-h",
+      "w": 260,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "Agents   7",
+      "x": 316,
+      "y": 60,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "w-main": {
+      "seed": 1,
+      "id": "w-main",
+      "w": 840,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 600,
+      "y": 44,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-head": {
+      "seed": 1,
+      "id": "w-head",
+      "w": 840,
+      "h": 56,
+      "shape": "rect",
+      "fill": "none",
+      "x": 600,
+      "y": 44,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-head-t": {
+      "seed": 1,
+      "id": "w-head-t",
+      "w": 220,
+      "h": 23.400000000000002,
+      "fontSize": 18,
+      "text": "New conversation",
+      "x": 624,
+      "y": 62,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "w-pick": {
+      "seed": 1,
+      "id": "w-pick",
+      "w": 320,
+      "h": 32,
+      "shape": "rect",
+      "fill": "none",
+      "x": 900,
+      "y": 56,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-pick-t": {
+      "seed": 1,
+      "id": "w-pick-t",
+      "w": 300,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "github.com/oisin-ee/dogsled   \u2304",
+      "x": 912,
+      "y": 63,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "w-empty": {
+      "seed": 1,
+      "id": "w-empty",
+      "w": 420,
+      "h": 20.8,
+      "fontSize": 16,
+      "text": "Pick a project, then send the first message.",
+      "x": 820,
+      "y": 420,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "w-comp": {
+      "seed": 1,
+      "id": "w-comp",
+      "w": 792,
+      "h": 56,
+      "shape": "rect",
+      "fill": "none",
+      "x": 624,
+      "y": 820,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-comp-t": {
+      "seed": 1,
+      "id": "w-comp-t",
+      "w": 500,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "Message the new lead\u2026",
+      "x": 672,
+      "y": 838,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "w-send": {
+      "seed": 1,
+      "id": "w-send",
+      "w": 32,
+      "h": 32,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1368,
+      "y": 832,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "type": "shape"
+    },
+    "w-send-t": {
+      "seed": 1,
+      "id": "w-send-t",
+      "w": 20,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "\u2191",
+      "x": 1378,
+      "y": 838,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "w-err": {
+      "seed": 1,
+      "id": "w-err",
+      "w": 792,
+      "h": 15.600000000000001,
+      "fontSize": 12,
+      "text": "Error state: the server's message appears above the composer; the draft is kept.",
+      "x": 624,
+      "y": 790,
+      "groupIds": [
+        "leads",
+        "wide"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "n-frame": {
+      "seed": 1,
+      "id": "n-frame",
+      "w": 390,
+      "h": 844,
+      "x": 1540,
+      "y": 0,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "type": "component",
+      "kind": "frame",
+      "props": {
+        "label": "Leads / narrow / 390 \u00d7 844",
+        "preset": "free",
+        "statusBar": false
+      }
+    },
+    "n-top": {
+      "seed": 1,
+      "id": "n-top",
+      "w": 390,
+      "h": 44,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1540,
+      "y": 0,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "n-brand": {
+      "seed": 1,
+      "id": "n-brand",
+      "w": 100,
+      "h": 20.8,
+      "fontSize": 16,
+      "text": "Dogsled",
+      "x": 1556,
+      "y": 12,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "n-new": {
+      "seed": 1,
+      "id": "n-new",
+      "w": 72,
+      "h": 28,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1660,
+      "y": 8,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "n-new-t": {
+      "seed": 1,
+      "id": "n-new-t",
+      "w": 50,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "+ New",
+      "x": 1676,
+      "y": 13,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "n-head": {
+      "seed": 1,
+      "id": "n-head",
+      "w": 390,
+      "h": 96,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1540,
+      "y": 44,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "n-head-t": {
+      "seed": 1,
+      "id": "n-head-t",
+      "w": 300,
+      "h": 23.400000000000002,
+      "fontSize": 18,
+      "text": "New conversation",
+      "x": 1556,
+      "y": 56,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "n-pick": {
+      "seed": 1,
+      "id": "n-pick",
+      "w": 358,
+      "h": 32,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1556,
+      "y": 92,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "n-pick-t": {
+      "seed": 1,
+      "id": "n-pick-t",
+      "w": 330,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "github.com/oisin-ee/dogsled   \u2304",
+      "x": 1568,
+      "y": 99,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    },
+    "n-comp": {
+      "seed": 1,
+      "id": "n-comp",
+      "w": 358,
+      "h": 56,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1556,
+      "y": 772,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "type": "shape"
+    },
+    "n-comp-t": {
+      "seed": 1,
+      "id": "n-comp-t",
+      "w": 260,
+      "h": 18.2,
+      "fontSize": 14,
+      "text": "Message the new lead\u2026",
+      "x": 1572,
+      "y": 790,
+      "groupIds": [
+        "leads",
+        "narrow"
+      ],
+      "fixedW": true,
+      "bold": false,
+      "type": "text"
+    }
+  },
+  "order": [
+    "title",
+    "note",
+    "w-frame",
+    "w-top",
+    "w-brand",
+    "w-new",
+    "w-new-t",
+    "w-hosts",
+    "w-inbox",
+    "w-inbox-h",
+    "w-agents",
+    "w-agents-h",
+    "w-main",
+    "w-head",
+    "w-head-t",
+    "w-pick",
+    "w-pick-t",
+    "w-empty",
+    "w-comp",
+    "w-comp-t",
+    "w-send",
+    "w-send-t",
+    "w-err",
+    "n-frame",
+    "n-top",
+    "n-brand",
+    "n-new",
+    "n-new-t",
+    "n-head",
+    "n-head-t",
+    "n-pick",
+    "n-pick-t",
+    "n-comp",
+    "n-comp-t"
+  ],
+  "variations": [
+    {
+      "id": "wide",
+      "title": "Leads / wide / New conversation",
+      "description": "Main panel blank conversation with header project picker and normal composer.",
+      "nodeIds": [
+        "w-frame",
+        "w-top",
+        "w-brand",
+        "w-new",
+        "w-new-t",
+        "w-hosts",
+        "w-inbox",
+        "w-inbox-h",
+        "w-agents",
+        "w-agents-h",
+        "w-main",
+        "w-head",
+        "w-head-t",
+        "w-pick",
+        "w-pick-t",
+        "w-empty",
+        "w-comp",
+        "w-comp-t",
+        "w-send",
+        "w-send-t",
+        "w-err"
+      ]
+    },
+    {
+      "id": "narrow",
+      "title": "Leads / narrow / New conversation",
+      "description": "Picker stacks under the title; composer stays at the bottom.",
+      "nodeIds": [
+        "n-frame",
+        "n-top",
+        "n-brand",
+        "n-new",
+        "n-new-t",
+        "n-head",
+        "n-head-t",
+        "n-pick",
+        "n-pick-t",
+        "n-comp",
+        "n-comp-t"
+      ]
+    }
+  ],
+  "comments": [],
+  "app": "squig",
+  "version": 1
+}

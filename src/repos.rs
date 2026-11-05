@@ -36,7 +36,7 @@ fn write(config_path: &Path, document: &DocumentMut) -> Result<()> {
     Ok(())
 }
 
-fn same_origin(left: &str, right: &str) -> bool {
+pub(crate) fn same_origin(left: &str, right: &str) -> bool {
     match (
         crate::checkout::identity(left),
         crate::checkout::identity(right),
@@ -135,6 +135,65 @@ pub fn remove(config_path: &Path, selector: &str) -> Result<Repo> {
         .into_iter()
         .nth(index)
         .ok_or_else(|| Error::Invalid("selected repository disappeared".into()))
+}
+
+/// The one registered repository a selector names, by origin or by configured path.
+pub fn resolve<'a>(repos: &'a [Repo], home: &str, selector: &str) -> Result<&'a Repo> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Err(Error::Invalid("repository selector is empty".into()));
+    }
+    let wanted = expand(home, selector);
+    let matching: Vec<&Repo> = repos
+        .iter()
+        .filter(|repo| {
+            same_origin(&repo.origin, selector)
+                || repo.path == selector
+                || wanted.is_some() && expand(home, &repo.path) == wanted
+        })
+        .collect();
+    match matching.as_slice() {
+        [] => Err(Error::Invalid(format!(
+            "repository is not registered: {selector}"
+        ))),
+        [repo] => Ok(repo),
+        many => Err(Error::Invalid(format!(
+            "repository selector {selector} is ambiguous: {}",
+            many.iter()
+                .map(|repo| repo.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// The local checkout of a registered repository. It stays inside the home directory.
+pub fn checkout_path(home: &str, repo: &Repo) -> Result<PathBuf> {
+    let path = expand(home, &repo.path).ok_or_else(|| {
+        Error::Invalid(format!(
+            "registered path {} is neither home-relative nor absolute",
+            repo.path
+        ))
+    })?;
+    if path
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+        || !path.starts_with(home)
+    {
+        return Err(Error::Invalid(format!(
+            "registered path {} leaves the home directory",
+            repo.path
+        )));
+    }
+    Ok(path)
+}
+
+/// A `~/` or absolute path, without touching the filesystem.
+fn expand(home: &str, path: &str) -> Option<PathBuf> {
+    if let Some(relative) = path.strip_prefix("~/") {
+        return Some(Path::new(home).join(relative));
+    }
+    Path::new(path).is_absolute().then(|| PathBuf::from(path))
 }
 
 pub fn list(policy: &Policy) -> &[Repo] {

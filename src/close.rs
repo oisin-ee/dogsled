@@ -233,6 +233,16 @@ pub fn with_request<T>(
     if caller.pane.as_deref() == Some(pane) {
         return Err(refuse("cannot close the caller pane"));
     }
+    // A lead is never child work: route it before preservation, teardown, or removal.
+    if let Some(found) = lead_on(shell, ledger, pane)? {
+        if mode != Guard::Clean {
+            return Err(refuse(&format!(
+                "{pane} is lead {}; a lead closes only explicitly",
+                found.name
+            )));
+        }
+        return reconcile(lead(shell, ledger, &found, caller)?);
+    }
     let existing = if let Some(mode) = mode.preservation() {
         let existing = crate::preservation::operation(ledger, pane, request)?;
         if let Some(operation) = &existing {
@@ -730,6 +740,75 @@ fn validate_target<'a>(
         return Err(refuse(&reason));
     }
     Ok(target)
+}
+
+/// The open lead on `pane`. Only an observed terminal that positively differs from the
+/// stored one proves the pane now runs something else.
+fn lead_on(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+) -> Result<Option<crate::leads::Record>> {
+    if crate::leads::on_pane(ledger, pane, None)?.is_none() {
+        return Ok(None);
+    }
+    let (_, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    crate::leads::on_pane(ledger, pane, terminals.get(pane).map(String::as_str))
+}
+
+/// Close only the lead's pane: never its repository, teardown, branch, or child work.
+/// The stored terminal identity authorizes it; a name or pane ID alone does not.
+pub(crate) fn lead(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    lead: &crate::leads::Record,
+    caller: &Caller,
+) -> Result<Closed> {
+    let pane = lead
+        .pane
+        .as_deref()
+        .ok_or_else(|| refuse(&format!("lead {} has no pane yet", lead.name)))?;
+    let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
+    if panes.iter().all(|p| p.pane_id != pane) {
+        crate::lead_store::update(ledger, &lead.id, |record| {
+            let now = crate::ledger::now_ms();
+            record.close_requested_ms.get_or_insert(now);
+            record.closed_ms = Some(now);
+            record.updated_ms = now;
+            Ok(())
+        })?;
+        return Ok(Closed {
+            pane: pane.into(),
+            worktree: None,
+            pane_closed: false,
+            retained_branch: None,
+            recovery: None,
+        });
+    }
+    match (lead.terminal.as_deref(), terminals.get(pane)) {
+        (Some(saved), Some(observed)) if !saved.is_empty() && saved == observed => (),
+        _ => {
+            return Err(refuse(&format!(
+                "{pane} terminal identity does not prove lead {}",
+                lead.name
+            )));
+        }
+    }
+    validate_target(shell, &panes, pane, caller)?;
+    crate::lead_store::update(ledger, &lead.id, |record| {
+        let now = crate::ledger::now_ms();
+        record.close_requested_ms = Some(now);
+        record.updated_ms = now;
+        Ok(())
+    })?;
+    let closed = pane_only(shell, pane)?;
+    crate::lead_store::update(ledger, &lead.id, |record| {
+        let now = crate::ledger::now_ms();
+        record.closed_ms = Some(now);
+        record.updated_ms = now;
+        Ok(())
+    })?;
+    Ok(closed)
 }
 
 fn pane_only(shell: &dyn crate::shell::Shell, pane: &str) -> Result<Closed> {

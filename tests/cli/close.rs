@@ -1554,3 +1554,57 @@ fn doctor_lists_a_detached_worktree_and_prune_removes_it_once_a_remote_holds_its
         probe.display()
     )));
 }
+
+#[test]
+fn lead_holder_blocks_checkout_removal() {
+    let (rig, tree) = close_rig("close-lead-holder");
+    let repo = rig.dir.join("home/repo");
+    fs::write(tree.join("feature"), "work\n").unwrap();
+    git(&tree, &["add", "feature"]);
+    git(&tree, &["commit", "-q", "-m", "feature"]);
+    git(&repo, &["merge", "-q", "--squash", "feat/x"]);
+    git(&repo, &["commit", "-q", "-m", "feature (#1)"]);
+    // Only an exited lead's shell remains in the landed checkout.
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[
+            {"pane_id":"w2:p2","workspace_id":"w2","agent":null,"cwd":tree,"terminal_id":"lead-term"}
+        ]}}),
+    );
+    let (_, plan) = rig.json(&["doctor"]);
+    let entry = |plan: &Value| {
+        plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["class"] == "worktrees")
+            .cloned()
+            .unwrap_or_else(|| panic!("{plan}"))
+    };
+    assert_eq!(entry(&plan)["removable"], true, "{plan}");
+    rig.database()
+        .execute(
+            "INSERT INTO leads (id, name, repository_path, repository_origin,
+                repository_relative, repository_working_root, prompt, validity_version,
+                validity_created_ms, created_ms, phase, pane, terminal, workspace, updated_ms)
+             VALUES ('x', 'lead-x', ?1, 'https://example.org/repo.git', 'repo', ?1, 'first',
+                1, 1, 1, 'ready', 'w2:p2', 'lead-term', 'w2', 1)",
+            [repo.display().to_string()],
+        )
+        .unwrap();
+    let (_, plan) = rig.json(&["doctor"]);
+    assert_eq!(entry(&plan)["removable"], false, "{plan}");
+    assert!(
+        entry(&plan)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("lead lead-x works in this checkout"),
+        "{plan}"
+    );
+    let out = rig.run(&["prune", "--yes", "worktrees"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(!rig.log("herdr.log").contains("workspace close w2"));
+    assert!(!rig.log("herdr.log").contains("pane close w2:p2"));
+    assert_eq!(rig.log("hook.log"), "");
+    assert!(tree.join("feature").exists());
+}

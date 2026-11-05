@@ -285,7 +285,7 @@ fn start_with_simulated_busy_wait(
             elapsed: &|| elapsed.get(),
             pause: &|duration| elapsed.set(elapsed.get() + duration),
         },
-        request,
+        &|| work::check_launch_validity(ledger, request),
     )
 }
 
@@ -362,6 +362,7 @@ fn a_first_busy_refusal_can_exhaust_the_window_without_a_retry() {
     let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
     let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
+    let request = busy_request(&ledger);
     // A slow first command or a descheduled caller can consume the whole window.
     let error = start_with_busy_wait(
         &ledger,
@@ -374,7 +375,7 @@ fn a_first_busy_refusal_can_exhaust_the_window_without_a_retry() {
             elapsed: &|| window,
             pause: &|_| panic!("an exhausted window must not pause"),
         },
-        &busy_request(&ledger),
+        &|| work::check_launch_validity(&ledger, &request),
     )
     .unwrap_err();
     assert!(matches!(error, Error::Launch(_)), "{error:?}");

@@ -271,7 +271,7 @@ mod readers {
         }
     }
 
-    fn isolate(rig: &Rig) -> Vec<fs::File> {
+    pub(super) fn isolate(rig: &Rig) -> Vec<fs::File> {
         for command in ["git", "herdr", "ssh"] {
             rig.script(
                 command,
@@ -578,5 +578,306 @@ mod readers {
         );
         reader.join().unwrap();
         assert_eq!(rig.log("reader-access.log"), "");
+    }
+}
+
+/// O13: the integrated boundary. Each group is one claim of plans/briefs/observation.md.
+mod boundary {
+    use super::readers::isolate;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    type Observer = super::super::service_lanes::Observer;
+
+    /// A PATH where every observation tool records its caller and fails. Readers need none.
+    fn reader_path(rig: &Rig) -> PathBuf {
+        let bin = rig.dir.join("reader-bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in [
+            "git", "herdr", "ssh", "df", "ps", "sysctl", "vm_stat", "uptime", "nproc",
+        ] {
+            let path = bin.join(name);
+            fs::write(
+                &path,
+                "#!/bin/sh\nprintf '%s %s\\n' \"${0##*/}\" \"$*\" >> \"$RIG/reader-access.log\"\nexit 97\n",
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        bin
+    }
+
+    fn reader(rig: &Rig, path: &Path, args: &[&str]) -> Command {
+        let mut command = rig.cmd(args);
+        command.env("PATH", path);
+        command
+    }
+
+    /// Record serve's Git calls while still running the real Git the collector needs.
+    fn count_git(rig: &Rig) {
+        let output = std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let git = String::from_utf8(output.stdout).unwrap();
+        rig.script(
+            "git",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/git.log\"\nexec {} \"$@\"\n",
+                git.trim()
+            ),
+        );
+    }
+
+    /// One change-driven collection: rename the first pane and wait until it is published.
+    /// Returns the Herdr and Git calls serve made for it.
+    fn collect(observer: &mut Observer, name: &str) -> (Vec<String>, Vec<String>) {
+        let calls = |log: &str| observer_lines(observer, log);
+        let (herdr, git) = (calls("herdr.log"), calls("git.log"));
+        let mut panes = observer.rig.read("panes.json");
+        panes["result"]["panes"][0]["name"] = json!(name);
+        observer.rig.put("panes.json", &panes);
+        observer.event("pane.agent_status_changed");
+        observer.wait(|frame| frame["local"]["host"]["probe"]["panes"][0]["name"] == name);
+        observer.quiet();
+        let after = |log: &str, before: usize| {
+            observer
+                .rig
+                .log(log)
+                .lines()
+                .skip(before)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        (after("herdr.log", herdr), after("git.log", git))
+    }
+
+    fn observer_lines(observer: &Observer, log: &str) -> usize {
+        observer.rig.log(log).lines().count()
+    }
+
+    /// Group 5. Readers and subscribers never observe, and they neither cause nor enlarge
+    /// serve's collections.
+    #[test]
+    fn readers_and_subscriptions_add_no_observation_work() {
+        let mut observer = Observer::start("boundary-scale", "3600");
+        count_git(&observer.rig);
+        let path = reader_path(&observer.rig);
+        let (mut herdr, alone) = collect(&mut observer, "alone");
+        assert!(!herdr.is_empty(), "a collection must reach Herdr");
+        let rig = &observer.rig;
+        let quiet = observer.quiet();
+        let samples = observer.samples();
+        let (herdr_before, git_before) = (rig.log("herdr.log"), rig.log("git.log"));
+
+        let mut watchers = Vec::new();
+        let (send, lines) = mpsc::channel();
+        for args in [
+            &["board", "--watch", "--json", "--owner", "w1:p1"][..],
+            &["board", "--watch", "--json", "--owner", "w1:p1"],
+            &["board", "--watch", "--json", "--owner", "w2:p1"],
+            &["status", "--watch", "--json"],
+            &["status", "--watch", "--json"],
+        ] {
+            let mut command = reader(rig, &path, args);
+            command.stdout(Stdio::piped()).stderr(Stdio::null());
+            let mut child = Owned::spawn(&mut command);
+            let stdout = child.child_mut().stdout.take().unwrap();
+            let send = send.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if send.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            watchers.push(child);
+        }
+        for _ in &watchers {
+            let first: Value =
+                serde_json::from_str(&lines.recv_timeout(PROCESS_DEADLINE).unwrap()).unwrap();
+            assert!(first.get("error").is_none(), "{first}");
+        }
+        for _ in 0..4 {
+            for args in [
+                &["status", "--json"][..],
+                &["status", "--line"],
+                &["board", "--all", "--json"],
+                &["board", "--owner", "w1:p1", "--json"],
+                &["items", "--json"],
+                &["ps", "--json"],
+                &["host", "snapshot", "--json"],
+                &["host", "todos", "--json"],
+            ] {
+                let output = reader(rig, &path, args).output().unwrap();
+                assert!(output.status.success(), "{args:?}: {output:?}");
+            }
+        }
+        let mut mcp = super::super::mcp::Client::start(rig);
+        for _ in 0..4 {
+            let (_, failed) = mcp.call("status", &json!({"all":true}));
+            assert!(!failed);
+        }
+        drop(mcp);
+
+        // Nothing a reader did reached a tool, a collection, or a new publication.
+        assert_eq!(rig.log("reader-access.log"), "");
+        assert_eq!(rig.log("herdr.log"), herdr_before);
+        assert_eq!(rig.log("git.log"), git_before);
+        assert_eq!(observer.samples(), samples);
+        assert_eq!(observer.current()["revision"], quiet["revision"]);
+
+        // With every subscriber attached, the next change costs what it cost with none.
+        let (mut herdr_busy, busy) = collect(&mut observer, "busy");
+        // Serve probes panes in parallel, so only the set of calls is stable.
+        herdr_busy.sort();
+        herdr.sort();
+        assert_eq!(herdr_busy, herdr);
+        assert_eq!(busy.len(), alone.len(), "{alone:?}\n{busy:?}");
+        assert_eq!(observer.samples(), samples + 1);
+        for _ in &watchers {
+            let next: Value =
+                serde_json::from_str(&lines.recv_timeout(PROCESS_DEADLINE).unwrap()).unwrap();
+            assert!(next.get("error").is_none(), "{next}");
+        }
+        assert_eq!(observer.rig.log("reader-access.log"), "");
+        drop(watchers);
+    }
+
+    /// Group 2. A reader never accepts a publication it cannot trust, and a subscriber never
+    /// prints a replacement from another epoch or an older revision.
+    #[test]
+    fn unsupported_or_out_of_order_publications_are_unavailable() {
+        let rig = Rig::short("boundary-versions");
+        let mut future = publication(5);
+        future["version"] = json!(2);
+        let server = Supplied::start(&rig, future);
+        let _locks = isolate(&rig);
+        for args in [
+            vec!["status"],
+            vec!["board", "--all"],
+            vec!["items"],
+            vec!["ps"],
+        ] {
+            let (code, error) = rig.json(&args);
+            assert_ne!(code, 0, "{args:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported observation protocol version"),
+                "{args:?}: {error}"
+            );
+        }
+        drop(server);
+        for replacement in [
+            {
+                let mut restarted = publication(9);
+                restarted["epoch"] = json!("restarted");
+                restarted
+            },
+            publication(4),
+        ] {
+            let server = Supplied::start(&rig, publication(5));
+            let mut command = rig.cmd(&["board", "--watch", "--json", "--owner", "w1:p1"]);
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = Owned::spawn(&mut command);
+            let stdout = child.child_mut().stdout.take().unwrap();
+            let (send, lines) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if send.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            server.requested("subscribe");
+            let first: Value =
+                serde_json::from_str(&lines.recv_timeout(PROCESS_DEADLINE).unwrap()).unwrap();
+            assert_eq!(first["revision"], 5);
+            server.replace(replacement.clone());
+            assert!(!child.wait().success(), "{replacement}");
+            reader.join().unwrap();
+            let rest: Vec<String> = lines.try_iter().collect();
+            assert!(
+                rest.iter().all(|line| !line.contains("\"board\"")),
+                "{replacement}: {rest:?}"
+            );
+            drop(server);
+        }
+        assert_eq!(rig.log("reader-access.log"), "");
+    }
+
+    /// Group 3. A host's paths are its own: a local symlink at the same path cannot rewrite
+    /// a foreign path, and readers print it exactly as its host published it.
+    #[test]
+    fn foreign_paths_survive_local_filesystem_changes() {
+        let rig = Rig::short("boundary-foreign");
+        let target = rig.dir.join("local-target");
+        let link = rig.dir.join("foreign-tree");
+        fs::create_dir_all(&target).unwrap();
+        let foreign = link.display().to_string();
+        let mut frame = publication(1);
+        let job = json!({"id":"remote-job","cmd":["true"],"cwd":foreign,"host":"foreign",
+            "owner":"w1:p1","pane":"foreign:p1","state":"running"});
+        frame["views"]["jobs"]["data"] = json!([job.clone()]);
+        frame["views"]["active_jobs"]["data"] = json!([job]);
+        let _server = Supplied::start(&rig, frame);
+        let _locks = isolate(&rig);
+        let cwd = |rig: &Rig| {
+            let (code, jobs) = rig.json(&["ps", "--all"]);
+            assert_eq!(code, 0, "{jobs}");
+            jobs[0]["cwd"].clone()
+        };
+        assert_eq!(cwd(&rig), json!(foreign));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(cwd(&rig), json!(foreign));
+        fs::remove_file(&link).unwrap();
+        fs::create_dir(&link).unwrap();
+        assert_eq!(cwd(&rig), json!(foreign));
+        assert_eq!(rig.log("reader-access.log"), "");
+    }
+
+    /// Group 4. An observation that found a checkout safe to remove authorizes nothing once
+    /// the checkout holds new work: the removal revalidates and keeps it.
+    #[test]
+    fn a_safe_observation_cannot_remove_work_added_after_it() {
+        use super::super::close::{close_rig, git};
+        let (rig, tree) = close_rig("boundary-safety");
+        let repo = rig.dir.join("home/repo");
+        fs::write(tree.join("feature"), "work\n").unwrap();
+        git(&tree, &["add", "feature"]);
+        git(&tree, &["commit", "-q", "-m", "feature"]);
+        git(&repo, &["merge", "-q", "--squash", "feat/x"]);
+        git(&repo, &["commit", "-q", "-m", "feature (#1)"]);
+        rig.put(
+            "panes.json",
+            &json!({"result":{"panes":[{"pane_id":"w2:p2","workspace_id":"w2","agent":null,"cwd":tree}]}}),
+        );
+        let (code, plan) = rig.json(&["doctor"]);
+        assert_eq!(code, 0, "{plan}");
+        let entry = plan["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["class"] == "worktrees")
+            .cloned()
+            .unwrap_or_else(|| panic!("{plan}"));
+        assert_eq!(entry["removable"], true, "{entry}");
+        // New work arrives after the safe observation and before the destructive act.
+        fs::write(tree.join("unsaved"), "after observation\n").unwrap();
+        let plan = json!({"entries":[entry]});
+        let (code, applied) = rig.json(&["host", "prune", "--plan", &plan.to_string()]);
+        assert_eq!(code, 0, "{applied}");
+        assert_eq!(
+            fs::read_to_string(tree.join("unsaved")).unwrap(),
+            "after observation\n",
+            "{applied}"
+        );
+        assert!(
+            !rig.log("herdr.log").contains("workspace close w2"),
+            "{applied}"
+        );
+        assert_eq!(applied["skipped"].as_array().unwrap().len(), 1, "{applied}");
+        assert_eq!(applied["failures"], json!([]), "{applied}");
     }
 }

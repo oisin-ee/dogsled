@@ -1453,12 +1453,35 @@ pub(crate) fn pane(shell: &dyn Shell, launch: &Launch) -> Result<(String, Option
     }
     // Work in a repository opens where that repository is shown, never in the caller's
     // unrelated workspace.
-    let mut args = match crate::worktree::home(shell, &launch.cwd)? {
+    let args = match crate::worktree::home(shell, &launch.cwd)? {
         crate::worktree::Home::Shown(id) => tab(id),
         crate::worktree::Home::Unshown => vec!["workspace".into(), "create".into()],
         crate::worktree::Home::Outside => callers(shell, launch)?,
     };
-    args.extend(["--cwd".into(), launch.cwd.clone(), "--no-focus".into()]);
+    open_pane(shell, args, &launch.cwd)
+}
+
+/// A new pane for work in the repository at `cwd`, where that repository is shown or in a
+/// new workspace. It never uses a caller's workspace, so it needs no owner.
+pub(crate) fn repository_pane(shell: &dyn Shell, cwd: &str) -> Result<(String, Option<String>)> {
+    crate::worktree::require_execution_directory(cwd)?;
+    let args = match crate::worktree::home(shell, cwd)? {
+        crate::worktree::Home::Shown(id) => tab(id),
+        crate::worktree::Home::Unshown => vec!["workspace".into(), "create".into()],
+        crate::worktree::Home::Outside => {
+            return Err(Error::Invalid(format!("{cwd} is not in a repository"))
+                .because(Cause::CheckoutUnavailable));
+        }
+    };
+    open_pane(shell, args, cwd)
+}
+
+fn open_pane(
+    shell: &dyn Shell,
+    mut args: Vec<String>,
+    cwd: &str,
+) -> Result<(String, Option<String>)> {
+    args.extend(["--cwd".into(), cwd.into(), "--no-focus".into()]);
     let value = herdr(shell, &args)?;
     let pane = value
         .pointer("/result/root_pane/pane_id")

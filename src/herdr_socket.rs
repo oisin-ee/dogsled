@@ -257,7 +257,13 @@ impl Subscription {
             return Err(fail("invalid subscription acknowledgement".into()));
         }
         // Bound the acknowledgement, but never time out halfway through an event line.
-        reader.get_ref().set_read_timeout(None)?;
+        // Darwin refuses socket options once the peer has shut down (EINVAL); such a peer
+        // sends nothing more, so the reader drains what it already sent and sees EOF.
+        if let Err(error) = reader.get_ref().set_read_timeout(None)
+            && error.kind() != std::io::ErrorKind::InvalidInput
+        {
+            return Err(fail(error.to_string()));
+        }
         // Keep a socket handle so dropping the subscription interrupts its reader.
         let socket = reader.get_ref().try_clone()?;
         let (sender, receiver) = std::sync::mpsc::channel();

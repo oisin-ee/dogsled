@@ -71,6 +71,108 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents/{pane}/keys", post(keys))
         .route("/api/agents/{pane}/focus", post(focus))
         .route("/api/agents/{pane}/events", get(events))
+        .route("/api/leads", post(create_lead))
+        .route("/api/repos", get(repos))
+}
+
+/// The registered repositories, reread from config on every request.
+async fn repos(State(state): State<AppState>) -> Response {
+    let Some(launch) = state.leads.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "this server cannot start leads"})),
+        )
+            .into_response();
+    };
+    match crate::config::load(&launch.config_path) {
+        Ok(policy) => Json(portal_types::agents::RepoList {
+            repos: policy
+                .repos
+                .iter()
+                .map(|repo| portal_types::agents::RepoChoice {
+                    origin: repo.origin.clone(),
+                    path: repo.path.clone(),
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Start a lead through the same creator as `dogsled lead`. 201 only after its first
+/// prompt was accepted; a partial launch keeps its pane and reports its phase.
+async fn create_lead(
+    State(state): State<AppState>,
+    body: std::result::Result<
+        Json<portal_types::agents::CreateLeadBody>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let Some(launch) = state.leads.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "this server cannot start leads"})),
+        )
+            .into_response();
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(rejection) => return refuse(&rejection.body_text()),
+    };
+    let Some(socket) = socket(&state).cloned() else {
+        return no_socket();
+    };
+    let ledger = state.web.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let mut ledger = ledger;
+        ledger.budget =
+            crate::budget::Budget::until(std::time::Instant::now() + crate::budget::SETUP_LIMIT);
+        let context = crate::leads::CreateContext {
+            shell: launch.shell.as_ref(),
+            ledger: &ledger,
+            config_path: &launch.config_path,
+            home: &launch.home,
+            herdr: &socket,
+        };
+        crate::leads::create(&context, &body.repo, &body.prompt)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(started)) => (
+            StatusCode::CREATED,
+            Json(portal_types::agents::CreatedLead { pane: started.pane }),
+        )
+            .into_response(),
+        Ok(Err(failure)) => lead_error_response(&failure),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+fn lead_error_response(failure: &crate::leads::Failure) -> Response {
+    let status = match failure.kind {
+        crate::leads::FailureKind::Invalid => StatusCode::BAD_REQUEST,
+        crate::leads::FailureKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        crate::leads::FailureKind::Launch => StatusCode::BAD_GATEWAY,
+    };
+    (
+        status,
+        Json(json!({
+            "error": failure.error.to_string(),
+            "id": failure.id,
+            "pane": failure.pane,
+            "phase": failure.phase,
+        })),
+    )
+        .into_response()
 }
 
 /// The client the agent routes talk to Herdr through, if there is one.
@@ -495,6 +597,109 @@ mod tests {
     /// The state of the API, talking to a fake Herdr.
     fn with_socket(server: &fake::Server) -> AppState {
         state(Some(server.client()))
+    }
+
+    async fn post_lead(state: AppState, body: &str) -> (StatusCode, serde_json::Value) {
+        let response = state.oneshot_lead(body).await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    impl AppState {
+        async fn oneshot_lead(self, body: &str) -> Response {
+            super::test_request(
+                self,
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/leads")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+        }
+    }
+
+    fn launch(config: &str) -> crate::web::LeadLaunch {
+        let dir = std::env::temp_dir().join(format!("dogsled-lead-{}", crate::ledger::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), config).unwrap();
+        crate::web::LeadLaunch {
+            config_path: dir.join("config.toml"),
+            home: dir.display().to_string(),
+            shell: Arc::new(crate::shell::Fake::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn lead_route_maps_capability_input_and_selector_failures() {
+        let server = fake::Server::start(|_, _| json!({"result":{"agents":[]}}));
+        // A one-shot server has no lead capability.
+        let (status, body) = post_lead(with_socket(&server), r#"{"repo":"r","prompt":"go"}"#).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let leads = || with_socket(&server).with_leads(launch(""));
+        for bad in [
+            r#"{"repo":"r"}"#,
+            r#"{"repo":"r","prompt":"go","owner":"w1:p1"}"#,
+            "{",
+        ] {
+            let (status, body) = post_lead(leads(), bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+        }
+        let (status, body) =
+            post_lead(leads(), r#"{"repo":"https://example.org/r","prompt":"go"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("not registered"),
+            "{body}"
+        );
+        assert_eq!(body["id"], serde_json::Value::Null);
+        // No Herdr socket: the capability is unavailable, and nothing is started.
+        let (status, body) = post_lead(
+            state(None).with_leads(launch("")),
+            r#"{"repo":"r","prompt":"go"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(!server.methods().iter().any(|m| m == "agent.prompt"));
+    }
+
+    #[tokio::test]
+    async fn repos_route_rereads_the_registered_list() {
+        let launch = launch("[[repos]]\npath = \"~/a\"\norigin = \"https://example.org/a.git\"\n");
+        let config = launch.config_path.clone();
+        let get = |state: AppState| async move {
+            let response = super::test_request(
+                state,
+                Request::builder()
+                    .uri("/api/repos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        };
+        let (status, body) = get(state(None).with_leads(launch.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            json!({"repos":[{"origin":"https://example.org/a.git","path":"~/a"}]})
+        );
+        std::fs::write(&config, "").unwrap();
+        let (_, body) = get(state(None).with_leads(launch)).await;
+        assert_eq!(body, json!({"repos":[]}));
+        let (status, _) = get(state(None)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Capture native source records before installing a publication in the reader.

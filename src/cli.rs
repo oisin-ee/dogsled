@@ -235,6 +235,10 @@ pub enum Command {
         #[command(flatten)]
         placement: WorkArgs,
     },
+    /// Start a top-level Pi lead in a registered repository and send it the first prompt. A
+    /// lead has no owner, no done/ask/blocked contract, and no capacity cost; it stays open
+    /// until `dogsled close lead-<id>`.
+    Lead(LeadArgs),
     /// Durable unit request protocol. All operations accept and return JSON.
     #[command(subcommand)]
     Unit(UnitCommand),
@@ -251,9 +255,10 @@ pub enum Command {
         owner: Option<String>,
     },
     /// Close a finished child: run its worktree's `teardown`, close the panes and Herdr workspace
-    /// that use it, remove the worktree, and end its item. Refuses busy or dirty work.
+    /// that use it, remove the worktree, and end its item. Refuses busy or dirty work. A lead,
+    /// by name or pane, loses only its idle pane; its repository and children stay.
     Close {
-        /// The child's Herdr pane (the spawn result's `target`).
+        /// The child's Herdr pane (the spawn result's `target`), or a lead's name.
         pane: String,
         /// The child's host. Defaults to the host of the open item for this pane, else local.
         #[arg(long)]
@@ -965,4 +970,22 @@ impl ThresholdArgs {
             reservation_ttl_ms: self.reservation_ttl_ms.unwrap_or(base.reservation_ttl_ms),
         }
     }
+}
+
+/// `dogsled lead`: the repository and the first prompt.
+#[derive(Debug, clap::Args)]
+pub struct LeadArgs {
+    /// The repository's registered origin or path (`dogsled repo list`).
+    #[arg(long)]
+    pub repo: String,
+    /// The first prompt. Use `--message-file` for a long or multi-line prompt.
+    #[arg(
+        long,
+        required_unless_present = "message_file",
+        conflicts_with = "message_file"
+    )]
+    pub message: Option<String>,
+    /// A file with the first prompt, or `-` for stdin.
+    #[arg(long, value_name = "PATH")]
+    pub message_file: Option<PathBuf>,
 }

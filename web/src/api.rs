@@ -125,6 +125,34 @@ pub async fn send_prompt(pane: &str, text: &str) -> Result<(), String> {
     post(&format!("{BASE}/api/agents/{}/prompt", encode(pane)), &body).await
 }
 
+/// The repositories a lead can start in.
+pub async fn fetch_repos() -> Result<Vec<portal_types::agents::RepoChoice>, String> {
+    let response = Request::get(&format!("{BASE}/api/repos"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    read_json::<portal_types::agents::RepoList>(response)
+        .await
+        .map(|list| list.repos)
+}
+
+/// Start a lead in `repo` with its first prompt. The result is the lead's pane.
+pub async fn create_lead(repo: &str, prompt: &str) -> Result<String, String> {
+    let body = portal_types::agents::CreateLeadBody {
+        repo: repo.to_owned(),
+        prompt: prompt.to_owned(),
+    };
+    let response = Request::post(&format!("{BASE}/api/leads"))
+        .json(&body)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    read_json::<portal_types::agents::CreatedLead>(response)
+        .await
+        .map(|lead| lead.pane)
+}
+
 /// Answer a blocked prompt with one key.
 pub async fn send_key(pane: &str, key: &str) -> Result<(), String> {
     let body = KeysBody {

@@ -60,5 +60,319 @@ pub(crate) fn protects_pane(record: &Record, pane: &str, terminal: Option<&str>)
         )
 }
 
+/// What a lead launch needs. It never reads the caller's pane or workspace.
+pub(crate) struct CreateContext<'a> {
+    pub shell: &'a dyn crate::shell::Shell,
+    pub ledger: &'a crate::ledger::Ledger,
+    /// Reloaded on every launch, so a long-lived portal or MCP server sees `repo add`.
+    pub config_path: &'a std::path::Path,
+    pub home: &'a str,
+    pub herdr: &'a crate::herdr_socket::Client,
+}
+
+/// A lead that started and accepted its first prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Started {
+    pub id: String,
+    pub name: String,
+    pub pane: String,
+    pub workspace: Option<String>,
+}
+
+/// Which side of the launch a failure is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FailureKind {
+    /// The selector, prompt, or checkout is wrong. Nothing was recorded.
+    Invalid,
+    /// Herdr cannot take a prompt here. Nothing was recorded.
+    Unavailable,
+    /// The launch was recorded and an effect failed. The pane stays as it is.
+    Launch,
+}
+
+/// A failed launch keeps what is known: its record, pane, and the phase that failed.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    pub kind: FailureKind,
+    pub id: Option<String>,
+    pub pane: Option<String>,
+    pub phase: Option<Phase>,
+    pub error: Box<crate::error::Error>,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)?;
+        if let Some(id) = &self.id {
+            write!(f, "; lead request {id}")?;
+        }
+        if let Some(pane) = &self.pane {
+            write!(f, ", pane {pane}")?;
+        }
+        if let Some(phase) = self.phase {
+            write!(
+                f,
+                ", phase {}",
+                crate::rows::name(&phase).unwrap_or_default()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl From<Failure> for crate::error::Error {
+    fn from(failure: Failure) -> Self {
+        match failure.kind {
+            FailureKind::Invalid | FailureKind::Unavailable if failure.id.is_none() => {
+                *failure.error
+            }
+            _ => Self::Launch(failure.to_string()),
+        }
+    }
+}
+
+/// A request ID short enough that `lead-<id>` is a Herdr agent name: at most 32 characters
+/// of `[a-z0-9_-]`, starting with a letter.
+pub(crate) fn new_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "r-{}-{}-{}",
+        base36(crate::ledger::now_ms()),
+        base36(u64::from(std::process::id())),
+        base36(SEQUENCE.fetch_add(1, Ordering::Relaxed))
+    )
+}
+
+fn base36(mut value: u64) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut digits = Vec::new();
+    loop {
+        digits.push(DIGITS[usize::try_from(value % 36).unwrap_or_default()]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    digits.reverse();
+    String::from_utf8(digits).unwrap_or_default()
+}
+
+fn agent_name(id: &str) -> crate::error::Result<String> {
+    let name = format!("lead-{id}");
+    if name.len() > 32
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err(crate::error::Error::Invalid(format!(
+            "{name} is not a Herdr agent name"
+        )));
+    }
+    Ok(name)
+}
+
+/// Start one ownerless Pi lead in a registered repository and submit its first prompt.
+/// Intent is saved before every effect. A failure after the record keeps the pane and
+/// never retries an uncertain start or prompt.
+pub(crate) fn create(
+    context: &CreateContext<'_>,
+    selector: &str,
+    prompt: &str,
+) -> Result<Started, Failure> {
+    let invalid = |error| Failure {
+        kind: FailureKind::Invalid,
+        id: None,
+        pane: None,
+        phase: None,
+        error: Box::new(error),
+    };
+    let repository = registered(context, selector).map_err(invalid)?;
+    if prompt.trim().is_empty() {
+        return Err(invalid(crate::error::Error::Invalid(
+            "the first prompt is empty".into(),
+        )));
+    }
+    context.herdr.agent_list().map_err(|error| Failure {
+        kind: FailureKind::Unavailable,
+        id: None,
+        pane: None,
+        phase: None,
+        error: Box::new(error),
+    })?;
+    let id = new_id();
+    let name = agent_name(&id).map_err(invalid)?;
+    let validity =
+        crate::jobs::issue_unowned_validity(context.ledger, &id).map_err(|error| Failure {
+            kind: FailureKind::Launch,
+            id: Some(id.clone()),
+            pane: None,
+            phase: None,
+            error: Box::new(error),
+        })?;
+    let now = crate::ledger::now_ms();
+    let mut record = Record {
+        id,
+        name,
+        repository,
+        prompt: prompt.to_owned(),
+        validity,
+        created_ms: now,
+        phase: Phase::Recorded,
+        pane: None,
+        terminal: None,
+        workspace: None,
+        updated_ms: now,
+        error: None,
+        close_requested_ms: None,
+        closed_ms: None,
+    };
+    crate::lead_store::insert(context.ledger, &record).map_err(|error| Failure {
+        kind: FailureKind::Launch,
+        id: Some(record.id.clone()),
+        pane: None,
+        phase: None,
+        error: Box::new(error),
+    })?;
+    launch(context, &mut record).map_err(|error| {
+        let error = match record.pane.as_deref() {
+            Some(pane) if record.phase == Phase::Starting => {
+                crate::launch::startup_error(context.shell, pane, error)
+            }
+            _ => error,
+        };
+        let message = error.to_string();
+        // The original error is the answer; a failed note must not replace it.
+        let _ = crate::lead_store::update(context.ledger, &record.id, |saved| {
+            saved.error = Some(message);
+            saved.updated_ms = crate::ledger::now_ms();
+            Ok(())
+        });
+        Failure {
+            kind: FailureKind::Launch,
+            id: Some(record.id.clone()),
+            pane: record.pane.clone(),
+            phase: Some(record.phase),
+            error: Box::new(error),
+        }
+    })?;
+    Ok(Started {
+        id: record.id,
+        name: record.name,
+        pane: record.pane.unwrap_or_default(),
+        workspace: record.workspace,
+    })
+}
+
+/// The registered repository, checked against its local checkout. Stage 1 never clones,
+/// creates a worktree, or changes branches.
+fn registered(
+    context: &CreateContext<'_>,
+    selector: &str,
+) -> crate::error::Result<crate::checkout::Repository> {
+    let policy = crate::config::load(context.config_path)?;
+    let repo = crate::repos::resolve(&policy.repos, context.home, selector)?;
+    let path = crate::repos::checkout_path(context.home, repo)?;
+    let display = path.display().to_string();
+    let found = crate::checkout::discover(context.shell, &display, context.home, false)?
+        .ok_or_else(|| {
+            crate::error::Error::Invalid(format!("{display} is not a repository checkout"))
+        })?;
+    let canonical = |path: &str| std::fs::canonicalize(path).ok();
+    if canonical(&found.path).is_none() || canonical(&found.path) != canonical(&display) {
+        return Err(crate::error::Error::Invalid(format!(
+            "{display} is not the main checkout of {}",
+            repo.origin
+        )));
+    }
+    if !crate::repos::same_origin(&found.origin, &repo.origin) {
+        return Err(crate::error::Error::Invalid(format!(
+            "{display} has origin {}, not the registered {}",
+            found.origin, repo.origin
+        )));
+    }
+    Ok(found)
+}
+
+/// Advance one saved phase per effect. `record` mirrors what is saved.
+fn launch(context: &CreateContext<'_>, record: &mut Record) -> crate::error::Result<()> {
+    let ledger = context.ledger;
+    let advance = |record: &mut Record, phase: Phase| -> crate::error::Result<()> {
+        record.phase = phase;
+        record.updated_ms = crate::ledger::now_ms();
+        let saved = record.clone();
+        crate::lead_store::update(ledger, &record.id, |stored| {
+            *stored = saved;
+            Ok(())
+        })
+    };
+    advance(record, Phase::Allocating)?;
+    let (pane, created) = crate::work::repository_pane(context.shell, &record.repository.path)?;
+    record.pane = Some(pane.clone());
+    let (panes, terminals) = crate::cleanup::pane_snapshot(context.shell)?;
+    record.terminal = created.or_else(|| terminals.get(&pane).cloned());
+    record.workspace = panes
+        .iter()
+        .find(|listed| listed.pane_id == pane)
+        .and_then(|listed| listed.workspace_id.clone());
+    advance(record, Phase::Allocated)?;
+    let terminal = record.terminal.clone().ok_or_else(|| {
+        crate::error::Error::Invalid(format!("{pane}: cannot establish its terminal identity"))
+    })?;
+    advance(record, Phase::Starting)?;
+    let args = [
+        "agent",
+        "start",
+        &record.name,
+        "--kind",
+        "pi",
+        "--pane",
+        &pane,
+    ]
+    .map(str::to_owned);
+    let validity = record.validity;
+    crate::launch::start_native(ledger, context.shell, &args, &pane, &terminal, &|| {
+        crate::jobs::check_validity(ledger, Some(&validity))
+    })?;
+    advance(record, Phase::Started)?;
+    advance(record, Phase::Prompting)?;
+    context.herdr.agent_prompt(&pane, &record.prompt)?;
+    advance(record, Phase::Ready)
+}
+
+/// Whether any open lead may own this pane. Automatic paths leave such a pane alone.
+pub(crate) fn protected(leads: &[Record], pane: &str, terminal: Option<&str>) -> bool {
+    leads.iter().any(|lead| protects_pane(lead, pane, terminal))
+}
+
+/// The open lead that may own `pane`, read fresh for a destructive or terminal decision.
+pub(crate) fn on_pane(
+    ledger: &crate::ledger::Ledger,
+    pane: &str,
+    terminal: Option<&str>,
+) -> crate::error::Result<Option<Record>> {
+    Ok(crate::lead_store::list(ledger)?
+        .into_iter()
+        .find(|lead| protects_pane(lead, pane, terminal)))
+}
+
+/// The open lead an explicit command names, by its generated name or its pane.
+pub(crate) fn resolve_local(
+    ledger: &crate::ledger::Ledger,
+    target: &str,
+) -> crate::error::Result<Option<Record>> {
+    Ok(crate::lead_store::list(ledger)?.into_iter().find(|lead| {
+        lead.closed_ms.is_none() && (lead.name == target || lead.pane.as_deref() == Some(target))
+    }))
+}
+
+/// A lead has no completion contract: it never signals done, ask, or blocked.
+pub(crate) fn refuse_signal(pane: &str, signal: &str) -> crate::error::Error {
+    crate::error::Error::Invalid(format!(
+        "{pane} is a lead; leads have no {signal}. Close it explicitly with dogsled close"
+    ))
+}
+
 #[cfg(test)]
 mod tests;

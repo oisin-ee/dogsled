@@ -82,6 +82,33 @@ pub struct PromptBody {
     pub text: String,
 }
 
+/// Body of the lead creation request: a registered repository and the first prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateLeadBody {
+    pub repo: String,
+    pub prompt: String,
+}
+
+/// A registered repository a lead can start in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoChoice {
+    pub origin: String,
+    pub path: String,
+}
+
+/// The registered repositories, in config order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoList {
+    pub repos: Vec<RepoChoice>,
+}
+
+/// A lead that started and accepted its first prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedLead {
+    pub pane: String,
+}
+
 /// Body of the keys request. Only the keys the server allows are accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeysBody {

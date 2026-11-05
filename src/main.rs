@@ -222,6 +222,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         Command::Repo(command) => {
             repo_command(&shell, &home, &config_path, &policy, command, cli.json)?;
         }
+        Command::Lead(args) => lead_command(&node, &config_path, args, cli.json)?,
         Command::Serve { interval, once } => service::serve(
             &node,
             &policy,
@@ -261,12 +262,12 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         }
         Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
         Command::Sidebar { owner } => sidebar::command(shell, &ledger, &policy, &home, owner)?,
-        Command::Web { port } => web::serve(&ledger, &policy, &home, port)?,
+        Command::Web { port } => web::serve(&ledger, &policy, &home, port, &config_path)?,
         command @ (Command::Interview { .. } | Command::Review { .. }) => {
             return web::oneshot::command(&shell, &ledger, command);
         }
         Command::Unit(command) => return unit_request::run(&fleet, command),
-        Command::Mcp => mcp::serve(policy, ledger, home)?,
+        Command::Mcp => mcp::serve(policy, ledger, home, config_path)?,
 
         Command::Drop { id, host } => {
             let dropped = drop::drop(&fleet, &id, host.as_deref())?;
@@ -299,6 +300,28 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         command => return dispatch(&fleet, command, cli.json),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `dogsled lead`: the shared creator, printing the lead's name and pane.
+fn lead_command(
+    node: &Node<'_>,
+    config_path: &std::path::Path,
+    args: cli::LeadArgs,
+    json: bool,
+) -> Result<()> {
+    let prompt = inbox::message_text(args.message, args.message_file)?;
+    let herdr = herdr_socket::Client::discover()?;
+    let context = leads::CreateContext {
+        shell: node.shell,
+        ledger: node.ledger,
+        config_path,
+        home: node.home,
+        herdr: &herdr,
+    };
+    let started = leads::create(&context, &args.repo, &prompt)?;
+    print(json, &started, || {
+        format!("{}\t{}\n", started.name, started.pane)
+    })
 }
 
 fn repo_command(

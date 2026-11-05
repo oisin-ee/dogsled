@@ -245,7 +245,18 @@ pub fn observe(ledger: &Ledger, agents: &mut [Agent]) -> Result<()> {
         let before: Marks = crate::host_store::marks_rows(tx)?;
         let mut marks = before.clone();
         let owners = owners(ledger)?;
+        let leads = crate::lead_store::list(ledger)?;
         for agent in agents {
+            // A lead has no completion contract. It still publishes its lifecycle and work.
+            if crate::leads::protected(&leads, &agent.pane, agent.terminal_id.as_deref()) {
+                agent.signal = None;
+                agent.done = false;
+                agent.finishing = false;
+                agent.handoff = Some("none".to_owned());
+                agent.owns_open = owners.contains_key(&agent.pane);
+                crate::lifecycle::publish(agent, crate::lifecycle::Host::Up);
+                continue;
+            }
             let mut done = false;
             let mut recorded = false;
             let mut called = false;
@@ -330,6 +341,9 @@ pub fn mark(
     now: u64,
 ) -> Result<Mark> {
     let agent = crate::inbox::local_agent(shell, pane)?;
+    if crate::leads::on_pane(ledger, pane, agent.terminal_id.as_deref())?.is_some() {
+        return Err(crate::leads::refuse_signal(pane, "done"));
+    }
     if agent.state != "working" {
         return Err(Error::Invalid(format!(
             "{pane} is {}; call done during the turn that completes your task",
@@ -412,6 +426,9 @@ pub fn signal(
     now: u64,
 ) -> Result<Signal> {
     let agent = crate::inbox::local_agent(shell, pane)?;
+    if crate::leads::on_pane(ledger, pane, agent.terminal_id.as_deref())?.is_some() {
+        return Err(crate::leads::refuse_signal(pane, kind.as_str()));
+    }
     if agent.state != "working" {
         return Err(Error::Invalid(format!(
             "{pane} is {}; call {} during the working turn",
@@ -1077,6 +1094,15 @@ fn close_mark(
     )
 }
 
+/// A mark left on a lead's pane is never a handoff: no branch, reply, or closure.
+fn on_lead(leads: &[crate::leads::Record], agents: &[Agent], pane: &str) -> bool {
+    let terminal = agents
+        .iter()
+        .find(|agent| agent.pane == pane)
+        .and_then(|agent| agent.terminal_id.as_deref());
+    crate::leads::protected(leads, pane, terminal)
+}
+
 fn handoff_locked(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
@@ -1088,8 +1114,12 @@ fn handoff_locked(
     }
     let mut agents = crate::probe::agent_list(shell)?;
     observe(ledger, &mut agents)?;
+    let leads = crate::lead_store::list(ledger)?;
     for mut mark in list(ledger)? {
         if mark.dropped_ms.is_some() {
+            continue;
+        }
+        if on_lead(&leads, &agents, &mark.pane) {
             continue;
         }
         if let Some(branch) = &mut mark.branch

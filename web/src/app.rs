@@ -21,7 +21,8 @@ use crate::components::sidebar::{Sidebar, SidebarCollapsible, SidebarHeader, Sid
 use crate::components::skeleton::Skeleton;
 use crate::components::tabs::{TabContent, TabList, TabTrigger, Tabs};
 use crate::conversations::Conversations;
-use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon};
+use crate::new_lead::{NewConversation, NewLead};
+use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon, Plus};
 
 #[derive(Clone, Copy)]
 pub struct ConsoleWidth(pub Signal<u32>);
@@ -294,6 +295,31 @@ pub fn App() -> Element {
     let mut selected = use_context_provider(|| Signal::new(link.pane.clone()));
     let mut selection = use_context_provider(|| Signal::new(link.selection()));
     use_context_provider(|| Draft(Signal::new(String::new())));
+    let conversation = use_context_provider(|| NewConversation {
+        open: Signal::new(false),
+        repository: Signal::new(None),
+    });
+    let mut composing = conversation.open;
+    let mut hint = conversation.repository;
+    let mut start_new = move || {
+        let current = selected.peek().clone();
+        hint.set(current.and_then(|pane| {
+            agents
+                .peek()
+                .iter()
+                .find(|agent| agent.pane == pane)
+                .and_then(|agent| agent.repository.clone())
+        }));
+        selected.set(None);
+        selection.set(None);
+        composing.set(true);
+        panel.set(LeadPanel::Chat);
+    };
+    use_effect(move || {
+        if selected().is_some() {
+            composing.set(false);
+        }
+    });
     use_context_provider(|| Signal::new(Conversations::default()));
 
     use_future(move || async move {
@@ -336,7 +362,13 @@ pub fn App() -> Element {
 
     let navigation = rsx! {
             Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
-                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" } }
+                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" }
+                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
+                        onclick: move |_| start_new(),
+                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                        "New"
+                    }
+                }
                 ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
                     if let Some(message) = board_error() { Alert { "Board updates unavailable: {message}" } }
                     if let Some(message) = agent_error() { Status { title: "{message}", "Herdr is not reachable. The board still works." } }
@@ -401,16 +433,25 @@ pub fn App() -> Element {
                         let question = pick(InboxKind::Question);
                         rsx! { AgentView { key: "{pane}", pane, review, question, agent_count } }
                     }
+                    None if composing() => rsx! { NewLead {} },
                     None => rsx! { div { class: "empty-lead",
                         if width() < 1100 {
-                            header { class: "lead-header", TabList { aria_label: "Lead view", TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } TabTrigger { value: "chat", index: 1usize, "Chat" } } }
+                            header { class: "lead-header", TabList { aria_label: "Lead view", TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } TabTrigger { value: "chat", index: 1usize, "Chat" } }
+                                Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", onclick: move |_| start_new(),
+                                    Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                                    "New"
+                                }
+                            }
                         }
                         TabContent { class: "empty-chat", value: "chat", index: 1usize,
                         div { class: "console-empty",
                         if view.is_none() { Skeleton { role: "status", aria_label: "Loading agents" } }
                         else if view.as_ref().is_some_and(|view| view.repos.iter().all(|repo| repo.rows.is_empty())) && agents().is_empty() {
                             h1 { "No agents are running" }
-                            p { "Start an agent with " code { "dogsled spawn" } "." }
+                            Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", onclick: move |_| start_new(),
+                                Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                                "New"
+                            }
                         } else { h1 { "Select an agent" } p { "Choose an agent or a waiting item to open its work." } }
                     } } } },
                 }
