@@ -156,16 +156,28 @@ pub fn use_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use portal_types::agents::Role;
+    use portal_types::agents::{Role, Source, TimeMeaning, Timestamp};
 
     fn snapshot(pane: &str, text: &str) -> Conversation {
         Conversation {
             pane: pane.to_owned(),
             session: format!("{pane}-session"),
             turns: vec![Turn {
+                id: format!("{pane}-message"),
                 role: Role::Assistant,
                 text: text.to_owned(),
+                source: Source::Harness {
+                    harness: "pi".to_owned(),
+                    model: Some("recorded-model".to_owned()),
+                    provider: Some("recorded-provider".to_owned()),
+                },
+                timestamp: Some(Timestamp {
+                    ms: 42,
+                    meaning: TimeMeaning::Message,
+                }),
+                tool: None,
             }],
+            truncated: false,
         }
     }
 
@@ -246,6 +258,7 @@ mod tests {
                 pane: "empty".to_owned(),
                 session: "empty-session".into(),
                 turns: Vec::new(),
+                truncated: false,
             })),
         )?;
         assert_eq!(cache.access("empty"), Some(&Vec::new()));

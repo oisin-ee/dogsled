@@ -50,13 +50,77 @@ pub struct AgentList {
 pub enum Role {
     User,
     Assistant,
+    Context,
+    Tool,
 }
 
-/// One turn of a conversation.
+/// What the recorded timestamp measures, not an inferred display time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeMeaning {
+    /// The harness message timestamp. Pi assistant times mark request start,
+    /// not response completion.
+    Message,
+    Recorded,
+    Created,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timestamp {
+    pub ms: u64,
+    pub meaning: TimeMeaning,
+}
+
+/// Provenance supplied by the transcript, never recovered from message prose.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Source {
+    Harness {
+        harness: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+    },
+    Custom {
+        custom_type: String,
+    },
+    Dogsled {
+        sender: String,
+        delivery_kind: String,
+    },
+}
+
+/// Historical evidence only. An unmatched call is not a live running tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Unknown,
+    Completed,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolSummary {
+    pub call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Completed means a result was recorded, not that its payload claims success.
+    pub status: ToolStatus,
+}
+
+/// One chronological record: message text, attributed context, or a tool summary.
+/// Tool records have empty text; arguments, output, and reasoning are never included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
+    pub id: String,
     pub role: Role,
     pub text: String,
+    pub source: Source,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<Timestamp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolSummary>,
 }
 
 /// An agent's turns from its transcript, oldest first.
@@ -65,6 +129,39 @@ pub struct Conversation {
     pub pane: String,
     pub session: String,
     pub turns: Vec<Turn>,
+    /// At least one read or record bound omitted history.
+    pub truncated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn conversation_metadata_and_tool_evidence_round_trip() -> Result<(), serde_json::Error> {
+        let wire = json!({
+            "pane":"agent-pane", "session":"session-key", "truncated":true,
+            "turns":[
+                {"id":"native-message","role":"assistant","text":"reply",
+                 "source":{"kind":"harness","harness":"pi","model":"recorded-model","provider":"recorded-provider"},
+                 "timestamp":{"ms":42,"meaning":"message"}},
+                {"id":"delivery","role":"context","text":"report",
+                 "source":{"kind":"dogsled","sender":"worker","delivery_kind":"message"},
+                 "timestamp":{"ms":40,"meaning":"created"}},
+                {"id":"tool-entry","role":"tool","text":"",
+                 "source":{"kind":"harness","harness":"claude"},
+                 "timestamp":{"ms":43,"meaning":"recorded"},
+                 "tool":{"call_id":"tool-id","name":"read","status":"unknown"}},
+                {"id":"custom","role":"context","text":"context",
+                 "source":{"kind":"custom","custom_type":"extension-note"}}
+            ]
+        });
+        let conversation: Conversation = serde_json::from_value(wire.clone())?;
+        assert!(conversation.truncated);
+        assert_eq!(serde_json::to_value(conversation)?, wire);
+        Ok(())
+    }
 }
 
 /// The text on an agent's terminal.

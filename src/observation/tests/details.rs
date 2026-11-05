@@ -314,16 +314,47 @@ fn json_escaping_uses_the_derived_wire_ceiling_and_read_limit_is_unchanged() {
     let line = json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"bounded turn"}]}}).to_string() + "\n";
     std::fs::write(&path, &line).unwrap();
     let path = path.to_str().unwrap();
+    let complete = crate::activity::conversation_with_limit("pi", path, line.len() as u64).unwrap();
+    assert_eq!(complete.turns.len(), 1);
+    assert!(!complete.truncated);
+    let cut = crate::activity::conversation_with_limit("pi", path, line.len() as u64 - 1).unwrap();
+    assert_eq!(cut.turns, Vec::<portal_types::agents::Turn>::new());
+    assert!(cut.truncated);
+}
+
+#[test]
+fn conversation_capture_preserves_session_metadata_and_truncation() {
+    let native = Native::new();
+    let agent = native.agent();
+    let mut transcript = String::new();
+    for index in 0..201 {
+        transcript.push_str(&json!({"type":"message","id":format!("message-{index}"),"message":{"role":"assistant","timestamp":42,"model":"recorded-model","provider":"recorded-provider","content":"reply"}}).to_string());
+        transcript.push('\n');
+    }
+    std::fs::write(agent.transcript.as_ref().unwrap(), transcript).unwrap();
+    let mut capture = Capture::default();
+    let detail = capture.tick(&agent, Ok(&native.server.client()));
+    let Content::Available(conversation) = &detail.conversation else {
+        panic!("expected conversation, got {:?}", detail.conversation);
+    };
+    assert_eq!(conversation.session, detail.key().unwrap());
+    assert_eq!(conversation.pane, agent.pane);
+    assert!(conversation.truncated);
+    assert_eq!(conversation.turns.len(), 200);
+    assert_eq!(conversation.turns[0].id, "message-1");
+    let encoded = super::super::details::CODEC.encode(&detail).unwrap();
+    let decoded: super::super::details::Detail =
+        Codec::decode(&encoded, super::super::details::CODEC.wire_limit()).unwrap();
+    assert_eq!(decoded, detail);
+    let wire: Value = serde_json::from_slice(&encoded).unwrap();
+    let turn = &wire["conversation"]["data"]["turns"][0];
+    assert_eq!(turn["timestamp"], json!({"ms":42,"meaning":"message"}));
     assert_eq!(
-        crate::activity::conversation_with_limit("pi", path, line.len() as u64)
-            .unwrap()
-            .len(),
-        1
+        turn["source"],
+        json!({"kind":"harness","harness":"pi","model":"recorded-model","provider":"recorded-provider"})
     );
-    assert_eq!(
-        crate::activity::conversation_with_limit("pi", path, line.len() as u64 - 1).unwrap(),
-        Vec::<portal_types::agents::Turn>::new()
-    );
+    assert_eq!(capture.tick(&agent, Ok(&native.server.client())), detail);
+    assert_eq!(capture.transcript_reads, 1);
 }
 
 #[test]
