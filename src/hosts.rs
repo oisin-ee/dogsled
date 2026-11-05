@@ -962,6 +962,21 @@ mod tests {
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
 
+    #[test]
+    fn disabled_machines_are_not_fleet_hosts() {
+        let hosts = parse_machine_list(
+            r#"[{"id":"peer","label":"peer","target":"peer.example"},{"id":"off","label":"off","target":"off.example","enabled":false}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            hosts
+                .iter()
+                .map(|host| host.id.as_str())
+                .collect::<Vec<_>>(),
+            ["peer"]
+        );
+    }
+
     fn observed_status(fleet: &Fleet<'_>, now: u64) -> Result<Vec<HostReport>> {
         for host in fleet.hosts.iter().filter(|host| !host.is_local()) {
             crate::observation::peers::Ingestion::default().refresh(

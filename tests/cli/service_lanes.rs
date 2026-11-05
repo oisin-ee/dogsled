@@ -32,6 +32,23 @@ fn lanes(rig: &Rig) -> Value {
 }
 
 #[test]
+fn quota_cli_only_requests_and_serve_consumes_the_request() {
+    let rig = Rig::new("quota-cli-request");
+    let (code, plain) = rig.json(&["quota"]);
+    assert_eq!(code, 0, "{plain}");
+    assert!(rig.state(&["quota-request"]).is_null());
+    let (code, refreshed) = rig.json(&["quota", "--refresh"]);
+    assert_eq!(code, 0, "{refreshed}");
+    assert_eq!(refreshed, plain);
+    assert!(!rig.state(&["quota-request"]).is_null());
+    // The CLI reads storage only: no fleet discovery, Herdr, SSH or Keychain.
+    assert_eq!(rig.log("herdr.log"), "");
+    assert_eq!(rig.log("ssh.log"), "");
+    serve(&rig);
+    assert!(rig.state(&["quota-request"]).is_null());
+}
+
+#[test]
 fn lane_status_write_failure_does_not_stop_service() {
     let rig = Rig::new("service-lane-write-refused");
     serve(&rig);

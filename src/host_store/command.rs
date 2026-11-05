@@ -1,11 +1,12 @@
 //! Hidden, typed fixture and inspection commands. JSON exists only at the CLI boundary.
 
 use super::{
-    BTreeMap, BTreeSet, Ledger, Result, consume_sweep_request, custodies, gate, landing, marks,
-    operations, orphans, parents, peer, put_custodies, put_landing, put_marks, put_operations,
-    put_orphans, put_parents, put_peer, put_quota, put_quota_refresh, put_repositories,
-    put_snapshot, put_sweep_request, put_trees, put_watchdog, quota, quota_refresh, replace_gate,
-    replace_report, report, reports, repositories, snapshot, sweep_request, trees, watchdog,
+    BTreeMap, BTreeSet, Ledger, Result, consume_quota_request, consume_sweep_request, custodies,
+    gate, landing, marks, operations, orphans, parents, peer, put_custodies, put_landing,
+    put_marks, put_operations, put_orphans, put_parents, put_peer, put_quota, put_quota_refresh,
+    put_quota_request, put_repositories, put_snapshot, put_sweep_request, put_trees, put_watchdog,
+    quota, quota_refresh, quota_request, replace_gate, replace_report, report, reports,
+    repositories, snapshot, sweep_request, trees, watchdog,
 };
 
 macro_rules! commands {
@@ -14,6 +15,7 @@ macro_rules! commands {
         pub(crate) enum Command {
             Peer { id: String, #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
             SweepRequest { #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
+            QuotaRequest { #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
             Gate { #[arg(long)] delete: bool },
             /// The latest completed cleanup pass.
             Sweep { #[arg(long, conflicts_with = "delete")] put: bool, #[arg(long)] delete: bool },
@@ -39,6 +41,11 @@ macro_rules! commands {
                     if put { let token: String = serde_json::from_reader(std::io::stdin().lock())?; put_sweep_request(ledger, &token)?; }
                     if delete && let Some(token) = sweep_request(ledger)? { consume_sweep_request(ledger, &token)?; }
                     Ok(serde_json::to_value(sweep_request(ledger)?)?)
+                }
+                Command::QuotaRequest { put, delete } => {
+                    if put { let token: String = serde_json::from_reader(std::io::stdin().lock())?; put_quota_request(ledger, &token)?; }
+                    if delete && let Some(token) = quota_request(ledger)? { consume_quota_request(ledger, &token)?; }
+                    Ok(serde_json::to_value(quota_request(ledger)?)?)
                 }
                 Command::Gate { delete } => {
                     crate::store::write(ledger, |tx| {

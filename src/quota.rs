@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use crate::backoff::Backoff;
 use crate::config::Policy;
 use crate::error::{Error, Result};
-use crate::hosts::ObserverFleet;
 use crate::ledger::Ledger;
 use crate::shell::Shell;
 
@@ -561,50 +560,69 @@ pub(crate) struct Refresh {
     pub(crate) push_retry: Backoff,
 }
 
-pub fn command(
-    shell: &dyn Shell,
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    args: &crate::cli::QuotaArgs,
-) -> Result<Snapshot> {
+/// The CLI reads the stored snapshot. Only serve's quota lane collects: `--refresh` records a
+/// durable request and wakes serve, and the next stored snapshot answers it.
+pub fn command(ledger: &Ledger, args: &crate::cli::QuotaArgs) -> Result<Snapshot> {
     if args.store {
-        store(ledger, std::io::stdin().lock())
-    } else {
-        read(shell, ledger, policy, home, args.cached, args.refresh)
+        return store(ledger, std::io::stdin().lock());
     }
+    if args.refresh {
+        request(ledger)?;
+    }
+    cached(ledger)
 }
 
-pub fn read(
-    shell: &dyn Shell,
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    only_cached: bool,
-    force: bool,
-) -> Result<Snapshot> {
-    Collector {
-        shell,
-        ledger,
-        policy,
-        home,
+/// Durable first, wake second. A stopped service consumes the request when it starts.
+pub fn request(ledger: &Ledger) -> Result<()> {
+    crate::host_store::put_quota_request(ledger, &crate::ledger::new_id())?;
+    crate::sweep::wake(ledger)
+}
+
+pub fn pending(ledger: &Ledger) -> Result<bool> {
+    Ok(crate::host_store::quota_request(ledger)?.is_some())
+}
+
+/// Serve's quota lane. A pending request forces collection and is consumed whatever the
+/// outcome, so a failed or inactive collector never leaves it to restart the lane.
+pub(crate) fn lane(fleet: &crate::hosts::ActionFleet<'_>, now: u64) -> Result<()> {
+    let peers = fleet
+        .hosts
+        .iter()
+        .filter(|host| !host.is_local())
+        .map(|host| fleet.remote_argv(host, &["quota-store".into()]))
+        .collect::<Vec<_>>();
+    let collector = Collector {
+        shell: fleet.shell,
+        ledger: fleet.ledger,
+        policy: fleet.policy,
+        peers: &peers,
         macos: cfg!(target_os = "macos"),
-    }
-    .read(only_cached, force, crate::ledger::now_ms())
+    };
+    collector.lane(now)
 }
 
 struct Collector<'a> {
     shell: &'a dyn Shell,
     ledger: &'a Ledger,
     policy: &'a Policy,
-    home: &'a str,
+    /// The `ssh` argv of each published peer's `quota-store`.
+    peers: &'a [Vec<String>],
     macos: bool,
 }
 
 impl Collector<'_> {
-    fn read(&self, only_cached: bool, force: bool, now: u64) -> Result<Snapshot> {
+    fn lane(&self, now: u64) -> Result<()> {
+        let request = crate::host_store::quota_request(self.ledger)?;
+        let result = self.read(request.is_some(), now);
+        if let Some(token) = request {
+            crate::host_store::consume_quota_request(self.ledger, &token)?;
+        }
+        result.map(|_| ())
+    }
+
+    fn read(&self, force: bool, now: u64) -> Result<Snapshot> {
         let previous = cached(self.ledger)?;
-        if only_cached || !self.macos || self.policy.quota.management_url.is_none() {
+        if !self.macos || self.policy.quota.management_url.is_none() {
             return Ok(previous);
         }
         let observed: Refresh = crate::host_store::quota_refresh(self.ledger)?.unwrap_or_default();
@@ -645,7 +663,7 @@ impl Collector<'_> {
             if refresh.pending_push {
                 // Persist before transport so a crash leaves delivery pending.
                 crate::host_store::put_quota_refresh(self.ledger, &refresh)?;
-                match push(self.shell, self.ledger, self.policy, self.home, &snapshot) {
+                match push(self.shell, self.peers, &snapshot) {
                     Ok(()) => {
                         refresh.pending_push = false;
                         refresh.push_retry.reset();
@@ -663,21 +681,12 @@ impl Collector<'_> {
     }
 }
 
-fn push(
-    shell: &dyn Shell,
-    ledger: &Ledger,
-    policy: &Policy,
-    home: &str,
-    snapshot: &Snapshot,
-) -> Result<()> {
-    let fleet = ObserverFleet::discover(shell, ledger, policy, home.into())
-        .map_err(|_| Error::Invalid("quota host discovery failed".into()))?;
+fn push(shell: &dyn Shell, peers: &[Vec<String>], snapshot: &Snapshot) -> Result<()> {
     let input = serde_json::to_vec(snapshot)?;
     let mut failed = false;
-    for host in fleet.hosts.iter().filter(|host| !host.is_local()) {
-        let args = fleet.remote_argv(host, &["quota-store".into()]);
+    for args in peers {
         failed |= !shell
-            .run_input_bounded("ssh", &args, &input, crate::budget::CALL_LIMIT)
+            .run_input_bounded("ssh", args, &input, crate::budget::CALL_LIMIT)
             .is_ok_and(|output| output.ok());
     }
     if failed {
@@ -711,7 +720,6 @@ mod tests {
             shell
                 .shell
                 .on(&format!("security {}", KEY_ARGS.join(" ")), SECRET);
-            shell.shell.on("herdr machine list --json", r#"[{"id":"peer","label":"peer","target":"peer.example"},{"id":"off","label":"off","target":"off.example","enabled":false}]"#);
             shell
         }
 
@@ -750,8 +758,7 @@ mod tests {
             assert!(!args.join(" ").contains(SECRET));
             assert!(!args.join(" ").contains(RAW_KEY));
             if program == "ssh" {
-                assert!(args.join(" ").contains("host quota-store --json"));
-                assert!(!args.join(" ").contains("off.example"));
+                assert_eq!(args, &peer_argv());
                 let snapshot: Snapshot = serde_json::from_slice(input).unwrap();
                 self.stored.lock().unwrap().push(snapshot);
                 return Ok(Output {
@@ -769,10 +776,15 @@ mod tests {
         }
     }
 
+    fn peer_argv() -> Vec<String> {
+        words(&["peer.example", "dogsled host quota-store --json"])
+    }
+
     struct Fixture {
         shell: HttpShell,
         ledger: Ledger,
         policy: Policy,
+        peers: Vec<Vec<String>>,
     }
 
     impl Fixture {
@@ -783,6 +795,7 @@ mod tests {
                 shell: HttpShell::new(),
                 ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
                 policy,
+                peers: vec![peer_argv()],
             }
         }
 
@@ -791,7 +804,7 @@ mod tests {
                 shell: &self.shell,
                 ledger: &self.ledger,
                 policy: &self.policy,
-                home: "/home/test",
+                peers: &self.peers,
                 macos: true,
             }
         }
@@ -832,7 +845,7 @@ mod tests {
             }}),
             200,
         );
-        let snapshot = f.collector().read(false, false, 1_000_000).unwrap();
+        let snapshot = f.collector().read(false, 1_000_000).unwrap();
         assert_eq!(snapshot.pools.len(), 6);
         assert_eq!(snapshot.pools[0].resets_ms, Some(1_767_225_600_000));
         assert_eq!(snapshot.pools[0].used_pct, 25.5);
@@ -883,7 +896,7 @@ mod tests {
         );
         f.shell.usage(&json!({"error":SECRET}), 401);
         f.shell.reply(&json!({"error":SECRET}), 503);
-        let snapshot = f.collector().read(false, false, 1000).unwrap();
+        let snapshot = f.collector().read(false, 1000).unwrap();
         assert_eq!(snapshot.pools.len(), 6);
         assert!(snapshot.pools.iter().all(|row| row.error.is_some()));
         assert_eq!(
@@ -926,7 +939,7 @@ mod tests {
             ]}),
             200,
         );
-        let snapshot = f.collector().read(false, false, 1000).unwrap();
+        let snapshot = f.collector().read(false, 1000).unwrap();
         let plugin: Vec<_> = snapshot
             .pools
             .iter()
@@ -966,7 +979,7 @@ mod tests {
             &json!({"groups":[{"displayName":"All","buckets":[{"window":"5h","remainingFraction":0.5}]}]}),
             200,
         );
-        let snapshot = f.collector().read(false, false, 1000).unwrap();
+        let snapshot = f.collector().read(false, 1000).unwrap();
         assert_eq!(snapshot.pools.len(), 1);
         assert_eq!(snapshot.pools[0].window, "5h");
         assert_eq!(snapshot.pools[0].used_pct, 50.0);
@@ -996,7 +1009,7 @@ mod tests {
                 &json!({"groups":[{"displayName":"a","buckets":[{"window":"w","remainingFraction":0.9}]}]}),
                 200,
             );
-            let snapshot = f.collector().read(false, false, 1000).unwrap();
+            let snapshot = f.collector().read(false, 1000).unwrap();
             assert_eq!(snapshot.pools.len(), 2);
             assert_eq!(snapshot.pools[0].pool, "minimax");
             assert_eq!(snapshot.pools[0].account, "redacted");
@@ -1063,21 +1076,15 @@ mod tests {
             ..Snapshot::empty()
         };
         crate::host_store::put_quota(&f.ledger, &snapshot).unwrap();
-        assert_eq!(
-            f.collector().read(true, false, 2_000_000).unwrap(),
-            snapshot
-        );
+        assert_eq!(cached(&f.ledger).unwrap(), snapshot);
         assert!(f.shell.shell.calls.lock().unwrap().is_empty());
         f.policy.quota.management_url = None;
-        assert_eq!(
-            f.collector().read(false, true, 2_000_000).unwrap(),
-            snapshot
-        );
+        assert_eq!(f.collector().read(true, 2_000_000).unwrap(), snapshot);
         assert!(f.shell.shell.calls.lock().unwrap().is_empty());
         f.policy.quota.management_url = Some("https://proxy.example".into());
         let mut linux = f.collector();
         linux.macos = false;
-        assert_eq!(linux.read(false, true, 2_000_000).unwrap(), snapshot);
+        assert_eq!(linux.read(true, 2_000_000).unwrap(), snapshot);
         assert!(f.shell.shell.calls.lock().unwrap().is_empty());
         f.shell.shell.on_output(
             &format!("security {}", KEY_ARGS.join(" ")),
@@ -1087,10 +1094,7 @@ mod tests {
                 stderr: SECRET.into(),
             },
         );
-        assert_eq!(
-            f.collector().read(false, true, 2_000_000).unwrap(),
-            snapshot
-        );
+        assert_eq!(f.collector().read(true, 2_000_000).unwrap(), snapshot);
         assert!(f.shell.requests.lock().unwrap().is_empty());
         assert_eq!(f.shell.shell.calls.lock().unwrap().len(), 1);
     }
@@ -1136,30 +1140,84 @@ mod tests {
         let f = Fixture::new();
         f.shell.minimal();
         *f.shell.fail_push.lock().unwrap() = true;
-        assert!(f.collector().read(false, false, 1000).is_err());
+        assert!(f.collector().read(false, 1000).is_err());
         assert_eq!(cached(&f.ledger).unwrap().fetched_ms, 1000);
         *f.shell.fail_push.lock().unwrap() = false;
-        f.collector().read(false, false, 1001).unwrap();
+        f.collector().read(false, 1001).unwrap();
         assert_eq!(f.shell.stored.lock().unwrap().len(), 1);
-        f.collector().read(false, false, 20_000).unwrap();
+        f.collector().read(false, 20_000).unwrap();
         assert_eq!(f.shell.stored.lock().unwrap().len(), 2);
         assert_eq!(f.shell.requests.lock().unwrap().len(), 1);
         f.shell.minimal();
-        f.collector().read(false, true, 20_001).unwrap();
+        f.collector().read(true, 20_001).unwrap();
         assert_eq!(f.shell.requests.lock().unwrap().len(), 2);
         f.shell.reply(&json!({"error":SECRET}), 500);
-        let error = f
-            .collector()
-            .read(false, false, 400_000)
-            .unwrap_err()
-            .to_string();
+        let error = f.collector().read(false, 400_000).unwrap_err().to_string();
         assert!(!error.contains(SECRET));
         assert_eq!(cached(&f.ledger).unwrap().fetched_ms, 20_001);
-        f.collector().read(false, false, 400_001).unwrap();
+        f.collector().read(false, 400_001).unwrap();
         assert_eq!(f.shell.requests.lock().unwrap().len(), 3);
         f.shell.minimal();
-        f.collector().read(false, false, 420_000).unwrap();
+        f.collector().read(false, 420_000).unwrap();
         assert_eq!(f.shell.requests.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn quota_cli_reads_storage_and_only_records_a_refresh_request() {
+        let f = Fixture::new();
+        let snapshot = Snapshot {
+            fetched_ms: 1,
+            source: "laptop".into(),
+            ..Snapshot::empty()
+        };
+        crate::host_store::put_quota(&f.ledger, &snapshot).unwrap();
+        for (cached_only, refresh, requested) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+        ] {
+            let args = crate::cli::QuotaArgs {
+                cached: cached_only,
+                refresh,
+                store: false,
+            };
+            assert_eq!(command(&f.ledger, &args).unwrap(), snapshot);
+            assert_eq!(pending(&f.ledger).unwrap(), requested);
+        }
+        // The CLI has no shell: no Keychain, network, discovery or SSH.
+        assert!(f.shell.shell.calls.lock().unwrap().is_empty());
+        assert!(f.shell.requests.lock().unwrap().is_empty());
+        assert!(f.shell.stored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn quota_lane_forces_a_requested_refresh_and_always_consumes_the_request() {
+        let f = Fixture::new();
+        f.shell.minimal();
+        f.collector().lane(1000).unwrap();
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 1);
+        assert_eq!(f.shell.stored.lock().unwrap().len(), 1);
+        // Fresh, so only a request collects again; the lane consumes it.
+        f.collector().lane(2000).unwrap();
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 1);
+        request(&f.ledger).unwrap();
+        f.shell.minimal();
+        f.collector().lane(3000).unwrap();
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 2);
+        assert_eq!(cached(&f.ledger).unwrap().fetched_ms, 3000);
+        assert!(!pending(&f.ledger).unwrap());
+        // A failed collection still consumes the request.
+        request(&f.ledger).unwrap();
+        f.shell.reply(&json!({"error":SECRET}), 500);
+        assert!(f.collector().lane(4000).is_err());
+        assert!(!pending(&f.ledger).unwrap());
+        // So does an inactive collector, which never touches the network.
+        request(&f.ledger).unwrap();
+        let mut linux = f.collector();
+        linux.macos = false;
+        linux.lane(5000).unwrap();
+        assert!(!pending(&f.ledger).unwrap());
+        assert_eq!(f.shell.requests.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -1169,7 +1227,7 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 let fixture = &f;
-                scope.spawn(move || fixture.collector().read(false, false, 1000).unwrap());
+                scope.spawn(move || fixture.collector().read(false, 1000).unwrap());
             }
         });
         assert_eq!(f.shell.requests.lock().unwrap().len(), 1);
@@ -1184,11 +1242,7 @@ mod tests {
             stdout: SECRET.into(),
             stderr: RAW_KEY.into(),
         });
-        let error = f
-            .collector()
-            .read(false, true, 1000)
-            .unwrap_err()
-            .to_string();
+        let error = f.collector().read(true, 1000).unwrap_err().to_string();
         assert!(!error.contains(SECRET));
         assert!(!error.contains(RAW_KEY));
         f.shell.replies.lock().unwrap().push_back(Output {
@@ -1196,11 +1250,7 @@ mod tests {
             stdout: format!("{SECRET}\n200"),
             stderr: RAW_KEY.into(),
         });
-        let error = f
-            .collector()
-            .read(false, true, 1001)
-            .unwrap_err()
-            .to_string();
+        let error = f.collector().read(true, 1001).unwrap_err().to_string();
         assert!(!error.contains(SECRET));
         assert!(!error.contains(RAW_KEY));
     }

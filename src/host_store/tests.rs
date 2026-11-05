@@ -1,9 +1,10 @@
 use super::{
-    BTreeMap, BTreeSet, Gate, Ledger, consume_sweep_request, custodies, gate, landing, marks,
-    operations, orphans, parents, peer, put_custodies, put_landing, put_marks, put_operations,
-    put_orphans, put_parents, put_peer, put_quota, put_quota_refresh, put_report, put_repositories,
-    put_snapshot, put_sweep_request, put_trees, put_watchdog, quota, quota_refresh, replace_gate,
-    report, repositories, snapshot, sweep_request, trees, watchdog,
+    BTreeMap, BTreeSet, Gate, Ledger, consume_quota_request, consume_sweep_request, custodies,
+    gate, landing, marks, operations, orphans, parents, peer, put_custodies, put_landing,
+    put_marks, put_operations, put_orphans, put_parents, put_peer, put_quota, put_quota_refresh,
+    put_quota_request, put_report, put_repositories, put_snapshot, put_sweep_request, put_trees,
+    put_watchdog, quota, quota_refresh, quota_request, replace_gate, report, repositories,
+    snapshot, sweep_request, trees, watchdog,
 };
 use serde_json::{Value, json};
 
@@ -204,6 +205,7 @@ fn clear(ledger: &Ledger) {
     put_operations(ledger, &BTreeMap::new()).unwrap();
     crate::store::write(ledger, |tx| replace_gate(tx, &Gate::new())).unwrap();
     consume_sweep_request(ledger, "token").unwrap();
+    consume_quota_request(ledger, "token").unwrap();
 }
 #[test]
 fn every_host_table_round_trips_and_replacement_clears_its_children() {
@@ -211,6 +213,11 @@ fn every_host_table_round_trips_and_replacement_clears_its_children() {
     populate(&ledger);
     put_sweep_request(&ledger, "token").unwrap();
     assert_eq!(sweep_request(&ledger).unwrap().as_deref(), Some("token"));
+    put_quota_request(&ledger, "token").unwrap();
+    assert_eq!(quota_request(&ledger).unwrap().as_deref(), Some("token"));
+    // Only the latest token is consumed: an older pass cannot drop a newer request.
+    consume_quota_request(&ledger, "older").unwrap();
+    assert_eq!(quota_request(&ledger).unwrap().as_deref(), Some("token"));
     let signatures = Gate::from([(
         "owner".into(),
         BTreeSet::from([BTreeSet::from([("item".into(), Some(7), true)])]),

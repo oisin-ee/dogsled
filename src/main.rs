@@ -218,7 +218,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         vec![hosts::Host::local()],
     );
     match cli.command {
-        Command::Quota(args) => quota_command(&shell, &ledger, &policy, &home, &args, cli.json)?,
+        Command::Quota(args) => quota_command(&ledger, &args, cli.json)?,
         Command::Repo(command) => {
             repo_command(&shell, &home, &config_path, &policy, command, cli.json)?;
         }
@@ -461,15 +461,8 @@ fn legacy_continue(ledger: &Ledger, shell: &System, ask: Ask, json: bool) -> Res
 }
 
 /// The quota command: this host's share of the fleet's capacity.
-fn quota_command(
-    shell: &System,
-    ledger: &Ledger,
-    policy: &config::Policy,
-    home: &str,
-    args: &cli::QuotaArgs,
-    json: bool,
-) -> Result<()> {
-    let snapshot = quota::command(shell, ledger, policy, home, args)?;
+fn quota_command(ledger: &Ledger, args: &cli::QuotaArgs, json: bool) -> Result<()> {
+    let snapshot = quota::command(ledger, args)?;
     print(json, &snapshot, || snapshot.render(now_ms()))?;
     Ok(())
 }
