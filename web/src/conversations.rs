@@ -32,11 +32,11 @@ impl Conversations {
         self.get(pane)
     }
 
-    pub fn get_session(&self, pane: &str, session: &str) -> Option<&Vec<Turn>> {
+    /// Keep completeness and provenance with the session-qualified history.
+    pub fn get_session(&self, pane: &str, session: &str) -> Option<&Conversation> {
         self.entries
             .iter()
             .find(|entry| entry.pane == pane && entry.session == session)
-            .map(|entry| &entry.turns)
     }
 
     fn begin_request(&mut self, pane: &str) -> u64 {
@@ -216,7 +216,7 @@ mod tests {
             )?,
             None
         );
-        assert_eq!(cache.get_session("pane", "new-session"), Some(&new.turns));
+        assert_eq!(cache.get_session("pane", "new-session"), Some(&new));
         assert_eq!(cache.get_session("pane", "pane-session"), None);
         Ok(())
     }
@@ -307,6 +307,27 @@ mod tests {
         assert_eq!(cache.get("second"), Some(&second.turns));
         assert!(cache.apply("unvisited", Ok(None)).is_err());
         assert_eq!(cache.entries.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_failure_retains_completeness_and_provenance_for_only_the_selected_session()
+    -> Result<(), String> {
+        let mut cache = Conversations::default();
+        let mut history = snapshot("pane", "retained reply");
+        history.truncated = true;
+        cache.apply("pane", Ok(Some(history.clone())))?;
+        let generation = cache.begin_request("pane");
+        assert!(
+            cache
+                .apply_response("pane", generation, Err("read failed".into()))
+                .is_err()
+        );
+        assert_eq!(cache.get_session("pane", "pane-session"), Some(&history));
+        assert_eq!(cache.get_session("pane", "other-session"), None);
+        cache.select_session("pane", "other-session");
+        assert_eq!(cache.get_session("pane", "pane-session"), None);
+        assert_eq!(cache.get_session("pane", "other-session"), None);
         Ok(())
     }
 

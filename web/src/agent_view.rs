@@ -18,10 +18,12 @@ use portal_types::reviews::{ReviewList, ReviewSummary};
 use portal_types::{BoardView, TodoStatusView, TodoView};
 use serde::de::DeserializeOwned;
 
+use crate::activity::{Gap, Live, use_live_activity};
 use crate::api;
 use crate::components::{
     accordion::{Accordion, AccordionContent, AccordionItem, AccordionTrigger},
     button::{Button, ButtonVariant},
+    collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger},
     input::Input,
     item::{Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSize, ItemTitle},
     scroll_area::ScrollArea,
@@ -420,17 +422,19 @@ fn AgentSession(
         .sum();
     let role = if row.is_some() { "worker" } else { "lead" };
     let host = row.map(|row| row.host.as_str());
-    let working = current
+    let assistant = current
         .as_ref()
-        .is_some_and(|agent| agent.state == "working")
-        && reachable();
+        .and_then(|agent| agent.name.as_deref())
+        .and_then(nonempty)
+        .unwrap_or("Assistant")
+        .to_owned();
     let mut page = use_signal(|| None::<Rc<MountedData>>);
     let mut following = use_signal(|| true);
     let mut follow_error = use_signal(|| None::<String>);
     // Follow the newest turn until the owner scrolls up to read; scrolling back
     // to the end resumes it. The page region is the one that scrolls.
     use_effect(use_reactive(
-        (&retained, &transcript_loading, &working, &tab),
+        (&retained, &transcript_loading, &tab),
         move |_| {
             if tab != Tab::Conversation || !following() {
                 return;
@@ -485,12 +489,18 @@ fn AgentSession(
                     }
                 } else {
                     ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
-                        Conversation { available: retained.is_some(), turns: retained.unwrap_or_default(), loading: transcript_loading, working }
+                        Conversation { snapshot: retained.clone(), loading: transcript_loading, assistant }
                     }
                 }
             if tab == Tab::Conversation {
-                Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
-                    on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
+                footer { class: "conversation-footer",
+                    LiveActivity { pane: pane.clone(), session: detail_session,
+                        coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
+                        connected: metadata_loading() || (reachable() && stream_error().is_none()),
+                        waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
+                    Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
+                        on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
+                }
             }
         }
     };
@@ -655,20 +665,297 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
 }
 
 #[component]
-fn Conversation(turns: Vec<Turn>, available: bool, loading: bool, working: bool) -> Element {
+pub(crate) fn Conversation(
+    snapshot: Option<wire::Conversation>,
+    loading: bool,
+    assistant: String,
+) -> Element {
+    let records = snapshot.as_ref().map(|snapshot| {
+        snapshot.turns.chunk_by(|a, b| a.role == Role::Tool && b.role == Role::Tool)
+            .filter_map(|group| {
+                let first = group.first()?;
+                Some(if first.role == Role::Tool {
+                    rsx! { ToolRecords { key: "{first.id}", turns: group.to_vec() } }
+                } else {
+                    rsx! { MessageRecord { key: "{first.id}", turn: first.clone(), assistant: assistant.clone() } }
+                })
+            }).collect::<Vec<_>>()
+    }).unwrap_or_default();
     rsx! {
         div { class: "conversation-turns",
-            if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
-            else if available && turns.is_empty() { Status { "No conversation yet. Send a message to start." } }
-            for (index, turn) in turns.iter().enumerate() {
-                article { key: "{index}", class: if turn.role == Role::User { "conversation-owner" } else { "conversation-agent" },
-                    aria_label: if turn.role == Role::User { "You" } else { "Agent" },
-                    div { class: "markdown-body", dangerous_inner_html: crate::review_view::render_markdown(&turn.text) }
+            div { class: "conversation-column",
+                if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
+                if let Some(snapshot) = &snapshot {
+                    if snapshot.truncated {
+                        p { class: "conversation-history-notice", "Earlier history was not returned." }
+                    }
+                    if snapshot.turns.is_empty() && !snapshot.truncated {
+                        Status { "No conversation yet. Send a message to start." }
+                    }
                 }
+                {records.into_iter()}
             }
-            if working { Status { "Working…" } }
         }
     }
+}
+
+/// Attribution comes from typed history, never from the body or today's model settings.
+fn source_label(turn: &Turn, assistant: &str) -> (String, String, bool) {
+    match &turn.source {
+        wire::Source::Dogsled {
+            sender,
+            delivery_kind,
+        } => (sender.clone(), format!("Dogsled · {delivery_kind}"), false),
+        wire::Source::Custom { custom_type } => {
+            (custom_type.clone(), "Extension context".into(), false)
+        }
+        wire::Source::Harness {
+            harness,
+            model,
+            provider,
+        } => {
+            let author = match turn.role {
+                Role::User => "You",
+                Role::Assistant => assistant,
+                Role::Context => "Context",
+                Role::Tool => "Tool",
+            };
+            let mut metadata = vec![harness.as_str()];
+            if turn.role == Role::Assistant {
+                metadata.extend(model.as_deref());
+                metadata.extend(provider.as_deref());
+            }
+            (author.into(), metadata.join(" · "), turn.role == Role::User)
+        }
+    }
+}
+
+#[component]
+fn MessageRecord(turn: Turn, assistant: String) -> Element {
+    let (author, source, owner) = source_label(&turn, &assistant);
+    // Polls, activity, and attribution changes must not reparse unchanged Markdown.
+    let markdown = use_memo(use_reactive(&turn.text, |text| {
+        crate::review_view::render_markdown(&text)
+    }));
+    rsx! {
+        article { class: if owner { "conversation-event conversation-owner" } else { "conversation-event" },
+            "data-record-id": turn.id, aria_label: author.clone(),
+            ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
+            div { class: "conversation-axis", aria_hidden: "true", i {} }
+            div { class: "conversation-body",
+                div { class: "conversation-meta", strong { "{author}" } span { "{source}" } }
+                div { class: "markdown-body", dangerous_inner_html: markdown() }
+            }
+        }
+    }
+}
+
+#[component]
+fn ToolRecords(turns: Vec<Turn>) -> Element {
+    let Some(first) = turns.first().cloned() else {
+        return rsx! {};
+    };
+    let names = turns
+        .iter()
+        .map(|turn| {
+            turn.tool
+                .as_ref()
+                .and_then(|tool| tool.name.as_deref())
+                .unwrap_or("Unnamed tool")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    rsx! {
+        div { class: "conversation-event conversation-tools", "data-record-id": first.id.clone(),
+            ConversationTime { timestamp: first.timestamp.clone(), role: first.role, source: first.source.clone() }
+            div { class: "conversation-axis", aria_hidden: "true", i {} }
+            div { class: "conversation-body",
+                Collapsible { keep_mounted: true,
+                    CollapsibleTrigger { "{turns.len()} tool records · {names}" }
+                    CollapsibleContent { "data-part": "tool-records",
+                        ul { role: "list",
+                            for turn in turns {
+                                li { key: "{turn.id}", "data-record-id": turn.id.clone(),
+                                    ConversationTime { timestamp: turn.timestamp.clone(), role: turn.role, source: turn.source.clone() }
+                                    div {
+                                        strong { "{turn.tool.as_ref().and_then(|tool| tool.name.as_deref()).unwrap_or(\"Unnamed tool\")}" }
+                                        p { "{tool_outcome(turn.tool.as_ref().map(|tool| tool.status))}" }
+                                        p { "{source_label(&turn, \"Assistant\").1}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn tool_outcome(status: Option<wire::ToolStatus>) -> &'static str {
+    match status {
+        Some(wire::ToolStatus::Completed) => "Result recorded",
+        Some(wire::ToolStatus::Error) => "Error recorded",
+        Some(wire::ToolStatus::Unknown) | None => "No recorded outcome",
+    }
+}
+
+fn time_meaning(role: Role, source: &wire::Source, meaning: wire::TimeMeaning) -> &'static str {
+    match meaning {
+        wire::TimeMeaning::Recorded => "Transcript entry recorded",
+        wire::TimeMeaning::Created => "Dogsled delivery created",
+        wire::TimeMeaning::Message
+            if role == Role::Assistant
+                && matches!(source, wire::Source::Harness { harness, .. } if harness.eq_ignore_ascii_case("pi")) =>
+        {
+            "Request started (not response completion)"
+        }
+        wire::TimeMeaning::Message => "Harness message time",
+    }
+}
+
+#[component]
+fn ConversationTime(
+    timestamp: Option<wire::Timestamp>,
+    role: Role,
+    source: wire::Source,
+) -> Element {
+    let Some(timestamp) = timestamp else {
+        return rsx! { span { class: "conversation-time", aria_label: "Time unavailable", "—" } };
+    };
+    let meaning = time_meaning(role, &source, timestamp.meaning);
+    let formatted = platform_time(timestamp.ms);
+    let label = formatted.as_ref().map_or_else(
+        || format!("{meaning}; date and time formatting unavailable"),
+        |(_, full, _)| format!("{meaning}: {full}"),
+    );
+    rsx! {
+        time { class: "conversation-time", datetime: formatted.as_ref().map(|(_, _, iso)| iso.clone()),
+            "data-timestamp-ms": "{timestamp.ms}", title: label.clone(), aria_label: label,
+            "{formatted.as_ref().map_or(\"—\", |(short, _, _)| short.as_str())}"
+        }
+    }
+}
+
+/// This boundary deliberately has no native test calendar or synthetic dates.
+#[cfg(not(target_arch = "wasm32"))]
+fn platform_time(_ms: u64) -> Option<(String, String, String)> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_time(ms: u64) -> Option<(String, String, String)> {
+    use js_sys::{Array, Date, Intl::DateTimeFormat, Object, Reflect, wasm_bindgen::JsValue};
+    let date = Date::new(&JsValue::from_f64(ms as f64));
+    if !date.get_time().is_finite() {
+        return None;
+    }
+    let format = |settings: &[(&str, JsValue)]| {
+        let options = Object::new();
+        for (key, value) in settings {
+            Reflect::set(&options, &JsValue::from_str(key), value).ok()?;
+        }
+        DateTimeFormat::new(&Array::new(), &options)
+            .format()
+            .call1(&JsValue::UNDEFINED, &date)
+            .ok()?
+            .as_string()
+    };
+    Some((
+        format(&[
+            ("hour", "2-digit".into()),
+            ("minute", "2-digit".into()),
+            ("hour12", false.into()),
+        ])?,
+        format(&[("dateStyle", "full".into()), ("timeStyle", "long".into())])?,
+        date.to_iso_string().into(),
+    ))
+}
+
+/// The subscription lives below the history component. Heartbeats cannot refresh Markdown.
+#[component]
+fn LiveActivity(
+    pane: String,
+    session: Signal<Option<wire::DetailSession>>,
+    coarse: String,
+    connected: bool,
+    waiting: Option<String>,
+) -> Element {
+    let live = use_live_activity(pane, session);
+    rsx! { ActivityRow { live: live(), coarse, connected, waiting } }
+}
+
+#[component]
+pub(crate) fn ActivityRow(
+    live: Live,
+    coarse: String,
+    connected: bool,
+    waiting: Option<String>,
+) -> Element {
+    let (phase, detail) = activity_label(&live, &coarse, connected, waiting.as_deref());
+    rsx! {
+        div { class: "conversation-activity", "data-state": if detail == "Needs you" { "blocked" } else if phase == "Disconnected" { "disconnected" } else { coarse.as_str() },
+            p { role: "status", aria_live: "polite", aria_atomic: "true", "{phase}" }
+            p { class: "activity-detail", "{detail}" }
+        }
+    }
+}
+
+fn activity_label(
+    live: &Live,
+    coarse: &str,
+    connected: bool,
+    waiting: Option<&str>,
+) -> (String, &'static str) {
+    if let Some(waiting) = waiting {
+        return (waiting.into(), "Needs you");
+    }
+    if !connected || coarse == "disconnected" {
+        return ("Disconnected".into(), "Agent state unavailable");
+    }
+    if coarse == "blocked" {
+        return ("Blocked".into(), "Needs you");
+    }
+    if let Live::Detail(state) = live {
+        let phase = match state.phase {
+            wire::LivePhase::Idle => "Idle".into(),
+            wire::LivePhase::Working => "Working…".into(),
+            wire::LivePhase::Thinking => "Thinking…".into(),
+            wire::LivePhase::Responding => "Responding…".into(),
+            wire::LivePhase::ToolRunning => {
+                let names = state
+                    .active_tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if names.is_empty() {
+                    "Running tools…".into()
+                } else {
+                    format!("Running tools: {names}")
+                }
+            }
+        };
+        return (phase, "Live");
+    }
+    let phase = match coarse {
+        "working" => "Working…",
+        "idle" => "Idle",
+        state => state,
+    }
+    .to_owned();
+    let detail = match live {
+        Live::Pending => "Activity pending",
+        Live::Unavailable(Gap::Disconnected) => "Activity disconnected",
+        Live::Unavailable(Gap::SessionMismatch) => "Activity session mismatch",
+        Live::Unavailable(Gap::Invalid) => "Activity unavailable",
+        Live::Unavailable(Gap::Server(wire::UnavailableReason::UnsupportedHarness)) => {
+            "Detailed activity unsupported"
+        }
+        Live::Unavailable(Gap::Server(_)) => "Detailed activity unavailable",
+        Live::Detail(_) => "Live",
+    };
+    (phase, detail)
 }
 
 pub(crate) fn message_with_images(text: &str, images: &[String]) -> String {
