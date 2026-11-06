@@ -1,0 +1,1229 @@
+{
+  "fileName": "git-files-sidebar",
+  "look": {
+    "theme": "graphite",
+    "paper": "white",
+    "font": "sans",
+    "grid": false
+  },
+  "nodes": {
+    "desktop-0-title": {
+      "seed": 1,
+      "id": "desktop-0-title",
+      "w": 380,
+      "h": 32,
+      "fontSize": 22,
+      "text": "A — Flat status list",
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-0-scope": {
+      "seed": 1,
+      "id": "desktop-0-scope",
+      "w": 380,
+      "h": 52,
+      "fontSize": 14,
+      "text": "Git files · Desktop sidebar · 300 × 720\nSynthetic example; selected checkout only.",
+      "x": 0,
+      "y": 44,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-panel": {
+      "seed": 1,
+      "id": "desktop-0-panel",
+      "w": 300,
+      "h": 720,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 110,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "type": "shape"
+    },
+    "desktop-0-tabs": {
+      "seed": 1,
+      "id": "desktop-0-tabs",
+      "w": 272,
+      "h": 38,
+      "x": 14,
+      "y": 124,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "props": {
+        "labels": "Todos 3/6, Files 7",
+        "active": 2,
+        "container": true
+      }
+    },
+    "desktop-0-branch": {
+      "seed": 1,
+      "id": "desktop-0-branch",
+      "w": 268,
+      "h": 62,
+      "fontSize": 14,
+      "text": "dogsled · local\nfeat/git-files-sidebar\n7 changed files",
+      "x": 16,
+      "y": 180,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-legend": {
+      "seed": 1,
+      "id": "desktop-0-legend",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": "Status = index | worktree\nM modified · A added · R renamed",
+      "x": 16,
+      "y": 258,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file0": {
+      "seed": 1,
+      "id": "desktop-0-file0",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": "MM  portal-types/src/agents.rs",
+      "x": 16,
+      "y": 320,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file1": {
+      "seed": 1,
+      "id": "desktop-0-file1",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": "A   src/observation/git.rs",
+      "x": 16,
+      "y": 368,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file2": {
+      "seed": 1,
+      "id": "desktop-0-file2",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": " M  src/web/agents.rs",
+      "x": 16,
+      "y": 416,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file3": {
+      "seed": 1,
+      "id": "desktop-0-file3",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": "??  web/src/files.rs",
+      "x": 16,
+      "y": 464,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file4": {
+      "seed": 1,
+      "id": "desktop-0-file4",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": " M  web/assets/console.css",
+      "x": 16,
+      "y": 512,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file5": {
+      "seed": 1,
+      "id": "desktop-0-file5",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": "R   docs/git-files.md",
+      "x": 16,
+      "y": 560,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-file6": {
+      "seed": 1,
+      "id": "desktop-0-file6",
+      "w": 268,
+      "h": 42,
+      "fontSize": 12,
+      "text": " D  src/legacy.rs",
+      "x": 16,
+      "y": 608,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-foot": {
+      "seed": 1,
+      "id": "desktop-0-foot",
+      "w": 268,
+      "h": 28,
+      "fontSize": 12,
+      "text": "Updated just now · Read only",
+      "x": 16,
+      "y": 790,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-0-note": {
+      "seed": 1,
+      "id": "desktop-0-note",
+      "w": 380,
+      "h": 72,
+      "fontSize": 16,
+      "text": "One row per file. Index and worktree stay separate.",
+      "x": 0,
+      "y": 854,
+      "groupIds": [
+        "desktop-0"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-title": {
+      "seed": 1,
+      "id": "desktop-1-title",
+      "w": 380,
+      "h": 32,
+      "fontSize": 22,
+      "text": "B — Grouped by stage",
+      "x": 440,
+      "y": 0,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-1-scope": {
+      "seed": 1,
+      "id": "desktop-1-scope",
+      "w": 380,
+      "h": 52,
+      "fontSize": 14,
+      "text": "Git files · Desktop sidebar · 300 × 720\nSynthetic example; selected checkout only.",
+      "x": 440,
+      "y": 44,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-panel": {
+      "seed": 1,
+      "id": "desktop-1-panel",
+      "w": 300,
+      "h": 720,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 440,
+      "y": 110,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "type": "shape"
+    },
+    "desktop-1-tabs": {
+      "seed": 1,
+      "id": "desktop-1-tabs",
+      "w": 272,
+      "h": 38,
+      "x": 454,
+      "y": 124,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "props": {
+        "labels": "Todos 3/6, Files 7",
+        "active": 2,
+        "container": true
+      }
+    },
+    "desktop-1-branch": {
+      "seed": 1,
+      "id": "desktop-1-branch",
+      "w": 268,
+      "h": 62,
+      "fontSize": 14,
+      "text": "dogsled · local\nfeat/git-files-sidebar\n7 changed files",
+      "x": 456,
+      "y": 180,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-h260": {
+      "seed": 1,
+      "id": "desktop-1-h260",
+      "w": 268,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Staged · 3",
+      "x": 456,
+      "y": 260,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-1-f292": {
+      "seed": 1,
+      "id": "desktop-1-f292",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": "MM  portal-types/src/agents.rs",
+      "x": 456,
+      "y": 292,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-f330": {
+      "seed": 1,
+      "id": "desktop-1-f330",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": "A   src/observation/git.rs",
+      "x": 456,
+      "y": 330,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-f368": {
+      "seed": 1,
+      "id": "desktop-1-f368",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": "R   docs/git-files.md",
+      "x": 456,
+      "y": 368,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-h406": {
+      "seed": 1,
+      "id": "desktop-1-h406",
+      "w": 268,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Unstaged · 4",
+      "x": 456,
+      "y": 406,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-1-f438": {
+      "seed": 1,
+      "id": "desktop-1-f438",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": "MM  portal-types/src/agents.rs",
+      "x": 456,
+      "y": 438,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-f476": {
+      "seed": 1,
+      "id": "desktop-1-f476",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": " M  src/web/agents.rs",
+      "x": 456,
+      "y": 476,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-f514": {
+      "seed": 1,
+      "id": "desktop-1-f514",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": " M  web/assets/console.css",
+      "x": 456,
+      "y": 514,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-f552": {
+      "seed": 1,
+      "id": "desktop-1-f552",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": " D  src/legacy.rs",
+      "x": 456,
+      "y": 552,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-h590": {
+      "seed": 1,
+      "id": "desktop-1-h590",
+      "w": 268,
+      "h": 26,
+      "fontSize": 14,
+      "text": "Untracked · 1",
+      "x": 456,
+      "y": 590,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-1-f622": {
+      "seed": 1,
+      "id": "desktop-1-f622",
+      "w": 268,
+      "h": 30,
+      "fontSize": 12,
+      "text": "??  web/src/files.rs",
+      "x": 456,
+      "y": 622,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-foot": {
+      "seed": 1,
+      "id": "desktop-1-foot",
+      "w": 268,
+      "h": 28,
+      "fontSize": 12,
+      "text": "Updated just now · Read only",
+      "x": 456,
+      "y": 790,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-1-note": {
+      "seed": 1,
+      "id": "desktop-1-note",
+      "w": 380,
+      "h": 72,
+      "fontSize": 16,
+      "text": "Readable groups; files can appear in both groups.",
+      "x": 440,
+      "y": 854,
+      "groupIds": [
+        "desktop-1"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-title": {
+      "seed": 1,
+      "id": "desktop-2-title",
+      "w": 380,
+      "h": 32,
+      "fontSize": 22,
+      "text": "C — Grouped by folder",
+      "x": 880,
+      "y": 0,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-scope": {
+      "seed": 1,
+      "id": "desktop-2-scope",
+      "w": 380,
+      "h": 52,
+      "fontSize": 14,
+      "text": "Git files · Desktop sidebar · 300 × 720\nSynthetic example; selected checkout only.",
+      "x": 880,
+      "y": 44,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-panel": {
+      "seed": 1,
+      "id": "desktop-2-panel",
+      "w": 300,
+      "h": 720,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 880,
+      "y": 110,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "type": "shape"
+    },
+    "desktop-2-tabs": {
+      "seed": 1,
+      "id": "desktop-2-tabs",
+      "w": 272,
+      "h": 38,
+      "x": 894,
+      "y": 124,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "props": {
+        "labels": "Todos 3/6, Files 7",
+        "active": 2,
+        "container": true
+      }
+    },
+    "desktop-2-branch": {
+      "seed": 1,
+      "id": "desktop-2-branch",
+      "w": 268,
+      "h": 62,
+      "fontSize": 14,
+      "text": "dogsled · local\nfeat/git-files-sidebar\n7 changed files",
+      "x": 896,
+      "y": 180,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-h260": {
+      "seed": 1,
+      "id": "desktop-2-h260",
+      "w": 268,
+      "h": 24,
+      "fontSize": 13,
+      "text": "portal-types/src",
+      "x": 896,
+      "y": 260,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-f286": {
+      "seed": 1,
+      "id": "desktop-2-f286",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": "MM  agents.rs",
+      "x": 908,
+      "y": 286,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-h314": {
+      "seed": 1,
+      "id": "desktop-2-h314",
+      "w": 268,
+      "h": 24,
+      "fontSize": 13,
+      "text": "src/observation",
+      "x": 896,
+      "y": 314,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-f340": {
+      "seed": 1,
+      "id": "desktop-2-f340",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": "A   git.rs",
+      "x": 908,
+      "y": 340,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-h368": {
+      "seed": 1,
+      "id": "desktop-2-h368",
+      "w": 268,
+      "h": 24,
+      "fontSize": 13,
+      "text": "src/web",
+      "x": 896,
+      "y": 368,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-f394": {
+      "seed": 1,
+      "id": "desktop-2-f394",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": " M  agents.rs",
+      "x": 908,
+      "y": 394,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-h422": {
+      "seed": 1,
+      "id": "desktop-2-h422",
+      "w": 268,
+      "h": 24,
+      "fontSize": 13,
+      "text": "web",
+      "x": 896,
+      "y": 422,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-f448": {
+      "seed": 1,
+      "id": "desktop-2-f448",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": "??  src/files.rs",
+      "x": 908,
+      "y": 448,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-f476": {
+      "seed": 1,
+      "id": "desktop-2-f476",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": " M  assets/console.css",
+      "x": 908,
+      "y": 476,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-h504": {
+      "seed": 1,
+      "id": "desktop-2-h504",
+      "w": 268,
+      "h": 24,
+      "fontSize": 13,
+      "text": "docs",
+      "x": 896,
+      "y": 504,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-f530": {
+      "seed": 1,
+      "id": "desktop-2-f530",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": "R   git-files.md ← old.md",
+      "x": 908,
+      "y": 530,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-h558": {
+      "seed": 1,
+      "id": "desktop-2-h558",
+      "w": 268,
+      "h": 24,
+      "fontSize": 13,
+      "text": "src",
+      "x": 896,
+      "y": 558,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "desktop-2-f584": {
+      "seed": 1,
+      "id": "desktop-2-f584",
+      "w": 256,
+      "h": 26,
+      "fontSize": 12,
+      "text": " D  legacy.rs",
+      "x": 908,
+      "y": 584,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-foot": {
+      "seed": 1,
+      "id": "desktop-2-foot",
+      "w": 268,
+      "h": 28,
+      "fontSize": 12,
+      "text": "Updated just now · Read only",
+      "x": 896,
+      "y": 790,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "desktop-2-note": {
+      "seed": 1,
+      "id": "desktop-2-note",
+      "w": 380,
+      "h": 72,
+      "fontSize": 16,
+      "text": "Shared paths appear once. Better for larger changes.",
+      "x": 880,
+      "y": 854,
+      "groupIds": [
+        "desktop-2"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "compact-title": {
+      "seed": 1,
+      "id": "compact-title",
+      "w": 1000,
+      "h": 40,
+      "fontSize": 24,
+      "text": "Git files · Compact portal · 1000 × 720",
+      "x": 0,
+      "y": 1040,
+      "groupIds": [
+        "compact"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "compact-screen": {
+      "seed": 1,
+      "id": "compact-screen",
+      "w": 1000,
+      "h": 720,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 1104,
+      "groupIds": [
+        "compact"
+      ],
+      "type": "shape"
+    },
+    "compact-inbox": {
+      "seed": 1,
+      "id": "compact-inbox",
+      "w": 280,
+      "h": 720,
+      "shape": "rect",
+      "fill": "light",
+      "x": 0,
+      "y": 1104,
+      "groupIds": [
+        "compact"
+      ],
+      "type": "shape"
+    },
+    "compact-inbox-title": {
+      "seed": 1,
+      "id": "compact-inbox-title",
+      "w": 244,
+      "h": 28,
+      "fontSize": 16,
+      "text": "Waiting on you    0",
+      "x": 18,
+      "y": 1122,
+      "groupIds": [
+        "compact"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "compact-inbox-empty": {
+      "seed": 1,
+      "id": "compact-inbox-empty",
+      "w": 244,
+      "h": 50,
+      "fontSize": 14,
+      "text": "Nothing is waiting on you.",
+      "x": 18,
+      "y": 1172,
+      "groupIds": [
+        "compact"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "compact-heading": {
+      "seed": 1,
+      "id": "compact-heading",
+      "w": 650,
+      "h": 28,
+      "fontSize": 16,
+      "text": "Git files sidebar",
+      "x": 304,
+      "y": 1122,
+      "groupIds": [
+        "compact"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "type": "text"
+    },
+    "compact-tabs": {
+      "seed": 1,
+      "id": "compact-tabs",
+      "w": 650,
+      "h": 38,
+      "x": 304,
+      "y": 1170,
+      "groupIds": [
+        "compact"
+      ],
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "props": {
+        "labels": "Agents, Chat, Todos 3/6, Files 7",
+        "active": 4,
+        "container": true
+      }
+    },
+    "compact-files": {
+      "seed": 1,
+      "id": "compact-files",
+      "w": 650,
+      "h": 440,
+      "fontSize": 16,
+      "text": "dogsled · local · feat/git-files-sidebar\n\nStatus: index | worktree\n\nMM  portal-types/src/agents.rs\n\nA   src/observation/git.rs\n\n M  src/web/agents.rs\n\n??  web/src/files.rs\n\n M  web/assets/console.css\n\nR   docs/git-files.md\n\n D  src/legacy.rs",
+      "x": 304,
+      "y": 1236,
+      "groupIds": [
+        "compact"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    },
+    "compact-composer": {
+      "seed": 1,
+      "id": "compact-composer",
+      "w": 672,
+      "h": 48,
+      "shape": "rect",
+      "fill": "light",
+      "x": 304,
+      "y": 1756,
+      "groupIds": [
+        "compact"
+      ],
+      "type": "shape"
+    },
+    "compact-composer-label": {
+      "seed": 1,
+      "id": "compact-composer-label",
+      "w": 630,
+      "h": 28,
+      "fontSize": 14,
+      "text": "Message composer stays pinned",
+      "x": 320,
+      "y": 1766,
+      "groupIds": [
+        "compact"
+      ],
+      "fixedW": true,
+      "fixedH": true,
+      "bold": false,
+      "type": "text"
+    }
+  },
+  "order": [
+    "desktop-0-title",
+    "desktop-0-scope",
+    "desktop-0-panel",
+    "desktop-0-tabs",
+    "desktop-0-branch",
+    "desktop-0-legend",
+    "desktop-0-file0",
+    "desktop-0-file1",
+    "desktop-0-file2",
+    "desktop-0-file3",
+    "desktop-0-file4",
+    "desktop-0-file5",
+    "desktop-0-file6",
+    "desktop-0-foot",
+    "desktop-0-note",
+    "desktop-1-title",
+    "desktop-1-scope",
+    "desktop-1-panel",
+    "desktop-1-tabs",
+    "desktop-1-branch",
+    "desktop-1-h260",
+    "desktop-1-f292",
+    "desktop-1-f330",
+    "desktop-1-f368",
+    "desktop-1-h406",
+    "desktop-1-f438",
+    "desktop-1-f476",
+    "desktop-1-f514",
+    "desktop-1-f552",
+    "desktop-1-h590",
+    "desktop-1-f622",
+    "desktop-1-foot",
+    "desktop-1-note",
+    "desktop-2-title",
+    "desktop-2-scope",
+    "desktop-2-panel",
+    "desktop-2-tabs",
+    "desktop-2-branch",
+    "desktop-2-h260",
+    "desktop-2-f286",
+    "desktop-2-h314",
+    "desktop-2-f340",
+    "desktop-2-h368",
+    "desktop-2-f394",
+    "desktop-2-h422",
+    "desktop-2-f448",
+    "desktop-2-f476",
+    "desktop-2-h504",
+    "desktop-2-f530",
+    "desktop-2-h558",
+    "desktop-2-f584",
+    "desktop-2-foot",
+    "desktop-2-note",
+    "compact-title",
+    "compact-screen",
+    "compact-inbox",
+    "compact-inbox-title",
+    "compact-inbox-empty",
+    "compact-heading",
+    "compact-tabs",
+    "compact-files",
+    "compact-composer",
+    "compact-composer-label"
+  ],
+  "variations": [
+    {
+      "id": "desktop-0",
+      "title": "A — Flat status list",
+      "description": "One row per file. Index and worktree stay separate.",
+      "nodeIds": [
+        "desktop-0-title",
+        "desktop-0-scope",
+        "desktop-0-panel",
+        "desktop-0-tabs",
+        "desktop-0-branch",
+        "desktop-0-legend",
+        "desktop-0-file0",
+        "desktop-0-file1",
+        "desktop-0-file2",
+        "desktop-0-file3",
+        "desktop-0-file4",
+        "desktop-0-file5",
+        "desktop-0-file6",
+        "desktop-0-foot",
+        "desktop-0-note"
+      ]
+    },
+    {
+      "id": "desktop-1",
+      "title": "B — Grouped by stage",
+      "description": "Readable groups; files can appear in both groups.",
+      "nodeIds": [
+        "desktop-1-title",
+        "desktop-1-scope",
+        "desktop-1-panel",
+        "desktop-1-tabs",
+        "desktop-1-branch",
+        "desktop-1-h260",
+        "desktop-1-f292",
+        "desktop-1-f330",
+        "desktop-1-f368",
+        "desktop-1-h406",
+        "desktop-1-f438",
+        "desktop-1-f476",
+        "desktop-1-f514",
+        "desktop-1-f552",
+        "desktop-1-h590",
+        "desktop-1-f622",
+        "desktop-1-foot",
+        "desktop-1-note"
+      ]
+    },
+    {
+      "id": "desktop-2",
+      "title": "C — Grouped by folder",
+      "description": "Shared paths appear once. Better for larger changes.",
+      "nodeIds": [
+        "desktop-2-title",
+        "desktop-2-scope",
+        "desktop-2-panel",
+        "desktop-2-tabs",
+        "desktop-2-branch",
+        "desktop-2-h260",
+        "desktop-2-f286",
+        "desktop-2-h314",
+        "desktop-2-f340",
+        "desktop-2-h368",
+        "desktop-2-f394",
+        "desktop-2-h422",
+        "desktop-2-f448",
+        "desktop-2-f476",
+        "desktop-2-h504",
+        "desktop-2-f530",
+        "desktop-2-h558",
+        "desktop-2-f584",
+        "desktop-2-foot",
+        "desktop-2-note"
+      ]
+    },
+    {
+      "id": "compact",
+      "title": "Compact portal — Files selected",
+      "description": "Inbox remains visible. Files joins Agents, Chat and Todos in the header.",
+      "nodeIds": [
+        "compact-title",
+        "compact-screen",
+        "compact-inbox",
+        "compact-inbox-title",
+        "compact-inbox-empty",
+        "compact-heading",
+        "compact-tabs",
+        "compact-files",
+        "compact-composer",
+        "compact-composer-label"
+      ]
+    }
+  ],
+  "comments": [],
+  "app": "squig",
+  "version": 1
+}
