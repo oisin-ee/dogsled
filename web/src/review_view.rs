@@ -27,7 +27,7 @@ use crate::components::{
     input::Input,
     item::{
         Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemMediaVariant,
-        ItemSize, ItemTitle, ItemVariant,
+        ItemSize, ItemVariant,
     },
     label::Label,
     tabs::{TabContent, TabList, TabTrigger, Tabs},
