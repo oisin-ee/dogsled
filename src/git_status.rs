@@ -19,7 +19,13 @@ pub(crate) fn read(shell: &dyn Shell, cwd: Option<&str>, timeout: Duration) -> F
 }
 
 fn words(root: &str, args: &[&str]) -> Vec<String> {
-    let mut words = vec!["--no-optional-locks".into(), "-C".into(), root.into()];
+    let mut words = vec![
+        "LC_ALL=C".into(),
+        "git".into(),
+        "--no-optional-locks".into(),
+        "-C".into(),
+        root.into(),
+    ];
     words.extend(args.iter().map(ToString::to_string));
     words
 }
@@ -27,7 +33,7 @@ fn words(root: &str, args: &[&str]) -> Vec<String> {
 fn capture(shell: &dyn Shell, cwd: &str, timeout: Duration) -> Result<FilesState> {
     // System's shared command boundary removes inherited Git repository/index routing.
     let root = shell.run_bounded(
-        "git",
+        "env",
         &words(cwd, &["rev-parse", "--show-toplevel"]),
         timeout,
     )?;
@@ -49,7 +55,7 @@ fn capture(shell: &dyn Shell, cwd: &str, timeout: Duration) -> Result<FilesState
             "--untracked-files=normal",
         ],
     );
-    let status = shell.run_bytes_bounded("git", &args, timeout, STATUS_LIMIT)?;
+    let status = shell.run_bytes_bounded("env", &args, timeout, STATUS_LIMIT)?;
     if status.status != 0 {
         return Err(Error::Command {
             program: "git".into(),
@@ -352,7 +358,7 @@ mod tests {
         }
         let out = System::default()
             .run_input_bounded(
-                "git",
+                "env",
                 &words(repo.0.to_str().unwrap(), &["update-index", "--index-info"]),
                 input.as_bytes(),
                 Duration::from_secs(5),
@@ -466,6 +472,33 @@ mod tests {
         assert_eq!(
             read(&System::default(), repo.0.to_str(), Duration::from_secs(10)),
             FilesState::TooMany
+        );
+    }
+
+    #[test]
+    fn root_probe_and_status_pin_the_c_locale() {
+        let shell = crate::shell::Fake::new();
+        let probe = "env LC_ALL=C git --no-optional-locks -C /checkout rev-parse --show-toplevel";
+        let status = "env LC_ALL=C git --no-optional-locks -C /checkout status --porcelain=v2 --branch -z --untracked-files=normal";
+        shell.on(probe, "/checkout\n");
+        shell.on(status, "# branch.oid abc\0# branch.head main\0");
+        assert!(matches!(
+            read(&shell, Some("/checkout"), Duration::from_secs(1)),
+            FilesState::Current(_)
+        ));
+        assert_eq!(*shell.calls.lock().unwrap(), [probe, status]);
+        shell.on_output(
+            probe,
+            crate::shell::Output {
+                status: 128,
+                stdout: String::new(),
+                stderr: "fatal: not a git repository (or any of the parent directories): .git"
+                    .into(),
+            },
+        );
+        assert_eq!(
+            read(&shell, Some("/checkout"), Duration::from_secs(1)),
+            FilesState::NotRepository
         );
     }
 
