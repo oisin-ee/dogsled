@@ -911,6 +911,7 @@ pub(crate) fn published_inventory(
     command: Command,
     json_output: bool,
 ) -> Result<ExitCode> {
+    crate::observation::read::report(published, None);
     match command {
         Command::Items { owner } => {
             let output = crate::observation::read::inventory(published, owner.as_deref())?;

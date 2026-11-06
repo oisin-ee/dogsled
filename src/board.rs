@@ -366,10 +366,9 @@ pub fn command(
         };
         return crate::print(true, &result, String::new);
     }
-    let board = crate::observation::read::board(
-        &crate::observation::ipc::Client::at(&ledger.dir).current()?,
-        owner.as_deref(),
-    )?;
+    let published = crate::observation::ipc::Client::at(&ledger.dir).current()?;
+    crate::observation::read::report(&published, None);
+    let board = crate::observation::read::board(&published, owner.as_deref())?;
     crate::print(json, &board, || board.render())
 }
 
@@ -387,6 +386,7 @@ pub fn watch(client: &crate::observation::ipc::Client, owner: &str, json: bool) 
             )));
         }
         let published = &*connection.publication;
+        crate::observation::read::report(published, None);
         let board = crate::observation::read::board(published, Some(owner));
         if json {
             let frame = match board.and_then(|board| {

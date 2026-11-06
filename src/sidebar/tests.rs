@@ -275,6 +275,54 @@ fn cold_unavailable_disconnect_and_restart_keep_the_last_frame_marked_stale() {
 }
 
 #[test]
+fn a_publication_gap_is_shown_in_the_footer_and_never_written_to_the_terminal() {
+    // The sidebar draws in raw mode on the terminal that is also its stderr. Run the read in
+    // a child test process so its real stderr can be inspected.
+    const CHILD: &str = "DOGSLED_TEST_SIDEBAR_GAP_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sidebar::tests::a_publication_gap_is_shown_in_the_footer_and_never_written_to_the_terminal",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{}\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!stderr.contains("observation gap"), "{stderr}");
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut published = (*fixture.capture()).clone();
+    let gap = crate::observation::Gap {
+        domain: "holds/job-validity/r-1".into(),
+        availability: crate::observation::Availability::Failed,
+        detail: "job-validity/r-1: no recorded owner pane".into(),
+    };
+    published.gaps.push(gap.clone());
+    for domain in ["sidebars", "sidebar_preferences", "findings"] {
+        published.views.get_mut(domain).unwrap()["gaps"] =
+            serde_json::to_value(vec![gap.clone()]).unwrap();
+    }
+    let mut display = Display::new();
+    display.receive(Msg::Publication(Arc::new(published)), OWNER);
+    display.tick();
+    let notice = display.model.notice.clone().unwrap_or_default();
+    assert_eq!(
+        notice.matches("no recorded owner pane").count(),
+        1,
+        "{notice}"
+    );
+}
+
+#[test]
 fn a_todo_publication_gap_becomes_a_notice_not_a_failed_read() {
     let fixture = Fixture::new();
     let mut published = (*fixture.capture()).clone();

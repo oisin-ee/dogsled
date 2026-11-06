@@ -57,12 +57,7 @@ fn read(published: &crate::observation::Published, owner: &str) -> Result<Select
     }
     let mut notices: Vec<_> = gaps
         .iter()
-        .map(|gap| {
-            format!(
-                "observation gap: {}: {:?}: {}",
-                gap.domain, gap.availability, gap.detail
-            )
-        })
+        .map(|gap| format!("observation gap: {}", publication::describe(gap)))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();

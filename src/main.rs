@@ -337,8 +337,9 @@ fn host_lead(node: &Node<'_>, config_path: &std::path::Path) -> Result<()> {
 }
 
 fn repo_command(client: &observation::ipc::Client, json: bool) -> Result<()> {
-    let list: portal_types::agents::RepoList =
-        observation::read::view(&client.current()?, "repos")?;
+    let published = client.current()?;
+    observation::read::report(&published, None);
+    let list: portal_types::agents::RepoList = observation::read::view(&published, "repos")?;
     print(json, &list, || repos::render(&list))
 }
 
@@ -368,6 +369,7 @@ fn status_command(client: &observation::ipc::Client, ask: Watch, json: bool) -> 
         None => client.current()?,
     };
     loop {
+        observation::read::report(&published, None);
         let status: commands::Status = observation::read::view(&published, "status")?;
         if ask.watch && !json && !ask.line && !ask.brief {
             print!("\x1b[2J\x1b[H");
@@ -580,7 +582,9 @@ fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Opt
                 board::watch(client, &owner, cli.json)?;
                 return Ok(Some(ExitCode::SUCCESS));
             }
-            let board = observation::read::board(&client.current()?, owner.as_deref())?;
+            let published = client.current()?;
+            observation::read::report(&published, None);
+            let board = observation::read::board(&published, owner.as_deref())?;
             print(cli.json, &board, || board.render())?;
             return Ok(Some(ExitCode::SUCCESS));
         }
@@ -591,14 +595,16 @@ fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Opt
             return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Snapshot) => {
-            let report: node::SnapshotReport =
-                observation::read::local(&client.current()?, "host")?;
+            let published = client.current()?;
+            observation::read::report(&published, Some("host"));
+            let report: node::SnapshotReport = observation::read::local(&published, "host")?;
             print(true, &report, String::new)?;
             return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Todos) => {
-            let todos: Vec<board::TodoSections> =
-                observation::read::view(&client.current()?, "todos")?;
+            let published = client.current()?;
+            observation::read::report(&published, None);
+            let todos: Vec<board::TodoSections> = observation::read::view(&published, "todos")?;
             print(true, &todos, String::new)?;
             return Ok(Some(ExitCode::SUCCESS));
         }

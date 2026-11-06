@@ -1,6 +1,6 @@
 //! Reader-only selection from one immutable publication. No observation capabilities.
 
-use super::{Published, project::View};
+use super::{Gap, Published, project::View};
 use crate::error::{Error, Result};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -11,6 +11,26 @@ fn missing(domain: &str) -> Error {
     ))
 }
 
+/// One gap as a reader shows it.
+pub(crate) fn describe(gap: &Gap) -> String {
+    format!("{}: {:?}: {}", gap.domain, gap.availability, gap.detail)
+}
+
+/// A one-shot command reports the gaps of the publication it printed on stderr, once each.
+/// Selection stays silent: a full-screen reader such as the sidebar owns its terminal and
+/// shows gaps in its own layout, and a stray stderr line would draw over it.
+pub(crate) fn report(published: &Published, domain: Option<&str>) {
+    let lines: std::collections::BTreeSet<_> = published
+        .gaps
+        .iter()
+        .filter(|gap| domain.is_none_or(|domain| gap.domain == domain))
+        .map(describe)
+        .collect();
+    for line in lines {
+        eprintln!("observation gap: {line}");
+    }
+}
+
 pub(crate) fn view<T: DeserializeOwned>(published: &Published, domain: &str) -> Result<T> {
     let value: View<T> = serde_json::from_value(
         published
@@ -19,12 +39,6 @@ pub(crate) fn view<T: DeserializeOwned>(published: &Published, domain: &str) -> 
             .ok_or_else(|| missing(domain))?
             .clone(),
     )?;
-    for gap in &value.gaps {
-        eprintln!(
-            "observation gap: {}: {:?}: {}",
-            gap.domain, gap.availability, gap.detail
-        );
-    }
     value.data.ok_or_else(|| {
         if value.gaps.is_empty() {
             missing(domain)
@@ -34,7 +48,7 @@ pub(crate) fn view<T: DeserializeOwned>(published: &Published, domain: &str) -> 
                 value
                     .gaps
                     .iter()
-                    .map(|gap| format!("{}: {:?}: {}", gap.domain, gap.availability, gap.detail))
+                    .map(describe)
                     .collect::<Vec<_>>()
                     .join("; ")
             ))
@@ -43,12 +57,6 @@ pub(crate) fn view<T: DeserializeOwned>(published: &Published, domain: &str) -> 
 }
 
 pub(crate) fn local<T: DeserializeOwned>(published: &Published, domain: &str) -> Result<T> {
-    for gap in published.gaps.iter().filter(|gap| gap.domain == domain) {
-        eprintln!(
-            "observation gap: {}: {:?}: {}",
-            gap.domain, gap.availability, gap.detail
-        );
-    }
     Ok(serde_json::from_value(
         published
             .local
