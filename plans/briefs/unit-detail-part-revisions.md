@@ -1,6 +1,6 @@
 # U1: per-part detail revisions in agent events
 
-Plan: `plans/git-files-sidebar.md`, unit U1. Base: `d904d9b`.
+Plan: `plans/git-files-sidebar.md`, unit U1. Base: `a6e3f8a` (code is identical at later docs-only commits).
 
 ## Outcome
 
