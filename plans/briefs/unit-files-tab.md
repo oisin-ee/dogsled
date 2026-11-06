@@ -31,7 +31,7 @@ U6b serves the `FilesState` at `GET /api/agents/{host}/{pane}/files` and sends `
 
 ## Paths
 - **Owns:** `web/src/files.rs`, `web/src/main.rs` (module line), `web/src/app.rs`, `web/src/api.rs`, `web/src/agent_view.rs` (scope above), `web/assets/console.css`, `web/src/component_tests.rs`.
-- **Reads:** `portal-types/src/files.rs`, `.impeccable/mocks/git-files-sidebar/` (design B: `desktop.png`, `compact.png`), `web/src/workers.rs` (sibling tab), `DESIGN.md`.
+- **Reads:** `portal-types/src/files.rs`, design B in `origin/docs/portal-mocks:.impeccable/mocks/git-files-sidebar/` (`desktop.png`, `compact.png`, `index.html`; read with `git show` into `/tmp`, do not commit them), `web/src/workers.rs` (sibling tab), `DESIGN.md`.
 
 ## Acceptance
 `web/src/component_tests.rs` covers each of the six states, group order with empty groups hidden, a rename row, and the unique-path count when one path is both staged and unstaged.
