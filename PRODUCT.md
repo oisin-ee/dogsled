@@ -55,4 +55,4 @@ Dogsled exists to remove cruft. A closed agent whose branch sits in "to land" fo
 4. Degrade visibly: when Herdr or a stream is down, say what still works and disable what does not.
 5. No cruft. Finished work is landed or removed; the screen never normalises leftovers with archive or "older" buckets.
 6. A blocked agent's request is that agent's screen. A plan review (Plannotator style) or an interview (pi-interview style) fills the agent's main area while it waits; the conversation becomes a tab. The inbox is always on screen: it lists every waiting item, and selecting one opens its agent with the item in front.
-7. The owner works with leads, not their workers. Workers sit under their lead, muted, with muted status. A worker is raised only when it idles and its lead has not picked it up.
+7. The owner works with leads, not their workers. Workers sit in a Workers tab on their lead's page, not in the agents sidebar. The sidebar shows a compact worker summary for each lead. Yellow marks a worker that waits on the owner. A worker without a lead stays in the sidebar.

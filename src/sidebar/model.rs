@@ -530,6 +530,7 @@ pub mod tests {
             host: "netcup".into(),
             pane: Some(format!("p-{id}")),
             owner_pane: None,
+            owner_host: None,
             title: None,
             cleanup: None,
             unseen: false,

@@ -5,6 +5,197 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+fn worker_lead() -> crate::board::NavigationRow {
+    crate::board::NavigationRow {
+        pane: Some("lead".into()),
+        title: "Ship the portal".into(),
+        role: "lead".into(),
+        host: "local".into(),
+        state: "working".into(),
+        worker: false,
+        unseen: false,
+        workers: Vec::new(),
+        progress: Some((2, 6)),
+    }
+}
+
+fn worker_row(id: &str, state: &str) -> Result<portal_types::RowView, serde_json::Error> {
+    serde_json::from_value(serde_json::json!({
+        "group": "running", "kind": "agent", "id": id, "name": id, "title": format!("Task {id}"),
+        "what": "pi · model", "host": "netcup", "pane": id, "owner_pane": "lead", "owner_host": "local",
+        "state": state, "activity": format!("Latest activity for {id}"), "age_ms": 120_000, "quiet_ms": 13_000
+    }))
+}
+
+fn worker_context(selected: Option<portal_types::agents::AgentAddress>) {
+    use_context_provider(|| Signal::new(selected));
+    use_context_provider(|| Signal::new(None::<crate::app::InboxSelection>));
+    use_context_provider(|| Signal::new(crate::app::LeadPanel::Chat));
+    use_context_provider(|| crate::app::LeadDetail(Signal::new(crate::app::LeadPanel::Workers)));
+}
+
+fn workers_root(props: (Vec<portal_types::RowView>, Vec<crate::app::InboxItem>)) -> Element {
+    worker_context(Some(portal_types::agents::AgentAddress {
+        host: "netcup".into(),
+        pane: "working".into(),
+    }));
+    rsx! { crate::workers::Workers { rows: props.0, inbox: props.1 } }
+}
+
+#[test]
+fn workers_render_the_four_groups_in_order_and_mark_the_open_worker()
+-> Result<(), serde_json::Error> {
+    let mut unseen = worker_row("unseen", "done")?;
+    unseen.unseen = true;
+    let prompt = crate::app::InboxItem {
+        selection: crate::app::InboxSelection {
+            host: "netcup".into(),
+            pane: "prompt".into(),
+            kind: crate::app::InboxKind::Prompt,
+            id: "prompt".into(),
+        },
+        title: "Key prompt".into(),
+        agent_title: None,
+        repository: None,
+        age_ms: 0,
+    };
+    let rows = vec![
+        worker_row("finished", "closed")?,
+        worker_row("idle", "idle")?,
+        worker_row("working", "working")?,
+        unseen,
+        worker_row("prompt", "blocked")?,
+    ];
+    let mut dom = VirtualDom::new_with_props(workers_root, (rows, vec![prompt]));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    let headings = [
+        "Waiting on you · 2",
+        "Working · 1",
+        "Idle · 1",
+        "Finished · 1",
+    ];
+    let mut previous = 0;
+    for heading in headings {
+        let position = html.find(&format!("<h3>{heading}</h3>"));
+        assert!(
+            position.is_some_and(|position| position >= previous),
+            "missing/out of order {heading}: {html}"
+        );
+        previous = position.unwrap_or(previous);
+    }
+    for expected in [
+        "1 working",
+        "Task working",
+        "working · 13s · netcup",
+        "Latest activity for working",
+        "Finished · 13s · netcup",
+        r#"aria-current="true""#,
+    ] {
+        assert!(html.contains(expected), "missing {expected}: {html}");
+    }
+    assert!(!html.contains("Held by the lead"));
+    Ok(())
+}
+
+#[test]
+fn worker_rows_filter_by_owner_host_and_pane_including_closed() -> Result<(), serde_json::Error> {
+    let mut foreign_host = worker_row("foreign-host", "working")?;
+    foreign_host.owner_host = Some("netcup".into());
+    let mut foreign_pane = worker_row("foreign-pane", "idle")?;
+    foreign_pane.owner_pane = Some("other-lead".into());
+    let board = portal_types::BoardView {
+        hosts: Vec::new(),
+        generated_ms: 0,
+        repos: vec![portal_types::RepoGroup {
+            repository: None,
+            todos: Vec::new(),
+            rows: vec![
+                worker_row("working", "working")?,
+                foreign_host,
+                foreign_pane,
+                worker_row("closed", "closed")?,
+            ],
+        }],
+    };
+    let rows = crate::workers::owned_rows(Some(&board), Some(&worker_lead()));
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        ["working", "closed"]
+    );
+    assert!(crate::workers::owned_rows(Some(&board), None).is_empty());
+    Ok(())
+}
+
+fn worker_sidebar_root(
+    props: (crate::board::NavigationRepo, Vec<crate::app::InboxItem>),
+) -> Element {
+    worker_context(Some(portal_types::agents::AgentAddress {
+        host: "netcup".into(),
+        pane: "worker".into(),
+    }));
+    rsx! { crate::components::sidebar::SidebarProvider { crate::board::RepoGroup { group: props.0, inbox: props.1 } } }
+}
+
+#[test]
+fn sidebar_worker_summary_rolls_up_attention_and_keeps_the_lead_active() {
+    let mut lead = worker_lead();
+    let mut worker = worker_lead();
+    worker.worker = true;
+    worker.host = "netcup".into();
+    worker.pane = Some("worker".into());
+    worker.title = "Not a sidebar entry".into();
+    worker.unseen = true;
+    lead.workers.push(worker);
+    let repo = crate::board::NavigationRepo {
+        repository: Some("owner/repo".into()),
+        rows: vec![lead],
+        to_land: 0,
+    };
+    assert_eq!(repo.agent_count(), 1);
+    let mut dom = VirtualDom::new_with_props(worker_sidebar_root, (repo, Vec::new()));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    for expected in [
+        "1 workers · 1 working",
+        "Show 1 workers for Ship the portal",
+        "data-waiting=true",
+        r#"data-state="waiting""#,
+        r#"aria-current="true""#,
+    ] {
+        assert!(html.contains(expected), "missing {expected}: {html}");
+    }
+    assert!(!html.contains("Not a sidebar entry"));
+    assert!(!html.contains("sidebar-menu-sub"));
+}
+
+fn worker_heading_root() -> Element {
+    worker_context(None);
+    let draft = use_signal(String::new);
+    let images = use_signal(Vec::<String>::new);
+    let uploading = use_signal(|| false);
+    rsx! {
+        crate::workers::WorkerHeading { title: "Worker task", lead: worker_lead(), what: "pi · model", host: "netcup" }
+        crate::agent_view::Composer { draft, images, uploading, disabled: false, busy: false,
+            placeholder: Some("Message the worker…".to_owned()), on_error: |_| {}, on_send: |_| {} }
+    }
+}
+
+#[test]
+fn worker_header_links_back_to_lead_and_composer_targets_the_worker() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(worker_heading_root));
+    for expected in [
+        "Back to lead",
+        "Worker task",
+        "Worker of ",
+        "Ship the portal",
+        " · pi · model · netcup",
+        r#"placeholder="Message the worker…""#,
+    ] {
+        assert!(html.contains(expected), "missing {expected}: {html}");
+    }
+}
+
 fn root() -> Element {
     let subject = String::from("Foundation check");
     let message = String::from("Keep the existing portal layout");
