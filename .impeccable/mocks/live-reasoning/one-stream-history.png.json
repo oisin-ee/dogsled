@@ -2,6 +2,6 @@
   "kind": "browser-capture",
   "source": ".impeccable/mocks/live-reasoning/one-stream.html",
   "viewport": "1600x1000",
-  "prompt": "Browser screenshot of one-stream.html. The conversation content is a replay of a real Pi session transcript (claude-opus-5-5 lead, 2026-11-06 11:53-12:27): recorded thinking blocks, bash commands, tool output and reply text. The agent-list snippets for the other agents are real recorded gpt-6-astra thoughts and commands; their titles and timings, the hosts, and the todos are illustrative. No image model generated this raster. Animations were paused for the capture. Scrolled to the top with the earlier turn's work expanded.",
+  "prompt": "Browser screenshot of one-stream.html. The conversation content is a replay of a real Pi session transcript (claude-opus-5-5 lead, 2026-11-06 11:53-12:27): recorded thinking blocks, bash commands, tool output and reply text. The rondo lead and its three workers in the agents column are the real fleet at 13:24 on 6 Nov, taken from their Pi sessions. Todos and hosts are illustrative. No image model generated this raster. Animations were paused for the capture.",
   "approved": false
 }
