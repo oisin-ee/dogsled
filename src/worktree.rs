@@ -1042,6 +1042,10 @@ fn remove_inner(
             return Err(operation.refusal("normalized checkout changed before removal"));
         }
     }
+    // Invariant: all hold checks (including final preservation capture/normalization)
+    // run before any holder pane closes. Environment-attributed detached tool processes
+    // lose their live holder after this point; do not rediscover ownership afterwards.
+    // Leave their lifecycle alone: closing their clients does not authorize signalling them.
     close_holders(shell, ledger, workspace, holders)?;
     remove_git(shell, ledger, tree, removal, operation, original)
 }
