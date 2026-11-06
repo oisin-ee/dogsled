@@ -27,7 +27,7 @@ use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon, P
 /// Portal stream projections shared with the selected agent view.
 #[derive(Clone, Copy)]
 pub struct AgentPortal {
-    pub agents: Memo<Vec<Agent>>,
+    pub agents: Memo<Option<Vec<Agent>>>,
     pub agent_error: Memo<Option<String>>,
     pub board: Memo<Option<BoardView>>,
     pub board_error: Memo<Option<String>>,
@@ -224,12 +224,17 @@ struct PortalState {
     board: Option<BoardView>,
     board_error: Option<String>,
     agents: Vec<Agent>,
+    agents_received: bool,
     agent_error: Option<String>,
     inbox: InboxState,
     paused: bool,
 }
 
 impl PortalState {
+    fn received_agents(&self) -> Option<&[Agent]> {
+        self.agents_received.then_some(self.agents.as_slice())
+    }
+
     fn update(&mut self, result: Result<PortalEvent, String>, now: u64) {
         let result = result.and_then(|event| match event {
             PortalEvent::Snapshot(snapshot) => Ok(snapshot),
@@ -260,6 +265,7 @@ impl PortalState {
                 match snapshot.agents {
                     Some(agents) => {
                         self.agents = agents;
+                        self.agents_received = true;
                         self.agent_error = None;
                     }
                     None => self.agent_error = Some(missing()),
@@ -310,8 +316,10 @@ pub fn App() -> Element {
     });
     let agents = use_memo(move || publication.read().agents.clone());
     let agent_error = use_memo(move || publication.read().agent_error.clone());
+    let received_agents =
+        use_memo(move || publication.read().received_agents().map(<[Agent]>::to_vec));
     use_context_provider(|| AgentPortal {
-        agents,
+        agents: received_agents,
         agent_error,
         board,
         board_error,
@@ -664,6 +672,33 @@ fn age(ms: u64) -> String {
 mod shell_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn portal_agents_wait_for_a_snapshot_and_survive_a_stream_error()
+    -> Result<(), serde_json::Error> {
+        let mut state = PortalState::default();
+        assert_eq!(state.received_agents(), None);
+        let agents: Vec<Agent> = serde_json::from_value(json!([{
+            "host": "local", "pane": "pane", "state": "working"
+        }]))?;
+        let snapshot = portal_types::PortalSnapshot {
+            version: 1,
+            epoch: "serve".into(),
+            revision: 1,
+            published_ms: 1,
+            board: None,
+            agents: Some(agents.clone()),
+            inbox: None,
+            gaps: vec![],
+        };
+        state.update(Ok(PortalEvent::Snapshot(Box::new(snapshot))), 1);
+        assert_eq!(state.received_agents(), Some(agents.as_slice()));
+        assert!(state.agent_error.is_none());
+        state.update(Err("stream disconnected".into()), 2);
+        assert_eq!(state.received_agents(), Some(agents.as_slice()));
+        assert_eq!(state.agent_error.as_deref(), Some("stream disconnected"));
+        Ok(())
+    }
 
     #[test]
     fn portal_publications_and_status_keep_stream_order() -> Result<(), serde_json::Error> {

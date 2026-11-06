@@ -99,6 +99,41 @@ pub fn AgentView(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AgentMetadata {
+    Loading,
+    Missing,
+    Unreachable {
+        message: String,
+        agent: Option<wire::AgentView>,
+    },
+    Present(wire::AgentView),
+}
+
+fn agent_metadata(
+    agents: Option<&[wire::AgentView]>,
+    error: Option<&str>,
+    address: &wire::AgentAddress,
+) -> AgentMetadata {
+    let agent = agents.and_then(|agents| {
+        agents
+            .iter()
+            .find(|agent| agent.host == address.host && agent.pane == address.pane)
+            .cloned()
+    });
+    if let Some(message) = error {
+        return AgentMetadata::Unreachable {
+            message: message.to_owned(),
+            agent,
+        };
+    }
+    match (agents, agent) {
+        (None, _) => AgentMetadata::Loading,
+        (_, Some(agent)) => AgentMetadata::Present(agent),
+        (Some(_), None) => AgentMetadata::Missing,
+    }
+}
+
 #[component]
 fn AgentSession(
     host: String,
@@ -116,13 +151,20 @@ fn AgentSession(
     let portal = use_context::<crate::app::AgentPortal>();
     let mut latest_event = use_signal(|| None::<wire::AgentEvent>);
     let agent_address = address.clone();
+    let metadata = use_memo(move || {
+        agent_metadata(
+            portal.agents.read().as_deref(),
+            portal.agent_error.read().as_deref(),
+            &agent_address,
+        )
+    });
+    let loading = use_memo(move || matches!(&*metadata.read(), AgentMetadata::Loading));
     let agent = use_memo(move || {
-        let mut current = portal
-            .agents
-            .read()
-            .iter()
-            .find(|agent| agent.host == agent_address.host && agent.pane == agent_address.pane)
-            .cloned();
+        let mut current = match &*metadata.read() {
+            AgentMetadata::Present(agent) => Some(agent.clone()),
+            AgentMetadata::Unreachable { agent, .. } => agent.clone(),
+            AgentMetadata::Loading | AgentMetadata::Missing => None,
+        };
         if let (Some(current), Some(event)) = (current.as_mut(), latest_event.read().as_ref()) {
             if let Some(state) = &event.state {
                 current.state.clone_from(state);
@@ -133,14 +175,18 @@ fn AgentSession(
         }
         current
     });
-    let reachable = use_memo(move || portal.agent_error.read().is_none());
-    let metadata_error = use_memo(move || {
-        (portal.agent_error)().or_else(|| {
-            agent
-                .read()
-                .is_none()
-                .then(|| "This agent is no longer available. Select another agent.".to_owned())
-        })
+    let reachable = use_memo(move || {
+        matches!(
+            &*metadata.read(),
+            AgentMetadata::Present(_) | AgentMetadata::Missing
+        )
+    });
+    let metadata_error = use_memo(move || match &*metadata.read() {
+        AgentMetadata::Loading | AgentMetadata::Present(_) => None,
+        AgentMetadata::Missing => {
+            Some("This agent is no longer available. Select another agent.".to_owned())
+        }
+        AgentMetadata::Unreachable { message, .. } => Some(message.clone()),
     });
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
     let mut questions = use_signal(|| None::<Vec<Pending>>);
@@ -430,12 +476,16 @@ fn AgentSession(
             }
         },
     );
-    let state = pending
-        .as_ref()
-        .map(RequestTab::state)
-        .or_else(|| current.as_ref().map(|agent| agent.state.as_str()))
-        .unwrap_or("Loading…")
-        .to_owned();
+    let state = if loading() {
+        "Loading…"
+    } else {
+        pending
+            .as_ref()
+            .map(RequestTab::state)
+            .or_else(|| current.as_ref().map(|agent| agent.state.as_str()))
+            .unwrap_or("Loading…")
+    }
+    .to_owned();
     let disabled = busy() || !reachable() || current.is_none();
     let plan_open = tab == Tab::Pending && matches!(pending, Some(RequestTab::Review(_)));
     let focus_pane = address.clone();
@@ -531,7 +581,7 @@ fn AgentSession(
                 footer { class: "conversation-footer",
                     LiveActivity { address: address.clone(), session: detail_session,
                         coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
-                        connected: reachable() && stream_error().is_none(),
+                        connected: loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
                     Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
                         on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
@@ -598,7 +648,7 @@ fn AgentSession(
             }
             }
             div { class: "lead-notices",
-                if !reachable() {
+                if matches!(&*metadata.read(), AgentMetadata::Unreachable { .. }) {
                     Status { "Herdr is not reachable. The board still works; conversation and messages do not." }
                 }
                 if let Some(message) = metadata_error() { Alert { "{message}" } }
@@ -1403,6 +1453,93 @@ pub(crate) fn allowed_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metadata_agent() -> wire::AgentView {
+        wire::AgentView {
+            host: "local".into(),
+            pane: "pane".into(),
+            name: None,
+            title: None,
+            agent: None,
+            state: "working".into(),
+            cwd: None,
+            repository: None,
+            blocked: None,
+        }
+    }
+
+    #[test]
+    fn metadata_is_loading_before_the_first_agent_list() {
+        assert_eq!(
+            agent_metadata(None, None, &wire::AgentAddress::local("pane")),
+            AgentMetadata::Loading
+        );
+    }
+
+    #[test]
+    fn metadata_is_missing_only_after_a_list_arrives() {
+        let agents = [metadata_agent()];
+        for (host, pane) in [("other-host", "pane"), ("local", "other-pane")] {
+            let address = wire::AgentAddress {
+                host: host.into(),
+                pane: pane.into(),
+            };
+            assert_eq!(
+                agent_metadata(Some(&agents), None, &address),
+                AgentMetadata::Missing
+            );
+        }
+        assert_eq!(
+            agent_metadata(Some(&[]), None, &wire::AgentAddress::local("pane")),
+            AgentMetadata::Missing
+        );
+    }
+
+    #[test]
+    fn metadata_is_unreachable_with_the_last_known_agent() {
+        let agent = metadata_agent();
+        assert_eq!(
+            agent_metadata(
+                Some(std::slice::from_ref(&agent)),
+                Some("stream disconnected"),
+                &wire::AgentAddress::local("pane"),
+            ),
+            AgentMetadata::Unreachable {
+                message: "stream disconnected".into(),
+                agent: Some(agent),
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_is_unreachable_without_an_earlier_entry() {
+        for agents in [None, Some([].as_slice())] {
+            assert_eq!(
+                agent_metadata(
+                    agents,
+                    Some("stream disconnected"),
+                    &wire::AgentAddress::local("pane"),
+                ),
+                AgentMetadata::Unreachable {
+                    message: "stream disconnected".into(),
+                    agent: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_is_present_when_the_address_matches() {
+        let agent = metadata_agent();
+        assert_eq!(
+            agent_metadata(
+                Some(std::slice::from_ref(&agent)),
+                None,
+                &wire::AgentAddress::local("pane"),
+            ),
+            AgentMetadata::Present(agent)
+        );
+    }
 
     fn event(conversation: u64, screen: u64, state: &str) -> wire::AgentEvent {
         wire::AgentEvent {
