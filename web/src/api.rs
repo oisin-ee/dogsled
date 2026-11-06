@@ -173,9 +173,11 @@ pub async fn focus_agent(address: &portal_types::agents::AgentAddress) -> Result
 pub async fn send_prompt(
     address: &portal_types::agents::AgentAddress,
     text: &str,
+    reply: bool,
 ) -> Result<(), String> {
     let body = PromptBody {
         text: text.to_owned(),
+        reply,
     };
     post(&agent_url(address, "prompt"), &body).await
 }

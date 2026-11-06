@@ -365,14 +365,24 @@ fn peer_reply_response(label: &str, mut reply: PeerReply) -> Response {
     (status, [("cache-control", "no-store")], Json(reply.body)).into_response()
 }
 
-async fn machine_action(
-    state: AppState,
-    host: String,
-    operation: &'static str,
-    args: Vec<String>,
-) -> Response {
+enum MachineAction {
+    Prompt {
+        pane: String,
+        text: String,
+        reply: bool,
+    },
+    Keys {
+        pane: String,
+        keys: Vec<String>,
+    },
+    Focus {
+        pane: String,
+    },
+}
+
+async fn machine_action(state: AppState, host: String, action: MachineAction) -> Response {
     let label = host.clone();
-    let outcome = tokio::task::spawn_blocking(move || -> crate::error::Result<()> {
+    let outcome = tokio::task::spawn_blocking(move || -> crate::error::Result<Response> {
         let launch = state
             .leads
             .as_ref()
@@ -385,19 +395,33 @@ async fn machine_action(
             launch.home.clone(),
         )?;
         let target = fleet.find(&host)?;
-        let mut command = vec![
-            "--machine".into(),
-            target.label.clone(),
-            "agent".into(),
-            operation.into(),
-        ];
-        command.extend(args);
+        let mut command = vec!["--machine".into(), target.label.clone(), "agent".into()];
+        match action {
+            MachineAction::Prompt { pane, text, reply } => {
+                let mut get = command.clone();
+                get.extend(["get".into(), pane.clone()]);
+                let output = launch.shell.run_ok("herdr", &get)?;
+                let agent: Value = serde_json::from_str(&output.stdout)?;
+                let status = agent
+                    .pointer("/result/agent/agent_status")
+                    .and_then(Value::as_str);
+                if let Some(response) = prompt_refusal(&host, status, reply) {
+                    return Ok(response);
+                }
+                command.extend(["prompt".into(), pane, text]);
+            }
+            MachineAction::Keys { pane, keys } => {
+                command.extend(["send-keys".into(), pane]);
+                command.extend(keys);
+            }
+            MachineAction::Focus { pane } => command.extend(["focus".into(), pane]),
+        }
         launch.shell.run_ok("herdr", &command)?;
-        Ok(())
+        Ok(StatusCode::ACCEPTED.into_response())
     })
     .await;
     match outcome {
-        Ok(Ok(())) => StatusCode::ACCEPTED.into_response(),
+        Ok(Ok(response)) => response,
         Ok(Err(error)) => peer_error(&label, &error),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
@@ -738,7 +762,24 @@ fn stamped(mut response: Response, publication: &DetailFrame) -> Response {
     response
 }
 
+/// Refuse unrelated text while blocked, or any prompt without a readable live status.
+fn prompt_refusal(host: &str, status: Option<&str>, reply: bool) -> Option<Response> {
+    match status.filter(|status| !status.is_empty()) {
+        None => Some((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": format!("host {host}: agent status unavailable")})),
+        ).into_response()),
+        Some("blocked") if !reply => Some((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "The agent needs a response. Select its prompt in Waiting on you to reply."})),
+        ).into_response()),
+        Some(_) => None,
+    }
+}
+
 /// Send a prompt to an agent.
+/// Herdr's `agent.prompt` has no conditional form: an agent that blocks between
+/// the check and the send still receives the text.
 async fn prompt(
     State(state): State<AppState>,
     Path((host, pane)): Path<(String, String)>,
@@ -749,11 +790,33 @@ async fn prompt(
         return refuse("the prompt is empty");
     }
     if host != crate::hosts::LOCAL {
-        return machine_action(state, host, "prompt", vec![pane, text.into()]).await;
+        return machine_action(
+            state,
+            host,
+            MachineAction::Prompt {
+                pane,
+                text: text.into(),
+                reply: body.reply,
+            },
+        )
+        .await;
     }
     let Some(socket) = socket(&state) else {
         return no_socket();
     };
+    let agents = match socket.agent_list() {
+        Ok(agents) => agents,
+        Err(error) => return peer_error(&host, &error),
+    };
+    let Some(agent) = agents
+        .iter()
+        .find(|agent| agent["pane_id"].as_str() == Some(&pane))
+    else {
+        return not_found(&pane);
+    };
+    if let Some(response) = prompt_refusal(&host, agent["agent_status"].as_str(), body.reply) {
+        return response;
+    }
     match socket.agent_prompt(&pane, text) {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => error_response(&error),
@@ -784,9 +847,7 @@ async fn keys(
         });
     }
     if host != crate::hosts::LOCAL {
-        let mut args = vec![pane];
-        args.extend(keys);
-        return machine_action(state, host, "send-keys", args).await;
+        return machine_action(state, host, MachineAction::Keys { pane, keys }).await;
     }
     let Some(socket) = socket(&state) else {
         return no_socket();
@@ -803,7 +864,7 @@ async fn focus(
     Path((host, pane)): Path<(String, String)>,
 ) -> Response {
     if host != crate::hosts::LOCAL {
-        return machine_action(state, host, "focus", vec![pane]).await;
+        return machine_action(state, host, MachineAction::Focus { pane }).await;
     }
     let Some(socket) = socket(&state) else {
         return no_socket();
@@ -1294,6 +1355,10 @@ mod tests {
     #[tokio::test]
     async fn remote_conversation_and_actions_target_the_named_peer() {
         let fixture = PeerFixture::new();
+        fixture.shell.on(
+            "herdr --machine netcup agent get w1:p1",
+            r#"{"result":{"agent":{"agent_status":"working"}}}"#,
+        );
         fixture.shell.on(&fixture.command("w1:p1", &PeerOperation::Conversation),
             &json!({"status":200,"body":{"pane":"w1:p1","session":"peer-session","turns":[],"truncated":false}}).to_string());
         let local = agent_server();
@@ -1332,6 +1397,75 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED, "{route}");
         }
         assert_eq!(local.methods(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_remote_blocked_agent_only_receives_a_reply() {
+        let fixture = PeerFixture::new();
+        let get = "herdr --machine netcup agent get w1:p1";
+        let prompt = "herdr --machine netcup agent prompt w1:p1 go on";
+        fixture
+            .shell
+            .on(get, r#"{"result":{"agent":{"agent_status":"blocked"}}}"#);
+        fixture.shell.on(prompt, "{}");
+        let response = call(
+            fixture.state.clone(),
+            request(
+                Method::POST,
+                "/api/agents/netcup/w1:p1/prompt",
+                Some(r#"{"text":"go on"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error": "The agent needs a response. Select its prompt in Waiting on you to reply."})
+        );
+        assert_eq!(*fixture.shell.calls.lock().unwrap(), vec![get]);
+
+        let response = call(
+            fixture.state.clone(),
+            request(
+                Method::POST,
+                "/api/agents/netcup/w1:p1/prompt",
+                Some(r#"{"text":"go on","reply":true}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(*fixture.shell.calls.lock().unwrap(), vec![get, get, prompt]);
+    }
+
+    #[tokio::test]
+    async fn a_remote_prompt_requires_a_readable_status_even_for_a_reply() {
+        for output in [
+            "not json",
+            "{}",
+            r#"{"result":{"agent":{"agent_status":42}}}"#,
+            r#"{"result":{"agent":{"agent_status":""}}}"#,
+        ] {
+            let fixture = PeerFixture::new();
+            let get = "herdr --machine netcup agent get w1:p1";
+            fixture.shell.on(get, output);
+            let response = call(
+                fixture.state.clone(),
+                request(
+                    Method::POST,
+                    "/api/agents/netcup/w1:p1/prompt",
+                    Some(r#"{"text":"go on","reply":true}"#),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{output}");
+            assert!(
+                body_json(response).await["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("host netcup:")
+            );
+            assert_eq!(*fixture.shell.calls.lock().unwrap(), vec![get]);
+        }
     }
 
     #[tokio::test]
@@ -1888,6 +2022,96 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert!(server.methods().contains(&"agent.prompt".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_local_blocked_agent_only_receives_a_reply() {
+        let server = fake::Server::start(|method, params| match method {
+            "agent.list" => {
+                json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":"blocked"}]}})
+            }
+            "agent.prompt" => {
+                assert_eq!(params["target"], "w1:p1");
+                assert_eq!(params["text"], "go on");
+                json!({"result":{"type":"agent_prompted"}})
+            }
+            other => panic!("unexpected method {other}"),
+        });
+        let response = call(
+            with_socket(&server),
+            request(
+                Method::POST,
+                "/api/agents/local/w1:p1/prompt",
+                Some(r#"{"text":"go on"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error": "The agent needs a response. Select its prompt in Waiting on you to reply."})
+        );
+        assert_eq!(server.methods(), vec!["agent.list"]);
+
+        let response = call(
+            with_socket(&server),
+            request(
+                Method::POST,
+                "/api/agents/local/w1:p1/prompt",
+                Some(r#"{"text":"go on","reply":true}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            server.methods(),
+            vec!["agent.list", "agent.list", "agent.prompt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_to_an_unknown_local_pane_is_not_sent() {
+        let server = agent_server();
+        let response = call(
+            with_socket(&server),
+            request(
+                Method::POST,
+                "/api/agents/local/missing/prompt",
+                Some(r#"{"text":"go on"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"no agent in pane missing"})
+        );
+        assert_eq!(server.methods(), vec!["agent.list"]);
+    }
+
+    #[tokio::test]
+    async fn a_local_prompt_requires_a_readable_status_even_for_a_reply() {
+        for status in [Value::Null, json!(42), json!("")] {
+            let server = fake::Server::start(move |method, _| {
+                assert_eq!(method, "agent.list");
+                json!({"result":{"agents":[{"pane_id":"w1:p1","agent_status":status}]}})
+            });
+            let response = call(
+                with_socket(&server),
+                request(
+                    Method::POST,
+                    "/api/agents/local/w1:p1/prompt",
+                    Some(r#"{"text":"go on","reply":true}"#),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body_json(response).await,
+                json!({"error":"host local: agent status unavailable"})
+            );
+            assert_eq!(server.methods(), vec!["agent.list"]);
+        }
     }
 
     #[tokio::test]
