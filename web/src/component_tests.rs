@@ -747,7 +747,7 @@ fn tool_turn(
 }
 
 #[test]
-fn adjacent_tools_use_collapsed_official_disclosures_and_recorded_outcomes() {
+fn tools_render_individually_in_recorded_order_with_name_fallbacks_and_outcomes() {
     use portal_types::agents::{Role, ToolStatus};
     let html = render_timeline(history(vec![
         tool_turn("read", Some("read"), ToolStatus::Completed),
@@ -757,19 +757,21 @@ fn adjacent_tools_use_collapsed_official_disclosures_and_recorded_outcomes() {
         tool_turn("search", Some("search"), ToolStatus::Unknown),
     ]));
     assert_eq!(
-        html.matches("conversation-event conversation-tools")
+        html.matches("conversation-event conversation-tool\"")
             .count(),
-        2,
+        4,
         "{html}"
     );
-    assert_eq!(html.matches("aria-expanded=false").count(), 2, "{html}");
+    assert!(!html.contains("aria-expanded=false"), "{html}");
     for expected in [
-        "3 tool records · read, bash, Unnamed tool",
-        "1 tool records · search",
+        ">read</pre>",
+        ">bash</pre>",
+        ">Unnamed tool</pre>",
+        ">search</pre>",
         "Result recorded",
         "Error recorded",
         "No recorded outcome",
-        r#"data-part="tool-records""#,
+        "data-error=true",
         r#"data-record-id="unknown""#,
     ] {
         assert!(html.contains(expected), "missing {expected}: {html}");
@@ -778,7 +780,351 @@ fn adjacent_tools_use_collapsed_official_disclosures_and_recorded_outcomes() {
     assert!(!html.contains("Running"), "{html}");
     assert!(!html.contains("Success"), "{html}");
     assert!(!html.contains("<details"), "{html}");
-    assert!(html.contains("data-open=false"), "{html}");
+    let positions = ["read", "bash", "unknown", "reply", "search"]
+        .map(|id| html.find(&format!("data-record-id=\"{id}\"")));
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{html}");
+}
+
+#[test]
+fn thinking_and_tool_payloads_keep_markdown_calls_output_tails_and_errors() {
+    use portal_types::agents::{Role, ToolStatus, ToolSummary};
+    let mut tool = tool_turn("call", Some("bash"), ToolStatus::Error);
+    tool.tool = Some(ToolSummary {
+        call_id: "call".into(),
+        name: Some("bash".into()),
+        status: ToolStatus::Error,
+        call: Some("$ git status --short".into()),
+        output: Some("line <one>\nline two".into()),
+        output_lines: Some(25),
+    });
+    let html = render_timeline(history(vec![
+        history_turn("thought", Role::Thinking, "Check **the cause** first."),
+        tool,
+        history_turn("reply", Role::Assistant, "Final reply."),
+    ]));
+    for text in [
+        "conversation-thought",
+        "Check <strong>the cause</strong> first.",
+        "$ git status --short",
+        "23 earlier lines",
+        "line &#60;one&#62;\nline two",
+        "data-error=true",
+        "Error recorded",
+    ] {
+        assert!(html.contains(text), "missing {text}: {html}");
+    }
+    assert!(
+        html.find("Check <strong>") < html.find("$ git status"),
+        "{html}"
+    );
+    assert!(
+        html.find("line &#60;one&#62;") < html.find("Final reply."),
+        "{html}"
+    );
+    let css = include_str!("../assets/console.css");
+    assert!(css.contains("font-style: italic"));
+    assert!(css.contains("color: var(--primary-error-color)"));
+    assert!(css.contains("white-space: pre-wrap"));
+    assert!(css.contains("overflow-wrap: anywhere"));
+}
+
+fn worked_history(timed: bool) -> portal_types::agents::Conversation {
+    use portal_types::agents::{Role, TimeMeaning, Timestamp, ToolStatus};
+    let mut turns = vec![
+        history_turn("input", Role::User, "Please check."),
+        history_turn("thought", Role::Thinking, "Checking."),
+        tool_turn("call", Some("read"), ToolStatus::Completed),
+        history_turn("commentary", Role::Assistant, "One more check."),
+        history_turn("thought-two", Role::Thinking, "Confirming."),
+        tool_turn("call-two", Some("bash"), ToolStatus::Completed),
+        history_turn("final", Role::Assistant, "Finished reply."),
+    ];
+    if timed {
+        for (index, turn) in turns.iter_mut().enumerate() {
+            turn.timestamp = Some(Timestamp {
+                ms: 1000 + index as u64 * 1000,
+                meaning: TimeMeaning::Recorded,
+            });
+        }
+    }
+    history(turns)
+}
+
+#[test]
+fn finished_turn_work_folds_with_counts_and_only_recorded_time_spans() {
+    for (timed, expected) in [
+        (true, "Worked for 6s · 2 thoughts · 2 tool calls"),
+        (false, "Worked · 2 thoughts · 2 tool calls"),
+    ] {
+        let html = render_timeline(worked_history(timed));
+        assert!(html.contains(expected), "{html}");
+        assert_eq!(html.matches("aria-expanded=false").count(), 1, "{html}");
+        assert!(html.contains("data-open=false"), "{html}");
+        assert!(html.contains("data-part=\"turn-work\""), "{html}");
+        assert!(html.find("Please check.") < html.find(expected), "{html}");
+        assert!(
+            html.find("Confirming.") < html.find("Finished reply."),
+            "{html}"
+        );
+        if !timed {
+            assert!(!html.contains("Worked for"), "{html}");
+        }
+    }
+    // Neither a missing owner time nor missing record times supplies a span.
+    let mut missing_owner = worked_history(true);
+    missing_owner.turns[0].timestamp = None;
+    assert!(render_timeline(missing_owner).contains("Worked · 2 thoughts · 2 tool calls"));
+    let mut missing_records = worked_history(true);
+    for turn in missing_records.turns.iter_mut().skip(1) {
+        turn.timestamp = None;
+    }
+    assert!(render_timeline(missing_records).contains("Worked · 2 thoughts · 2 tool calls"));
+}
+
+#[test]
+fn worked_span_uses_the_latest_record_time_even_when_the_final_reply_time_is_earlier() {
+    use portal_types::agents::{TimeMeaning, Timestamp};
+    let mut snapshot = worked_history(true);
+    snapshot.turns[2].timestamp = Some(Timestamp {
+        ms: 12_000,
+        meaning: TimeMeaning::Recorded,
+    });
+    snapshot.turns[4].timestamp = None;
+    let html = render_timeline(snapshot);
+    assert!(
+        html.contains("Worked for 11s · 2 thoughts · 2 tool calls"),
+        "{html}"
+    );
+    assert!(!html.contains("Worked for 6s"), "{html}");
+}
+
+fn live_timeline_root(
+    props: (portal_types::agents::Conversation, crate::activity::Live),
+) -> Element {
+    rsx! { crate::agent_view::Conversation { snapshot: Some(props.0), loading: false, assistant: "Assistant", live: props.1, coarse: "working" } }
+}
+
+fn render_live_timeline(
+    snapshot: portal_types::agents::Conversation,
+    live: crate::activity::Live,
+) -> String {
+    let mut dom = VirtualDom::new_with_props(live_timeline_root, (snapshot, live));
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
+}
+
+#[test]
+fn newest_active_turn_stays_open_and_live_thought_and_calls_are_at_the_edge() {
+    use crate::activity::Live;
+    use portal_types::agents::{ActiveTool, LivePhase, LiveState};
+    let state = Live::Detail(LiveState {
+        phase: LivePhase::ToolRunning,
+        reasoning: Some("Newest **live** thought.".into()),
+        active_tools: vec![
+            ActiveTool {
+                call_id: "running".into(),
+                name: "bash".into(),
+                parent_call_id: None,
+                call: Some("$ cargo test -p web".into()),
+            },
+            ActiveTool {
+                call_id: "fallback".into(),
+                name: "read".into(),
+                parent_call_id: None,
+                call: None,
+            },
+        ],
+    });
+    let html = render_live_timeline(worked_history(true), state);
+    assert!(!html.contains("Worked for"), "{html}");
+    assert!(
+        html.contains("Newest <strong>live</strong> thought."),
+        "{html}"
+    );
+    assert!(
+        html.find("Finished reply.") < html.find("Newest <strong>"),
+        "{html}"
+    );
+    assert!(
+        html.find("Newest <strong>") < html.find("$ cargo test -p web"),
+        "{html}"
+    );
+    assert!(html.contains(">read</pre>"), "{html}");
+    assert!(html.contains("conversation-live-thought"), "{html}");
+    let mut two_turns = worked_history(true);
+    two_turns
+        .turns
+        .extend(worked_history(false).turns.into_iter().map(|mut turn| {
+            turn.id = format!("new-{}", turn.id);
+            turn
+        }));
+    let html = render_live_timeline(two_turns, Live::Pending);
+    assert_eq!(html.matches("Worked for 6s").count(), 1, "{html}");
+    assert!(!html.contains("Worked ·"), "{html}");
+}
+
+type StreamHandle = std::rc::Rc<
+    std::cell::Cell<Option<Signal<(portal_types::agents::Conversation, crate::activity::Live)>>>,
+>;
+
+fn changing_stream_root(handle: StreamHandle) -> Element {
+    use crate::activity::Live;
+    use portal_types::agents::{LivePhase, LiveState};
+    let stream = use_signal(|| {
+        (
+            worked_history(true),
+            Live::Detail(LiveState {
+                phase: LivePhase::Thinking,
+                reasoning: Some("Thought at the edge.".into()),
+                active_tools: Vec::new(),
+            }),
+        )
+    });
+    handle.set(Some(stream));
+    let (snapshot, live) = stream();
+    rsx! { crate::agent_view::Conversation { snapshot: Some(snapshot), loading: false, assistant: "Assistant", live, coarse: "working" } }
+}
+
+#[test]
+fn message_end_removes_live_copy_and_transcript_supplies_the_finished_thought()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::activity::Live;
+    use portal_types::agents::{LivePhase, LiveState, Role};
+    let handle = StreamHandle::default();
+    let mut dom = VirtualDom::new_with_props(changing_stream_root, handle.clone());
+    dom.rebuild_in_place();
+    assert_eq!(
+        dioxus_ssr::render(&dom)
+            .matches("Thought at the edge.")
+            .count(),
+        1
+    );
+    let mut stream = handle.get().ok_or("Missing stream signal")?;
+    dom.in_runtime(|| {
+        let mut state = stream.write();
+        state.0.turns.push(history_turn(
+            "finished-thought",
+            Role::Thinking,
+            "Thought at the edge.",
+        ));
+        state.1 = Live::Detail(LiveState {
+            phase: LivePhase::Responding,
+            reasoning: None,
+            active_tools: Vec::new(),
+        });
+    });
+    dom.render_immediate_to_vec();
+    let html = dioxus_ssr::render(&dom);
+    assert_eq!(html.matches("Thought at the edge.").count(), 1, "{html}");
+    assert!(!html.contains("conversation-live-thought"), "{html}");
+    assert!(
+        html.contains("data-record-id=\"finished-thought\""),
+        "{html}"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct FollowProbe {
+    height: std::rc::Rc<std::cell::Cell<f64>>,
+    positions: std::rc::Rc<std::cell::RefCell<Vec<f64>>>,
+}
+
+impl dioxus::html::RenderedElementBacking for FollowProbe {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn get_scroll_size(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = dioxus::html::MountedResult<dioxus::html::geometry::PixelsSize>,
+                >,
+        >,
+    > {
+        let height = self.height.get();
+        Box::pin(async move { Ok(dioxus::html::geometry::PixelsSize::new(100.0, height)) })
+    }
+    fn scroll(
+        &self,
+        position: dioxus::html::geometry::PixelsVector2D,
+        behavior: ScrollBehavior,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = dioxus::html::MountedResult<()>>>> {
+        assert_eq!(behavior, ScrollBehavior::Instant);
+        self.positions.borrow_mut().push(position.y);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+type FollowHandle =
+    std::rc::Rc<std::cell::Cell<Option<(Signal<crate::activity::Live>, Signal<bool>)>>>;
+
+fn follow_root(props: (FollowProbe, FollowHandle)) -> Element {
+    let page = use_signal(|| Some(std::rc::Rc::new(MountedData::new(props.0))));
+    let following = use_signal(|| true);
+    let error = use_signal(|| None::<String>);
+    let live = use_signal(|| crate::activity::Live::Pending);
+    props.1.set(Some((live, following)));
+    crate::agent_view::use_follow_scroll(
+        page,
+        following,
+        error,
+        Some(worked_history(true)),
+        false,
+        true,
+        live(),
+    );
+    rsx! { p { "Following" } }
+}
+
+#[test]
+fn live_updates_follow_the_growing_edge_but_do_not_pull_the_owner_out_of_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::activity::Live;
+    use portal_types::agents::{LivePhase, LiveState};
+    let handle = FollowHandle::default();
+    let probe = FollowProbe::default();
+    probe.height.set(100.0);
+    let mut dom = VirtualDom::new_with_props(follow_root, (probe.clone(), handle.clone()));
+    dom.rebuild_in_place();
+    let (mut live, mut following) = handle.get().ok_or("Missing follow signals")?;
+    dom.render_immediate_to_vec();
+    for (text, height) in [
+        ("First live words", 200.0),
+        ("First live words, then more", 350.0),
+    ] {
+        probe.height.set(height);
+        dom.in_runtime(|| {
+            live.set(Live::Detail(LiveState {
+                phase: LivePhase::Thinking,
+                reasoning: Some(text.into()),
+                active_tools: Vec::new(),
+            }))
+        });
+        dom.render_immediate_to_vec();
+        dom.render_immediate_to_vec();
+        assert_eq!(probe.positions.borrow().last(), Some(&height));
+    }
+    dom.in_runtime(|| following.set(false));
+    dom.render_immediate_to_vec();
+    let previous = probe.positions.borrow().len();
+    probe.height.set(500.0);
+    dom.in_runtime(|| {
+        live.set(Live::Detail(LiveState {
+            phase: LivePhase::Thinking,
+            reasoning: Some("Do not move history".into()),
+            active_tools: Vec::new(),
+        }))
+    });
+    dom.render_immediate_to_vec();
+    dom.render_immediate_to_vec();
+    assert_eq!(probe.positions.borrow().len(), previous);
+    dom.in_runtime(|| following.set(true));
+    dom.render_immediate_to_vec();
+    dom.render_immediate_to_vec();
+    assert_eq!(probe.positions.borrow().last(), Some(&500.0));
+    Ok(())
 }
 
 #[test]
@@ -825,7 +1171,7 @@ fn record_scopes(
             DynamicNode::Component(component) => {
                 if let Some(key) = &node.key
                     && (component.name.ends_with("::MessageRecord")
-                        || component.name.ends_with("::ToolRecords"))
+                        || component.name.ends_with("::ToolRecord"))
                     && let Some(scope) = component.mounted_scope_id(index, node, dom)
                 {
                     records.insert(key.clone(), scope);
@@ -906,6 +1252,44 @@ fn render_activity(
     );
     dom.rebuild_in_place();
     dioxus_ssr::render(&dom)
+}
+
+fn counted_activity_root() -> Element {
+    use crate::activity::Live;
+    use portal_types::agents::{ActiveTool, LivePhase, LiveState};
+    let live = Live::Detail(LiveState {
+        phase: LivePhase::ToolRunning,
+        reasoning: Some("Still checking.".into()),
+        active_tools: vec![
+            ActiveTool {
+                call_id: "call-call".into(),
+                name: "read".into(),
+                parent_call_id: None,
+                call: Some("read src/lib.rs".into()),
+            },
+            ActiveTool {
+                call_id: "new-call".into(),
+                name: "bash".into(),
+                parent_call_id: None,
+                call: Some("$ git status".into()),
+            },
+        ],
+    });
+    rsx! { crate::agent_view::ActivityRow { live, coarse: "working", connected: true, waiting: None, turns: worked_history(true).turns, elapsed_seconds: Some(131) } }
+}
+
+#[test]
+fn footer_keeps_phase_elapsed_and_current_turn_counts_without_counting_a_call_twice() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(counted_activity_root));
+    for text in [
+        "Running tools: read, bash",
+        "2m 11s",
+        "3 thoughts · 3 tool calls",
+    ] {
+        assert!(html.contains(text), "missing {text}: {html}");
+    }
+    assert!(!html.contains("Still checking."), "{html}");
+    assert!(!html.contains("$ git status"), "{html}");
 }
 
 #[test]
