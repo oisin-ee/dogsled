@@ -20,7 +20,7 @@ Each agent event carries a separate conversation revision and screen revision. T
    - Give `Payload::new` a `previous: Option<&Payload>` argument. A part keeps the previous part revision when the session and that part's `Content` are both equal. Otherwise it takes the new detail revision.
    - Pass the current `output` value at all three call sites (lines 477, 498, 580-585).
    - Add `#[serde(default)] pub parts: Option<DetailRevisions>` to `DetailFrame` (line 150).
-3. `src/observation/ipc.rs`: `write_detail` takes `parts: Option<&DetailRevisions>` and writes it as `"parts"` in the header. The detail loop passes `Some(&payload.reference.parts)`; the missing-agent frame (~line 372) passes `None`.
+3. `src/observation/ipc.rs`: `write_detail` takes `parts: Option<&DetailRevisions>` and writes it as `"parts"` in the header. The detail loop passes `Some(&payload.reference.parts)`; the missing-agent frame (line 382) passes `None`.
 4. `src/web/agents.rs`:
    - `agent_event` (line 739) sets `revisions` from `publication.parts`.
    - `events` (lines 705-716) dedupes on the payload string alone. Drop the publication revision from the signature.
