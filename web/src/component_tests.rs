@@ -5,6 +5,205 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+fn files_root(state: Option<portal_types::files::FilesState>) -> Element {
+    rsx! { crate::files::Files { state } }
+}
+
+fn render_files(state: Option<portal_types::files::FilesState>) -> String {
+    let mut dom = VirtualDom::new_with_props(files_root, state);
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
+}
+
+fn checkout(entries: Vec<portal_types::files::Entry>) -> portal_types::files::Files {
+    portal_types::files::Files {
+        root: "/repo".into(),
+        head: portal_types::files::Head::Branch("feat/files".into()),
+        entries,
+        captured_ms: 1234,
+    }
+}
+
+fn file_entry(path: &[u8], change: portal_types::files::Change) -> portal_types::files::Entry {
+    portal_types::files::Entry {
+        path: portal_types::files::GitPath::new(path),
+        change,
+    }
+}
+
+#[test]
+fn files_render_loading_clean_and_all_unavailable_states() {
+    use portal_types::files::FilesState;
+    for state in [None, Some(FilesState::Pending)] {
+        let html = render_files(state.clone());
+        assert!(
+            html.contains(r#"aria-label="Loading file status""#),
+            "{html}"
+        );
+        assert!(html.contains("dx_skeleton"), "{html}");
+        assert!(!html.contains("Working tree clean"), "{html}");
+        assert_eq!(crate::files::path_count(state.as_ref()), None);
+    }
+    for (state, message) in [
+        (
+            FilesState::Current(checkout(Vec::new())),
+            "Working tree clean",
+        ),
+        (FilesState::NotRepository, "Not a Git checkout"),
+        (FilesState::TooMany, "Too many changes to list"),
+        (
+            FilesState::Unavailable("host files unsupported".into()),
+            "host files unsupported",
+        ),
+    ] {
+        let count = crate::files::path_count(Some(&state));
+        let html = render_files(Some(state));
+        assert!(html.contains(message), "{html}");
+        assert!(html.contains(r#"role="status""#), "{html}");
+        assert_eq!(count, (message == "Working tree clean").then_some(0));
+        assert!(!html.contains("files-group"), "{html}");
+    }
+}
+
+#[test]
+fn files_order_nonempty_groups_and_count_shared_paths_once() {
+    use portal_types::files::{Change, FilesState};
+    let shared = file_entry(
+        b"both.rs",
+        Change::Ordinary {
+            index: 'M',
+            worktree: 'M',
+        },
+    );
+    let entries = vec![
+        file_entry(b"new.rs", Change::Untracked),
+        shared.clone(),
+        file_entry(b"conflict.rs", Change::Conflict { code: ['U', 'U'] }),
+    ];
+    let state = FilesState::Current(checkout(entries));
+    assert_eq!(crate::files::path_count(Some(&state)), Some(3));
+    let html = render_files(Some(state));
+    let mut previous = 0;
+    for heading in [
+        "Conflicts · 1",
+        "Staged · 1",
+        "Unstaged · 1",
+        "Untracked · 1",
+    ] {
+        let position = html.find(heading);
+        assert!(
+            position.is_some_and(|position| position >= previous),
+            "missing/out of order {heading}: {html}"
+        );
+        previous = position.unwrap_or(previous);
+    }
+    let html = render_files(Some(FilesState::Current(checkout(vec![shared]))));
+    assert!(
+        html.contains("Staged · 1") && html.contains("Unstaged · 1"),
+        "{html}"
+    );
+    assert!(
+        !html.contains("Conflicts") && !html.contains("Untracked"),
+        "{html}"
+    );
+}
+
+#[test]
+fn stale_files_keep_the_last_groups_count_time_and_error() {
+    use portal_types::files::{Change, FilesState};
+    let state = FilesState::Stale {
+        files: checkout(vec![file_entry(b"last.rs", Change::Untracked)]),
+        error: "Git read failed".into(),
+    };
+    assert_eq!(crate::files::path_count(Some(&state)), Some(1));
+    let html = render_files(Some(state));
+    for text in [
+        "Last read at 1234 ms since Unix epoch: Git read failed",
+        "Untracked · 1",
+    ] {
+        assert!(html.contains(text), "missing {text}: {html}");
+    }
+    assert!(!html.contains("Working tree clean"), "{html}");
+}
+
+fn file_row_root(props: (portal_types::files::Entry, usize)) -> Element {
+    rsx! { crate::files::FileRow { entry: props.0, stage: props.1 } }
+}
+
+#[test]
+fn file_rows_show_stage_codes_and_rename_paths_without_actions() {
+    use portal_types::files::{Change, GitPath};
+    for (change, stage, code, previous) in [
+        (
+            Change::Renamed {
+                index: 'R',
+                worktree: '.',
+                from: GitPath::new(b"old/<name>.rs"),
+            },
+            1,
+            "R",
+            true,
+        ),
+        (
+            Change::Ordinary {
+                index: 'A',
+                worktree: 'M',
+            },
+            1,
+            "A",
+            false,
+        ),
+        (
+            Change::Ordinary {
+                index: 'A',
+                worktree: 'M',
+            },
+            2,
+            "M",
+            false,
+        ),
+        (Change::Conflict { code: ['U', 'U'] }, 0, "UU", false),
+        (Change::Untracked, 3, "?", false),
+    ] {
+        let mut dom = VirtualDom::new_with_props(
+            file_row_root,
+            (file_entry(b"long/path/<new>.rs", change), stage),
+        );
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("long/path/&lt;new&gt;.rs"), "{html}");
+        assert!(
+            html.contains(&format!(r#"class="files-code">{code}</span>"#)),
+            "{html}"
+        );
+        assert_eq!(
+            html.contains("from old/&lt;name&gt;.rs"),
+            previous,
+            "{html}"
+        );
+        for action in [
+            "<button",
+            "<a ",
+            "href=",
+            "onclick",
+            "onkeydown",
+            "tabindex=",
+        ] {
+            assert!(!html.contains(action), "unexpected {action}: {html}");
+        }
+    }
+}
+
+#[test]
+fn files_count_exact_paths_even_when_display_text_matches() {
+    use portal_types::files::{Change, FilesState};
+    let state = FilesState::Current(checkout(vec![
+        file_entry(b"\xff", Change::Untracked),
+        file_entry(b"\xfe", Change::Untracked),
+    ]));
+    assert_eq!(crate::files::path_count(Some(&state)), Some(2));
+}
+
 fn worker_lead() -> crate::board::NavigationRow {
     crate::board::NavigationRow {
         pane: Some("lead".into()),

@@ -194,6 +194,7 @@ fn AgentSession(
     let mut conversations = use_context::<Signal<Conversations>>();
     let mut detail_session = use_signal(|| None::<wire::DetailSession>);
     let mut screen = use_signal(|| None::<wire::Screen>);
+    let mut files = use_signal(|| None::<portal_types::files::FilesState>);
     let mut screen_error = use_signal(|| None::<String>);
     let mut pending_error = use_signal(|| None::<String>);
     let mut stream_error = use_signal(|| None::<String>);
@@ -201,6 +202,7 @@ fn AgentSession(
     let mut busy = use_signal(|| false);
     let mut conversation_trigger = use_signal(|| 0_u64);
     let mut screen_trigger = use_signal(|| 0_u64);
+    let mut files_trigger = use_signal(|| 0_u64);
     // A choice belongs to the request that was visible when it was made.
     // A new request opens in front; the same request preserves the tab.
     let mut choice = use_signal(|| None::<(String, Tab)>);
@@ -258,6 +260,36 @@ fn AgentSession(
         }
     });
 
+    let files_pane = address.clone();
+    use_resource(move || {
+        let trigger = files_trigger();
+        let session = detail_session.peek().clone();
+        let pane = files_pane.clone();
+        async move {
+            if trigger == 0 {
+                return;
+            }
+            let result = api::fetch_files(&pane).await;
+            if *detail_session.peek() != session {
+                return;
+            }
+            use portal_types::files::FilesState;
+            let state = match result {
+                Ok(state) => state,
+                Err(error) => match files.peek().as_ref() {
+                    Some(FilesState::Current(files) | FilesState::Stale { files, .. }) => {
+                        FilesState::Stale {
+                            files: files.clone(),
+                            error,
+                        }
+                    }
+                    _ => FilesState::Unavailable(error),
+                },
+            };
+            files.set(Some(state));
+        }
+    });
+
     let pending_address = address.clone();
     let inbox_ids = use_memo(use_reactive(&inbox, move |inbox| {
         agent_inbox_ids(&inbox, &pending_address)
@@ -295,7 +327,8 @@ fn AgentSession(
                     stream_error.set(None);
                     let parts = changed_parts(revisions.as_ref(), &event, was_blocked);
                     was_blocked = event_is_blocked(&event, was_blocked);
-                    if detail_session.peek().as_ref() != Some(&event.session) {
+                    let session_changed = detail_session.peek().as_ref() != Some(&event.session);
+                    if session_changed {
                         match &event.session {
                             wire::DetailSession::Available(session) => conversations
                                 .write()
@@ -307,6 +340,7 @@ fn AgentSession(
                                 .unavailable(&pane.pane),
                         }
                         screen.set(None);
+                        files.set(None);
                         detail_session.set(Some(event.session.clone()));
                     }
                     revisions.clone_from(&event.revisions);
@@ -316,6 +350,9 @@ fn AgentSession(
                     }
                     if parts.screen {
                         screen_trigger += 1;
+                    }
+                    if parts.files || session_changed {
+                        files_trigger += 1;
                     }
                     if !was_blocked {
                         screen.set(None);
@@ -423,6 +460,8 @@ fn AgentSession(
         .iter()
         .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
         .collect();
+    let files_count = crate::files::path_count(files.read().as_ref())
+        .map_or_else(String::new, |paths| paths.to_string());
     let worker_count = worker_rows.len();
     let working_count = crate::workers::working_count(&worker_rows);
     let todo_count: usize = todos
@@ -607,6 +646,7 @@ fn AgentSession(
                             TabTrigger { value: "chat", index: first_tab, "Chat" }
                             TabTrigger { value: "todos", index: first_tab + 1, "Todos {completed}/{todo_count}" }
                             TabTrigger { value: "workers", index: first_tab + 2, "Workers {worker_count}" }
+                            TabTrigger { value: "files", index: first_tab + 3, "Files {files_count}" }
                         }
                     }
                 }
@@ -669,17 +709,29 @@ fn AgentSession(
                     {chat.clone()}
                     aside { class: "console-todos",
                         Tabs { class: "lead-detail", horizontal: true, value: Some(detail().value().to_owned()),
-                            on_value_change: move |value: String| detail.set(if value == "workers" { crate::app::LeadPanel::Workers } else { crate::app::LeadPanel::Todos }),
+                            on_value_change: move |value: String| {
+                                let next = match value.as_str() {
+                                    "workers" => crate::app::LeadPanel::Workers,
+                                    "files" => crate::app::LeadPanel::Files,
+                                    _ => crate::app::LeadPanel::Todos,
+                                };
+                                detail.set(next);
+                                panel.set(next);
+                            },
                             header { class: "console-column-header detail-header",
                                 div { class: "lead-tabs detail-tabs", TabList { aria_label: "Lead detail",
                                     TabTrigger { value: "todos", index: 0usize, "Todos {completed}/{todo_count}" }
                                     TabTrigger { value: "workers", index: 1usize, "Workers {worker_count}" }
+                                    TabTrigger { value: "files", index: 2usize, "Files {files_count}" }
                                 } }
                                 if detail() == crate::app::LeadPanel::Workers { span { "{working_count} working" } }
                             }
                             TabContent { class: "detail-content", value: "todos", index: 0usize, Todos { todos: todos.clone(), workers: workers.clone() } }
                             TabContent { class: "detail-content", value: "workers", index: 1usize,
                                 crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone(), header: false }
+                            }
+                            TabContent { class: "detail-content", value: "files", index: 2usize,
+                                crate::files::Files { state: files() }
                             }
                         }
                     }
@@ -693,6 +745,9 @@ fn AgentSession(
                     TabContent { class: "workers-tab", value: "workers", index: first_tab + 2,
                         crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone() }
                     }
+                    TabContent { class: "files-tab", value: "files", index: first_tab + 3,
+                        crate::files::Files { state: files() }
+                    }
                 }
             }
         }
@@ -703,6 +758,7 @@ fn AgentSession(
 struct ChangedParts {
     conversation: bool,
     screen: bool,
+    files: bool,
 }
 
 fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
@@ -713,7 +769,7 @@ fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
             .map_or(was_blocked, |state| state == "blocked")
 }
 
-/// Older peers lack revisions; their events must invalidate both parts.
+/// Older peers lack revisions; their events must invalidate all three parts.
 fn changed_parts(
     held: Option<&wire::DetailRevisions>,
     event: &wire::AgentEvent,
@@ -723,11 +779,13 @@ fn changed_parts(
         return ChangedParts {
             conversation: true,
             screen: true,
+            files: true,
         };
     };
     let blocked = event_is_blocked(event, was_blocked);
     ChangedParts {
         conversation: held.is_none_or(|held| held.conversation != revisions.conversation),
+        files: held.is_none_or(|held| held.files != revisions.files),
         screen: blocked
             && (held.is_none_or(|held| held.screen != revisions.screen) || !was_blocked),
     }
@@ -1770,10 +1828,11 @@ mod tests {
         }
     }
 
-    fn parts(conversation: bool, screen: bool) -> ChangedParts {
+    fn parts(conversation: bool, screen: bool, files: bool) -> ChangedParts {
         ChangedParts {
             conversation,
             screen,
+            files,
         }
     }
 
@@ -1781,11 +1840,11 @@ mod tests {
     fn first_event_reads_the_conversation_and_only_a_blocked_screen() {
         assert_eq!(
             changed_parts(None, &event(4, 8, "working"), false),
-            parts(true, false)
+            parts(true, false, true)
         );
         assert_eq!(
             changed_parts(None, &event(4, 8, "blocked"), true),
-            parts(true, true)
+            parts(true, true, true)
         );
     }
 
@@ -1794,7 +1853,7 @@ mod tests {
         let event = event(4, 8, "blocked");
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, true),
-            parts(false, false)
+            parts(false, false, false)
         );
     }
 
@@ -1803,15 +1862,15 @@ mod tests {
         let held = event(4, 8, "blocked").revisions;
         assert_eq!(
             changed_parts(held.as_ref(), &event(4, 9, "blocked"), true),
-            parts(false, true)
+            parts(false, true, false)
         );
         assert_eq!(
             changed_parts(held.as_ref(), &event(4, 9, "working"), false),
-            parts(false, false)
+            parts(false, false, false)
         );
         assert_eq!(
             changed_parts(held.as_ref(), &event(4, 9, "working"), true),
-            parts(false, false)
+            parts(false, false, false)
         );
     }
 
@@ -1820,11 +1879,11 @@ mod tests {
         let held = event(4, 8, "blocked").revisions;
         assert_eq!(
             changed_parts(held.as_ref(), &event(5, 8, "blocked"), true),
-            parts(true, false)
+            parts(true, false, false)
         );
         assert_eq!(
             changed_parts(held.as_ref(), &event(5, 8, "working"), false),
-            parts(true, false)
+            parts(true, false, false)
         );
     }
 
@@ -1833,7 +1892,7 @@ mod tests {
         let mut event = event(4, 8, "blocked");
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, false),
-            parts(false, true)
+            parts(false, true, false)
         );
         event.state = Some("idle".into());
         event.blocked = Some(BlockedPrompt {
@@ -1842,25 +1901,38 @@ mod tests {
         });
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, false),
-            parts(false, true)
+            parts(false, true, false)
         );
         event.state = None;
         event.blocked = None;
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, true),
-            parts(false, false)
+            parts(false, false, false)
         );
     }
 
     #[test]
-    fn an_older_peer_invalidates_both_parts_on_every_event() {
+    fn a_files_only_revision_change_reads_only_files() {
+        let mut event = event(4, 8, "blocked");
+        let held = event.revisions.clone();
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.files += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, false, true)
+        );
+    }
+
+    #[test]
+    fn an_older_peer_invalidates_all_three_parts_on_every_event() {
         let mut event = event(4, 8, "working");
         let held = event.revisions.take();
         assert_eq!(
             changed_parts(held.as_ref(), &event, false),
-            parts(true, true)
+            parts(true, true, true)
         );
-        assert_eq!(changed_parts(None, &event, false), parts(true, true));
+        assert_eq!(changed_parts(None, &event, false), parts(true, true, true));
     }
 
     #[test]
@@ -1868,9 +1940,9 @@ mod tests {
         let event = event(4, 8, "blocked");
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, true),
-            parts(false, false)
+            parts(false, false, false)
         );
-        assert_eq!(changed_parts(None, &event, true), parts(true, true));
+        assert_eq!(changed_parts(None, &event, true), parts(true, true, true));
     }
 
     #[test]
