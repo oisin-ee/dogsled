@@ -947,20 +947,13 @@ textarea {
 .console-provider .console-shell .files-list {
   padding: 6px 16px 12px;
 }
-.console-provider .console-shell .files-list [data-orientation="vertical"] {
-  width: 100%;
-  border-color: var(--console-line);
-}
-.console-provider .console-shell .files-group {
-  border: 0;
-}
-.console-provider .console-shell .files-group button {
+.console-provider .console-shell .files-list button {
   padding: 9px 0 4px;
   font-size: 12px;
   font-weight: 500;
   color: var(--console-muted);
 }
-.console-provider .console-shell .files-group [data-slot="item-group"] {
+.console-provider .console-shell .files-list [data-slot="item-group"] {
   gap: 0;
 }
 .console-provider .console-shell .files-row[data-slot="item"] {
