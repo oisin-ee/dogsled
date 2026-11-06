@@ -876,12 +876,6 @@ impl FilesRead {
                     error: error.clone(),
                 };
             }
-            (FilesState::TooMany, Some(files)) => {
-                state = FilesState::Stale {
-                    files: files.clone(),
-                    error: "too many files".into(),
-                };
-            }
             _ => (),
         }
         Self {

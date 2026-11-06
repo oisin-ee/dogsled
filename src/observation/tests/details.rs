@@ -436,6 +436,27 @@ fn failed_git_keeps_only_a_snapshot_from_the_same_checkout() {
 }
 
 #[test]
+fn too_many_replaces_the_previous_list_instead_of_retaining_stale_files() {
+    let native = Native::new();
+    let repo = Repository::new();
+    native.raw.lock().unwrap()["cwd"] = json!(repo.0);
+    let shell = Arc::new(GitShell::default());
+    let fixture = Fixture::with_files_shell(native.server.client(), shell.clone());
+    let mut viewer = fixture.client.detail("w1:p1").unwrap();
+    fixture.wait(|frame| detail(frame).is_some_and(|detail| detail.files == ReadState::Empty));
+    shell.too_many.store(true, Ordering::Release);
+    fixture.files_tick("w1:p1");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while viewer.current().publication.detail.files != FilesState::TooMany {
+        assert!(
+            Instant::now() < deadline,
+            "TooMany must replace the previous snapshot"
+        );
+        viewer.changed(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn symlink_retarget_does_not_inherit_another_roots_stale_files() {
     use std::os::unix::fs::symlink;
     let native = Native::new();

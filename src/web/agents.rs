@@ -358,11 +358,10 @@ pub(super) async fn peer_response(
             if files
                 && matches!(
                     error.root(),
-                    crate::error::Error::Peer { .. }
-                        | crate::error::Error::Ssh {
-                            failure: crate::hosts::Failure::RemoteCommandFailed,
-                            ..
-                        }
+                    crate::error::Error::Ssh {
+                        refusal: Some(crate::error::Refusal::AgentFilesUnsupported),
+                        ..
+                    }
                 ) =>
         {
             (
@@ -1476,7 +1475,7 @@ mod tests {
         let command = fixture.command("w1:p1", &PeerOperation::Files);
         fixture.shell.on_output(&command, crate::shell::Output {
             status: 2,
-            stdout: json!({"error":"JSON: unknown variant `files`, expected conversation or screen"}).to_string(),
+            stdout: json!({"error":"JSON: unknown variant `files`, expected one of `conversation`, `screen`, `event`, `activity`, `register`, `publish` at line 1 column 20"}).to_string(),
             stderr: String::new(),
         });
         let response = call(
@@ -1490,6 +1489,50 @@ mod tests {
             json!({"error":"host netcup: files unsupported"})
         );
         assert_eq!(*fixture.shell.calls.lock().unwrap(), [command]);
+    }
+
+    #[tokio::test]
+    async fn current_peer_files_failure_is_not_reported_as_unsupported() {
+        let fixture = PeerFixture::new();
+        let command = fixture.command("w1:p1", &PeerOperation::Files);
+        for (status, category) in [(1, "unexpected output"), (2, "remote command failed")] {
+            fixture.shell.on_output(
+                &command,
+                crate::shell::Output {
+                    status,
+                    stdout: json!({"error":"ledger missing"}).to_string(),
+                    stderr: String::new(),
+                },
+            );
+            let response = call(
+                fixture.state.clone(),
+                request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body_json(response).await,
+                json!({"error":format!("host netcup: unreachable: {category}")})
+            );
+        }
+        fixture.shell.on_output(
+            &command,
+            crate::shell::Output {
+                status: 2,
+                stdout: json!({"error":"serve failed","diagnostic":{"version":1}}).to_string(),
+                stderr: String::new(),
+            },
+        );
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"host netcup: unreachable: other"})
+        );
     }
 
     #[tokio::test]
