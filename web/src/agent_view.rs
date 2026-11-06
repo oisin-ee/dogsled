@@ -293,7 +293,7 @@ fn AgentSession(
                             .to_owned(),
                     );
                 }
-                api::send_prompt(&pane, &message).await
+                api::send_prompt(&pane, &message, prompt_reply).await
             }
             .await;
             match result {
