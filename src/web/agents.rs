@@ -1371,12 +1371,22 @@ mod tests {
         .await
         .expect("agent SSE stops")
         .expect("the body");
+        // The body ends at once; the forwarding thread drops its subscription on its next
+        // poll, and only then does serve release the lease. A frame with no details can
+        // predate the first capture, so it proves nothing about the release.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !fixture.no_viewers() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detail lease was not released"
+            );
+            std::thread::yield_now();
+        }
         fixture.wait(|frame| {
             frame.views["agent_details"]["data"]
                 .as_object()
                 .is_some_and(serde_json::Map::is_empty)
         });
-        assert!(fixture.no_viewers());
     }
 
     /// A fake Herdr that answers the agent calls.

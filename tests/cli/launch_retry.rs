@@ -1784,8 +1784,10 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     queue[0].as_object_mut().unwrap().remove("wait_reason");
     rig.put_tickets(&queue);
     let (_, board) = {
-        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
-        rig.json(&["board", "--all"])
+        let observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        let board = rig.json(&["board", "--all"]);
+        super::place::stop_observer(&rig, observer);
+        board
     };
     assert_eq!(
         board["rows"][0]["activity"], "for a host with room",
@@ -1795,8 +1797,10 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     rig.expire_cache();
     rig.ingest_peers();
     let (_, board) = {
-        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
-        rig.json(&["board", "--all"])
+        let observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        let board = rig.json(&["board", "--all"]);
+        super::place::stop_observer(&rig, observer);
+        board
     };
     let reason = board["rows"][0]["activity"].as_str().unwrap();
     assert!(reason.starts_with("for netcup: "), "{board}");
