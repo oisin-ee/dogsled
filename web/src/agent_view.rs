@@ -9,13 +9,13 @@ use dioxus::web::WebEventExt;
 use dioxus_icons::lucide::{ArrowUp, ExternalLink, Paperclip, Square, X};
 use dioxus_primitives::dioxus_attributes::attributes;
 use dioxus_primitives::scroll_area::ScrollDirection;
-use dioxus_sdk_time::use_interval;
+use dioxus_sdk_time::{sleep, use_interval};
 use gloo_net::http::Request;
 use js_sys::wasm_bindgen::JsCast;
 use portal_types::agents::{self as wire, BlockedPrompt, Role, Turn};
 use portal_types::questions::{Pending, PendingList};
 use portal_types::reviews::{ReviewList, ReviewSummary};
-use portal_types::{BoardView, TodoStatusView, TodoView};
+use portal_types::{TodoStatusView, TodoView};
 use serde::de::DeserializeOwned;
 
 use crate::activity::{Gap, Live, use_live_activity};
@@ -36,8 +36,6 @@ use crate::notice::{Alert, Status};
 use crate::question_form::QuestionForm;
 use crate::review_view::ReviewView;
 
-/// The time between two refreshes of an open agent.
-const POLL: Duration = Duration::from_secs(5);
 const BASE: &str = match option_env!("DOGSLED_API") {
     Some(base) => base,
     None => "",
@@ -101,6 +99,41 @@ pub fn AgentView(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AgentMetadata {
+    Loading,
+    Missing,
+    Unreachable {
+        message: String,
+        agent: Option<wire::AgentView>,
+    },
+    Present(wire::AgentView),
+}
+
+fn agent_metadata(
+    agents: Option<&[wire::AgentView]>,
+    error: Option<&str>,
+    address: &wire::AgentAddress,
+) -> AgentMetadata {
+    let agent = agents.and_then(|agents| {
+        agents
+            .iter()
+            .find(|agent| agent.host == address.host && agent.pane == address.pane)
+            .cloned()
+    });
+    if let Some(message) = error {
+        return AgentMetadata::Unreachable {
+            message: message.to_owned(),
+            agent,
+        };
+    }
+    match (agents, agent) {
+        (None, _) => AgentMetadata::Loading,
+        (_, Some(agent)) => AgentMetadata::Present(agent),
+        (Some(_), None) => AgentMetadata::Missing,
+    }
+}
+
 #[component]
 fn AgentSession(
     host: String,
@@ -115,26 +148,61 @@ fn AgentSession(
         host: host.clone(),
         pane: pane.clone(),
     };
-    let mut agent = use_signal(|| None::<wire::AgentView>);
-    let mut board = use_signal(|| None::<BoardView>);
+    let portal = use_context::<crate::app::AgentPortal>();
+    let mut latest_event = use_signal(|| None::<wire::AgentEvent>);
+    let agent_address = address.clone();
+    let metadata = use_memo(move || {
+        agent_metadata(
+            portal.agents.read().as_deref(),
+            portal.agent_error.read().as_deref(),
+            &agent_address,
+        )
+    });
+    let loading = use_memo(move || matches!(&*metadata.read(), AgentMetadata::Loading));
+    let agent = use_memo(move || {
+        let mut current = match &*metadata.read() {
+            AgentMetadata::Present(agent) => Some(agent.clone()),
+            AgentMetadata::Unreachable { agent, .. } => agent.clone(),
+            AgentMetadata::Loading | AgentMetadata::Missing => None,
+        };
+        if let (Some(current), Some(event)) = (current.as_mut(), latest_event.read().as_ref()) {
+            if let Some(state) = &event.state {
+                current.state.clone_from(state);
+                current.blocked.clone_from(&event.blocked);
+            } else if event.blocked.is_some() {
+                current.blocked.clone_from(&event.blocked);
+            }
+        }
+        current
+    });
+    let reachable = use_memo(move || {
+        matches!(
+            &*metadata.read(),
+            AgentMetadata::Present(_) | AgentMetadata::Missing
+        )
+    });
+    let metadata_error = use_memo(move || match &*metadata.read() {
+        AgentMetadata::Loading | AgentMetadata::Present(_) => None,
+        AgentMetadata::Missing => {
+            Some("This agent is no longer available. Select another agent.".to_owned())
+        }
+        AgentMetadata::Unreachable { message, .. } => Some(message.clone()),
+    });
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
     let mut questions = use_signal(|| None::<Vec<Pending>>);
     let mut selection = use_context::<Signal<Option<crate::app::InboxSelection>>>();
     let mut conversations = use_context::<Signal<Conversations>>();
     let mut detail_session = use_signal(|| None::<wire::DetailSession>);
     let mut screen = use_signal(|| None::<wire::Screen>);
-    let mut metadata_loading = use_signal(|| true);
-    let mut reachable = use_signal(|| false);
-    let mut metadata_error = use_signal(|| None::<String>);
     let mut screen_error = use_signal(|| None::<String>);
     let mut pending_error = use_signal(|| None::<String>);
-    let mut board_error = use_signal(|| None::<String>);
     let mut stream_error = use_signal(|| None::<String>);
     let mut action_error = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
-    let mut refresh = use_signal(|| 0_u64);
+    let mut conversation_trigger = use_signal(|| 0_u64);
+    let mut screen_trigger = use_signal(|| 0_u64);
     // A choice belongs to the request that was visible when it was made.
-    // A new request opens in front; polling the same request preserves the tab.
+    // A new request opens in front; the same request preserves the tab.
     let mut choice = use_signal(|| None::<(String, Tab)>);
     let mut images = use_signal(Vec::<String>::new);
     let uploading = use_signal(|| false);
@@ -146,37 +214,21 @@ fn AgentSession(
     let mut draft = try_use_context::<Draft>().map_or(local_draft, |draft| draft.0);
 
     // Transcript I/O must start and render without waiting for the full agent list.
-    let transcript = use_conversation(address.clone(), refresh, detail_session);
+    let transcript = use_conversation(address.clone(), conversation_trigger, detail_session);
     let live = use_live_activity(address.clone(), detail_session);
-
-    let read_pane = address.clone();
-    use_resource(move || {
-        let _ = refresh();
-        let pane = read_pane.clone();
-        async move {
-            match api::fetch_agent(&pane).await {
-                Ok(current) => {
-                    reachable.set(true);
-                    metadata_error.set(current.is_none().then(|| {
-                        "This agent is no longer available. Select another agent.".to_owned()
-                    }));
-                    agent.set(current);
-                }
-                Err(message) => {
-                    reachable.set(false);
-                    metadata_error.set(Some(message));
-                }
-            }
-            metadata_loading.set(false);
-        }
-    });
 
     let screen_pane = address.clone();
     use_resource(move || {
-        let _ = refresh();
-        let blocked = agent.read().as_ref().is_some_and(is_blocked);
+        let trigger = screen_trigger();
+        let blocked = latest_event.peek().as_ref().map_or_else(
+            || agent.peek().as_ref().is_some_and(is_blocked),
+            |event| event_is_blocked(event, agent.peek().as_ref().is_some_and(is_blocked)),
+        );
         let pane = screen_pane.clone();
         async move {
+            if trigger == 0 {
+                return;
+            }
             // A failed or pending transcript must not hide the prompt needed to reply.
             let result = if blocked {
                 match api::fetch_screen(&pane).await {
@@ -206,16 +258,13 @@ fn AgentSession(
         }
     });
 
+    let pending_address = address.clone();
+    let inbox_ids = use_memo(use_reactive(&inbox, move |inbox| {
+        agent_inbox_ids(&inbox, &pending_address)
+    }));
     use_resource(move || {
-        let _ = refresh();
+        let _ = inbox_ids();
         async move {
-            match api::fetch_board().await {
-                Ok(value) => {
-                    board.set(Some(value));
-                    board_error.set(None);
-                }
-                Err(message) => board_error.set(Some(message)),
-            }
             let (review_result, question_result) = futures_util::join!(
                 pending_list::<ReviewList>("reviews"),
                 pending_list::<PendingList>("questions")
@@ -237,37 +286,54 @@ fn AgentSession(
     use_future(move || {
         let pane = event_pane.clone();
         async move {
-            let result = api::watch_agent(&pane, |event| {
-                if detail_session.peek().as_ref() != Some(&event.session) {
-                    match &event.session {
-                        wire::DetailSession::Available(session) => conversations
-                            .write()
-                            .host_mut(&pane.host)
-                            .select_session(&pane.pane, session),
-                        wire::DetailSession::Unavailable => conversations
-                            .write()
-                            .host_mut(&pane.host)
-                            .unavailable(&pane.pane),
+            let mut backoff = Backoff::default();
+            let mut revisions = None;
+            loop {
+                let mut was_blocked = agent.peek().as_ref().is_some_and(is_blocked);
+                let result = api::watch_agent(&pane, |event| {
+                    backoff.reset();
+                    stream_error.set(None);
+                    let parts = changed_parts(revisions.as_ref(), &event, was_blocked);
+                    was_blocked = event_is_blocked(&event, was_blocked);
+                    if detail_session.peek().as_ref() != Some(&event.session) {
+                        match &event.session {
+                            wire::DetailSession::Available(session) => conversations
+                                .write()
+                                .host_mut(&pane.host)
+                                .select_session(&pane.pane, session),
+                            wire::DetailSession::Unavailable => conversations
+                                .write()
+                                .host_mut(&pane.host)
+                                .unavailable(&pane.pane),
+                        }
+                        screen.set(None);
+                        detail_session.set(Some(event.session.clone()));
                     }
-                    screen.set(None);
-                    detail_session.set(Some(event.session.clone()));
-                }
-                if let Some(current) = agent.write().as_mut() {
-                    if let Some(state) = event.state {
-                        current.state = state;
-                        current.blocked = event.blocked;
-                    } else if event.blocked.is_some() {
-                        current.blocked = event.blocked;
+                    revisions.clone_from(&event.revisions);
+                    latest_event.set(Some(event));
+                    if parts.conversation {
+                        conversation_trigger += 1;
                     }
-                }
-                refresh += 1;
-            })
-            .await;
-            stream_error.set(result.err());
+                    if parts.screen {
+                        screen_trigger += 1;
+                    }
+                    if !was_blocked {
+                        screen.set(None);
+                        screen_error.set(None);
+                    }
+                })
+                .await;
+                stream_error.set(Some(
+                    result
+                        .err()
+                        .unwrap_or_else(|| "the agent stream ended".to_owned()),
+                ));
+                revisions = None;
+                latest_event.set(None);
+                sleep(backoff.next_delay()).await;
+            }
         }
     });
-
-    use_interval(POLL, move |()| refresh += 1);
 
     let send_pane = address.clone();
     let send = move |prompt_reply: bool| {
@@ -281,21 +347,7 @@ fn AgentSession(
         busy.set(true);
         action_error.set(None);
         spawn(async move {
-            let result = async {
-                let current = api::fetch_agent(&pane)
-                    .await?
-                    .ok_or_else(|| "This agent is no longer available.".to_owned())?;
-                let blocked = is_blocked(&current);
-                agent.set(Some(current));
-                if blocked && !prompt_reply {
-                    return Err(
-                        "The agent needs a response. Select its prompt in Waiting on you to reply."
-                            .to_owned(),
-                    );
-                }
-                api::send_prompt(&pane, &message).await
-            }
-            .await;
+            let result = api::send_prompt(&pane, &message, prompt_reply).await;
             match result {
                 Ok(()) => {
                     if draft() == text {
@@ -307,7 +359,6 @@ fn AgentSession(
                 }
                 Err(message) => action_error.set(Some(message)),
             }
-            refresh += 1;
             busy.set(false);
         });
     };
@@ -324,7 +375,6 @@ fn AgentSession(
         action_error.set(None);
         spawn(async move {
             action_error.set(api::send_key(&pane, &key).await.err());
-            refresh += 1;
             busy.set(false);
         });
     };
@@ -338,12 +388,13 @@ fn AgentSession(
             .cloned(),
         _ => None,
     };
-    let transcript_loading = retained.is_none() && transcript.read().is_none();
+    let transcript_loading =
+        retained.is_none() && (conversation_trigger() == 0 || transcript.read().is_none());
     let transcript_error = transcript
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().err().cloned());
-    let board_view = board();
+    let board_view = (portal.board)();
     let row = board_view.as_ref().and_then(|board| {
         board
             .repos
@@ -426,13 +477,17 @@ fn AgentSession(
             }
         },
     );
-    let state = pending
-        .as_ref()
-        .map(RequestTab::state)
-        .or_else(|| current.as_ref().map(|agent| agent.state.as_str()))
-        .unwrap_or("Loading…")
-        .to_owned();
-    let disabled = busy() || metadata_loading() || !reachable() || current.is_none();
+    let state = if loading() {
+        "Loading…"
+    } else {
+        pending
+            .as_ref()
+            .map(RequestTab::state)
+            .or_else(|| current.as_ref().map(|agent| agent.state.as_str()))
+            .unwrap_or("Loading…")
+    }
+    .to_owned();
+    let disabled = busy() || !reachable() || current.is_none();
     let plan_open = tab == Tab::Pending && matches!(pending, Some(RequestTab::Review(_)));
     let focus_pane = address.clone();
     let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
@@ -496,7 +551,6 @@ fn AgentSession(
                             QuestionForm { requested: id.clone(), on_done: move |id: String| {
                                 if let Some(pending) = questions.write().as_mut() { pending.retain(|item| item.id != id); }
                                 if selection.peek().as_ref().is_some_and(|item| item.kind == crate::app::InboxKind::Question && item.id == id) { selection.set(None); }
-                                refresh += 1;
                             } }
                         },
                         Some(RequestTab::Prompt) => rsx! {
@@ -515,7 +569,7 @@ fn AgentSession(
                 footer { class: "conversation-footer",
                     LiveActivity { live: live(), turns: retained.as_ref().map_or_else(Vec::new, |snapshot| snapshot.turns.clone()),
                         coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
-                        connected: metadata_loading() || (reachable() && stream_error().is_none()),
+                        connected: loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
                     Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
                         on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
@@ -582,15 +636,15 @@ fn AgentSession(
             }
             }
             div { class: "lead-notices",
-                if !metadata_loading() && !reachable() {
+                if matches!(&*metadata.read(), AgentMetadata::Unreachable { .. }) {
                     Status { "Herdr is not reachable. The board still works; conversation and messages do not." }
                 }
                 if let Some(message) = metadata_error() { Alert { "{message}" } }
                 if let Some(message) = screen_error() { Alert { "{message}" } }
                 if let Some(message) = transcript_error { Alert { "{message}" } }
                 if let Some(message) = pending_error() { Alert { "{message}" } }
-                if let Some(message) = board_error() { Alert { "{message}" } }
-                if stream_error().is_some() { Status { "Live updates paused. Checking every 5 seconds." } }
+                if let Some(message) = (portal.board_error)() { Alert { "{message}" } }
+                if stream_error().is_some() { Status { "Live updates paused. Reconnecting." } }
                 if let Some(message) = action_error() { Alert { "{message}" } }
                 if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
             }
@@ -636,6 +690,71 @@ fn AgentSession(
                 }
             }
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ChangedParts {
+    conversation: bool,
+    screen: bool,
+}
+
+fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
+    event.blocked.is_some()
+        || event
+            .state
+            .as_deref()
+            .map_or(was_blocked, |state| state == "blocked")
+}
+
+/// Older peers lack revisions; their events must invalidate both parts.
+fn changed_parts(
+    held: Option<&wire::DetailRevisions>,
+    event: &wire::AgentEvent,
+    was_blocked: bool,
+) -> ChangedParts {
+    let Some(revisions) = &event.revisions else {
+        return ChangedParts {
+            conversation: true,
+            screen: true,
+        };
+    };
+    let blocked = event_is_blocked(event, was_blocked);
+    ChangedParts {
+        conversation: held.is_none_or(|held| held.conversation != revisions.conversation),
+        screen: blocked
+            && (held.is_none_or(|held| held.screen != revisions.screen) || !was_blocked),
+    }
+}
+
+fn agent_inbox_ids(
+    inbox: &[crate::app::InboxItem],
+    address: &wire::AgentAddress,
+) -> std::collections::BTreeSet<String> {
+    inbox
+        .iter()
+        .filter(|item| item.selection.host == address.host && item.selection.pane == address.pane)
+        .map(|item| item.selection.id.clone())
+        .collect()
+}
+
+struct Backoff(Duration);
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self(Duration::from_secs(1))
+    }
+}
+
+impl Backoff {
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.0;
+        self.0 = (delay * 2).min(Duration::from_secs(30));
+        delay
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -1542,6 +1661,253 @@ pub(crate) fn allowed_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metadata_agent() -> wire::AgentView {
+        wire::AgentView {
+            host: "local".into(),
+            pane: "pane".into(),
+            name: None,
+            title: None,
+            agent: None,
+            state: "working".into(),
+            cwd: None,
+            repository: None,
+            blocked: None,
+        }
+    }
+
+    #[test]
+    fn metadata_is_loading_before_the_first_agent_list() {
+        assert_eq!(
+            agent_metadata(None, None, &wire::AgentAddress::local("pane")),
+            AgentMetadata::Loading
+        );
+    }
+
+    #[test]
+    fn metadata_is_missing_only_after_a_list_arrives() {
+        let agents = [metadata_agent()];
+        for (host, pane) in [("other-host", "pane"), ("local", "other-pane")] {
+            let address = wire::AgentAddress {
+                host: host.into(),
+                pane: pane.into(),
+            };
+            assert_eq!(
+                agent_metadata(Some(&agents), None, &address),
+                AgentMetadata::Missing
+            );
+        }
+        assert_eq!(
+            agent_metadata(Some(&[]), None, &wire::AgentAddress::local("pane")),
+            AgentMetadata::Missing
+        );
+    }
+
+    #[test]
+    fn metadata_is_unreachable_with_the_last_known_agent() {
+        let agent = metadata_agent();
+        assert_eq!(
+            agent_metadata(
+                Some(std::slice::from_ref(&agent)),
+                Some("stream disconnected"),
+                &wire::AgentAddress::local("pane"),
+            ),
+            AgentMetadata::Unreachable {
+                message: "stream disconnected".into(),
+                agent: Some(agent),
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_is_unreachable_without_an_earlier_entry() {
+        for agents in [None, Some([].as_slice())] {
+            assert_eq!(
+                agent_metadata(
+                    agents,
+                    Some("stream disconnected"),
+                    &wire::AgentAddress::local("pane"),
+                ),
+                AgentMetadata::Unreachable {
+                    message: "stream disconnected".into(),
+                    agent: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_is_present_when_the_address_matches() {
+        let agent = metadata_agent();
+        assert_eq!(
+            agent_metadata(
+                Some(std::slice::from_ref(&agent)),
+                None,
+                &wire::AgentAddress::local("pane"),
+            ),
+            AgentMetadata::Present(agent)
+        );
+    }
+
+    fn event(conversation: u64, screen: u64, state: &str) -> wire::AgentEvent {
+        wire::AgentEvent {
+            revisions: Some(wire::DetailRevisions {
+                conversation,
+                screen,
+            }),
+            session: wire::DetailSession::Available("session".into()),
+            kind: "pane.agent_status_changed".into(),
+            pane: "pane".into(),
+            state: Some(state.into()),
+            blocked: None,
+        }
+    }
+
+    fn parts(conversation: bool, screen: bool) -> ChangedParts {
+        ChangedParts {
+            conversation,
+            screen,
+        }
+    }
+
+    #[test]
+    fn first_event_reads_the_conversation_and_only_a_blocked_screen() {
+        assert_eq!(
+            changed_parts(None, &event(4, 8, "working"), false),
+            parts(true, false)
+        );
+        assert_eq!(
+            changed_parts(None, &event(4, 8, "blocked"), true),
+            parts(true, true)
+        );
+    }
+
+    #[test]
+    fn unchanged_revisions_make_no_requests() {
+        let event = event(4, 8, "blocked");
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, true),
+            parts(false, false)
+        );
+    }
+
+    #[test]
+    fn screen_only_change_reads_only_a_blocked_screen() {
+        let held = event(4, 8, "blocked").revisions;
+        assert_eq!(
+            changed_parts(held.as_ref(), &event(4, 9, "blocked"), true),
+            parts(false, true)
+        );
+        assert_eq!(
+            changed_parts(held.as_ref(), &event(4, 9, "working"), false),
+            parts(false, false)
+        );
+        assert_eq!(
+            changed_parts(held.as_ref(), &event(4, 9, "working"), true),
+            parts(false, false)
+        );
+    }
+
+    #[test]
+    fn conversation_change_reads_only_the_conversation() {
+        let held = event(4, 8, "blocked").revisions;
+        assert_eq!(
+            changed_parts(held.as_ref(), &event(5, 8, "blocked"), true),
+            parts(true, false)
+        );
+        assert_eq!(
+            changed_parts(held.as_ref(), &event(5, 8, "working"), false),
+            parts(true, false)
+        );
+    }
+
+    #[test]
+    fn becoming_blocked_reads_the_screen_even_without_a_new_revision() {
+        let mut event = event(4, 8, "blocked");
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, false),
+            parts(false, true)
+        );
+        event.state = Some("idle".into());
+        event.blocked = Some(BlockedPrompt {
+            question: "Allow?".into(),
+            options: Vec::new(),
+        });
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, false),
+            parts(false, true)
+        );
+        event.state = None;
+        event.blocked = None;
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, true),
+            parts(false, false)
+        );
+    }
+
+    #[test]
+    fn an_older_peer_invalidates_both_parts_on_every_event() {
+        let mut event = event(4, 8, "working");
+        let held = event.revisions.take();
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, false),
+            parts(true, true)
+        );
+        assert_eq!(changed_parts(None, &event, false), parts(true, true));
+    }
+
+    #[test]
+    fn reconnect_clears_revisions_and_reads_each_eligible_part_again() {
+        let event = event(4, 8, "blocked");
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, true),
+            parts(false, false)
+        );
+        assert_eq!(changed_parts(None, &event, true), parts(true, true));
+    }
+
+    #[test]
+    fn reconnect_backoff_doubles_caps_and_resets_after_an_event() {
+        let mut backoff = Backoff::default();
+        let delays: Vec<_> = (0..8).map(|_| backoff.next_delay().as_secs()).collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30, 30]);
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pending_list_identity_uses_only_this_agents_inbox_id_set() {
+        use crate::app::{InboxItem, InboxKind, InboxSelection};
+        let item = |host: &str, pane: &str, id: &str| InboxItem {
+            selection: InboxSelection {
+                host: host.into(),
+                pane: pane.into(),
+                id: id.into(),
+                kind: InboxKind::Question,
+            },
+            title: "Question".into(),
+            agent_title: None,
+            repository: None,
+            age_ms: 0,
+        };
+        let address = wire::AgentAddress::local("pane");
+        let mut inbox = vec![
+            item("local", "pane", "a"),
+            item("local", "pane", "b"),
+            item("other-host", "pane", "foreign-host"),
+            item("local", "other-pane", "foreign-pane"),
+        ];
+        let ids = agent_inbox_ids(&inbox, &address);
+        assert_eq!(ids, ["a".to_owned(), "b".to_owned()].into_iter().collect());
+        inbox.reverse();
+        inbox[0].age_ms = 2_000;
+        inbox[3].title = "Updated title".into();
+        inbox.push(item("local", "pane", "a"));
+        assert_eq!(agent_inbox_ids(&inbox, &address), ids);
+        inbox.retain(|item| item.selection.id != "a");
+        assert_ne!(agent_inbox_ids(&inbox, &address), ids);
+    }
 
     #[test]
     fn panel_keys_and_options_follow_the_server_allowlist() {
