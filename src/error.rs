@@ -57,6 +57,8 @@ pub enum Error {
     Invalid(String),
     #[error("deadline reached: {0}")]
     Deadline(String),
+    #[error("stdout limit reached: {operation} ({limit} bytes)")]
+    OutputLimit { operation: String, limit: usize },
     /// Terminal diagnostics retain the original error classification and payload.
     #[error("{source}; startup output from {pane}:\n{output}")]
     Startup {

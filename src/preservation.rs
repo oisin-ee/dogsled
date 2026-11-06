@@ -674,6 +674,7 @@ fn raw(shell: &dyn Shell, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
         "env",
         &git_words(repo, None, args)?,
         shell.budget().remaining("git")?,
+        crate::shell::OUTPUT_LIMIT,
     )?;
     if out.status != 0 {
         return Err(crate::error::Error::Command {
@@ -2322,8 +2323,9 @@ mod tests {
             program: &str,
             args: &[String],
             timeout: std::time::Duration,
+            limit: usize,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
-            let output = System::default().run_bytes_bounded(program, args, timeout)?;
+            let output = System::default().run_bytes_bounded(program, args, timeout, limit)?;
             self.replace(args)?;
             Ok(output)
         }
@@ -2613,8 +2615,9 @@ mod tests {
             program: &str,
             args: &[String],
             timeout: std::time::Duration,
+            limit: usize,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
-            System::default().run_bytes_bounded("env", &self.args(program, args), timeout)
+            System::default().run_bytes_bounded("env", &self.args(program, args), timeout, limit)
         }
 
         fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
