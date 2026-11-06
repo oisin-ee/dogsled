@@ -165,6 +165,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn agent_event_without_revisions_deserializes() -> Result<(), serde_json::Error> {
+        let wire = json!({
+            "session":{"availability":"unavailable"},
+            "kind":"pane.agent_status_changed", "pane":"agent-pane"
+        });
+        let event: AgentEvent = serde_json::from_value(wire.clone())?;
+        assert_eq!(event.revisions, None);
+        assert_eq!(serde_json::to_value(event)?, wire);
+        Ok(())
+    }
+
+    #[test]
     fn conversation_metadata_and_tool_evidence_round_trip() -> Result<(), serde_json::Error> {
         let wire = json!({
             "pane":"agent-pane", "session":"session-key", "truncated":true,
@@ -411,9 +423,20 @@ pub struct ActivityError {
     pub code: ActivityCode,
 }
 
+/// Independent revisions of an agent's conversation and screen content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailRevisions {
+    pub conversation: u64,
+    pub screen: u64,
+}
+
 /// A change the agent stream pushes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Absent when the peer does not supply part revisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revisions: Option<DetailRevisions>,
     pub session: DetailSession,
     /// The Herdr event name, such as `pane.agent_status_changed`.
     pub kind: String,
