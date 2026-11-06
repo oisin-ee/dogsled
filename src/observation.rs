@@ -138,6 +138,15 @@ impl Publisher {
     }
 
     pub fn replace(&mut self, mut input: Publication) -> Result<Arc<Published>> {
+        if let Some(previous) = self.sender.borrow().as_ref()
+            && previous.published.local == input.local
+            && previous.published.sources == input.sources
+            && previous.published.gaps == input.gaps
+            && same_views(&previous.published.views, &input.views)
+            && same_activity(&previous.activity, &self.activity)?
+        {
+            return Ok(Arc::clone(&previous.published));
+        }
         let increment = |value: u64| {
             value.checked_add(1).ok_or_else(|| {
                 Error::Invalid("observation revision exhausted; restart the publisher".into())
@@ -207,6 +216,63 @@ impl Publisher {
         })));
         Ok(published)
     }
+}
+
+fn same_views(previous: &Domains, current: &Domains) -> bool {
+    previous.len() == current.len()
+        && previous.iter().all(|(name, previous)| {
+            current.get(name).is_some_and(|current| {
+                if name == "portal" {
+                    portal_content(previous) == portal_content(current)
+                } else {
+                    previous == current
+                }
+            })
+        })
+}
+
+fn portal_content(view: &Value) -> Value {
+    let mut view = view.clone();
+    if let Some(snapshot) = view.get_mut("data").and_then(Value::as_object_mut) {
+        for field in ["epoch", "revision", "published_ms"] {
+            snapshot.remove(field);
+        }
+    }
+    view
+}
+
+fn same_activity(
+    previous: &BTreeMap<String, Arc<[u8]>>,
+    current: &BTreeMap<String, portal_types::agents::ActivityView>,
+) -> Result<bool> {
+    if previous.len() != current.len() {
+        return Ok(false);
+    }
+    for (pane, current) in current {
+        let Some(bytes) = previous.get(pane) else {
+            return Ok(false);
+        };
+        let previous = serde_json::from_slice(bytes)?;
+        if activity_content(previous) != activity_content(current.clone()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn activity_content(
+    mut view: portal_types::agents::ActivityView,
+) -> portal_types::agents::ActivityView {
+    view.epoch.clear();
+    view.revision = 0;
+    // The deadline is min(received + LEASE, terminals measurement + NATIVE_TTL_MS)
+    // (live_activity.rs:529-535). Receipt clocks advance together (:413-414, :456-457),
+    // and sources includes the terminals measurement (:205, :232, :263). Comparing
+    // received_at_ms and sources therefore preserves the deadline, not its countdown.
+    if let portal_types::agents::ActivityDetail::Available { valid_for_ms, .. } = &mut view.detail {
+        *valid_for_ms = 0;
+    }
+    view
 }
 
 /// This adapter runs before configuration loading or fleet discovery.

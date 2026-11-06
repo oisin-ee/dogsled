@@ -128,7 +128,9 @@ impl Fixture {
         self.send.send(Event::Observe).unwrap();
     }
 
-    pub fn republish(&self) {
+    pub fn rename_agent(&self, name: &str) {
+        self.source.lock().unwrap().views.get_mut("portal").unwrap()["data"]["agents"][0]["name"] =
+            json!(name);
         self.send.send(Event::Observe).unwrap();
     }
 
