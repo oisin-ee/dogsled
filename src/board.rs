@@ -932,10 +932,9 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
                 host: label(&status.hosts, &hold.host),
                 pane: None,
                 owner_pane: Some(hold.owner.clone()),
-                owner_host: hold
-                    .owner_pane
-                    .as_ref()
-                    .map(|_| label(&status.hosts, &hold.host)),
+                // A hold's host is where the resource lives; its owner pane may be on
+                // another host, and nothing records which.
+                owner_host: None,
                 title: None,
                 cleanup: None,
                 unseen: false,
@@ -1893,19 +1892,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(shown(Some("w1:p1")), ["mine"]);
-        assert_eq!(
-            build(&status, Some("w1:p1"), NOW).rows[0]
-                .owner_host
-                .as_deref(),
-            Some("local")
-        );
         let mut all = shown(None);
         all.sort();
         assert_eq!(all, ["mine", "theirs", "unowned"]);
     }
 
     #[test]
-    fn peer_resource_rows_record_the_peer_label_as_owner_host() {
+    fn resource_rows_record_no_owner_host() {
         let status = Status {
             holds: vec![crate::holds::Hold {
                 host: "8103".into(),
@@ -1923,7 +1916,7 @@ mod tests {
         };
         let board = build(&status, None, NOW);
         assert_eq!(board.rows[0].host, "netcup");
-        assert_eq!(board.rows[0].owner_host.as_deref(), Some("netcup"));
+        assert_eq!(board.rows[0].owner_host, None);
     }
 
     #[test]
