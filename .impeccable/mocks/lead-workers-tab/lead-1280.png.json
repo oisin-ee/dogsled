@@ -1,0 +1,7 @@
+{
+  "kind": "browser-capture",
+  "source": ".impeccable/mocks/lead-workers-tab/lead.html",
+  "viewport": "1280x800",
+  "prompt": "Browser screenshot of lead.html. Both conversation streams replay real Pi session transcripts from 6 Nov 2026, frozen at 13:24:05 UTC: the rondo claude-opus-5-5 lead (13:20:48-13:24:20) and its Live Activities gpt-6.1-sol worker (13:15:44-13:24:09). Worker titles, the hold message and accepted results come from the lead's messages and todo records. The notifications worker's phase, the dogsled row and the host meters are illustrative. No image model generated this raster. Playback was stopped with ?still for the capture.",
+  "approved": false
+}

@@ -1,0 +1,29 @@
+{
+  "title": "Lead page: a separate Workers tab",
+  "question": "Workers leave the agents sidebar and move to their lead's page, in a Workers tab beside Todos. The sidebar keeps one summary line per lead. Clicking a worker opens its stream with a link back to the lead. Both streams replay the real rondo lead and its Live Activities worker at 13:24 UTC on 6 Nov.",
+  "options": [
+    {
+      "id": "workers-tab",
+      "kind": "grounded",
+      "label": "Workers tab on the lead page, leads-only sidebar",
+      "thesis": "The sidebar lists leads only, each with a worker summary line. The right column has Todos and Workers tabs; Workers groups the lead's workers by Waiting on you, Working, Held by the lead and Finished. A worker opens in the conversation column with a back button and a 'Worker of <lead>' link.",
+      "viewport": "1600 \u00d7 1000 at the live edge; also 1280 \u00d7 800, 900 \u00d7 800, the top of the lead stream, the Todos tab, and the worker view at all three sizes.",
+      "risk": "A held worker and a worker waiting on the owner look the same in today's data; the Held group needs a new signal.",
+      "palette": [
+        "#0e0f11",
+        "#141518",
+        "#e6e6e9",
+        "#4cb782"
+      ],
+      "materials": [
+        "Leads-only sidebar",
+        "Workers tab",
+        "Worker view with back link"
+      ],
+      "html": ".impeccable/mocks/lead-workers-tab/lead.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/lead-workers-tab/lead-1600.png"
+    }
+  ],
+  "steer": true
+}
