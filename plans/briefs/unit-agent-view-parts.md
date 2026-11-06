@@ -32,43 +32,26 @@ The open agent view makes no request when nothing changes. A conversation change
 4. **`AgentSession`, reviews and questions:** refetch the review and question lists only when the set of inbox ids for this agent changes. Use the `inbox` prop (`InboxItem.selection` host, pane and id). An answered question removes its item locally, as now, with no refetch.
 5. **`AgentSession`, stream:**
    - Run `watch_agent` in a loop. On an error, or on the "stream ended" result, set the stream error, clear the held revisions, and wait with backoff: 1 s, doubling, at most 30 s, reset by the first event.
-   - Use `dioxus_sdk_time::sleep`, as `app.rs` does.
-   - Change `:605` to "Live updates paused. Reconnecting."
+   - Use `dioxus_sdk_time::sleep`, as `app.rs` does. Change `:605` to "Live updates paused. Reconnecting."
 6. **`AgentSession`, actions:**
-   - Delete `refresh`, `POLL` and `use_interval`, together with every `refresh += 1`.
-   - `send` calls `api::send_prompt(&pane, &message, prompt_reply)` directly, and shows a 409 message through `action_error` as it shows any other error.
+   - Delete `refresh`, `POLL`, `use_interval` and every `refresh += 1`. `send` calls `api::send_prompt(&pane, &message, prompt_reply)` directly, and shows a 409 message through `action_error` as it shows any other error.
 7. **`web/src/api.rs`:** delete `fetch_agent`, `fetch_agents` and `fetch_board` if nothing else uses them.
 
 Do not edit `Conversation`, `ToolRecords`, `LiveActivity`, the right-column tabs, `review_view.rs` or `question_form.rs`.
 
 ## Paths
 
-Owns:
-- `web/src/agent_view.rs` (`AgentSession` data hooks, actions, the `:605` status and its tests)
-- `web/src/conversations.rs` (`use_conversation`)
-- `web/src/api.rs`
-- `web/src/app.rs` (the context value only)
-- `web/src/component_tests.rs`
+Owns: `web/src/agent_view.rs` (`AgentSession` data hooks, actions, the `:605` status, tests), `web/src/conversations.rs` (`use_conversation`), `web/src/api.rs`, `web/src/app.rs` (the context value only), `web/src/component_tests.rs`.
 
 Reads: `portal-types/src/agents.rs`, `src/web/agents.rs`.
 
 ## Acceptance
 
-- Unit tests of the parts function:
-  - the first event of a connection;
-  - a screen-only change while blocked, which fetches the screen only;
-  - a screen-only change while not blocked, which fetches nothing;
-  - a conversation change;
-  - a transition to blocked;
-  - an event without revisions.
+- Unit tests of the parts function: the first event of a connection; a screen-only change while blocked (screen only); a screen-only change while not blocked (nothing); a conversation change; a transition to blocked; an event without revisions.
 - A unit test of the backoff sequence and its reset.
 - `rg -n 'refresh|POLL|use_interval|fetch_agent|fetch_board' web/src/agent_view.rs` finds nothing.
 - `cargo test -p web` passes.
 
 ## Checks
 
-- Run `cargo fmt --all --check`.
-- Run `cargo clippy -p web --all-targets -- -D warnings`.
-- The lead prebuilds `web/public` and runs `moon run dogsled:web-lint`. Do not run `web-build`.
-- Commit through the pre-commit hook. Do not bypass it.
-- The brief is complete. It does not depend on any plan file.
+Run `cargo fmt --all --check` and `cargo clippy -p web --all-targets -- -D warnings`. The lead prebuilds `web/public` and runs `moon run dogsled:web-lint`; do not run `web-build`. Commit through the pre-commit hook; do not bypass it. This brief is complete; it depends on no plan file.
