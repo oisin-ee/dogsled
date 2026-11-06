@@ -7,15 +7,23 @@ use std::time::Duration;
 
 const STATUS_LIMIT: usize = 1024 * 1024;
 
-pub(crate) fn read(shell: &dyn Shell, cwd: Option<&str>, timeout: Duration) -> FilesState {
-    let Some(cwd) = cwd else {
-        return FilesState::Unavailable("checkout directory unavailable".into());
+#[derive(Debug)]
+pub(crate) struct Capture {
+    pub root: Option<String>,
+    pub state: FilesState,
+}
+
+pub(crate) fn read(shell: &dyn Shell, cwd: Option<&str>, timeout: Duration) -> Capture {
+    let mut root = None;
+    let state = match cwd {
+        None => FilesState::Unavailable("checkout directory unavailable".into()),
+        Some(cwd) => match capture(shell, cwd, timeout, &mut root) {
+            Ok(state) => state,
+            Err(Error::OutputLimit { .. }) => FilesState::TooMany,
+            Err(error) => FilesState::Unavailable(error.to_string()),
+        },
     };
-    match capture(shell, cwd, timeout) {
-        Ok(state) => state,
-        Err(Error::OutputLimit { .. }) => FilesState::TooMany,
-        Err(error) => FilesState::Unavailable(error.to_string()),
-    }
+    Capture { root, state }
 }
 
 fn words(root: &str, args: &[&str]) -> Vec<String> {
@@ -30,7 +38,12 @@ fn words(root: &str, args: &[&str]) -> Vec<String> {
     words
 }
 
-fn capture(shell: &dyn Shell, cwd: &str, timeout: Duration) -> Result<FilesState> {
+fn capture(
+    shell: &dyn Shell,
+    cwd: &str,
+    timeout: Duration,
+    resolved: &mut Option<String>,
+) -> Result<FilesState> {
     // System's shared command boundary removes inherited Git repository/index routing.
     let root = shell.run_bounded(
         "env",
@@ -45,6 +58,7 @@ fn capture(shell: &dyn Shell, cwd: &str, timeout: Duration) -> Result<FilesState
     if root.is_empty() {
         return Err(invalid("missing checkout root"));
     }
+    *resolved = Some(root.into());
     let args = words(
         root,
         &[
@@ -262,7 +276,8 @@ mod tests {
         }
 
         fn files_at(path: &std::path::Path) -> Files {
-            match read(&System::default(), path.to_str(), Duration::from_secs(10)) {
+            let capture = read(&System::default(), path.to_str(), Duration::from_secs(10));
+            match capture.state {
                 FilesState::Current(files) => files,
                 state => panic!("expected current Files: {state:?}"),
             }
@@ -457,12 +472,12 @@ mod tests {
         let outside = std::env::temp_dir().join(crate::ledger::new_id());
         std::fs::create_dir_all(&outside).unwrap();
         assert_eq!(
-            read(&System::default(), outside.to_str(), Duration::from_secs(5)),
+            read(&System::default(), outside.to_str(), Duration::from_secs(5)).state,
             FilesState::NotRepository
         );
         std::fs::remove_dir_all(outside).unwrap();
         assert!(matches!(
-            read(&System::default(), None, Duration::from_secs(5)),
+            read(&System::default(), None, Duration::from_secs(5)).state,
             FilesState::Unavailable(_)
         ));
     }
@@ -474,7 +489,7 @@ mod tests {
             repo.write(&format!("{n:04}-{}", "x".repeat(220)), "");
         }
         assert_eq!(
-            read(&System::default(), repo.0.to_str(), Duration::from_secs(10)),
+            read(&System::default(), repo.0.to_str(), Duration::from_secs(10)).state,
             FilesState::TooMany
         );
     }
@@ -487,7 +502,7 @@ mod tests {
         shell.on(probe, "/checkout\n");
         shell.on(status, "# branch.oid abc\0# branch.head main\0");
         assert!(matches!(
-            read(&shell, Some("/checkout"), Duration::from_secs(1)),
+            read(&shell, Some("/checkout"), Duration::from_secs(1)).state,
             FilesState::Current(_)
         ));
         assert_eq!(*shell.calls.lock().unwrap(), [probe, status]);
@@ -501,9 +516,50 @@ mod tests {
             },
         );
         assert_eq!(
-            read(&shell, Some("/checkout"), Duration::from_secs(1)),
+            read(&shell, Some("/checkout"), Duration::from_secs(1)).state,
             FilesState::NotRepository
         );
+    }
+
+    #[test]
+    fn resolved_root_survives_status_failure_and_output_limit() {
+        let shell = crate::shell::Fake::new();
+        let probe = "env LC_ALL=C git --no-optional-locks -C /checkout rev-parse --show-toplevel";
+        let status = "env LC_ALL=C git --no-optional-locks -C /checkout status --porcelain=v2 --branch -z --untracked-files=normal";
+        shell.on(probe, "/checkout\n");
+        let failed = read(&shell, Some("/checkout"), Duration::from_secs(1));
+        assert_eq!(failed.root.as_deref(), Some("/checkout"));
+        assert!(matches!(failed.state, FilesState::Unavailable(_)));
+        shell.on(status, &"x".repeat(STATUS_LIMIT + 1));
+        let limited = read(&shell, Some("/checkout"), Duration::from_secs(1));
+        assert_eq!(limited.root.as_deref(), Some("/checkout"));
+        assert_eq!(limited.state, FilesState::TooMany);
+        shell.on(status, "# branch.oid abc\0# branch.head main\0");
+        let current = read(&shell, Some("/checkout"), Duration::from_secs(1));
+        assert_eq!(current.root.as_deref(), Some("/checkout"));
+        assert!(matches!(current.state, FilesState::Current(_)));
+    }
+
+    #[test]
+    fn failed_probe_missing_cwd_and_not_repository_have_no_root() {
+        let shell = crate::shell::Fake::new();
+        let failed = read(&shell, Some("/checkout"), Duration::from_secs(1));
+        assert!(failed.root.is_none());
+        assert!(matches!(failed.state, FilesState::Unavailable(_)));
+        let missing = read(&shell, None, Duration::from_secs(1));
+        assert!(missing.root.is_none());
+        assert!(matches!(missing.state, FilesState::Unavailable(_)));
+        shell.on_output(
+            "env LC_ALL=C git --no-optional-locks -C /checkout rev-parse --show-toplevel",
+            crate::shell::Output {
+                status: 128,
+                stdout: String::new(),
+                stderr: "fatal: not a git repository".into(),
+            },
+        );
+        let outside = read(&shell, Some("/checkout"), Duration::from_secs(1));
+        assert!(outside.root.is_none());
+        assert_eq!(outside.state, FilesState::NotRepository);
     }
 
     #[test]

@@ -30,18 +30,29 @@ impl Fixture {
     }
 
     pub fn at(socket: Client, ledger: Ledger) -> Self {
-        Self::start(socket, ledger, false)
+        Self::start(socket, ledger, false, None)
     }
 
     pub fn paused(socket: Client) -> Self {
         let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        Self::start(socket, ledger, true)
+        Self::start(socket, ledger, true, None)
     }
 
-    fn start(socket: Client, ledger: Ledger, paused: bool) -> Self {
+    pub fn with_files_shell(socket: Client, shell: Arc<dyn crate::shell::Shell>) -> Self {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        Self::start(socket, ledger, false, Some(shell))
+    }
+
+    fn start(
+        socket: Client,
+        ledger: Ledger,
+        paused: bool,
+        files_shell: Option<Arc<dyn crate::shell::Shell>>,
+    ) -> Self {
         let mut publisher = Publisher::new().unwrap();
         let mut collector = Collector::default();
         collector.client = Some(socket.clone());
+        collector.files_shell = files_shell;
         publisher.details(collector.payloads.clone());
         let interests = collector.interests.clone();
         let mut server = ipc::Server::new(&ledger.dir).unwrap();
@@ -123,6 +134,10 @@ impl Fixture {
         self.collector.lock().unwrap().tick(pane)
     }
 
+    pub fn files_tick(&self, pane: &str) -> bool {
+        self.collector.lock().unwrap().files_tick(pane)
+    }
+
     pub fn wake(&self) {
         *self.source.lock().unwrap() = input(&self.socket, &self.ledger);
         self.send.send(Event::Observe).unwrap();
@@ -150,6 +165,102 @@ impl Drop for Fixture {
         let collector = std::mem::take(&mut *self.collector.lock().unwrap());
         drop(collector);
         std::fs::remove_dir_all(&self.ledger.dir).unwrap();
+    }
+}
+
+/// A real checkout kept separate from transcript and observer files.
+#[derive(Debug)]
+pub(crate) struct Repository(pub std::path::PathBuf);
+
+impl Repository {
+    pub fn new() -> Self {
+        let root = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = Self(root.canonicalize().unwrap());
+        repo.git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.0.join("file"), "base\n").unwrap();
+        repo.git(&["add", "file"]);
+        repo.git(&["commit", "-qm", "base"]);
+        repo
+    }
+
+    fn git(&self, args: &[&str]) {
+        use crate::shell::Shell as _;
+        let mut words = vec![
+            "git".into(),
+            "-C".into(),
+            self.0.to_str().unwrap().into(),
+            "-c".into(),
+            "user.name=Fixture".into(),
+            "-c".into(),
+            "user.email=fixture@example.invalid".into(),
+        ];
+        words.extend(args.iter().map(ToString::to_string));
+        crate::shell::System::default()
+            .run_ok("env", &words)
+            .unwrap();
+    }
+}
+
+impl Drop for Repository {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+/// Holds actual Git output at the shell boundary, without blocking the detail thread.
+#[derive(Debug, Default)]
+pub(crate) struct GitShell {
+    holds: Mutex<std::collections::VecDeque<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    pub fail: AtomicBool,
+}
+
+impl GitShell {
+    pub fn hold(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        self.holds.lock().unwrap().push_back((entered, released));
+        (started, release)
+    }
+}
+
+impl crate::shell::Shell for GitShell {
+    fn run(&self, program: &str, args: &[String]) -> crate::error::Result<crate::shell::Output> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(crate::error::Error::Invalid("fixture Git failure".into()));
+        }
+        crate::shell::System::default().run(program, args)
+    }
+
+    fn run_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> crate::error::Result<crate::shell::Output> {
+        crate::shell::System::default().run_bounded(program, args, timeout)
+    }
+
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+        limit: usize,
+    ) -> crate::error::Result<crate::shell::BytesOutput> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(crate::error::Error::Invalid("fixture Git failure".into()));
+        }
+        let result =
+            crate::shell::System::default().run_bytes_bounded(program, args, timeout, limit);
+        let hold = self.holds.lock().unwrap().pop_front();
+        if let Some((entered, released)) = hold {
+            entered.send(()).unwrap();
+            released
+                .recv_timeout(Duration::from_secs(6))
+                .expect("release Git read");
+        }
+        result
     }
 }
 
