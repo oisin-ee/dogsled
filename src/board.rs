@@ -463,6 +463,9 @@ pub struct Row {
     pub pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_pane: Option<String>,
+    /// Host label of the ledger that records this owner relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -584,6 +587,7 @@ fn closed_branch_row(
         host: label(hosts, &item.host),
         pane: None,
         owner_pane: Some(item.owner_pane.clone()),
+        owner_host: Some("local".into()),
         title: None,
         cleanup: None,
         unseen: false,
@@ -684,6 +688,7 @@ fn agent_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         host: label(hosts, &item.host),
         pane: Some(item.pane.clone()),
         owner_pane: Some(item.owner_pane.clone()),
+        owner_host: Some("local".into()),
         title: None,
         cleanup: None,
         unseen: false,
@@ -758,6 +763,7 @@ fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
         host: label(hosts, &item.host),
         pane: Some(item.pane.clone()),
         owner_pane: Some(item.owner_pane.clone()),
+        owner_host: Some("local".into()),
         title: None,
         cleanup: None,
         unseen: false,
@@ -805,6 +811,7 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
         host: target.clone().unwrap_or_else(|| "any".into()),
         pane: None,
         owner_pane: Some(request.owner.clone()),
+        owner_host: Some("local".into()),
         title: None,
         cleanup: None,
         unseen: false,
@@ -925,6 +932,10 @@ fn resource_rows(status: &Status, rows: &mut Vec<Row>, owner: Option<&str>) {
                 host: label(&status.hosts, &hold.host),
                 pane: None,
                 owner_pane: Some(hold.owner.clone()),
+                owner_host: hold
+                    .owner_pane
+                    .as_ref()
+                    .map(|_| label(&status.hosts, &hold.host)),
                 title: None,
                 cleanup: None,
                 unseen: false,
@@ -1882,9 +1893,37 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(shown(Some("w1:p1")), ["mine"]);
+        assert_eq!(
+            build(&status, Some("w1:p1"), NOW).rows[0]
+                .owner_host
+                .as_deref(),
+            Some("local")
+        );
         let mut all = shown(None);
         all.sort();
         assert_eq!(all, ["mine", "theirs", "unowned"]);
+    }
+
+    #[test]
+    fn peer_resource_rows_record_the_peer_label_as_owner_host() {
+        let status = Status {
+            holds: vec![crate::holds::Hold {
+                host: "8103".into(),
+                resource: "tree".into(),
+                owner: "w1:p1".into(),
+                owner_pane: Some("w1:p1".into()),
+                code: "preparation_claim".into(),
+                reason: "held".into(),
+                next_command: "dogsled doctor".into(),
+                command_host: "8103".into(),
+                command_argv: Vec::new(),
+                request_id: None,
+            }],
+            ..status(board_hosts(), Vec::new())
+        };
+        let board = build(&status, None, NOW);
+        assert_eq!(board.rows[0].host, "netcup");
+        assert_eq!(board.rows[0].owner_host.as_deref(), Some("netcup"));
     }
 
     #[test]
@@ -1986,6 +2025,7 @@ mod tests {
         let captured = capture_enrichment(&board, &status, messages, &shell);
         enrich_captured(&mut board, &status, &[todo], &captured);
         assert_eq!(board.rows[0].owner_pane.as_deref(), Some("w1:p1"));
+        assert_eq!(board.rows[0].owner_host.as_deref(), Some("local"));
         assert_eq!(board.rows[0].title.as_deref(), Some("Implement inbox"));
         assert!(board.rows[0].unseen);
         let read = record("two", 2, crate::inbox::State::Delivered);
@@ -2216,6 +2256,12 @@ mod tests {
         );
         assert_eq!(board.rows[0].activity, "+2 commits");
         assert_eq!(board.rows[0].host, "netcup");
+        assert!(
+            board
+                .rows
+                .iter()
+                .all(|row| row.owner_host.as_deref() == Some("local"))
+        );
         assert_eq!(board.rows[2].activity, "quiet 11m · last: rg \"t(\" web/");
         assert_eq!(board.rows[5].what, "codex · gpt-5.6-sol");
         assert_eq!(board.rows[5].activity, "cargo test -p auth");

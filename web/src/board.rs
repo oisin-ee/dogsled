@@ -8,7 +8,7 @@ use crate::app::{InboxItem, InboxKind, InboxSelection};
 use crate::components::item::{Item, ItemContent, ItemSize, ItemTitle, ItemVariant};
 use crate::components::sidebar::{
     SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton,
-    SidebarMenuButtonSize, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubItem,
+    SidebarMenuButtonSize, SidebarMenuItem,
 };
 
 #[derive(Clone, Default, PartialEq)]
@@ -26,11 +26,7 @@ pub struct NavigationRepo {
 
 impl NavigationRepo {
     pub fn agent_count(&self) -> usize {
-        self.rows
-            .iter()
-            .flat_map(|row| std::iter::once(row).chain(&row.workers))
-            .filter(|row| row.role != "job")
-            .count()
+        self.rows.iter().filter(|row| !row.worker).count()
     }
 }
 
@@ -48,7 +44,7 @@ pub struct NavigationRow {
 }
 
 /// Ledger rows are workers; Herdr agents without a ledger row are leads.
-/// Closed rows contribute cleanup counts, never agent entries.
+/// Closed rows remain in their lead's Workers tab, but never become sidebar entries.
 pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation {
     let mut navigation = Navigation::default();
     let rows: Vec<_> = board.repos.iter().flat_map(|repo| &repo.rows).collect();
@@ -98,30 +94,27 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                         && row.host == agent.host
                         && row.pane.as_deref() == Some(&agent.pane)
                 });
-            if repository.is_none() && !live {
+            let has_lead = navigation
+                .repos
+                .iter()
+                .flat_map(|repo| &repo.rows)
+                .any(|lead| !lead.worker && owns_worker(lead, row));
+            if repository.is_none() && !live && !has_lead {
                 navigation.finished_without_repository += 1;
                 continue;
             }
             if row.group == GroupView::ToLand {
                 repository_group(&mut navigation.repos, repository.clone()).to_land += 1;
             }
-            if row.state == "closed" {
-                continue;
-            }
             let worker = navigation_row(row, &repo.todos);
             if let Some(lead) = navigation
                 .repos
                 .iter_mut()
                 .flat_map(|repo| &mut repo.rows)
-                .find(|lead| {
-                    !lead.worker
-                        && lead.host == row.host
-                        && row.owner_pane.is_some()
-                        && lead.pane == row.owner_pane
-                })
+                .find(|lead| !lead.worker && owns_worker(lead, row))
             {
                 lead.workers.push(worker);
-            } else {
+            } else if row.state != "closed" {
                 repository_group(&mut navigation.repos, repository)
                     .rows
                     .push(worker);
@@ -132,6 +125,12 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
         .repos
         .retain(|repo| !repo.rows.is_empty() || repo.to_land > 0);
     navigation
+}
+
+pub(crate) fn owns_worker(lead: &NavigationRow, row: &RowView) -> bool {
+    lead.host == row.owner_host.as_deref().unwrap_or(&row.host)
+        && row.owner_pane.is_some()
+        && lead.pane == row.owner_pane
 }
 
 fn todo_progress(todo: Option<&TodoView>) -> Option<(usize, usize)> {
@@ -246,13 +245,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                         SidebarMenuItem { key: "{index}:{row.pane:?}",
                             NavigationAgent { row: row.clone(), inbox: inbox.clone() }
                             if !row.workers.is_empty() {
-                                SidebarMenuSub {
-                                    for (index, worker) in row.workers.into_iter().enumerate() {
-                                        SidebarMenuSubItem { key: "{index}:{worker.pane:?}",
-                                            NavigationAgent { row: worker, inbox: inbox.clone() }
-                                        }
-                                    }
-                                }
+                                WorkerSummary { lead: row, inbox: inbox.clone() }
                             }
                         }
                     }
@@ -288,8 +281,12 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
         || row.title.clone(),
         |kind| format!("{} · {}", row.title, kind.tag()),
     );
-    let is_selected = selected()
-        .is_some_and(|address| address.host == row.host && Some(address.pane) == row.pane);
+    let is_selected = selected().is_some_and(|address| {
+        (address.host == row.host && Some(&address.pane) == row.pane.as_ref())
+            || row.workers.iter().any(|worker| {
+                worker.host == address.host && worker.pane.as_ref() == Some(&address.pane)
+            })
+    });
     let status = if needs_owner || (!row.worker && tag.is_some()) {
         "waiting"
     } else if !row.worker && matches!(row.state.as_str(), "working" | "running") {
@@ -336,6 +333,52 @@ fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
                     None => rsx! { div { ..attributes, {body} } },
                 }
             },
+        }
+    }
+}
+
+#[component]
+pub(crate) fn WorkerSummary(lead: NavigationRow, inbox: Vec<InboxItem>) -> Element {
+    let mut selected = use_context::<Signal<Option<AgentAddress>>>();
+    let mut selection = use_context::<Signal<Option<InboxSelection>>>();
+    let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
+    let mut detail = use_context::<crate::app::LeadDetail>().0;
+    let count = lead.workers.len();
+    let working = lead
+        .workers
+        .iter()
+        .filter(|worker| matches!(worker.state.as_str(), "working" | "running"))
+        .count();
+    let states: Vec<_> = lead
+        .workers
+        .iter()
+        .map(|worker| {
+            let waiting = worker.unseen
+                || inbox.iter().any(|item| {
+                    item.selection.kind == InboxKind::Prompt
+                        && item.selection.host == worker.host
+                        && Some(&item.selection.pane) == worker.pane.as_ref()
+                });
+            crate::workers::WorkerGroup::from_state(&worker.state, waiting)
+        })
+        .collect();
+    let waiting = states.contains(&crate::workers::WorkerGroup::Waiting);
+    rsx! {
+        crate::components::button::Button { class: "worker-summary", variant: crate::components::button::ButtonVariant::Ghost,
+            r#type: "button", "data-waiting": waiting,
+            aria_label: "Show {count} workers for {lead.title}",
+            onclick: move |_| {
+                selected.set(lead.pane.clone().map(|pane| AgentAddress { host: lead.host.clone(), pane }));
+                selection.set(None);
+                detail.set(crate::app::LeadPanel::Workers);
+                panel.set(crate::app::LeadPanel::Workers);
+            },
+            span { class: "worker-dots", aria_hidden: "true",
+                for (index, state) in states.into_iter().enumerate() {
+                    span { key: "{index}", class: "worker-dot", "data-state": state.value() }
+                }
+            }
+            span { "{count} workers · {working} working" }
         }
     }
 }
@@ -425,7 +468,7 @@ mod shell_tests {
     }
 
     #[test]
-    fn navigation_counts_agents_without_removing_jobs() -> Result<(), serde_json::Error> {
+    fn navigation_counts_only_leads_without_removing_jobs() -> Result<(), serde_json::Error> {
         let mut nested_job = row("sh", Some("lead-a"), "working")?;
         nested_job.kind = "job".to_owned();
         let mut standalone_job = row("pnpm", None, "working")?;
@@ -439,11 +482,39 @@ mod shell_tests {
             &agents()?,
         );
         let repo = &groups.repos[0];
-        assert_eq!(repo.agent_count(), 3);
+        assert_eq!(repo.agent_count(), 2);
         assert_eq!(repo.rows.len(), 3);
         assert_eq!(repo.rows[0].workers.len(), 2);
         assert!(repo.rows[0].workers.iter().any(|row| row.role == "job"));
         assert!(repo.rows.iter().any(|row| row.role == "job"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_lead_owns_cross_host_workers_including_closed_rows() -> Result<(), serde_json::Error> {
+        let mut agents = agents()?;
+        agents[0].host = "local".into();
+        let mut remote = row("remote", Some("lead-a"), "working")?;
+        remote.owner_host = Some("local".into());
+        let mut closed = remote.clone();
+        closed.id = "closed".into();
+        closed.state = "closed".into();
+        let same_pane_foreign_owner = row("other", Some("lead-a"), "idle")?;
+        let groups = navigation_groups(
+            &board(vec![remote, closed, same_pane_foreign_owner]),
+            &agents,
+        );
+        let lead = &groups.repos[0].rows[0];
+        assert_eq!(lead.host, "local");
+        assert_eq!(lead.workers.len(), 2);
+        assert_eq!(lead.workers[0].host, "netcup");
+        assert_eq!(lead.workers[1].state, "closed");
+        assert!(
+            groups.repos[0]
+                .rows
+                .iter()
+                .any(|row| row.pane.as_deref() == Some("other"))
+        );
         Ok(())
     }
 

@@ -103,6 +103,8 @@ pub struct RowView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<Cleanup>,
