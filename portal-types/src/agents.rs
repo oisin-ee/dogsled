@@ -434,12 +434,14 @@ pub struct ActivityError {
     pub code: ActivityCode,
 }
 
-/// Independent revisions of an agent's conversation and screen content.
+/// Independent revisions of an agent's conversation, screen and files content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DetailRevisions {
     pub conversation: u64,
     pub screen: u64,
+    #[serde(default)]
+    pub files: u64,
 }
 
 /// A change the agent stream pushes.

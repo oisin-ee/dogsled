@@ -1760,6 +1760,7 @@ mod tests {
             revisions: Some(wire::DetailRevisions {
                 conversation,
                 screen,
+                files: 0,
             }),
             session: wire::DetailSession::Available("session".into()),
             kind: "pane.agent_status_changed".into(),
