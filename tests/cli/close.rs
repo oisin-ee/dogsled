@@ -405,9 +405,16 @@ fn close_refuses_active_unsupported_foreign_locked_or_own_work_without_changes()
 
 /// This fixture has no ancestry under fake Herdr's shell (pid 10), and leads its own
 /// process group. Only its inherited pane/server identity can attribute it to the agent.
+/// macOS returns no environment for Apple platform binaries such as `/bin/sleep`, and kills
+/// a copy of one, so the fixture re-executes this test binary, as a real tool server runs
+/// its own installed binary.
 fn detached_tool(rig: &Rig, tree: &Path, attributed: bool) -> Owned {
-    let mut command = isolated("sleep");
-    command.arg("60").current_dir(tree);
+    let mut command = isolated(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "close::detached_tool_process", "--quiet"])
+        .env(DETACHED_TOOL, "1")
+        .stdout(std::process::Stdio::null())
+        .current_dir(tree);
     if attributed {
         command
             .env("HERDR_PANE_ID", "w2:p1")
@@ -418,6 +425,17 @@ fn detached_tool(rig: &Rig, tree: &Path, attributed: bool) -> Owned {
             .env_remove("HERDR_SOCKET_PATH");
     }
     Owned::spawn(&mut command)
+}
+
+const DETACHED_TOOL: &str = "DOGSLED_TEST_DETACHED_TOOL";
+
+/// The body of `detached_tool`: it works in its checkout until the test reaps it. Run
+/// directly by the harness, it returns at once.
+#[test]
+fn detached_tool_process() {
+    if std::env::var_os(DETACHED_TOOL).is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 
 #[test]
