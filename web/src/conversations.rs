@@ -138,11 +138,19 @@ impl PaneConversations {
     }
 }
 
+/// Notify activity subscribers only when the accepted session actually changes.
+pub(crate) fn accept_session(mut session: Signal<Option<DetailSession>>, key: String) {
+    let selected = Some(DetailSession::Available(key));
+    if *session.peek() != selected {
+        session.set(selected);
+    }
+}
+
 /// Read only when a conversation event triggers it. Keep session and request fencing.
 pub fn use_conversation(
     address: portal_types::agents::AgentAddress,
     trigger: Signal<u64>,
-    mut session: Signal<Option<DetailSession>>,
+    session: Signal<Option<DetailSession>>,
 ) -> Resource<Result<(), String>> {
     let mut conversations = use_context::<Signal<Conversations>>();
     use_hook(|| {
@@ -170,7 +178,7 @@ pub fn use_conversation(
                 .host_mut(&address.host)
                 .apply_response(&address.pane, generation, result)?;
             if let Some(key) = accepted {
-                session.set(Some(DetailSession::Available(key)));
+                accept_session(session, key);
             }
             Ok(())
         }

@@ -228,6 +228,9 @@ pub fn use_live_activity(
         live.set(Live::Pending);
         expiry.set(None);
         async move {
+            if selected.is_none() {
+                return;
+            }
             loop {
                 let mut state = ActivityState::default();
                 let mut apply = |view: ActivityView| -> Result<(), Gap> {
