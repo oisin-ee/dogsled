@@ -75,8 +75,10 @@ jobs:
       # local Moon dependencies, but do not rebuild the downloaded bundle.
       - name: Lint
         run: moon run dogsled:lint :clippy --upstream none
+      # Stream test output. A buffered task loses its output when the job
+      # timeout cancels it, so a hung test would leave no name in the log.
       - name: Test
-        run: moon run dogsled:test todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test --upstream none
+        run: moon run dogsled:test todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test --upstream none --output-style stream
 
   typescript:
     runs-on: ubuntu-24.04
