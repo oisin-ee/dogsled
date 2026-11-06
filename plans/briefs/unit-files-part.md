@@ -32,7 +32,7 @@ An open agent's checkout status becomes a third detail part, beside the conversa
    - **Older peer:** one that rejects `files` as an unknown operation answers as a peer error. The route maps it to 502 "host {host}: files unsupported". No fallback.
 
 ## Paths
-- **Owns:** `portal-types/src/agents.rs` (`DetailRevisions` only), `src/observation/details.rs`, `src/observation/details_fixture.rs`, `src/observation/tests/details.rs`, `src/web/agents.rs`.
+- **Owns:** `src/main.rs` (delete U6a's `expect(dead_code)` on `mod git_status`), `portal-types/src/agents.rs` (`DetailRevisions` only), `src/observation/details.rs`, `src/observation/details_fixture.rs`, `src/observation/tests/details.rs`, `src/web/agents.rs`.
 - **Reads:** `src/git_status.rs`, `portal-types/src/files.rs`, `src/web/peer_stream.rs`, `src/shell.rs`.
 
 ## Acceptance
