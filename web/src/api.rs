@@ -125,6 +125,17 @@ pub async fn fetch_screen(address: &portal_types::agents::AgentAddress) -> Resul
     read_json(response).await
 }
 
+/// Read checkout changes independently from the conversation and terminal.
+pub async fn fetch_files(
+    address: &portal_types::agents::AgentAddress,
+) -> Result<portal_types::files::FilesState, String> {
+    let response = Request::get(&agent_url(address, "files"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    read_json(response).await
+}
+
 /// Open the agent in Herdr.
 pub async fn focus_agent(address: &portal_types::agents::AgentAddress) -> Result<(), String> {
     let response = Request::post(&agent_url(address, "focus"))

@@ -54,6 +54,7 @@ pub enum LeadPanel {
     Chat,
     Todos,
     Workers,
+    Files,
 }
 
 impl LeadPanel {
@@ -63,6 +64,7 @@ impl LeadPanel {
             Self::Chat => "chat",
             Self::Todos => "todos",
             Self::Workers => "workers",
+            Self::Files => "files",
         }
     }
 }
@@ -480,8 +482,8 @@ pub fn App() -> Element {
         SidebarProvider { class: "console-provider",
         Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
             on_value_change: move |value: String| {
-                let next = match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, "workers" => LeadPanel::Workers, _ => LeadPanel::Chat };
-                if matches!(next, LeadPanel::Todos | LeadPanel::Workers) { detail.set(next); }
+                let next = match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, "workers" => LeadPanel::Workers, "files" => LeadPanel::Files, _ => LeadPanel::Chat };
+                if matches!(next, LeadPanel::Todos | LeadPanel::Workers | LeadPanel::Files) { detail.set(next); }
                 panel.set(next);
             },
             header { class: "console-topbar",
