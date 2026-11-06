@@ -383,11 +383,14 @@ fn a_slow_detail_capture_does_not_delay_portal_publication() {
     let _viewer = fixture.client.detail("w1:p1").unwrap();
     started.recv_timeout(Duration::from_secs(3)).unwrap();
     let previous = fixture.client.current().unwrap().revision;
-    fixture.republish();
+    fixture.rename_agent("renamed while capture is blocked");
     let frame = fixture.wait(|frame| frame.revision > previous);
     let portal: portal_types::PortalSnapshot = read::view(&frame, "portal").unwrap();
     assert!(portal.board.is_some());
-    assert!(portal.agents.is_some());
+    assert_eq!(
+        portal.agents.unwrap()[0].name.as_deref(),
+        Some("renamed while capture is blocked")
+    );
     assert!(portal.inbox.is_some());
     release.send(()).unwrap();
     fixture.wait(available);
