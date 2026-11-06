@@ -43,7 +43,7 @@ A finished turn folds its work into one line, `Worked for 2m 31s · 6 thoughts �
   - its phase and elapsed time, such as `Thinking · 1m 19s`;
   - its newest thought (italic, two lines) or its running command (`$ …`, monospace, two lines).
   The selected row has an indigo edge, and its snippet follows the live stream. A row that is not working keeps one line of state.
-- **Workers:** each lead's workers nest under it, as the shipped `RepoGroup` does with `SidebarMenuSub` (`web/src/board.rs`).
+- **Workers:** superseded on 2026-11-06. The owner chose a separate Workers tab on the lead's page; see `plans/lead-workers-tab.md`. The original direction: each lead's workers nest under it, as the shipped `RepoGroup` does with `SidebarMenuSub` (`web/src/board.rs`).
   Each worker row has three lines: the title, its phase and elapsed time, and its newest thought or command (one line).
   Clicking a worker opens its own stream in the conversation column.
   Change from shipped: a running worker gets the green dot. Today only leads do (`board.rs` `NavigationAgent`).
