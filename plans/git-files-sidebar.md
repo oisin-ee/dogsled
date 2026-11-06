@@ -131,9 +131,9 @@ Both `POLL` constants, both loops, and `tick` are deleted.
 
 **The blocked guard moves to the server.** The `send` closure (`web/src/agent_view.rs:267–290`) fetches the whole agent list before every prompt.
 It refuses to send when the agent is blocked. The `prompt` route (`src/web/agents.rs`) forwards text without that check.
-The route reads the agent's state from the current serve publication and answers 409 for a blocked agent, local or remote.
+The route reads the agent's live Herdr state on its own host (`agent.list` locally, `herdr --machine <host> agent get` remotely) and answers 409 for a blocked agent unless the body has `reply: true`.
 The client deletes its pre-send fetch and shows the 409 message.
-A prompt that appears between the last publication and the send is still possible. This change does not claim to close that window; Herdr's `agent.prompt` has no conditional form.
+A prompt that appears between the check and the send is still possible. This change does not claim to close that window; Herdr's `agent.prompt` has no conditional form.
 
 **No timer while live.** The 5-second interval is removed.
 When the agent stream fails or closes cleanly, the view shows the disconnect, reconnects with backoff, and then refetches all parts once.
