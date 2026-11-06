@@ -45,23 +45,12 @@ pub(crate) fn view(
     let mut items = Vec::new();
     for review in reviews.iter().filter(|review| review.decision.is_none()) {
         let (agent_title, repository) = metadata(&review.pane);
-        let latest = review.revisions.last();
-        let title = latest
-            .and_then(|revision| plan_title(&revision.content))
-            .unwrap_or_else(|| {
-                review
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&review.path)
-                    .to_owned()
-            });
-        let revision = latest.map_or(0, |revision| revision.n);
         items.push(InboxItem {
             kind: InboxKind::Review,
             id: review.id.clone(),
+            revision: review.revisions.len() as u64,
             pane: review.pane.clone(),
-            title: format!("{title}, revision {revision}"),
+            title: review_title(review),
             agent_title,
             repository,
             age_ms: now.saturating_sub(
@@ -77,6 +66,7 @@ pub(crate) fn view(
         items.push(InboxItem {
             kind: InboxKind::Question,
             id: question.id.clone(),
+            revision: 0,
             pane: question.pane.clone(),
             title: question
                 .questions
@@ -103,6 +93,7 @@ pub(crate) fn view(
         items.push(InboxItem {
             kind: InboxKind::Prompt,
             id: agent.pane.clone(),
+            revision: 0,
             pane: agent.pane.clone(),
             title: prompt.question.clone(),
             agent_title,
@@ -114,6 +105,7 @@ pub(crate) fn view(
         items.push(InboxItem {
             kind: InboxKind::UnseenWorker,
             id: row.id.clone(),
+            revision: 0,
             pane: row.pane.clone().unwrap_or_default(),
             title: row.title.clone().unwrap_or_else(|| row.name.clone()),
             agent_title: Some(row.name.clone()),
@@ -125,6 +117,22 @@ pub(crate) fn view(
         count: items.len(),
         items,
     }
+}
+
+fn review_title(review: &Review) -> String {
+    let latest = review.revisions.last();
+    let title = latest
+        .and_then(|revision| plan_title(&revision.content))
+        .unwrap_or_else(|| {
+            review
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&review.path)
+                .to_owned()
+        });
+    let revision = latest.map_or(0, |revision| revision.n);
+    format!("{title}, revision {revision}")
 }
 
 #[cfg(test)]
@@ -166,6 +174,27 @@ mod tests {
             general: String::new(),
             decision: None,
         }
+    }
+
+    #[test]
+    fn inbox_revision_counts_submitted_reviews_and_is_zero_for_questions() -> Result<()> {
+        let mut review = review();
+        review.revisions.push(portal_types::reviews::Revision {
+            n: 3,
+            content: "Updated plan".into(),
+            submitted_ms: 12,
+        });
+        let question: Pending = serde_json::from_value(json!({
+            "id": "question-one", "pane": "worker-pane", "session": "session",
+            "cwd": "/repo", "created_ms": 5,
+            "questions": {"questions": [{"id": "q", "type": "text", "question": "Which?"}]}
+        }))?;
+        let inbox = view(&board()?, &[review], &[question], &[], 20);
+        assert_eq!(inbox.items[0].kind, InboxKind::Review);
+        assert_eq!(inbox.items[0].revision, 2);
+        assert_eq!(inbox.items[1].kind, InboxKind::Question);
+        assert_eq!(inbox.items[1].revision, 0);
+        Ok(())
     }
 
     #[test]

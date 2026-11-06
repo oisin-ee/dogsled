@@ -561,10 +561,14 @@ fn AgentSession(
                 if tab == Tab::Pending {
                     match &pending {
                         Some(RequestTab::Questions(id, _)) => rsx! {
-                            QuestionForm { requested: id.clone(), on_done: move |id: String| {
-                                if let Some(pending) = questions.write().as_mut() { pending.retain(|item| item.id != id); }
-                                if selection.peek().as_ref().is_some_and(|item| item.kind == crate::app::InboxKind::Question && item.id == id) { selection.set(None); }
-                            } }
+                            if let Some(question) = questions().and_then(|items| items.into_iter().find(|item| item.id == *id)) {
+                                QuestionForm { question, on_done: move |id: String| {
+                                    if let Some(pending) = questions.write().as_mut() { pending.retain(|item| item.id != id); }
+                                    if selection.peek().as_ref().is_some_and(|item| item.kind == crate::app::InboxKind::Question && item.id == id) { selection.set(None); }
+                                } }
+                            } else {
+                                Status { "This question is loading, answered, or no longer available." }
+                            }
                         },
                         Some(RequestTab::Prompt) => rsx! {
                             BlockedPanel { prompt: current.as_ref().and_then(|agent| agent.blocked.clone()), screen: screen().filter(|value| detail_session.peek().as_ref().is_none_or(|session| session == &wire::DetailSession::Available(value.session.clone()))).map(|value| value.text),
@@ -663,7 +667,9 @@ fn AgentSession(
             if plan_open {
                 div { class: "pending-review",
                     if let Some(RequestTab::Review(id)) = &pending {
-                        ReviewView { review_id: id.clone(), embedded: true,
+                        ReviewView { review_id: id.clone(),
+                            revision: inbox.iter().find(|item| item.selection.host == address.host && item.selection.pane == address.pane && item.selection.kind == crate::app::InboxKind::Review && item.selection.id == *id).map_or(0, |item| item.revision),
+                            embedded: true,
                             lead: title.clone(), role: role.to_owned(),
                             repository: current.as_ref().and_then(|agent| agent.repository.clone()).unwrap_or_else(|| "Unknown repository".to_owned()),
                             on_close: move |_| choice.set(Some((review_identity.clone(), Tab::Conversation))),
@@ -742,11 +748,11 @@ fn changed_parts(
 fn agent_inbox_ids(
     inbox: &[crate::app::InboxItem],
     address: &wire::AgentAddress,
-) -> std::collections::BTreeSet<String> {
+) -> std::collections::BTreeSet<(String, u64)> {
     inbox
         .iter()
         .filter(|item| item.selection.host == address.host && item.selection.pane == address.pane)
-        .map(|item| item.selection.id.clone())
+        .map(|item| (item.selection.id.clone(), item.revision))
         .collect()
 }
 
@@ -1669,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_list_identity_uses_only_this_agents_inbox_id_set() {
+    fn pending_list_identity_uses_only_this_agents_inbox_ids_and_revisions() {
         use crate::app::{InboxItem, InboxKind, InboxSelection};
         let item = |host: &str, pane: &str, id: &str| InboxItem {
             selection: InboxSelection {
@@ -1678,6 +1684,7 @@ mod tests {
                 id: id.into(),
                 kind: InboxKind::Question,
             },
+            revision: 0,
             title: "Question".into(),
             agent_title: None,
             repository: None,
@@ -1691,11 +1698,22 @@ mod tests {
             item("local", "other-pane", "foreign-pane"),
         ];
         let ids = agent_inbox_ids(&inbox, &address);
-        assert_eq!(ids, ["a".to_owned(), "b".to_owned()].into_iter().collect());
-        inbox.reverse();
+        assert_eq!(
+            ids,
+            [("a".to_owned(), 0), ("b".to_owned(), 0)]
+                .into_iter()
+                .collect()
+        );
         inbox[0].age_ms = 2_000;
-        inbox[3].title = "Updated title".into();
+        inbox[1].title = "Updated title".into();
+        inbox.reverse();
         inbox.push(item("local", "pane", "a"));
+        assert_eq!(agent_inbox_ids(&inbox, &address), ids);
+        inbox[2].revision = 1;
+        assert_ne!(agent_inbox_ids(&inbox, &address), ids);
+        inbox[2].revision = 0;
+        assert_eq!(agent_inbox_ids(&inbox, &address), ids);
+        inbox[0].revision = 2;
         assert_eq!(agent_inbox_ids(&inbox, &address), ids);
         inbox.retain(|item| item.selection.id != "a");
         assert_ne!(agent_inbox_ids(&inbox, &address), ids);

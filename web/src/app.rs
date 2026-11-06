@@ -118,6 +118,7 @@ impl From<ServerInboxKind> for InboxKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InboxItem {
     pub selection: InboxSelection,
+    pub revision: u64,
     pub title: String,
     pub agent_title: Option<String>,
     pub repository: Option<String>,
@@ -164,6 +165,7 @@ impl InboxState {
                             id: item.id.clone(),
                             pane: item.pane.clone(),
                         },
+                        revision: item.revision,
                         title: item.title.clone(),
                         agent_title: item.agent_title.clone(),
                         repository: item.repository.clone(),
