@@ -203,8 +203,9 @@ One pure function in `portal-types` turns entries into groups and counts, so the
 
 - Add `Files` to `LeadPanel` in `web/src/app.rs`. Put the tab's rendering in `web/src/files.rs`.
 - Use the existing Dioxus Tabs, Accordion, Item, ScrollArea, Skeleton, and Status components. Do not edit generated component sources.
-- At 1400px and wider, Todos and Files are tabs in the right sidebar. Todos is selected first.
-  Below 1400px, Files joins the header tabs. Resizing keeps an explicit Files selection.
+- Files is a third tab in the right-column tab control that LR2 (`feat/lead-workers-tab`) adds: `Todos`, `Workers`, `Files`.
+  It reuses LR2's segmented-tab component and `LeadPanel`; it adds `LeadPanel::Files`, not a second control. Todos is selected first.
+  Below 1400px, Files joins LR2's header tabs after Workers. Resizing keeps an explicit Files selection.
 - Rows are not interactive. Paths wrap. A rename shows its previous path underneath.
 - Selecting another agent clears the shown files before the new agent's files arrive.
 
@@ -217,12 +218,22 @@ All units use the `writer` profile and run in order. Each starts from the revisi
 | U1 | Per-part detail revisions in agent events | `src/observation/details.rs`, `src/observation/tests/details.rs`, `portal-types/src/agents.rs`, `src/web/agents.rs` | — | A screen-only change leaves the conversation revision unchanged. The local event stream sends an event only when a part revision, state, blocked prompt, or session changes. |
 | U2 | Held remote detail subscription | `src/web/agents.rs`, `src/cli.rs`, `src/main.rs`, `tests/cli/observation_portal.rs` | U1 | Two viewers of one remote pane share one SSH process. Unrelated portal publications start no SSH call. The last disconnect kills the process. Process exit and an unsupported peer appear as disconnects. |
 | U3 | Prompt route refuses blocked agents | `src/web/agents.rs` and its tests | U2 | A prompt to a blocked local or remote agent answers 409 and reaches no Herdr call. |
-| U4 | Agent view refetches only changed parts | `web/src/agent_view.rs`, `web/src/conversations.rs`, `web/src/api.rs`, `web/src/component_tests.rs` | U3 | `refresh`, `POLL`, and the interval are gone. A screen event refetches only the screen. Agent, board, and inbox come from the portal stream. Sending makes no agent-list request. Failure and clean close both reconnect and refetch once. |
+| U4 | Agent view refetches only changed parts | `web/src/agent_view.rs` (`AgentSession` data hooks and actions only), `web/src/conversations.rs`, `web/src/api.rs`, `web/src/component_tests.rs` | U3, LR2 landed | `refresh`, `POLL`, and the interval are gone. A screen event refetches only the screen. Agent, board, and inbox come from the portal stream. Sending makes no agent-list request. Failure and clean close both reconnect and refetch once. |
 | U5 | Reviews and questions follow the inbox | `portal-types/src/inbox.rs`, `src/web/inbox.rs`, `web/src/review_view.rs`, `web/src/question_form.rs`, `web/src/component_tests.rs` | U4 | Both 2-second loops and `tick` are gone. A new inbox id refetches the list once. A changed review revision refetches only that review. |
 | U6 | Files capture, part, and route | `src/shell.rs`, new `src/git_status.rs`, new `portal-types/src/files.rs`, `portal-types/src/lib.rs`, `src/observation/details.rs`, `src/web/agents.rs`, `src/main.rs` module list | U5 | Real temporary repositories cover each state, the seven conflict codes, renames, staged-and-unstaged paths, non-UTF-8 names, unborn and detached HEAD, linked worktrees, and the byte limit. A blocked Git read does not delay the conversation part. A remote files change arrives through the U2 subscription. |
-| U7 | By Stage Files tab | new `web/src/files.rs`, `web/src/app.rs`, `web/src/agent_view.rs`, `web/assets/console.css`, `web/src/component_tests.rs` | U6 | Component tests cover each state, group, and count. Browser check at 1600, 1400, 1200, 1000, and 800px against design B. A files change refetches only files. |
+| U7 | By Stage Files tab | new `web/src/files.rs`, `web/src/app.rs`, `web/src/agent_view.rs` (right column and header tabs), `web/assets/console.css`, `web/src/component_tests.rs` | U6, LR2 landed | Component tests cover each state, group, and count. Browser check at 1600, 1400, 1200, 1000, and 800px against design B. A files change refetches only files. |
 
 U1–U5 remove every forced reload in the agent view. U6–U7 add Files on top.
+
+**Concurrent work on `origin/main` `aef6cce`** (briefs on `origin/docs/portal-mocks`, `plans/briefs/live-reasoning-*.md`):
+
+| Branch | Overlap | Order |
+| --- | --- | --- |
+| `feat/live-reasoning-wire` (LR1) | `portal-types/src/agents.rs`: LR1 adds fields to `LiveState`, `ActiveTool`, `Role`, `ToolSummary`; U1 changes `AgentEvent` and adds `DetailRevisions` | Separate items. Whichever lands second rebases; no shared field. |
+| `feat/lead-workers-tab` (LR2) | `web/src/agent_view.rs`, `web/src/app.rs`, `portal-types/src/lib.rs`, `web/assets/console.css`, `web/src/component_tests.rs` | U4 and U7 start from a base that contains LR2. U6 adds its `files` module export to `portal-types/src/lib.rs` after LR2. |
+| LR3 (live reasoning stream) | `web/src/agent_view.rs` `Conversation`, `ToolRecords`, `LiveActivity` | U4 and U7 do not edit those components. |
+
+U1–U3 touch no file LR2 or LR3 owns, so they continue now.
 After U7, the lead does the integration review: a real edit in a test checkout reaches the running portal for a local and a remote agent.
 The review also counts requests for 60 idle seconds with an open agent: zero conversation, board, review, or question fetches.
 
