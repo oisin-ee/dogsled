@@ -233,7 +233,20 @@ fn scaling_sidebars_add_no_collection_settlement_git_or_herdr_calls() {
         display.receive(reader.revision(first.revision), OWNER);
         assert!(render(&mut display).contains("child"));
     }
-    let second = fixture.publish(&captured);
+    let unchanged = fixture.publish(&captured);
+    assert_eq!(unchanged.revision, first.revision);
+    for reader in &readers {
+        assert!(matches!(
+            reader.rx.recv_timeout(Duration::from_millis(10)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(reader.rx.try_recv().is_err());
+    }
+    let mut changed = (*captured).clone();
+    changed.views.get_mut("portal_board").unwrap()["data"]["generated_ms"] =
+        json!(first.published_ms + 1);
+    let second = fixture.publish(&changed);
+    assert_eq!(second.revision, first.revision + 1);
     for reader in &readers {
         let mut display = Display::new();
         display.receive(reader.revision(second.revision), OWNER);

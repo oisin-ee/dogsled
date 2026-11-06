@@ -1620,6 +1620,11 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        let registered = fixture.wait(|frame| {
+            frame.views["agent_details"]["data"]
+                .as_object()
+                .is_some_and(|details| details.contains_key("w1:p1"))
+        });
         state.stop.cancel();
         tokio::time::timeout(
             Duration::from_secs(2),
@@ -1640,9 +1645,10 @@ mod tests {
             std::thread::yield_now();
         }
         fixture.wait(|frame| {
-            frame.views["agent_details"]["data"]
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty)
+            frame.revision > registered.revision
+                && frame.views["agent_details"]["data"]
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty)
         });
     }
 

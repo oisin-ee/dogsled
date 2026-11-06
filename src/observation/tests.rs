@@ -81,6 +81,243 @@ mod publication {
     }
 
     #[test]
+    fn identical_replacement_retains_the_frame_without_notifying_subscribers() {
+        let mut publisher = Publisher::new().unwrap();
+        let first = publisher.replace(input(1)).unwrap();
+        let receiver = publisher.subscribe();
+        let frame = Arc::clone(receiver.borrow().as_ref().unwrap());
+        let repeated = publisher.replace(input(1)).unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert!(Arc::ptr_eq(&frame, receiver.borrow().as_ref().unwrap()));
+        assert_eq!(
+            frame.activity_measured,
+            receiver.borrow().as_ref().unwrap().activity_measured
+        );
+        assert!(!receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn publication_time_alone_does_not_publish() {
+        let mut publisher = Publisher::new().unwrap();
+        let first = publisher.replace(input(1)).unwrap();
+        let receiver = publisher.subscribe();
+        let mut later = input(1);
+        later.published_ms = 2;
+        let repeated = publisher.replace(later).unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert_eq!(repeated.published_ms, 1);
+        assert!(!receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn portal_metadata_is_excluded_but_portal_content_and_wrapper_are_compared() {
+        let mut publisher = Publisher::new().unwrap();
+        let mut initial = input(1);
+        initial.views.insert(
+            "portal".into(),
+            serde_json::json!({"data": {
+                "version": 1, "epoch": "", "revision": 0, "published_ms": 0,
+                "board": null, "agents": null, "inbox": null, "gaps": []
+            }, "gaps": []}),
+        );
+        let first = publisher.replace(initial.clone()).unwrap();
+        let mut receiver = publisher.subscribe();
+        let mut later = initial.clone();
+        later.published_ms = 2;
+        let portal = later.views.get_mut("portal").unwrap();
+        portal["data"]["epoch"] = "ignored".into();
+        portal["data"]["revision"] = 99.into();
+        portal["data"]["published_ms"] = 99.into();
+        assert!(Arc::ptr_eq(&first, &publisher.replace(later).unwrap()));
+        assert!(!receiver.has_changed().unwrap());
+        initial.views.get_mut("portal").unwrap()["data"]["agents"] = serde_json::json!([]);
+        let changed = publisher.replace(initial.clone()).unwrap();
+        assert_eq!(changed.revision, first.revision + 1);
+        assert!(receiver.has_changed().unwrap());
+        receiver.borrow_and_update();
+        initial.views.get_mut("portal").unwrap()["gaps"] = serde_json::json!([{
+            "domain": "agents", "availability": "failed", "detail": "failed capture"
+        }]);
+        assert_eq!(
+            publisher.replace(initial).unwrap().revision,
+            changed.revision + 1
+        );
+        assert!(receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn each_substantive_publication_change_advances_the_revision() {
+        let initial = input(1);
+        let mut cases = Vec::new();
+        let mut measured = initial.clone();
+        measured.sources.local.insert("host".into(), 2);
+        cases.push(("measurement", measured, false));
+        let mut gap = initial.clone();
+        gap.gaps[0].detail = "capture failed".into();
+        cases.push(("gap", gap, false));
+        let mut view = initial.clone();
+        view.views
+            .insert("status".into(), serde_json::json!({"value": 2}));
+        cases.push(("view", view, false));
+        let mut local = initial.clone();
+        local
+            .local
+            .insert("host".into(), serde_json::json!({"value": 2}));
+        cases.push(("local", local, true));
+        for (name, changed, local_changed) in cases {
+            let mut publisher = Publisher::new().unwrap();
+            let first = publisher.replace(initial.clone()).unwrap();
+            let receiver = publisher.subscribe();
+            let next = publisher.replace(changed).unwrap();
+            assert_eq!(next.revision, first.revision + 1, "{name}");
+            assert_eq!(
+                next.local_revision,
+                first.local_revision + u64::from(local_changed),
+                "{name}"
+            );
+            assert!(receiver.has_changed().unwrap(), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_peer_source_field_is_publication_content() {
+        let mut initial = input(1);
+        let peer = PeerSource {
+            epoch: "peer-epoch".into(),
+            local_revision: 1,
+            received_ms: 1,
+            retry_tokens: vec![],
+            availability: Availability::Available,
+        };
+        initial.sources.peers.insert("peer".into(), peer.clone());
+        let sources = [
+            PeerSource {
+                epoch: "restarted".into(),
+                ..peer.clone()
+            },
+            PeerSource {
+                local_revision: 2,
+                ..peer.clone()
+            },
+            PeerSource {
+                received_ms: 2,
+                ..peer.clone()
+            },
+            PeerSource {
+                retry_tokens: vec!["retry-ack".into()],
+                ..peer.clone()
+            },
+            PeerSource {
+                availability: Availability::Stale,
+                ..peer
+            },
+        ];
+        for peer in sources {
+            let mut publisher = Publisher::new().unwrap();
+            let first = publisher.replace(initial.clone()).unwrap();
+            let receiver = publisher.subscribe();
+            let mut changed = initial.clone();
+            changed.sources.peers.insert("peer".into(), peer);
+            let next = publisher.replace(changed).unwrap();
+            assert_eq!(next.revision, first.revision + 1);
+            assert_eq!(next.local_revision, first.local_revision);
+            assert!(receiver.has_changed().unwrap());
+        }
+    }
+
+    fn activity(received_at_ms: u64, valid_for_ms: u64) -> portal_types::agents::ActivityView {
+        use portal_types::agents::{
+            ActivityDetail, ActivityProducer, ActivityView, LivePhase, LiveState,
+        };
+        ActivityView {
+            version: 1,
+            pane: "w1:p1".into(),
+            epoch: String::new(),
+            revision: 0,
+            session: Some("session".into()),
+            coarse_state: Some("working".into()),
+            producer: ActivityProducer {
+                generation: 1,
+                id: Some("producer".into()),
+            },
+            detail: ActivityDetail::Available {
+                sequence: 1,
+                received_at_ms,
+                valid_for_ms,
+                state: LiveState {
+                    phase: LivePhase::Thinking,
+                    active_tools: vec![],
+                    reasoning: None,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn unchanged_activity_and_a_falling_validity_budget_keep_the_existing_frame() {
+        let mut publisher = Publisher::new().unwrap();
+        let mut initial = input(1);
+        initial.sources.local.insert("terminals".into(), 1000);
+        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]));
+        let first = publisher.replace(initial.clone()).unwrap();
+        let receiver = publisher.subscribe();
+        let frame = Arc::clone(receiver.borrow().as_ref().unwrap());
+        assert!(Arc::ptr_eq(
+            &first,
+            &publisher.replace(initial.clone()).unwrap()
+        ));
+        let mut later = activity(1000, 8000);
+        later.epoch = "ignored".into();
+        later.revision = 99;
+        publisher.activity(BTreeMap::from([("w1:p1".into(), later)]));
+        initial.published_ms = 2000;
+        let repeated = publisher.replace(initial).unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert!(Arc::ptr_eq(&frame, receiver.borrow().as_ref().unwrap()));
+        assert_eq!(
+            frame.activity_measured,
+            receiver.borrow().as_ref().unwrap().activity_measured
+        );
+        assert!(!receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn activity_renewal_publishes_even_when_the_remaining_budget_is_unchanged() {
+        let mut publisher = Publisher::new().unwrap();
+        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]));
+        let first = publisher.replace(input(1)).unwrap();
+        let receiver = publisher.subscribe();
+        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(2000, 9000))]));
+        let renewed = publisher.replace(input(1)).unwrap();
+        assert_eq!(renewed.revision, first.revision + 1);
+        assert_eq!(renewed.local_revision, first.local_revision);
+        assert!(receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn activity_expiry_and_removal_are_content_changes() {
+        let mut publisher = Publisher::new().unwrap();
+        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]));
+        let first = publisher.replace(input(1)).unwrap();
+        let mut receiver = publisher.subscribe();
+        let mut expired = activity(1000, 0);
+        expired.detail = portal_types::agents::ActivityDetail::Unavailable {
+            reason: portal_types::agents::UnavailableReason::Expired,
+        };
+        publisher.activity(BTreeMap::from([("w1:p1".into(), expired)]));
+        let expired = publisher.replace(input(1)).unwrap();
+        assert_eq!(expired.revision, first.revision + 1);
+        assert!(receiver.has_changed().unwrap());
+        receiver.borrow_and_update();
+        publisher.activity(BTreeMap::new());
+        assert_eq!(
+            publisher.replace(input(1)).unwrap().revision,
+            expired.revision + 1
+        );
+        assert!(receiver.has_changed().unwrap());
+    }
+
+    #[test]
     fn atomic_replacement_preserves_old_references_and_wire() {
         let mut fixture = Fixture::new();
         let old = fixture.publish(1);
