@@ -1,0 +1,7 @@
+{
+  "kind": "browser-capture",
+  "source": ".impeccable/mocks/live-reasoning/split.html",
+  "viewport": "900x800",
+  "prompt": "Browser screenshot of split.html. The conversation content is a replay of a real Pi session transcript (claude-opus-5-5 lead, 2026-11-06 11:53-12:27): recorded thinking blocks, bash commands, tool output and reply text. The agent list, hosts and todos are illustrative. No image model generated this raster. Animations were paused for the capture. Scrolled to the live edge.",
+  "approved": false
+}
