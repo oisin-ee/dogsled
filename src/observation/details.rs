@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
 
 /// Match the open-agent refresh cadence in `web/src/agent_view.rs::POLL`.
 const DETAIL_TICK: Duration = Duration::from_secs(5);
@@ -204,14 +205,17 @@ impl Payload {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Payloads(Arc<Mutex<BTreeMap<String, Arc<Payload>>>>);
+pub(crate) struct Payloads(Interests);
 
 impl Payloads {
-    pub fn snapshot(&self) -> BTreeMap<String, Arc<Payload>> {
+    pub fn subscribe(&self, pane: &str) -> Option<watch::Receiver<Option<Arc<Payload>>>> {
         self.0
+            .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .panes
+            .get(pane)
+            .map(|viewers| viewers.output.subscribe())
     }
 }
 
@@ -235,15 +239,34 @@ impl Stop {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Viewers {
     count: usize,
-    stop: Option<Stop>,
+    output: watch::Sender<Option<Arc<Payload>>>,
 }
 
-/// Each connection holds one lease. Only the first and last viewer invalidate collection.
+impl Default for Viewers {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            output: watch::channel(None).0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Registry {
+    panes: BTreeMap<String, Viewers>,
+    agents: BTreeMap<String, Agent>,
+    sequence: Arc<AtomicU64>,
+    workers: BTreeMap<String, Worker>,
+    retired: Vec<std::thread::JoinHandle<()>>,
+    client: Option<Client>,
+}
+
+/// Each connection holds one lease. Workers start from the last serve-owned observation.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Interests(Arc<Mutex<BTreeMap<String, Viewers>>>);
+pub(crate) struct Interests(Arc<Mutex<Registry>>);
 
 impl Interests {
     pub fn register(
@@ -258,11 +281,15 @@ impl Interests {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let viewers = panes.entry(pane.to_owned()).or_default();
+        let viewers = panes.panes.entry(pane.to_owned()).or_default();
         viewers.count += 1;
         if viewers.count == 1
             && let Some(dirty) = &dirty
         {
+            if let Err(error) = panes.select(pane, dirty) {
+                panes.panes.remove(pane);
+                return Err(error);
+            }
             dirty.mark(wake::DETAILS);
         }
         Ok(Interest {
@@ -272,26 +299,15 @@ impl Interests {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn panes(&self) -> Vec<String> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .panes
             .keys()
             .cloned()
             .collect()
-    }
-
-    fn worker(&self, pane: &str, stop: Stop) {
-        if let Some(viewers) = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(pane)
-        {
-            viewers.stop = Some(stop);
-        } else {
-            stop.stop();
-        }
     }
 }
 
@@ -309,13 +325,11 @@ impl Drop for Interest {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(viewers) = panes.get_mut(&self.pane) {
+        if let Some(viewers) = panes.panes.get_mut(&self.pane) {
             viewers.count -= 1;
             if viewers.count == 0 {
-                if let Some(stop) = &viewers.stop {
-                    stop.stop();
-                }
-                panes.remove(&self.pane);
+                panes.retire(&self.pane);
+                panes.panes.remove(&self.pane);
                 if let Some(dirty) = &self.dirty {
                     dirty.mark(wake::DETAILS);
                 }
@@ -327,7 +341,6 @@ impl Drop for Interest {
 #[derive(Debug)]
 struct Worker {
     session: Session,
-    value: Arc<Mutex<Option<Arc<Payload>>>>,
     agent: Arc<Mutex<Agent>>,
     stop: Stop,
     thread: std::thread::JoinHandle<()>,
@@ -336,15 +349,24 @@ struct Worker {
 }
 
 /// Slow transcript/socket I/O runs in per-pane workers, never in publication assembly.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Collector {
     pub interests: Interests,
     pub payloads: Payloads,
-    sequence: Arc<AtomicU64>,
-    workers: BTreeMap<String, Worker>,
-    retired: Vec<std::thread::JoinHandle<()>>,
     #[cfg(test)]
     pub(super) client: Option<Client>,
+}
+
+impl Default for Collector {
+    fn default() -> Self {
+        let interests = Interests::default();
+        Self {
+            payloads: Payloads(interests.clone()),
+            interests,
+            #[cfg(test)]
+            client: None,
+        }
+    }
 }
 
 impl Collector {
@@ -353,7 +375,15 @@ impl Collector {
         input: &mut super::Publication,
         dirty: &crate::service::wake::Dirty,
     ) -> Result<()> {
-        let panes = self.interests.panes();
+        let mut registry = self
+            .interests
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        #[cfg(test)]
+        {
+            registry.client.clone_from(&self.client);
+        }
         let terminals = input
             .local
             .get("terminals")
@@ -366,76 +396,17 @@ impl Collector {
             .map(|value| serde_json::from_value::<crate::probe::Terminals>(value.clone()))
             .transpose()?;
         let mut values = BTreeMap::new();
-        let mut payloads = BTreeMap::new();
-        let retained = self.payloads.snapshot();
-        let mut obsolete: Vec<_> = self
-            .workers
-            .keys()
-            .filter(|pane| !panes.contains(pane))
-            .cloned()
+        registry.agents = terminals
+            .into_iter()
+            .flat_map(|terminals| terminals.agents)
+            .map(|agent| (agent.pane.clone(), agent))
             .collect();
+        let panes: Vec<_> = registry.panes.keys().cloned().collect();
         for pane in panes {
-            let agent = terminals
-                .as_ref()
-                .and_then(|terminals| terminals.agents.iter().find(|agent| agent.pane == pane));
-            let Some((agent, session)) =
-                agent.and_then(|agent| Session::of(agent).map(|session| (agent, session)))
-            else {
-                obsolete.push(pane.clone());
-                let payload = reuse_payload(
-                    Detail::unavailable(agent, "agent session unavailable"),
-                    &pane,
-                    &retained,
-                    &self.sequence,
-                )?;
-                values.insert(pane.clone(), payload.reference.clone());
-                payloads.insert(pane, payload);
-                continue;
-            };
-            if self.workers.get(&pane).is_some_and(|worker| {
-                worker.session != session || worker.stop.stopped.load(Ordering::Acquire)
-            }) {
-                self.retire(&pane);
-            }
-            let worker = self.workers.entry(pane.clone()).or_insert_with(|| {
-                #[cfg(test)]
-                let client = self.client.clone();
-                #[cfg(not(test))]
-                let client = None;
-                Worker::start(
-                    agent,
-                    session,
-                    dirty.clone(),
-                    &self.interests,
-                    client,
-                    Arc::clone(&self.sequence),
-                )
-            });
-            *worker
-                .agent
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = agent.clone();
-            let payload = worker
-                .value
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let payload = match payload {
-                Some(payload) => payload,
-                None => reuse_payload(Detail::pending(agent), &pane, &retained, &self.sequence)?,
-            };
+            let payload = registry.select(&pane, dirty)?;
             values.insert(pane.clone(), payload.reference.clone());
-            payloads.insert(pane, payload);
         }
-        for pane in obsolete {
-            self.retire(&pane);
-        }
-        self.retired.retain(|thread| !thread.is_finished());
-        *self
-            .payloads
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = payloads;
+        registry.retired.retain(|thread| !thread.is_finished());
         input.views.insert(
             "agent_details".into(),
             serde_json::to_value(super::project::View {
@@ -448,7 +419,11 @@ impl Collector {
 
     #[cfg(test)]
     pub(super) fn transcript_reads(&self) -> usize {
-        self.workers
+        self.interests
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .workers
             .values()
             .map(|worker| worker.transcript_reads.load(Ordering::Acquire))
             .sum()
@@ -456,7 +431,12 @@ impl Collector {
 
     #[cfg(test)]
     pub(super) fn tick(&self, pane: &str) -> bool {
-        let Some(worker) = self.workers.get(pane) else {
+        let registry = self
+            .interests
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(worker) = registry.workers.get(pane) else {
             return false;
         };
         let (send, receive) = std::sync::mpsc::sync_channel(0);
@@ -470,6 +450,57 @@ impl Collector {
             .expect("tick completed");
         true
     }
+}
+
+impl Registry {
+    fn select(&mut self, pane: &str, dirty: &wake::Dirty) -> Result<Arc<Payload>> {
+        let agent = self.agents.get(pane).cloned();
+        let session = agent.as_ref().and_then(Session::of);
+        if self.workers.get(pane).is_some_and(|worker| {
+            Some(&worker.session) != session.as_ref() || worker.stop.stopped.load(Ordering::Acquire)
+        }) {
+            self.retire(pane);
+        }
+        let output = self
+            .panes
+            .get(pane)
+            .ok_or_else(|| Error::Invalid("agent detail interest unavailable".into()))?
+            .output
+            .clone();
+        if let (Some(agent), Some(session)) = (agent.as_ref(), session) {
+            if let Some(worker) = self.workers.get(pane) {
+                *worker
+                    .agent
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = agent.clone();
+            } else {
+                output.send_replace(Some(Arc::new(Payload::new(
+                    Detail::pending(agent),
+                    pane,
+                    &self.sequence,
+                )?)));
+                self.workers.insert(
+                    pane.into(),
+                    Worker::start(
+                        agent,
+                        session,
+                        dirty.clone(),
+                        output.clone(),
+                        self.client.clone(),
+                        Arc::clone(&self.sequence),
+                    ),
+                );
+            }
+        } else {
+            let detail = Detail::unavailable(agent.as_ref(), "agent session unavailable");
+            let previous = output.borrow().clone();
+            if previous.as_ref().map(|payload| &payload.detail) != Some(&detail) {
+                output.send_replace(Some(Arc::new(Payload::new(detail, pane, &self.sequence)?)));
+            }
+        }
+        let payload = output.borrow().clone();
+        payload.ok_or_else(|| Error::Invalid("agent detail payload unavailable".into()))
+    }
 
     fn retire(&mut self, pane: &str) {
         if let Some(worker) = self.workers.remove(pane) {
@@ -479,28 +510,21 @@ impl Collector {
     }
 }
 
-fn reuse_payload(
-    detail: Detail,
-    pane: &str,
-    retained: &BTreeMap<String, Arc<Payload>>,
-    sequence: &AtomicU64,
-) -> Result<Arc<Payload>> {
-    if let Some(payload) = retained.get(pane)
-        && payload.detail == detail
-    {
-        return Ok(Arc::clone(payload));
-    }
-    Ok(Arc::new(Payload::new(detail, pane, sequence)?))
-}
-
 impl Drop for Collector {
     fn drop(&mut self) {
-        let workers = std::mem::take(&mut self.workers);
+        let mut registry = self
+            .interests
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workers = std::mem::take(&mut registry.workers);
         for (_, worker) in workers {
             worker.stop.stop();
-            self.retired.push(worker.thread);
+            registry.retired.push(worker.thread);
         }
-        for thread in self.retired.drain(..) {
+        let retired = std::mem::take(&mut registry.retired);
+        drop(registry);
+        for thread in retired {
             let _ = thread.join();
         }
     }
@@ -511,15 +535,13 @@ impl Worker {
         agent: &Agent,
         session: Session,
         dirty: crate::service::wake::Dirty,
-        interests: &Interests,
+        output: watch::Sender<Option<Arc<Payload>>>,
         client: Option<Client>,
         sequence: Arc<AtomicU64>,
     ) -> Self {
-        let value = Arc::new(Mutex::new(None));
         let current = Arc::new(Mutex::new(agent.clone()));
         let stopped = Arc::new(AtomicBool::new(false));
         let done = Arc::clone(&stopped);
-        let output = Arc::clone(&value);
         let source = Arc::clone(&current);
         let (wake, ticks) = std::sync::mpsc::channel();
         #[cfg(test)]
@@ -549,10 +571,7 @@ impl Worker {
                 if done.load(Ordering::Acquire) {
                     break;
                 }
-                let previous = output
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
+                let previous = output.borrow().clone();
                 if previous
                     .as_ref()
                     .map(|payload: &Arc<Payload>| &payload.detail)
@@ -567,11 +586,16 @@ impl Worker {
                     });
                     match payload {
                         Ok(payload) => {
-                            *output
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(Arc::new(payload));
-                            dirty.mark(wake::DETAILS);
+                            let changed = output.send_if_modified(|value| {
+                                if done.load(Ordering::Acquire) {
+                                    return false;
+                                }
+                                *value = Some(Arc::new(payload));
+                                true
+                            });
+                            if changed {
+                                dirty.mark(wake::DETAILS);
+                            }
                         }
                         Err(error) => eprintln!("agent detail serialization: {error}"),
                     }
@@ -598,10 +622,8 @@ impl Worker {
             }
         });
         let stop = Stop { stopped, wake };
-        interests.worker(&agent.pane, stop.clone());
         Self {
             session,
-            value,
             agent: current,
             stop,
             thread,

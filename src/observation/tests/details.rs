@@ -74,6 +74,72 @@ fn available(frame: &Published) -> bool {
 }
 
 #[test]
+fn detail_subscribers_receive_worker_captures_without_another_publication() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let native = Native::new();
+    let source = Arc::clone(&native.raw);
+    let screen = Arc::clone(&native.screen);
+    let (entered, started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let first = AtomicBool::new(true);
+    let socket = fake::Server::start(move |method, _| match method {
+        "agent.list" => json!({"result":{"agents":[source.lock().unwrap().clone()]}}),
+        "pane.read" => {
+            if first.swap(false, Ordering::AcqRel) {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(3)).unwrap();
+            }
+            json!({"result":{"read":screen.lock().unwrap().clone()}})
+        }
+        other => panic!("unexpected method {other}"),
+    });
+    let fixture = Fixture::paused(socket.client());
+    let publication = fixture.client.current().unwrap();
+    let mut viewer = fixture.client.detail("w1:p1").unwrap();
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(
+        viewer.current().publication.detail.conversation,
+        Content::Pending
+    ));
+    let mut second = fixture.client.detail("w1:p1").unwrap();
+    release.send(()).unwrap();
+    for viewer in [&mut viewer, &mut second] {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let connection = viewer.current();
+            assert_eq!(connection.status, ipc::Status::Connected);
+            assert_eq!(connection.publication.revision, publication.revision);
+            if let Content::Available(conversation) = &connection.publication.detail.conversation {
+                assert_eq!(conversation.turns[0].text, "original task");
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker detail was not delivered");
+            viewer.changed(Duration::from_millis(100));
+        }
+    }
+    assert_eq!(fixture.collector.lock().unwrap().transcript_reads(), 1);
+    *native.screen.lock().unwrap() = json!({"text":"direct update", "revision":8});
+    assert!(fixture.tick("w1:p1"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !matches!(&viewer.current().publication.detail.screen, Content::Available(screen) if screen.revision == 8)
+    {
+        assert!(Instant::now() < deadline, "next capture was not delivered");
+        viewer.changed(Duration::from_millis(100));
+    }
+    assert_eq!(fixture.client.current().unwrap(), publication);
+    drop(second);
+    drop(viewer);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !fixture.no_viewers() {
+        assert!(Instant::now() < deadline, "detail lease was not released");
+        std::thread::yield_now();
+    }
+    assert!(!fixture.tick("w1:p1"));
+}
+
+#[test]
 fn interests_scope_ticks_and_viewers_share_one_capture() {
     let native = Native::new();
     let fixture = Fixture::new(native.server.client());

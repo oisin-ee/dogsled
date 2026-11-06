@@ -77,7 +77,8 @@ pub(crate) struct Frame {
     pub published: Arc<Published>,
     /// One newline-delimited frame, serialized before making this revision visible.
     pub bytes: Arc<[u8]>,
-    pub details: BTreeMap<String, Arc<details::Payload>>,
+    /// Host-local detail channels advance independently of the main publication.
+    pub details: details::Payloads,
     pub activity: BTreeMap<String, Arc<[u8]>>,
     pub activity_measured: std::time::Instant,
 }
@@ -200,7 +201,7 @@ impl Publisher {
         self.sender.send_replace(Some(Arc::new(Frame {
             published: Arc::clone(&published),
             bytes: bytes.into(),
-            details: self.details.snapshot(),
+            details: self.details.clone(),
             activity,
             activity_measured: std::time::Instant::now(),
         })));

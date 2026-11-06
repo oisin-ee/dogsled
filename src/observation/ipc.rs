@@ -305,17 +305,12 @@ async fn connection(
     ) {
         return activity_connection(&socket, &mut receiver, request).await;
     }
-    let _detail_interest = if matches!(request.operation, Operation::Detail) {
+    if matches!(request.operation, Operation::Detail) {
         let Some(pane) = request.pane.as_deref() else {
             return failure(&socket, "invalid", "missing detail pane").await;
         };
-        match details.register(pane, dirty.clone()) {
-            Ok(interest) => Some(interest),
-            Err(_) => return failure(&socket, "invalid", "invalid detail pane").await,
-        }
-    } else {
-        None
-    };
+        return detail_connection(&socket, &mut receiver, details, dirty, pane).await;
+    }
     if matches!(request.operation, Operation::Retry) {
         let frame = receiver.borrow().clone();
         return retry_command(&socket, frame, request.host, dirty.as_ref()).await;
@@ -326,7 +321,6 @@ async fn connection(
         };
         return peer_connection(&socket, &mut receiver, interests, dirty, peer).await;
     }
-    let mut sent_detail = None;
     loop {
         if receiver.has_changed().is_err() {
             return failure(&socket, "unavailable", "observation publisher disconnected").await;
@@ -334,38 +328,6 @@ async fn connection(
         // Release the watch borrow before writing: readers cannot delay publication.
         let frame = receiver.borrow_and_update().clone();
         match frame {
-            Some(frame) if matches!(request.operation, Operation::Detail) => {
-                let pane = request
-                    .pane
-                    .as_deref()
-                    .ok_or_else(|| Error::Invalid("missing detail pane".into()))?;
-                // The published agent list decides whether the pane exists. Serve captures a
-                // detail for every pane a reader asks about, an unknown one included, so a
-                // detail payload alone never makes a pane found.
-                let identity = selected_agent(&frame.published, pane)?;
-                let listed = frame
-                    .published
-                    .views
-                    .get("portal")
-                    .and_then(|view| view.pointer("/data/agents"))
-                    .is_some_and(serde_json::Value::is_array);
-                if listed && identity.is_none() {
-                    let missing = serde_json::to_vec(&super::details::Detail::unavailable(
-                        None,
-                        "agent unavailable",
-                    ))?;
-                    write_detail(&socket, &frame.published, None, false, &missing).await?;
-                    return Ok(());
-                }
-                if let Some(payload) = frame.details.get(pane) {
-                    let signature = (payload.reference.revision, identity.clone());
-                    if sent_detail.as_ref() != Some(&signature) {
-                        write_detail(&socket, &frame.published, identity, true, &payload.bytes)
-                            .await?;
-                        sent_detail = Some(signature);
-                    }
-                }
-            }
             Some(frame) => write(&socket, &frame.bytes).await?,
             None => return failure(&socket, "unavailable", "observation unavailable").await,
         }
@@ -373,6 +335,91 @@ async fn connection(
             || !updated(&socket, &mut receiver).await?
         {
             return Ok(());
+        }
+    }
+}
+
+/// A lease starts capture immediately; worker changes wake only this pane's subscribers.
+async fn detail_connection(
+    socket: &tokio::net::UnixStream,
+    receiver: &mut watch::Receiver<Option<Arc<Frame>>>,
+    interests: super::details::Interests,
+    dirty: Option<crate::service::wake::Dirty>,
+    pane: &str,
+) -> Result<()> {
+    let Ok(_interest) = interests.register(pane, dirty) else {
+        return failure(socket, "invalid", "invalid detail pane").await;
+    };
+    let frame = receiver.borrow_and_update().clone();
+    let Some(frame) = frame else {
+        return failure(socket, "unavailable", "observation unavailable").await;
+    };
+    let Some(mut payloads) = frame.details.subscribe(pane) else {
+        return failure(socket, "unavailable", "agent detail unavailable").await;
+    };
+    let mut sent = None;
+    loop {
+        if receiver.has_changed().is_err() {
+            return failure(socket, "unavailable", "observation publisher disconnected").await;
+        }
+        let frame = receiver.borrow_and_update().clone();
+        let Some(frame) = frame else {
+            return failure(socket, "unavailable", "observation unavailable").await;
+        };
+        let identity = selected_agent(&frame.published, pane)?;
+        if identity.is_none()
+            && frame
+                .published
+                .views
+                .get("portal")
+                .and_then(|view| view.pointer("/data/agents"))
+                .is_some_and(serde_json::Value::is_array)
+        {
+            let missing = super::details::CODEC.encode(&super::details::Detail::unavailable(
+                None,
+                "agent unavailable",
+            ))?;
+            write_detail(socket, &frame.published, None, false, &missing).await?;
+            return Ok(());
+        }
+        let payload = payloads.borrow_and_update().clone();
+        // The worker can finish while a new native observation is still being projected.
+        // Never pair its session with metadata from a different publication session.
+        let terminals = frame
+            .published
+            .local
+            .get("terminals")
+            .filter(|_| {
+                !frame
+                    .published
+                    .gaps
+                    .iter()
+                    .any(|gap| gap.domain == "terminals" || gap.domain == "host")
+            })
+            .map(|value| serde_json::from_value::<crate::probe::Terminals>(value.clone()))
+            .transpose()?;
+        let session = terminals
+            .as_ref()
+            .and_then(|terminals| terminals.agents.iter().find(|agent| agent.pane == pane))
+            .and_then(super::details::Session::of);
+        if let Some(payload) = payload.filter(|payload| payload.detail.session == session) {
+            let signature = (payload.reference.revision, identity.clone());
+            if sent.as_ref() != Some(&signature) {
+                write_detail(socket, &frame.published, identity, true, &payload.bytes).await?;
+                sent = Some(signature);
+            }
+        }
+        tokio::select! {
+            changed = payloads.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+            },
+            changed = updated(socket, receiver) => {
+                if !changed? {
+                    return Ok(());
+                }
+            },
         }
     }
 }
@@ -901,6 +948,9 @@ pub(crate) trait Wire:
     fn version(&self) -> u32;
     fn epoch(&self) -> &str;
     fn revision(&self) -> u64;
+    fn follows(&self, previous: &Self) -> bool {
+        self.epoch() == previous.epoch() && self.revision() > previous.revision()
+    }
     fn valid(&self) -> bool {
         !self.epoch().is_empty() && self.revision() > 0
     }
@@ -945,6 +995,11 @@ impl Wire for super::details::DetailFrame {
     }
     fn revision(&self) -> u64 {
         self.revision
+    }
+    fn follows(&self, previous: &Self) -> bool {
+        // This revision stamps the main observation, not the independent detail stream.
+        // Several ordered worker captures can share the same metadata publication.
+        self.epoch == previous.epoch && self.revision >= previous.revision
     }
 }
 
@@ -1044,14 +1099,12 @@ fn receive<T: Wire>(reader: &mut BufReader<UnixStream>, shared: &Shared<T>) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = result.and_then(|value| {
-            if value.epoch() != state.publication.epoch()
-                || value.revision() <= state.publication.revision()
-            {
+            if value.follows(&state.publication) {
+                Ok(value)
+            } else {
                 Err(Error::Invalid(
                     "observation publication is out of order".into(),
                 ))
-            } else {
-                Ok(value)
             }
         });
         match result {
