@@ -2,7 +2,7 @@
   "kind": "browser-capture",
   "source": ".impeccable/mocks/conversation-live-work/inline.html",
   "viewport": "1600x1000",
-  "prompt": "Browser screenshot of the locally authored inline.html Impeccable mockup. Illustrative content, not a live transcript. No image model generated this raster.",
+  "prompt": "Browser screenshot of the locally authored inline.html Impeccable mockup. Illustrative content, not a live transcript. No image model generated this raster. Animations were paused for the capture.",
   "approved": false,
-  "contentRevision": "Source-backed mockups: active todo title, recorded agent commentary, tool names and targets; no generated summaries or inferred findings."
+  "contentRevision": "Reasoning-stream revision (owner choice B, 2026-11-06): recorded reasoning text streams live; tool calls show their arguments as Pi renders them; inbox and agents share one left column to widen the conversation."
 }
