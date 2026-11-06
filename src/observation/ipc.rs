@@ -379,7 +379,7 @@ async fn detail_connection(
                 None,
                 "agent unavailable",
             ))?;
-            write_detail(socket, &frame.published, None, false, &missing).await?;
+            write_detail(socket, &frame.published, None, false, None, &missing).await?;
             return Ok(());
         }
         let payload = payloads.borrow_and_update().clone();
@@ -405,7 +405,15 @@ async fn detail_connection(
         if let Some(payload) = payload.filter(|payload| payload.detail.session == session) {
             let signature = (payload.reference.revision, identity.clone());
             if sent.as_ref() != Some(&signature) {
-                write_detail(socket, &frame.published, identity, true, &payload.bytes).await?;
+                write_detail(
+                    socket,
+                    &frame.published,
+                    identity,
+                    true,
+                    Some(&payload.reference.parts),
+                    &payload.bytes,
+                )
+                .await?;
                 sent = Some(signature);
             }
         }
@@ -616,10 +624,11 @@ async fn write_detail(
     publication: &Published,
     agent: Option<portal_types::agents::AgentView>,
     found: bool,
+    parts: Option<&portal_types::agents::DetailRevisions>,
     content: &[u8],
 ) -> Result<()> {
     let mut header = serde_json::to_vec(&serde_json::json!({
-        "version": VERSION, "epoch": publication.epoch, "revision": publication.revision, "found": found, "agent": agent
+        "version": VERSION, "epoch": publication.epoch, "revision": publication.revision, "found": found, "agent": agent, "parts": parts
     }))?;
     header.pop();
     header.extend_from_slice(b",\"detail\":");
