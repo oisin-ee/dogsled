@@ -21,6 +21,8 @@ mod drop;
 mod error;
 mod facts;
 mod gate;
+#[cfg_attr(not(test), expect(dead_code, reason = "Files capture is wired by U6b"))]
+mod git_status;
 mod herdr_socket;
 mod holds;
 mod host_store;

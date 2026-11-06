@@ -670,6 +670,10 @@ fn git_words(checkout: &Path, index: Option<&Path>, args: &[&str]) -> Result<Vec
     Ok(words)
 }
 
+/// Preservation must read every byte it preserves and has no size policy of its own, so its Git
+/// reads are uncapped. The detail codec bound (`crate::shell::OUTPUT_LIMIT`) does not apply here.
+const READ_LIMIT: usize = usize::MAX;
+
 fn raw(shell: &dyn Shell, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     raw_input(shell, repo, args, None)
 }
@@ -683,8 +687,8 @@ fn raw_input(
     let words = git_words(repo, None, args)?;
     let budget = shell.budget().remaining("git")?;
     let out = match input {
-        Some(input) => shell.run_input_bytes_bounded("env", &words, input, budget)?,
-        None => shell.run_bytes_bounded("env", &words, budget)?,
+        Some(input) => shell.run_input_bytes_bounded("env", &words, input, budget, READ_LIMIT)?,
+        None => shell.run_bytes_bounded("env", &words, budget, READ_LIMIT)?,
     };
     if out.status != 0 {
         return Err(crate::error::Error::Command {
@@ -2407,8 +2411,9 @@ mod tests {
             program: &str,
             args: &[String],
             timeout: std::time::Duration,
+            limit: usize,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
-            let output = System::default().run_bytes_bounded(program, args, timeout)?;
+            let output = System::default().run_bytes_bounded(program, args, timeout, limit)?;
             self.replace(args)?;
             Ok(output)
         }
@@ -2418,12 +2423,61 @@ mod tests {
             args: &[String],
             input: &[u8],
             timeout: std::time::Duration,
+            limit: usize,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
             let output =
-                System::default().run_input_bytes_bounded(program, args, input, timeout)?;
+                System::default().run_input_bytes_bounded(program, args, input, timeout, limit)?;
             self.replace(args)?;
             Ok(output)
         }
+    }
+
+    /// Records the output limit of every byte read; runs nothing.
+    #[derive(Debug, Default)]
+    struct Limits(std::sync::Mutex<Vec<usize>>);
+    impl Shell for Limits {
+        fn run(&self, _: &str, _: &[String]) -> crate::error::Result<Output> {
+            unreachable!("preservation byte reads only")
+        }
+        fn run_bytes_bounded(
+            &self,
+            _: &str,
+            _: &[String],
+            _: std::time::Duration,
+            limit: usize,
+        ) -> crate::error::Result<crate::shell::BytesOutput> {
+            self.0.lock().unwrap().push(limit);
+            Ok(crate::shell::BytesOutput {
+                status: 0,
+                stdout: Vec::new(),
+                stderr: String::new(),
+            })
+        }
+        fn run_input_bytes_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            _: &[u8],
+            timeout: std::time::Duration,
+            limit: usize,
+        ) -> crate::error::Result<crate::shell::BytesOutput> {
+            self.run_bytes_bounded(program, args, timeout, limit)
+        }
+    }
+
+    #[test]
+    fn preservation_reads_are_not_capped_by_the_detail_limit() {
+        let shell = Limits::default();
+        raw(&shell, Path::new("/repo"), &["ls-tree"]).unwrap();
+        raw_input(
+            &shell,
+            Path::new("/repo"),
+            &["cat-file", "--batch"],
+            Some(b"oid\n"),
+        )
+        .unwrap();
+        assert_eq!(*shell.0.lock().unwrap(), vec![READ_LIMIT, READ_LIMIT]);
+        assert_ne!(READ_LIMIT, crate::shell::OUTPUT_LIMIT);
     }
 
     #[test]
@@ -2728,8 +2782,9 @@ mod tests {
             program: &str,
             args: &[String],
             timeout: std::time::Duration,
+            limit: usize,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
-            System::default().run_bytes_bounded("env", &self.args(program, args), timeout)
+            System::default().run_bytes_bounded("env", &self.args(program, args), timeout, limit)
         }
 
         fn run_input_bytes_bounded(
@@ -2738,12 +2793,14 @@ mod tests {
             args: &[String],
             input: &[u8],
             timeout: std::time::Duration,
+            limit: usize,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
             System::default().run_input_bytes_bounded(
                 "env",
                 &self.args(program, args),
                 input,
                 timeout,
+                limit,
             )
         }
 
