@@ -403,6 +403,72 @@ fn close_refuses_active_unsupported_foreign_locked_or_own_work_without_changes()
     assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
+/// This fixture has no ancestry under fake Herdr's shell (pid 10), and leads its own
+/// process group. Only its inherited pane/server identity can attribute it to the agent.
+fn detached_tool(rig: &Rig, tree: &Path, attributed: bool) -> Owned {
+    let mut command = isolated("sleep");
+    command.arg("60").current_dir(tree);
+    if attributed {
+        command
+            .env("HERDR_PANE_ID", "w2:p1")
+            .env("HERDR_SOCKET_PATH", rig.dir.join("herdr.sock"));
+    } else {
+        command
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SOCKET_PATH");
+    }
+    Owned::spawn(&mut command)
+}
+
+#[test]
+fn detached_agent_tool_environment_allows_close_without_signalling_the_tool() {
+    let (rig, tree) = close_rig("close-detached-tool");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    fs::write(tree.join("draft"), "preserve before closing the pane").unwrap();
+    let mut tool = detached_tool(&rig, &tree, true);
+    let out = rig.run(&["close", "w2:p1", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!tree.exists());
+    assert!(
+        tool.child_mut().try_wait().unwrap().is_none(),
+        "close must not signal the tool"
+    );
+    let closed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!closed["recovery"].is_null(), "{closed}");
+    let log = rig.log("herdr.log");
+    let after = log.split_once("workspace close w2").unwrap().1;
+    assert!(
+        !after.contains("pane process-info"),
+        "hold checks must precede pane closure: {log}"
+    );
+}
+
+#[test]
+fn detached_foreign_tool_refuses_close_with_its_pid() {
+    let (rig, tree) = close_rig("close-detached-foreign");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    let mut tool = detached_tool(&rig, &tree, false);
+    let pid = tool.child_mut().id();
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains(&format!("held: process {pid} works in {}", tree.display())),
+        "{error}"
+    );
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("workspace close"));
+    assert_eq!(rig.log("hook.log"), "");
+}
+
 #[test]
 fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     let (rig, tree) = close_rig("close-hook-fails");

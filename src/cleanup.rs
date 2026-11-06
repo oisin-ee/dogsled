@@ -96,9 +96,96 @@ pub enum Scope {
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub pid: u32,
-    /// 0 when the parent is unknown; such a process belongs to no pane.
+    /// 0 when the parent is unknown; ancestry cannot attribute such a process.
     pub ppid: u32,
     pub cwd: std::path::PathBuf,
+    pub pane: Option<PaneIdentity>,
+}
+
+/// Only the two inherited fields needed for ownership, never the rest of the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneIdentity {
+    pane: String,
+    socket: std::path::PathBuf,
+}
+
+impl PaneIdentity {
+    fn environment<'a>(mut entries: impl DoubleEndedIterator<Item = &'a [u8]>) -> Option<Self> {
+        use std::os::unix::ffi::OsStrExt as _;
+        // Only non-final entries prove a terminator. Linux split keeps an empty final
+        // entry for a trailing NUL; sysinfo removes delimiters, so its last entry is
+        // always untrusted. A truncated pane ID or socket must never grant ownership.
+        entries.next_back()?;
+        let mut pane = None;
+        let mut socket = None;
+        for entry in entries.filter(|entry| !entry.is_empty()) {
+            if let Some(value) = entry.strip_prefix(b"HERDR_PANE_ID=") {
+                if pane.is_some() || value.is_empty() {
+                    return None;
+                }
+                pane = Some(std::str::from_utf8(value).ok()?.to_owned());
+            } else if let Some(value) = entry.strip_prefix(b"HERDR_SOCKET_PATH=") {
+                if socket.is_some() || value.is_empty() {
+                    return None;
+                }
+                socket = Some(Path::new(std::ffi::OsStr::from_bytes(value)).to_path_buf());
+            }
+        }
+        Some(Self {
+            pane: pane?,
+            socket: socket?,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity(pid: u32) -> Option<PaneIdentity> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    // sysinfo 0.40.1's get_process_infos calls sysctl(3) with the full numeric MIB
+    // [CTL_KERN, KERN_PROCARGS2, pid], not a name/format lookup. Its parsed environment
+    // preserves spaces/newlines, unlike `ps -E`. Refresh only this pid, without CPU,
+    // disk, or whole-table sampling. A fresh System cannot reuse stale environment data.
+    let mut system = System::new().ok()?;
+    let pid = Pid::from_u32(pid);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_environ(UpdateKind::Always),
+    );
+    // EPERM, exited processes, and empty environments provide no identity evidence.
+    PaneIdentity::environment(
+        system
+            .process(pid)?
+            .environ()
+            .iter()
+            .map(|entry| entry.as_bytes()),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_identity(pid: u32) -> Option<PaneIdentity> {
+    let bytes = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    PaneIdentity::environment(bytes.split(|b| *b == 0))
+}
+
+/// The socket used by the same Herdr CLI that lists these panes. Pane IDs alone are not
+/// unique across servers. Failed discovery disables environment attribution, not holds.
+fn pane_socket(shell: &dyn Shell) -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("HERDR_SOCKET_PATH").filter(|p| !p.is_empty()) {
+        return Some(path.into());
+    }
+    let out = shell
+        .run_ok(
+            "herdr",
+            &["status".into(), "server".into(), "--json".into()],
+        )
+        .ok()?;
+    let status: serde_json::Value = serde_json::from_str(&out.stdout).ok()?;
+    status["socket"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(Into::into)
 }
 
 /// Every process this user can see, with its resolved working directory, or `None` when the
@@ -125,6 +212,7 @@ pub fn process_cwds(shell: &dyn Shell) -> Option<Vec<Proc>> {
                         pid,
                         ppid: parent,
                         cwd,
+                        pane: process_identity(pid),
                     })
                 })
                 .collect(),
@@ -164,6 +252,7 @@ pub fn process_cwds(shell: &dyn Shell) -> Option<Vec<Proc>> {
                 pid,
                 ppid: parents.get(&pid).copied().unwrap_or(0),
                 cwd: crate::worktree::resolved(Path::new(cwd)),
+                pane: process_identity(pid),
             });
         }
     }
@@ -171,23 +260,23 @@ pub fn process_cwds(shell: &dyn Shell) -> Option<Vec<Proc>> {
 }
 
 /// The first process working directory inside `path` that is not one of `owned`, if any.
-fn process_in<'a>(
-    table: &'a [Proc],
-    path: &str,
-    owned: &BTreeSet<u32>,
-) -> Option<&'a std::path::PathBuf> {
+fn process_in<'a>(table: &'a [Proc], path: &str, owned: &BTreeSet<u32>) -> Option<&'a Proc> {
     let root = crate::worktree::resolved(Path::new(path));
     table
         .iter()
-        .filter(|p| !owned.contains(&p.pid))
-        .map(|p| &p.cwd)
-        .find(|cwd| cwd.starts_with(&root))
+        .find(|p| !owned.contains(&p.pid) && p.cwd.starts_with(&root))
 }
 
 /// The processes that belong to the holder panes, whose own busy check decides for them. An
-/// agent pane owns every descendant of its shell, such as the agent and its tool servers. A
-/// shell owns only itself: a background job it started still holds the checkout.
-fn pane_owned(shell: &dyn Shell, holders: &[Pane], table: &[Proc]) -> Result<BTreeSet<u32>> {
+/// agent pane owns its shell descendants and processes with its inherited pane AND server
+/// socket identity, including detached tool servers. A shell owns only itself: its background
+/// jobs still hold the checkout, regardless of their inherited environment.
+fn pane_owned(
+    shell: &dyn Shell,
+    holders: &[Pane],
+    table: &[Proc],
+    socket: Option<&Path>,
+) -> Result<BTreeSet<u32>> {
     let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for p in table {
         children.entry(p.ppid).or_default().push(p.pid);
@@ -214,6 +303,17 @@ fn pane_owned(shell: &dyn Shell, holders: &[Pane], table: &[Proc]) -> Result<BTr
             }
         }
     }
+    owned.extend(table.iter().filter_map(|p| {
+        p.pane
+            .as_ref()
+            .filter(|identity| {
+                socket == Some(identity.socket.as_path())
+                    && holders
+                        .iter()
+                        .any(|pane| pane.agent.is_some() && pane.pane_id == identity.pane)
+            })
+            .map(|_| p.pid)
+    }));
     Ok(owned)
 }
 
@@ -1198,8 +1298,12 @@ fn checkout_users(
     match &seen.cwds {
         None => users.push("the process table is unreadable".into()),
         Some(cwds) => {
-            if let Some(cwd) = cwds.iter().map(|p| &p.cwd).find(|cwd| own(cwd)) {
-                users.push(format!("a process works in {}", cwd.display()));
+            if let Some(process) = cwds.iter().find(|p| own(&p.cwd)) {
+                users.push(format!(
+                    "process {} works in {}",
+                    process.pid,
+                    process.cwd.display()
+                ));
             }
         }
     }
@@ -1735,9 +1839,14 @@ fn held(
     match &seen.cwds {
         None => held.push("the process table is unreadable".into()),
         Some(cwds) => {
-            let owned = pane_owned(node.shell, &usage.holders, cwds)?;
-            if let Some(cwd) = process_in(cwds, &tree.path, &owned) {
-                held.push(format!("a process works in {}", cwd.display()));
+            let socket = pane_socket(node.shell);
+            let owned = pane_owned(node.shell, &usage.holders, cwds, socket.as_deref())?;
+            if let Some(process) = process_in(cwds, &tree.path, &owned) {
+                held.push(format!(
+                    "process {} works in {}",
+                    process.pid,
+                    process.cwd.display()
+                ));
             }
         }
     }
@@ -2590,6 +2699,110 @@ mod tests {
     use super::*;
     use crate::shell::Fake;
     use serde_json::json;
+
+    fn pane_identity() -> PaneIdentity {
+        PaneIdentity {
+            pane: "w2:p1".into(),
+            socket: "/server/herdr.sock".into(),
+        }
+    }
+
+    #[test]
+    fn detached_agent_process_requires_matching_pane_and_server_environment() {
+        let shell = Fake::new();
+        shell.on(
+            "herdr pane process-info --pane w2:p1",
+            r#"{"result":{"process_info":{"shell_pid":10}}}"#,
+        );
+        let mut pane = Pane {
+            pane_id: "w2:p1".into(),
+            agent: Some("pi".into()),
+            ..Pane::default()
+        };
+        let mut table = vec![
+            Proc {
+                pid: 10,
+                ppid: 1,
+                cwd: "/tree".into(),
+                pane: None,
+            },
+            Proc {
+                pid: 11,
+                ppid: 10,
+                cwd: "/tree".into(),
+                pane: None,
+            },
+            Proc {
+                pid: 42,
+                ppid: 1,
+                cwd: "/tree/nested".into(),
+                pane: Some(pane_identity()),
+            },
+        ];
+        let socket = Some(Path::new("/server/herdr.sock"));
+        assert_eq!(
+            pane_owned(&shell, &[pane.clone()], &table, socket).unwrap(),
+            BTreeSet::from([10, 11, 42])
+        );
+        table[2].pane.as_mut().unwrap().socket = "/other/herdr.sock".into();
+        let owned = pane_owned(&shell, &[pane.clone()], &table, socket).unwrap();
+        assert_eq!(owned, BTreeSet::from([10, 11]));
+        let holder = process_in(&table, "/tree", &owned).unwrap();
+        assert_eq!(holder.pid, 42);
+        assert_eq!(holder.cwd, Path::new("/tree/nested"));
+        table[2].pane = None; // unreadable environment never grants detached ownership
+        assert_eq!(
+            pane_owned(&shell, &[pane.clone()], &table, socket).unwrap(),
+            owned
+        );
+        table[2].pane = Some(pane_identity());
+        assert_eq!(
+            pane_owned(&shell, &[pane.clone()], &table, None).unwrap(),
+            owned
+        );
+        pane.agent = None;
+        assert_eq!(
+            pane_owned(&shell, &[pane], &table, socket).unwrap(),
+            BTreeSet::from([10])
+        );
+    }
+
+    #[test]
+    fn pane_environment_is_exact_complete_and_unambiguous() {
+        let bytes = b"IGNORED=a value\nwith lines\0HERDR_PANE_ID=w2:p1\0HERDR_SOCKET_PATH=/server/herdr.sock\0";
+        assert_eq!(
+            PaneIdentity::environment(bytes.split(|b| *b == 0)),
+            Some(pane_identity())
+        );
+        for bytes in [
+            &b"HERDR_PANE_ID=w2:p1\0"[..],
+            &b"HERDR_PANE_ID=w2:p1\0HERDR_SOCKET_PATH=/server/herdr.sock"[..],
+            &b"HERDR_PANE_ID=w2:p1\0HERDR_PANE_ID=w2:p1\0HERDR_SOCKET_PATH=/server/herdr.sock\0"[..],
+            &b"HERDR_PANE_ID=\0HERDR_SOCKET_PATH=/server/herdr.sock\0"[..],
+        ] {
+            assert_eq!(PaneIdentity::environment(bytes.split(|b| *b == 0)), None);
+        }
+    }
+
+    #[test]
+    fn pane_environment_never_trusts_the_final_entry() {
+        let pane = &b"HERDR_PANE_ID=w2:p1"[..];
+        let socket = &b"HERDR_SOCKET_PATH=/server/herdr.sock"[..];
+        // sysinfo's ordered entries omit delimiters. Either required key in last place
+        // is unknown, including a truncated w2:p12 that would otherwise match w2:p1.
+        assert_eq!(
+            PaneIdentity::environment([pane, socket, b"OTHER=value"].into_iter()),
+            Some(pane_identity())
+        );
+        for entries in [vec![], vec![pane, socket], vec![socket, pane]] {
+            assert_eq!(PaneIdentity::environment(entries.into_iter()), None);
+        }
+        // Linux retains the trailing empty split only for a complete final entry.
+        let full = b"HERDR_SOCKET_PATH=/server/herdr.sock\0HERDR_PANE_ID=w2:p12\0";
+        let prefix = &full[..full.len() - 2];
+        assert_eq!(PaneIdentity::environment(prefix.split(|b| *b == 0)), None);
+        assert_eq!(PaneIdentity::environment(b"".split(|b| *b == 0)), None);
+    }
 
     fn planned_branch() -> Tree {
         Tree {
