@@ -588,10 +588,18 @@ fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Opt
             print(cli.json, &board, || board.render())?;
             return Ok(Some(ExitCode::SUCCESS));
         }
-        Command::Host(HostCommand::AgentDetail { pane, input }) => {
-            let reply =
-                web::agents::peer_command(pane.clone(), input, Ledger::new(ledger::default_dir()))?;
-            print(true, &reply, String::new)?;
+        Command::Host(HostCommand::AgentDetail {
+            pane,
+            input,
+            follow,
+        }) => {
+            let ledger = Ledger::new(ledger::default_dir());
+            if *follow {
+                web::agents::peer_follow(pane, input, &ledger)?;
+            } else {
+                let reply = web::agents::peer_command(pane.clone(), input, ledger)?;
+                print(true, &reply, String::new)?;
+            }
             return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Snapshot) => {
