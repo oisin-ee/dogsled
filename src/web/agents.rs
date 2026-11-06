@@ -78,11 +78,11 @@ pub(crate) enum PeerOperation {
     Publish(portal_types::agents::PublishActivity),
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PeerReply {
-    status: u16,
-    body: Value,
+    pub(super) status: u16,
+    pub(super) body: Value,
 }
 
 pub(crate) fn peer_command(
@@ -102,6 +102,115 @@ pub(crate) fn peer_command(
         .enable_all()
         .build()?
         .block_on(peer_read(state, pane, operation))
+}
+
+/// Hold serve-owned detail until the relay closes stdin or the publication disconnects.
+pub(crate) fn peer_follow(
+    pane: &str,
+    input: &str,
+    ledger: &crate::ledger::Ledger,
+) -> crate::error::Result<()> {
+    use std::io::Read as _;
+    let operation: PeerOperation = serde_json::from_str(input)?;
+    if !matches!(operation, PeerOperation::Event | PeerOperation::Activity) {
+        return Err(crate::error::Error::Invalid(
+            "unsupported peer stream".into(),
+        ));
+    }
+    let stop = tokio_util::sync::CancellationToken::new();
+    let eof = stop.clone();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buffer = [0; 1024];
+        while matches!(stdin.read(&mut buffer), Ok(1..)) {}
+        eof.cancel();
+    });
+    follow_output(
+        pane,
+        &operation,
+        ledger,
+        &stop,
+        &mut std::io::stdout().lock(),
+    )
+}
+
+fn follow_output(
+    pane: &str,
+    operation: &PeerOperation,
+    ledger: &crate::ledger::Ledger,
+    stop: &tokio_util::sync::CancellationToken,
+    output: &mut impl std::io::Write,
+) -> crate::error::Result<()> {
+    let client = ipc::Client::at(&ledger.dir);
+    match operation {
+        PeerOperation::Event => follow_subscription(client.detail(pane)?, stop, output, |frame| {
+            event_reply(frame, pane)
+        }),
+        PeerOperation::Activity => match client.activity_subscribe(pane) {
+            Ok(subscription) => follow_subscription(subscription, stop, output, |view| {
+                Ok(PeerReply {
+                    status: 200,
+                    body: serde_json::to_value(view)?,
+                })
+            }),
+            Err(error) => {
+                let response = super::activity::failure(error.clone());
+                let reply = PeerReply {
+                    status: response.status().as_u16(),
+                    body: serde_json::to_value(error)?,
+                };
+                let _ = write_follow_line(output, &serde_json::to_vec(&reply)?);
+                Ok(())
+            }
+        },
+        _ => Err(crate::error::Error::Invalid(
+            "unsupported peer stream".into(),
+        )),
+    }
+}
+
+fn follow_subscription<T: ipc::Wire>(
+    mut subscription: ipc::Subscription<T>,
+    stop: &tokio_util::sync::CancellationToken,
+    output: &mut impl std::io::Write,
+    reply: impl Fn(&T) -> crate::error::Result<PeerReply>,
+) -> crate::error::Result<()> {
+    let mut previous = None;
+    let mut current = subscription.current();
+    while !stop.is_cancelled() {
+        let line = serde_json::to_vec(&reply(&current.publication)?)?;
+        if previous.as_ref() != Some(&line) {
+            if write_follow_line(output, &line).is_err() {
+                break;
+            }
+            previous = Some(line);
+        }
+        if matches!(current.status, ipc::Status::Disconnected(_)) {
+            break;
+        }
+        current = subscription.changed(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+fn write_follow_line(output: &mut impl std::io::Write, line: &[u8]) -> std::io::Result<()> {
+    output.write_all(line)?;
+    output.write_all(b"\n")?;
+    output.flush()
+}
+
+fn event_reply(publication: &DetailFrame, pane: &str) -> crate::error::Result<PeerReply> {
+    Ok(if publication.found {
+        PeerReply {
+            status: 200,
+            body: serde_json::from_str(&agent_event(publication, pane)?)?,
+        }
+    } else {
+        PeerReply {
+            status: 404,
+            body: json!({"error": format!("no agent in pane {pane}")}),
+        }
+    })
 }
 
 /// Execute on the named peer, with the same serve-owned read boundary as local HTTP.
@@ -133,15 +242,12 @@ async fn peer_read(
         PeerOperation::Event => {
             let subscription = client.detail(&pane)?;
             let current = subscription.current();
-            if current.publication.found {
-                Json(serde_json::from_str::<Value>(&agent_event(
-                    &current.publication,
-                    &pane,
-                )?)?)
+            let reply = event_reply(&current.publication, &pane)?;
+            (
+                StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                Json(reply.body),
+            )
                 .into_response()
-            } else {
-                not_found(&pane)
-            }
         }
         PeerOperation::Activity => match client.activity(&pane) {
             Ok(view) => Json(view).into_response(),
@@ -236,13 +342,7 @@ pub(super) async fn peer_response(
 ) -> Response {
     let label = host.clone();
     match tokio::task::spawn_blocking(move || peer_call(&state, &host, &pane, &operation)).await {
-        Ok(Ok(mut reply)) => {
-            let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
-            if status.is_server_error() {
-                reply.body["error"] = json!(format!("host {label}: agent detail unavailable"));
-            }
-            (status, [("cache-control", "no-store")], Json(reply.body)).into_response()
-        }
+        Ok(Ok(reply)) => peer_reply_response(&label, reply),
         Ok(Err(error)) => peer_error(&label, &error),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
@@ -250,6 +350,19 @@ pub(super) async fn peer_response(
         )
             .into_response(),
     }
+}
+
+fn peer_reply_response(label: &str, mut reply: PeerReply) -> Response {
+    let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    if status.is_server_error() {
+        let error = json!(format!("host {label}: agent detail unavailable"));
+        if let Some(body) = reply.body.as_object_mut() {
+            body.insert("error".into(), error);
+        } else {
+            reply.body = json!({"error": error});
+        }
+    }
+    (status, [("cache-control", "no-store")], Json(reply.body)).into_response()
 }
 
 async fn machine_action(
@@ -294,7 +407,7 @@ async fn machine_action(
     }
 }
 
-/// Reconcile a remote stream when the board receives a publication, not through another observer.
+/// Share a held peer stream without observing unrelated portal publications.
 pub(super) async fn peer_events(
     state: AppState,
     host: String,
@@ -302,47 +415,60 @@ pub(super) async fn peer_events(
     operation: PeerOperation,
     event: &'static str,
 ) -> Response {
-    let initial = peer_response(state.clone(), host.clone(), pane.clone(), operation.clone()).await;
-    if !initial.status().is_success() {
-        return initial;
-    }
+    let mut lines = match state
+        .followers
+        .subscribe(&state, host.clone(), pane, &operation)
+    {
+        Ok(lines) => lines,
+        Err(error) => return peer_error(&host, &error),
+    };
+    let first = tokio::select! {
+        () = state.stop.cancelled() => Err(format!("host {host}: agent stream unavailable")),
+        result = tokio::time::timeout(crate::budget::CALL_LIMIT, first_peer_line(&mut lines)) => {
+            result.unwrap_or_else(|_| Err(format!("host {host}: agent stream unavailable")))
+        }
+    };
+    let initial = match first {
+        Ok(reply) if reply.status < 400 && StatusCode::from_u16(reply.status).is_ok() => reply,
+        Ok(reply) => return peer_reply_response(&host, reply),
+        Err(error) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error":error}))).into_response();
+        }
+    };
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let stop = state.stop.clone();
-    let mut portal = state.portal.clone();
-    let reader = state.clone();
     tokio::spawn(async move {
-        let mut response = initial;
+        let mut line = Ok(initial);
         loop {
-            let failed = !response.status().is_success();
-            let Ok(bytes) = axum::body::to_bytes(
-                response.into_body(),
-                crate::observation::details::CODEC.wire_limit(),
-            )
-            .await
-            else {
-                break;
+            let (name, body, failed) = match line {
+                Ok(mut reply) => {
+                    reply.status = StatusCode::from_u16(reply.status)
+                        .unwrap_or(StatusCode::BAD_GATEWAY)
+                        .as_u16();
+                    if reply.status >= 500 {
+                        reply.body =
+                            json!({"error":format!("host {host}: agent detail unavailable")});
+                    }
+                    (
+                        if reply.status >= 400 { "error" } else { event },
+                        reply.body,
+                        reply.status >= 400,
+                    )
+                }
+                Err(error) => ("error", json!({"error":error}), true),
             };
-            let payload = String::from_utf8_lossy(&bytes).into_owned();
-            if sender
-                .send((if failed { "error" } else { event }, payload))
-                .await
-                .is_err()
-                || failed
-            {
+            if sender.send((name, body.to_string())).await.is_err() || failed {
                 break;
             }
             tokio::select! {
                 () = stop.cancelled() => break,
                 () = sender.closed() => break,
-                changed = portal.changed() => if changed.is_err() { break; },
+                changed = lines.changed() => if changed.is_err() { break; },
             }
-            response = peer_response(
-                reader.clone(),
-                host.clone(),
-                pane.clone(),
-                operation.clone(),
-            )
-            .await;
+            let Some(next) = lines.borrow_and_update().clone() else {
+                break;
+            };
+            line = next;
         }
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).map(|(event, data)| {
@@ -355,6 +481,19 @@ pub(super) async fn peer_events(
     axum::response::sse::Sse::new(state.until_shutdown(stream))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+async fn first_peer_line(
+    lines: &mut tokio::sync::watch::Receiver<Option<super::peer_stream::Line>>,
+) -> super::peer_stream::Line {
+    loop {
+        if let Some(line) = lines.borrow_and_update().clone() {
+            return line;
+        }
+        if lines.changed().await.is_err() {
+            return Err("agent stream unavailable".into());
+        }
+    }
 }
 
 /// The routes of the agent API.
@@ -1197,7 +1336,11 @@ mod tests {
 
     #[tokio::test]
     async fn remote_screen_activity_and_streams_forward_peer_publications() {
-        let fixture = PeerFixture::new();
+        let mut fixture = PeerFixture::new();
+        fixture.state.followers = super::super::peer_stream::Followers::with_launcher("sh", vec![
+            "-c".into(),
+            "printf '%s\\n' '{\"status\":200,\"body\":{\"session\":\"peer-session\"}}'; cat >/dev/null".into(),
+        ]);
         let activity = json!({"version":1,"pane":"w1:p1","epoch":"peer-serve","revision":2,
             "session":"peer-session","coarse_state":"working","producer":{"generation":1,"id":"producer"},
             "detail":{"availability":"available","sequence":1,"received_at_ms":1,"valid_for_ms":5000,
@@ -1235,6 +1378,9 @@ mod tests {
         let payload = body_json(response).await;
         assert_eq!(payload["session"], "peer-session");
         assert!(payload["detail"]["valid_for_ms"].as_u64().unwrap() <= 5000);
+        fixture.shell.calls.lock().unwrap().clear();
+        let (publications, portal) = watch::channel(fixture.state.portal.borrow().clone());
+        fixture.state.portal = portal;
         for (route, event) in [("events", "agent"), ("activity/events", "activity")] {
             let response = call(
                 fixture.state.clone(),
@@ -1255,7 +1401,120 @@ mod tests {
             let frame = String::from_utf8(bytes.to_vec()).unwrap();
             assert!(frame.contains(&format!("event: {event}")), "{frame}");
             assert!(frame.contains("peer-session"), "{frame}");
+            publications.send_replace(super::super::PortalState::default());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), stream.next())
+                    .await
+                    .is_err(),
+                "unrelated portal publication must not emit an event"
+            );
         }
+        assert!(
+            fixture
+                .shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| !call.contains("agent-detail"))
+        );
+        let calls = fixture.state.followers.calls();
+        assert_eq!(calls.len(), 2);
+        for (argv, operation) in calls
+            .iter()
+            .zip([PeerOperation::Event, PeerOperation::Activity])
+        {
+            let expected =
+                fixture
+                    .command("w1:p1", &operation)
+                    .replacen(" --input", " --follow --input", 1);
+            assert_eq!(format!("ssh {}", argv.join(" ")), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_stream_errors_preserve_initial_status_and_close_later_events() {
+        for (script, status, error) in [
+            (
+                "exit 0".to_owned(),
+                StatusCode::BAD_GATEWAY,
+                "host netcup: agent stream unavailable",
+            ),
+            (
+                "printf '%s\\n' '{\"status\":404,\"body\":{\"error\":\"no agent\"}}'".into(),
+                StatusCode::NOT_FOUND,
+                "no agent",
+            ),
+            (
+                "printf '%s\\n' '{\"status\":503,\"body\":{\"error\":\"secret peer detail\"}}'"
+                    .into(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "host netcup: agent detail unavailable",
+            ),
+        ] {
+            let mut fixture = PeerFixture::new();
+            fixture.state.followers = super::super::peer_stream::Followers::with_launcher(
+                "sh",
+                vec!["-c".into(), script],
+            );
+            let response = call(
+                fixture.state.clone(),
+                request(Method::GET, "/api/agents/netcup/w1:p1/events", None),
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            assert_eq!(body_json(response).await["error"], error);
+            assert!(
+                fixture
+                    .shell
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|call| !call.contains("agent-detail"))
+            );
+        }
+        let release = std::env::temp_dir().join(crate::ledger::new_id());
+        let mut fixture = PeerFixture::new();
+        fixture.state.followers = super::super::peer_stream::Followers::with_launcher(
+            "sh",
+            vec![
+                "-c".into(),
+                format!(
+                    "printf '%s\\n' '{{\"status\":200,\"body\":{{\"session\":\"peer-session\"}}}}'; while [ ! -f {} ]; do sleep 0.01; done; printf '%s\\n' '{{\"status\":409,\"body\":{{\"error\":\"session changed\"}}}}'; cat >/dev/null",
+                    crate::shell::quote(&release.to_string_lossy())
+                ),
+            ],
+        );
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/events", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: agent"));
+        std::fs::write(&release, "release").unwrap();
+        let last = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let last = String::from_utf8_lossy(&last);
+        assert!(last.contains("event: error"), "{last}");
+        assert!(last.contains("session changed"), "{last}");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(release).unwrap();
     }
 
     #[tokio::test]
@@ -1798,6 +2057,89 @@ mod tests {
         assert_eq!(second.conversation, first.conversation);
         assert!(second.screen > first.screen);
         state.stop.cancel();
+    }
+
+    #[test]
+    fn peer_follow_refuses_one_shot_operations() {
+        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        for operation in [PeerOperation::Conversation, PeerOperation::Screen] {
+            let error = peer_follow(
+                "w1:p1",
+                &serde_json::to_string(&operation).unwrap(),
+                &ledger,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "unsupported peer stream");
+        }
+        assert!(
+            !ledger.dir.exists(),
+            "refused streams must not read host files"
+        );
+    }
+
+    #[test]
+    fn peer_follow_emits_only_changed_detail_lines() {
+        use std::io::BufRead as _;
+        let raw = Arc::new(std::sync::Mutex::new(json!({
+            "pane_id":"w1:p1", "agent":"pi", "name":"worker", "agent_status":"working",
+            "agent_session":{"kind":"path","value":"/work/session.jsonl"}
+        })));
+        let screen = Arc::new(std::sync::Mutex::new(json!({"text":"first", "revision":7})));
+        let source = Arc::clone(&raw);
+        let output = Arc::clone(&screen);
+        let server = fake::Server::start(move |method, _| match method {
+            "agent.list" => json!({"result":{"agents":[source.lock().unwrap().clone()]}}),
+            "pane.read" => json!({"result":{"read":output.lock().unwrap().clone()}}),
+            other => panic!("unexpected method {other}"),
+        });
+        let fixture = crate::observation::details::fixture::Fixture::new(server.client());
+        let _viewer = fixture.client.detail("w1:p1").unwrap();
+        fixture.wait(|frame| frame.views["agent_details"]["data"]["w1:p1"]["screen_revision"] == 7);
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        let mut reader = std::io::BufReader::new(reader);
+        let stop = tokio_util::sync::CancellationToken::new();
+        let _cancel = stop.clone().drop_guard();
+        let stopped = stop.clone();
+        let ledger = fixture.ledger.clone();
+        let thread = std::thread::spawn(move || {
+            follow_output(
+                "w1:p1",
+                &PeerOperation::Event,
+                &ledger,
+                &stopped,
+                &mut writer,
+            )
+            .unwrap();
+        });
+        let mut first = String::new();
+        reader.read_line(&mut first).unwrap();
+        let first: PeerReply = serde_json::from_str(&first).unwrap();
+        assert_eq!(first.status, 200);
+        let previous = fixture.client.current().unwrap().revision;
+        raw.lock().unwrap()["name"] = json!("renamed");
+        fixture.wake();
+        fixture.wait(|frame| frame.revision > previous);
+        let mut unchanged = String::new();
+        assert!(
+            reader.read_line(&mut unchanged).is_err(),
+            "unchanged detail must emit no line"
+        );
+        *screen.lock().unwrap() = json!({"text":"second", "revision":8});
+        assert!(fixture.tick("w1:p1"));
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut second = String::new();
+        reader.read_line(&mut second).unwrap();
+        let second: PeerReply = serde_json::from_str(&second).unwrap();
+        assert_eq!(second.status, 200);
+        assert_ne!(first.body["revisions"], second.body["revisions"]);
+        stop.cancel();
+        thread.join().unwrap();
     }
 
     fn agent_sse_payload(bytes: &[u8]) -> AgentEvent {
