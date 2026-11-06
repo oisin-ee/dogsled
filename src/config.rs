@@ -37,19 +37,9 @@ pub struct Policy {
     /// `ssh -T -o BatchMode=yes`. mise shims are not on the non-interactive
     /// PATH, but `mise` itself is, so the default goes through `mise x`.
     pub remote_command: Vec<String>,
-    #[serde(default)]
-    pub repos: Vec<Repo>,
     pub cleanup: Cleanup,
     pub quota: Quota,
     pub web: Web,
-}
-
-/// A repository origin and its home-relative checkout path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Repo {
-    pub path: String,
-    pub origin: String,
 }
 
 /// The web portal's settings.
@@ -93,7 +83,6 @@ impl Default for Policy {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
-            repos: Vec::new(),
             cleanup: Cleanup::default(),
             quota: Quota::default(),
             web: Web::default(),
@@ -173,24 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn repo_entries_keep_paths_and_origins() {
-        let policy = parse(
-            "[[repos]]\npath = '~/dev/dogsled'\norigin = 'git@github.com:oisin-ee/dogsled.git'\n",
-        )
-        .unwrap();
-        assert_eq!(
-            policy.repos,
-            [Repo {
-                path: "~/dev/dogsled".into(),
-                origin: "git@github.com:oisin-ee/dogsled.git".into(),
-            }]
-        );
-        assert!(parse("[[repos]]\npath = '~/dev/repo'\n").is_err());
+    fn configured_repository_list_is_rejected() {
         assert!(
-            parse(
-                "[[repos]]\npath = '~/dev/repo'\norigin = 'https://example.org/r'\nextra = true\n"
-            )
-            .is_err()
+            parse("[[repos]]\npath = '~/repo'\norigin = 'git@github.com:owner/repo.git'\n")
+                .is_err()
         );
     }
 

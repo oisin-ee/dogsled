@@ -61,7 +61,7 @@ impl Default for PortalState {
 /// What the portal needs to start a lead. One-shot servers have none.
 #[derive(Debug, Clone)]
 pub struct LeadLaunch {
-    /// Reloaded for every lead, so `dogsled repo add` needs no portal restart.
+    /// Reloaded for every lead, so a host policy change needs no portal restart.
     pub config_path: std::path::PathBuf,
     pub home: String,
     pub shell: Arc<dyn crate::shell::Shell>,
@@ -288,13 +288,16 @@ async fn stream(
 }
 
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let activity_write = request.uri().path().starts_with("/api/agents/")
-        && (request.uri().path().ends_with("/activity")
-            || request.uri().path().ends_with("/activity/producer"))
-        && matches!(
-            *request.method(),
-            axum::http::Method::POST | axum::http::Method::PUT
-        );
+    // Host-qualified activity routes retain the producer's bearer-only boundary.
+    let segments: Vec<_> = request.uri().path().split('/').collect();
+    let activity_write = matches!(
+        segments.as_slice(),
+        ["", "api", "agents", _, _, "activity"]
+            | ["", "api", "agents", _, _, "activity", "producer"]
+    ) && matches!(
+        *request.method(),
+        axum::http::Method::POST | axum::http::Method::PUT
+    );
     if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
         return activity::failure(crate::observation::live_activity::error(
             portal_types::agents::ActivityCode::Unauthorized,

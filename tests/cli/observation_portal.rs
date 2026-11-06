@@ -217,6 +217,72 @@ fn isolate(rig: &Rig) -> Vec<fs::File> {
 }
 
 #[test]
+fn catalogue_serve_publishes_github_fixture_to_api_and_repo_list() {
+    let rig = Rig::short("repo-catalogue");
+    rig.snapshot("state", now(), 0.0, 8);
+    rig.script("gh", r#"#!/bin/sh
+if test "$DOGSLED_TEST_ROLE" != observer; then
+  echo 'reader invoked GitHub' >> "$RIG/catalogue-reader-access"
+  exit 97
+fi
+if test "$#" != 3 || test "$1" != api || test "$2" != 'user/repos?per_page=100&affiliation=owner,collaborator,organization_member' || test "$3" != --paginate; then
+  echo 'unexpected gh arguments' >&2
+  exit 98
+fi
+printf 'call\n' >> "$RIG/catalogue-calls"
+cat <<'JSON'
+[{"full_name":"owner/old","description":"Older repository","pushed_at":"2026-10-01T00:00:00Z","private":false,"archived":false},{"full_name":"owner/archive","description":null,"pushed_at":"2026-12-01T00:00:00Z","private":false,"archived":true}]
+[{"full_name":"owner/fork","description":"Newest fork","pushed_at":"2026-11-01T00:00:00Z","private":true,"archived":false,"fork":true},{"full_name":"owner/unpushed","description":null,"pushed_at":null,"private":false,"archived":false}]
+JSON
+"#);
+    let observer = rig.serve();
+    let frame = wait_publication(&rig, |frame| {
+        frame["views"]["repos"]["data"]["repos"].is_array()
+    });
+    let expected = json!({"repos":[
+        {"slug":"owner/fork","description":"Newest fork","pushed_at":"2026-11-01T00:00:00Z","private":true},
+        {"slug":"owner/old","description":"Older repository","pushed_at":"2026-10-01T00:00:00Z","private":false},
+        {"slug":"owner/unpushed","description":null,"pushed_at":null,"private":false}
+    ],"error":null});
+    assert_eq!(frame["views"]["repos"]["data"], expected);
+    let portal = Portal::start(&rig);
+    let (status, headers, body) = portal.get("/api/repos");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(body, expected);
+    // Repo readers do not load policy, discover hosts or invoke gh.
+    rig.config("not valid TOML");
+    let mut list = rig.start(&["repo", "list", "--json"]);
+    assert!(list.wait().success());
+    let (stdout, stderr) = list.output();
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(serde_json::from_str::<Value>(&stdout).unwrap(), expected);
+    let mut list = rig.start(&["repo", "list"]);
+    assert!(list.wait().success());
+    let (stdout, stderr) = list.output();
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(
+        stdout,
+        "owner/fork\tprivate\t2026-11-01T00:00:00Z\tNewest fork\nowner/old\tpublic\t2026-10-01T00:00:00Z\tOlder repository\nowner/unpushed\tpublic\t\t\n"
+    );
+    assert_eq!(rig.log("catalogue-calls"), "call\n");
+    assert!(!rig.dir.join("catalogue-reader-access").exists());
+    drop(observer);
+    let (status, _, body) = portal.get("/api/repos");
+    assert_eq!(status, 503, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("unavailable"));
+    let mut list = rig.start(&["repo", "list", "--json"]);
+    assert!(!list.wait().success());
+    let (stdout, _) = list.output();
+    assert!(
+        serde_json::from_str::<Value>(&stdout).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
+}
+
+#[test]
 fn portal_readers_share_one_revision_and_one_subscription_without_observation() {
     let rig = Rig::short("portal-publication");
     rig.snapshot("state", now(), 0.0, 8);
@@ -413,7 +479,7 @@ fn detail_readers_use_session_qualified_publication_without_observation() {
     );
     let expected = &content["detail"];
     for field in ["conversation", "screen"] {
-        let (status, headers, data) = portal.get(&format!("/api/agents/w1:p1/{field}"));
+        let (status, headers, data) = portal.get(&format!("/api/agents/local/w1:p1/{field}"));
         assert_eq!(status, 200, "{data}");
         assert_eq!(data, expected[field]["data"]);
         supplied.interest("w1:p1", true);
@@ -424,7 +490,7 @@ fn detail_readers_use_session_qualified_publication_without_observation() {
             content["revision"].to_string()
         );
     }
-    let (mut events, status, _) = Http::open(portal.port, "/api/agents/w1:p1/events");
+    let (mut events, status, _) = Http::open(portal.port, "/api/agents/local/w1:p1/events");
     assert_eq!(status, 200);
     let (kind, data) = events.event();
     let data: Value = serde_json::from_str(&data).unwrap();

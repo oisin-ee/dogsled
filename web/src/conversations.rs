@@ -10,12 +10,27 @@ const CAPACITY: usize = 16;
 
 #[derive(Clone, Default)]
 pub struct Conversations {
+    hosts: BTreeMap<String, PaneConversations>,
+}
+
+impl Conversations {
+    pub fn host(&self, host: &str) -> Option<&PaneConversations> {
+        self.hosts.get(host)
+    }
+
+    pub fn host_mut(&mut self, host: &str) -> &mut PaneConversations {
+        self.hosts.entry(host.into()).or_default()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PaneConversations {
     entries: VecDeque<Conversation>,
     sessions: BTreeMap<String, DetailSession>,
     generations: BTreeMap<String, u64>,
 }
 
-impl Conversations {
+impl PaneConversations {
     pub fn get(&self, pane: &str) -> Option<&Vec<Turn>> {
         self.entries
             .iter()
@@ -125,26 +140,32 @@ impl Conversations {
 
 /// Refresh only the transcript. Metadata and terminal reads have separate lifetimes.
 pub fn use_conversation(
-    pane: String,
+    address: portal_types::agents::AgentAddress,
     refresh: Signal<u64>,
     mut session: Signal<Option<DetailSession>>,
 ) -> Resource<Result<(), String>> {
     let mut conversations = use_context::<Signal<Conversations>>();
     use_hook(|| {
-        let mut cache = conversations.write();
-        cache.begin_request(&pane);
-        cache.sessions.remove(&pane);
-        cache.access(&pane);
+        let mut hosts = conversations.write();
+        let cache = hosts.host_mut(&address.host);
+        let pane = &address.pane;
+        cache.begin_request(pane);
+        cache.sessions.remove(pane);
+        cache.access(pane);
     });
     use_resource(move || {
         let _ = refresh();
-        let pane = pane.clone();
-        let generation = conversations.write().begin_request(&pane);
+        let address = address.clone();
+        let generation = conversations
+            .write()
+            .host_mut(&address.host)
+            .begin_request(&address.pane);
         async move {
-            let result = crate::api::fetch_conversation(&pane).await;
+            let result = crate::api::fetch_conversation(&address).await;
             let accepted = conversations
                 .write()
-                .apply_response(&pane, generation, result)?;
+                .host_mut(&address.host)
+                .apply_response(&address.pane, generation, result)?;
             if let Some(key) = accepted {
                 session.set(Some(DetailSession::Available(key)));
             }
@@ -155,6 +176,7 @@ pub fn use_conversation(
 
 #[cfg(test)]
 mod tests {
+    use super::PaneConversations as Conversations;
     use super::*;
     use portal_types::agents::{Role, Source, TimeMeaning, Timestamp};
 
@@ -179,6 +201,27 @@ mod tests {
             }],
             truncated: false,
         }
+    }
+
+    #[test]
+    fn equal_panes_on_different_hosts_keep_separate_history() -> Result<(), String> {
+        let mut hosts = super::Conversations::default();
+        hosts
+            .host_mut("local")
+            .apply("pane", Ok(Some(snapshot("pane", "local reply"))))?;
+        hosts
+            .host_mut("netcup")
+            .apply("pane", Ok(Some(snapshot("pane", "peer reply"))))?;
+        hosts.host_mut("netcup").unavailable("pane");
+        assert_eq!(
+            hosts.host("local").and_then(|cache| cache.get("pane")),
+            Some(&snapshot("pane", "local reply").turns)
+        );
+        assert_eq!(
+            hosts.host("netcup").and_then(|cache| cache.get("pane")),
+            None
+        );
+        Ok(())
     }
 
     #[test]

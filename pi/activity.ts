@@ -143,7 +143,7 @@ export class ActivityPublisher {
     this.client = client;
     this.pane = pane;
     this.evidence = { ...evidence };
-    this.path = `/api/agents/${encodeURIComponent(pane)}/activity`;
+    this.path = `/api/agents/local/${encodeURIComponent(pane)}/activity`;
     this.reducer = new ActivityReducer(idle);
     this.pending = this.reducer.snapshot();
     this.request = { method: "GET", path: this.path };

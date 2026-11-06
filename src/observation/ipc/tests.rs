@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn foreign_agent_cannot_satisfy_local_detail_or_activity_selection() {
+    let mut publication = super::super::Published {
+        version: VERSION,
+        epoch: "serve".into(),
+        revision: 1,
+        published_ms: 1,
+        local_revision: 1,
+        sources: super::super::Sources::default(),
+        local: super::super::Domains::new(),
+        views: super::super::Domains::from([(
+            "portal".into(),
+            serde_json::json!({"data":{"agents":[
+                {"host":"netcup","pane":"w1:p1","state":"working"}
+            ]}}),
+        )]),
+        gaps: vec![],
+    };
+    assert!(selected_agent(&publication, "w1:p1").unwrap().is_none());
+    publication.views.get_mut("portal").unwrap()["data"]["agents"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"host":"local","pane":"w1:p1","state":"idle"}));
+    let agent = selected_agent(&publication, "w1:p1").unwrap().unwrap();
+    assert_eq!(agent.host, "local");
+    assert_eq!(agent.state, "idle");
+}
+
+/// A state path too long for a socket address (any macOS `$TMPDIR` test directory) with
+/// no state directory reads as "not running", like a missing socket on a short path.
+#[test]
+fn a_long_missing_state_directory_reads_as_not_running() {
+    let state = std::env::temp_dir()
+        .join("x".repeat(120))
+        .join(crate::ledger::new_id());
+    let error = Client::at(&state).current().unwrap_err().to_string();
+    assert!(error.contains("dogsled serve is not running"), "{error}");
+}
+
+#[test]
 fn publication_shutdown_unlocks_even_with_an_inherited_descriptor() {
     let state = std::env::temp_dir().join(crate::ledger::new_id());
     let publisher = super::super::Publisher::new().unwrap();

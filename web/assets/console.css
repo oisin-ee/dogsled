@@ -933,7 +933,68 @@ textarea {
   font-weight: 600;
 }
 .console-provider .console-shell .new-lead-repo {
-  width: min(320px, 50%);
+  position: relative;
+  width: min(360px, 55%);
+  min-width: 0;
+}
+.console-provider .console-shell .repo-search {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
+  color: var(--console-text);
+  font: inherit;
+  caret-color: var(--console-accent);
+}
+.console-provider .console-shell .repo-search:focus-visible {
+  outline: 2px solid var(--console-accent);
+  outline-offset: -1px;
+}
+.console-provider .console-shell .repo-search:disabled {
+  color: var(--console-dim);
+  cursor: not-allowed;
+}
+.console-provider .console-shell .repo-options[role="listbox"] {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 4px);
+  right: 0;
+  width: min(440px, 100vw - 32px);
+  max-height: min(400px, 60dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
+}
+.console-provider .console-shell .repo-options [role="option"] {
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.console-provider .console-shell .repo-options [data-highlighted="true"],
+.console-provider .console-shell .repo-options [role="option"]:hover {
+  background: var(--console-raised);
+}
+.console-provider .console-shell .repo-options [data-selected="true"] .repo-slug {
+  color: var(--console-accent);
+}
+.console-provider .console-shell .repo-slug {
+  color: var(--console-text);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .repo-description,
+.console-provider .console-shell .repo-empty {
+  color: var(--console-muted);
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .repo-empty {
+  padding: 8px 10px;
 }
 @media (max-width: 600px) {
   .console-provider .console-shell .new-lead {

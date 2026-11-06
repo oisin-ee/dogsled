@@ -359,6 +359,36 @@ fn all_views_share_one_capture_and_published_revision() {
 }
 
 #[test]
+fn fleet_agent_projection_keeps_same_pane_on_distinct_hosts() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input();
+    let mut projector = project::Projector::default();
+    let local = projector.inputs(&fixture.fleet(), &input);
+    let mut peer = host("peer", "working");
+    peer.host.label = "netcup".into();
+    peer.probe.as_mut().unwrap().agent_panes[0].pane = "local-worker".into();
+    let reports = vec![fixture.local.clone(), peer];
+    project::derive(
+        &local,
+        reports.clone(),
+        &(&fixture.policy).into(),
+        &mut input,
+    )
+    .unwrap();
+    let agents = &input.views["portal"]["data"]["agents"];
+    assert_eq!(agents.as_array().unwrap().len(), 2);
+    assert_eq!(agents[0]["host"], "local");
+    assert_eq!(agents[1]["host"], "netcup");
+    assert_eq!(agents[0]["pane"], agents[1]["pane"]);
+    assert_eq!(*agents, input.views["agents"]["data"]);
+    assert_eq!(agents[1]["repository"], "github.com/owner/repository");
+    // A peer-only composition must use the current time, not the last local capture time.
+    input.published_ms += crate::node::STALE_MS + 1;
+    project::derive(&local, reports, &(&fixture.policy).into(), &mut input).unwrap();
+    assert_eq!(input.views["agents"]["data"][1]["state"], "unknown");
+}
+
+#[test]
 fn published_owner_board_preserves_captured_enrichment() {
     let mut fixture = Fixture::new();
     let agent = &mut fixture.local.probe.as_mut().unwrap().agent_panes[0];
@@ -512,14 +542,13 @@ fn peer_only_compose_reuses_local_inputs_without_ledger_or_shell_reads() {
             serde_json::to_vec(&local_rows(b)).unwrap()
         );
     }
-    for key in [
-        "todos",
-        "agents",
-        "jobs",
-        "findings",
-        "job_history",
-        "inbox",
-    ] {
+    assert_eq!(
+        local_parts(&before.views["agents"]),
+        local_parts(&after.views["agents"])
+    );
+    assert_eq!(before.views["agents"]["data"][1]["state"], "working");
+    assert_eq!(after.views["agents"]["data"][1]["state"], "idle");
+    for key in ["todos", "jobs", "findings", "job_history", "inbox"] {
         assert_eq!(
             serde_json::to_vec(&before.views[key]).unwrap(),
             serde_json::to_vec(&after.views[key]).unwrap(),
@@ -566,7 +595,9 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
     )
     .unwrap();
     for (key, view) in &input.views {
-        if key == "agents" {
+        // The agent list and the GitHub catalogue do not derive from the failed capture;
+        // the catalogue reports its own read failure in `data.error`.
+        if key == "agents" || key == "repos" {
             assert_eq!(view["gaps"], json!([]));
             continue;
         }

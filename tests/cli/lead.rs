@@ -1,4 +1,4 @@
-//! `dogsled lead` and the MCP `lead` tool: one ownerless Pi lead, prompted once.
+//! Slug-based lead creation uses one published host choice and one native start.
 
 use super::close::git;
 use super::*;
@@ -6,36 +6,25 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 
-const ORIGIN: &str = "https://example.org/repo.git";
+const SLUG: &str = "owner/repo";
+const ORIGIN: &str = "git@github.com:owner/repo.git";
 
-/// A repository checkout registered in the rig's config, shown by no Herdr workspace.
-fn registered(rig: &Rig) -> PathBuf {
-    let repo = rig.dir.join("home/repo");
+fn checkout(rig: &Rig, name: &str, origin: &str) -> PathBuf {
+    let repo = rig.dir.join("home/dev").join(name);
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
-    git(&repo, &["remote", "add", "origin", ORIGIN]);
+    git(&repo, &["remote", "add", "origin", origin]);
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
-    configure(rig, &[("~/repo", ORIGIN)]);
     rig.put("herdr-worktrees", &json!({"result":{"worktrees":[]}}));
     repo.canonicalize().unwrap()
 }
 
-fn configure(rig: &Rig, repos: &[(&str, &str)]) {
-    let text = repos
-        .iter()
-        .fold(String::new(), |mut text, (path, origin)| {
-            use std::fmt::Write as _;
-            let _ = write!(
-                text,
-                "[[repos]]\npath = \"{path}\"\norigin = \"{origin}\"\n"
-            );
-            text
-        });
-    fs::write(rig.dir.join("config.toml"), text).unwrap();
+fn observer(rig: &Rig) -> super::observation::Supplied {
+    rig.snapshot("state", now(), 0.0, 8);
+    super::observation::seeded(rig)
 }
 
-/// A Herdr API socket that records every request. `agent.prompt` fails while
-/// `$RIG/prompt-error` exists.
+/// Records Herdr socket requests, and refuses prompts while prompt-error exists.
 struct Socket {
     path: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -76,7 +65,7 @@ impl Socket {
             .lock()
             .unwrap()
             .iter()
-            .map(|request| request["method"].as_str().unwrap().to_owned())
+            .map(|r| r["method"].as_str().unwrap().to_owned())
             .collect()
     }
 
@@ -85,47 +74,47 @@ impl Socket {
             .lock()
             .unwrap()
             .iter()
-            .filter(|request| request["method"] == "agent.prompt")
-            .map(|request| request["params"].clone())
+            .filter(|r| r["method"] == "agent.prompt")
+            .map(|r| r["params"].clone())
             .collect()
     }
 }
 
-/// `dogsled lead` with no caller pane or workspace, against the socket.
 fn lead(rig: &Rig, socket: &Socket, repo: &str, message: &str) -> (i32, Value) {
-    let mut command = rig.cmd(&["--json", "lead", "--repo", repo, "--message", message]);
+    let mut command = rig.cmd(&["--json", "lead", repo, message]);
     command
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_WORKSPACE_ID")
         .env("HERDR_SOCKET_PATH", &socket.path);
     let output = command.output().unwrap();
-    // `--json` reports a failure as `{"error": ...}` on stdout.
     let text = String::from_utf8_lossy(&output.stdout);
     let value = serde_json::from_str(text.trim()).unwrap_or_else(|_| json!(text.trim()));
     (output.status.code().unwrap_or(-1), value)
 }
 
-fn leads(rig: &Rig) -> Vec<Value> {
-    let database = rig.database();
-    let mut statement = database
-        .prepare("SELECT id, name, phase, pane, terminal, workspace, error, closed_ms FROM leads")
-        .unwrap();
-    statement
-        .query_map([], |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "phase": row.get::<_, String>(2)?,
-                "pane": row.get::<_, Option<String>>(3)?,
-                "terminal": row.get::<_, Option<String>>(4)?,
-                "workspace": row.get::<_, Option<String>>(5)?,
-                "error": row.get::<_, Option<String>>(6)?,
-                "closed_ms": row.get::<_, Option<i64>>(7)?,
-            }))
-        })
+fn records(rig: &Rig, state: &str) -> Vec<Value> {
+    let database = if state == "state" {
+        rig.database()
+    } else {
+        rusqlite::Connection::open_with_flags(
+            rig.dir.join(state).join("state.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
         .unwrap()
-        .map(Result::unwrap)
-        .collect()
+    };
+    let mut statement = database
+        .prepare("SELECT id, name, phase, pane, terminal, error, closed_ms FROM leads")
+        .unwrap();
+    statement.query_map([], |row| Ok(json!({
+        "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)?,
+        "phase": row.get::<_, String>(2)?, "pane": row.get::<_, Option<String>>(3)?,
+        "terminal": row.get::<_, Option<String>>(4)?, "error": row.get::<_, Option<String>>(5)?,
+        "closed_ms": row.get::<_, Option<i64>>(6)?,
+    }))).unwrap().map(Result::unwrap).collect()
+}
+
+fn leads(rig: &Rig) -> Vec<Value> {
+    records(rig, "state")
 }
 
 fn starts(rig: &Rig) -> Vec<String> {
@@ -137,17 +126,19 @@ fn starts(rig: &Rig) -> Vec<String> {
 }
 
 #[test]
-fn lead_starts_one_ownerless_pi_prompts_once_and_closes_only_its_pane() {
+fn lead_reuses_matching_main_checkout_preserves_branch_and_prompts_once() {
     let rig = Rig::short("lead-start");
-    let repo = registered(&rig);
+    let repo = checkout(&rig, "custom-name", "https://github.com/owner/repo.git");
+    git(&repo, &["switch", "-q", "-c", "in-progress"]);
+    let _observer = observer(&rig);
     let socket = Socket::start(&rig);
     let prompt = "  Plan the release.\nKeep notes.\n";
-    let (code, started) = lead(&rig, &socket, "https://example.org/repo", prompt);
+    let (code, started) = lead(&rig, &socket, SLUG, prompt);
     assert_eq!(code, 0, "{started}");
     let name = started["name"].as_str().unwrap().to_owned();
     assert!(name.starts_with("lead-r-") && name.len() <= 32, "{name}");
+    assert_eq!(started["host"], "local");
     assert_eq!(started["pane"], "w2:p1");
-    // The repository's own new workspace, never the caller's.
     let log = rig.log("herdr.log");
     assert!(
         log.contains(&format!(
@@ -157,7 +148,6 @@ fn lead_starts_one_ownerless_pi_prompts_once_and_closes_only_its_pane() {
         "{log}"
     );
     assert!(!log.contains("tab create"), "{log}");
-    // The exact native argv: no child contract, seed, or profile after `--`.
     assert_eq!(
         starts(&rig),
         [format!("agent start {name} --kind pi --pane w2:p1")]
@@ -171,10 +161,12 @@ fn lead_starts_one_ownerless_pi_prompts_once_and_closes_only_its_pane() {
     assert_eq!(saved[0]["phase"], "ready");
     assert_eq!(saved[0]["terminal"], "term_child");
     assert_eq!(saved[0]["error"], Value::Null);
-    // No child work, queue entry, or reservation.
     assert_eq!(rig.items(), json!([]));
     assert_eq!(rig.tickets(), json!([]));
-    // Closing by name ends only the pane: the repository and its workspace stay.
+    assert_eq!(
+        git(&repo, &["branch", "--show-current"]).trim(),
+        "in-progress"
+    );
     let (code, closed) = rig.json(&["close", &name]);
     assert_eq!(code, 0, "{closed}");
     assert_eq!(closed["pane"], "w2:p1");
@@ -188,65 +180,53 @@ fn lead_starts_one_ownerless_pi_prompts_once_and_closes_only_its_pane() {
 }
 
 #[test]
-fn invalid_selectors_and_prompts_record_and_start_nothing() {
+fn invalid_slugs_and_prompts_start_nothing() {
     let rig = Rig::short("lead-invalid");
-    let repo = registered(&rig);
     let socket = Socket::start(&rig);
-    for (config, selector, message, expected) in [
-        (
-            vec![("~/repo", ORIGIN)],
-            "https://example.org/other",
-            "go",
-            "not registered",
-        ),
-        (vec![("~/repo", ORIGIN)], "~/repo", "  \n", "empty"),
-        (
-            vec![("~/repo", ORIGIN), ("~/copy", ORIGIN)],
-            ORIGIN,
-            "go",
-            "ambiguous",
-        ),
-        (
-            vec![("~/../repo", ORIGIN)],
-            ORIGIN,
-            "go",
-            "leaves the home directory",
-        ),
-        (
-            vec![("~/repo", "https://example.org/elsewhere.git")],
-            "~/repo",
-            "go",
-            "not the registered",
-        ),
-        (
-            vec![("~/missing", ORIGIN)],
-            ORIGIN,
-            "go",
-            "not a repository",
-        ),
+    // No observer or local checkout is needed to reject invalid input.
+    for selector in [
+        "",
+        "repo",
+        "/repo",
+        "owner/",
+        "owner/repo/extra",
+        "../repo",
+        "owner/..",
+        "https://github.com/owner/repo",
+        "owner/repo;true",
+        "owner/repo\n",
     ] {
-        configure(&rig, &config);
-        let (code, error) = lead(&rig, &socket, selector, message);
+        let (code, error) = lead(&rig, &socket, selector, "go");
         assert_ne!(code, 0, "{selector}: {error}");
-        assert!(error.to_string().contains(expected), "{expected}: {error}");
+        assert!(error.to_string().contains("owner/name"), "{error}");
     }
-    // No prompt connection: nothing is recorded or allocated either.
-    configure(&rig, &[("~/repo", ORIGIN)]);
+    let (code, error) = lead(&rig, &socket, SLUG, "  \n");
+    assert_ne!(code, 0, "{error}");
+    assert!(error.to_string().contains("empty"), "{error}");
+    assert_eq!(leads(&rig), Vec::<Value>::new());
+    assert!(!rig.dir.join("home/dev").exists());
+    assert_eq!(starts(&rig), Vec::<String>::new());
+    assert_eq!(socket.methods(), Vec::<String>::new());
+    assert_eq!(rig.log("ssh.log"), "");
+}
+
+#[test]
+fn lead_unavailable_socket_does_not_allocate_or_clone() {
+    let rig = Rig::short("lead-no-socket");
+    let _observer = observer(&rig);
     let missing = Socket {
         path: rig.dir.join("absent.sock"),
         requests: Arc::default(),
     };
-    let (code, error) = lead(&rig, &missing, ORIGIN, "go");
+    let (code, error) = lead(&rig, &missing, SLUG, "go");
     assert_ne!(code, 0, "{error}");
     assert_eq!(leads(&rig), Vec::<Value>::new());
     assert!(!rig.log("herdr.log").contains("create"));
-    assert_eq!(starts(&rig), Vec::<String>::new());
-    assert_eq!(socket.prompts(), Vec::<Value>::new());
-    assert!(repo.exists());
+    assert!(!rig.dir.join("home/dev").exists());
 }
 
 #[test]
-fn partial_failures_keep_the_pane_phase_and_cause_without_retrying() {
+fn lead_partial_failures_keep_phase_and_cause_without_retrying() {
     let busy = "  'agent start'*) echo '{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"not an available shell\"}}' >&2; exit 1 ;;";
     let refused = "  'agent start'*) echo '{\"error\":{\"code\":\"agent_start_failed\",\"message\":\"pi exited\"}}' >&2; exit 1 ;;\n  'pane read'*) printf 'pi: missing model\\n' ;;";
     let replaced = "  'agent start'*) sed 's/term_child/term_other/' \"$RIG/panes.json\" > \"$RIG/p\" && mv \"$RIG/p\" \"$RIG/panes.json\"; echo '{\"error\":{\"code\":\"agent_pane_busy\",\"message\":\"not an available shell\"}}' >&2; exit 1 ;;";
@@ -260,19 +240,19 @@ fn partial_failures_keep_the_pane_phase_and_cause_without_retrying() {
         ),
     ] {
         let rig = Rig::short(name);
-        registered(&rig);
+        checkout(&rig, "repo", ORIGIN);
+        let _observer = observer(&rig);
         let socket = Socket::start(&rig);
         rig.script(
             "herdr",
             &HERDR_SCRIPT.replace("case \"$*\" in", &format!("case \"$*\" in\n{script}")),
         );
-        let mut command = rig.cmd(&["--json", "lead", "--repo", ORIGIN, "--message", "go"]);
-        command
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("HERDR_WORKSPACE_ID")
+        let output = rig
+            .cmd(&["--json", "lead", SLUG, "go"])
             .env("HERDR_SOCKET_PATH", &socket.path)
-            .env("DOGSLED_TEST_BUSY_WINDOW_MS", "300");
-        let output = command.output().unwrap();
+            .env("DOGSLED_TEST_BUSY_WINDOW_MS", "300")
+            .output()
+            .unwrap();
         let error = String::from_utf8_lossy(&output.stdout);
         assert!(!output.status.success(), "{name}: {output:?}");
         assert!(error.contains(expected), "{name}: {error}");
@@ -289,48 +269,263 @@ fn partial_failures_keep_the_pane_phase_and_cause_without_retrying() {
             "{saved:?}"
         );
         assert!(error.contains(saved[0]["id"].as_str().unwrap()), "{error}");
-        // The pane stays, and nothing is prompted.
         assert!(!rig.log("herdr.log").contains("close"), "{name}");
         assert_eq!(socket.prompts(), Vec::<Value>::new(), "{name}");
     }
-    // A refused prompt is reported once and never resent.
     let rig = Rig::short("lead-prompt");
-    registered(&rig);
+    checkout(&rig, "repo", ORIGIN);
+    let _observer = observer(&rig);
     let socket = Socket::start(&rig);
     fs::write(rig.dir.join("prompt-error"), "").unwrap();
-    let (code, error) = lead(&rig, &socket, ORIGIN, "go");
+    let (code, error) = lead(&rig, &socket, SLUG, "go");
     assert_ne!(code, 0, "{error}");
     assert!(error.to_string().contains("prompt refused"), "{error}");
     assert!(error.to_string().contains("phase prompting"), "{error}");
     assert_eq!(socket.prompts().len(), 1);
     assert_eq!(starts(&rig).len(), 1);
-    let saved = leads(&rig);
-    assert_eq!(saved[0]["phase"], "prompting");
+    assert_eq!(leads(&rig)[0]["phase"], "prompting");
     assert!(!rig.log("herdr.log").contains("close"));
 }
 
 #[test]
-fn mcp_lead_uses_the_same_creator_without_stdin_prompts() {
+fn mcp_lead_uses_the_same_slug_creator_without_stdin_prompts() {
     let rig = Rig::short("lead-mcp");
-    registered(&rig);
+    checkout(&rig, "repo", ORIGIN);
+    let _observer = observer(&rig);
     let socket = Socket::start(&rig);
     let mut client =
         super::mcp::Client::start_with(&rig, &[("HERDR_SOCKET_PATH", socket.path.as_path())]);
     let (refused, error) = client.call(
         "lead",
-        &json!({"repo":ORIGIN,"message":"go","message_file":"-"}),
+        &json!({"repo":SLUG,"message":"go","message_file":"-"}),
     );
     assert!(error, "{refused}");
     assert_eq!(leads(&rig), Vec::<Value>::new());
-    // A repository registered after the server started is found: the config is reloaded.
-    configure(&rig, &[]);
     let (refused, error) = client.call("lead", &json!({"repo":ORIGIN,"message":"go"}));
     assert!(error, "{refused}");
-    configure(&rig, &[("~/repo", ORIGIN)]);
-    let (started, error) = client.call("lead", &json!({"repo":ORIGIN,"message":"first"}));
+    let (started, error) = client.call("lead", &json!({"repo":SLUG,"message":"first"}));
     assert!(!error, "{started}");
+    assert_eq!(started["host"], "local");
     assert_eq!(started["pane"], "w2:p1");
     assert_eq!(socket.prompts(), [json!({"target":"w2:p1","text":"first"})]);
     assert_eq!(starts(&rig).len(), 1);
     assert_eq!(leads(&rig)[0]["phase"], "ready");
+}
+
+/// An offline source plus a POSIX git fixture exercises the real clone operation without GitHub.
+fn clone_source(rig: &Rig) {
+    let source = checkout(rig, "source", "git@github.com:other/source.git");
+    let real_git = String::from_utf8(
+        isolated("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    rig.script(
+        "git",
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/git.log"
+if test "$1" = clone; then
+    origin=$2
+    destination=$3
+    "{}" clone '{}' "$destination" || exit
+    "{}" -C "$destination" remote set-url origin "$origin"
+else
+    exec "{}" "$@"
+fi
+"#,
+            real_git.trim(),
+            source.display(),
+            real_git.trim(),
+            real_git.trim()
+        ),
+    );
+}
+
+#[test]
+fn lead_clones_missing_checkout_and_uses_owner_prefix_for_a_name_clash() {
+    for clash in [false, true] {
+        let rig = Rig::short("lead-clone");
+        clone_source(&rig);
+        let other = clash.then(|| checkout(&rig, "repo", "git@github.com:other/repo.git"));
+        let _observer = observer(&rig);
+        let socket = Socket::start(&rig);
+        let (code, started) = lead(&rig, &socket, SLUG, "go");
+        assert_eq!(code, 0, "{started}");
+        let destination = rig.dir.join(if clash {
+            "home/dev/owner-repo"
+        } else {
+            "home/dev/repo"
+        });
+        assert!(destination.join(".git").is_dir());
+        let log = rig.log("git.log");
+        assert!(
+            log.contains(&format!("clone {ORIGIN} {}", destination.display())),
+            "{log}"
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("clone "))
+                .count(),
+            1
+        );
+        if let Some(other) = other {
+            assert_eq!(
+                git(&other, &["remote", "get-url", "origin"]).trim(),
+                "git@github.com:other/repo.git"
+            );
+        }
+    }
+}
+
+fn remote_publication(rig: &Rig) -> super::observation::Supplied {
+    let local_observer = observer(rig);
+    let (_, mut frame) = rig.json(&["observation", "current"]);
+    drop(local_observer);
+    let mut local = frame["views"]["hosts"]["data"][0].clone();
+    local["headroom"]["eligible"] = json!(false);
+    local["headroom"]["headroom"] = json!(-8.0);
+    let mut peer = local.clone();
+    peer["id"] = json!("8103");
+    peer["label"] = json!("netcup");
+    peer["target"] = json!("peer-host");
+    peer["headroom"]["host"] = json!("8103");
+    peer["headroom"]["headroom"] = json!(-1.0);
+    let mut unreachable = peer.clone();
+    unreachable["id"] = json!("offline");
+    unreachable["label"] = json!("offline");
+    unreachable["reachable"] = json!(false);
+    unreachable["headroom"]["host"] = json!("offline");
+    unreachable["headroom"]["headroom"] = json!(100.0);
+    frame["views"]["hosts"]["data"] = json!([local, peer, unreachable]);
+    super::observation::Supplied::start(rig, frame)
+}
+
+fn peer_transport(rig: &Rig, lose_reply: bool) {
+    rig.script(
+        "herdr",
+        &HERDR_SCRIPT
+            .replace("w2:p1", "w9:p1")
+            .replace("term_child", "term_peer"),
+    );
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w9:p1","terminal_id":"term_peer"}]}}),
+    );
+    rig.script("ssh", &format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+for remote do :; done
+case "$remote" in
+  *'host lead --input -'*)
+    tee "$RIG/lead-delivery.json" | HOME="$RIG/peer-home" DOGSLED_STATE="$RIG/peer-state" sh -c '"$DOGSLED_BIN" '"$remote" > "$RIG/lead-reply.json"
+    {}
+    cat "$RIG/lead-reply.json" ;;
+  *) exit 97 ;;
+esac
+"#, if lose_reply { "exit 255" } else { ":" }));
+    fs::create_dir_all(rig.dir.join("peer-home")).unwrap();
+    fs::write(rig.dir.join("config.toml"), "remote_command = []\n").unwrap();
+}
+
+#[test]
+fn lead_chooses_roomiest_over_limit_host_and_starts_through_peer_ingress() {
+    let rig = Rig::short("lead-remote");
+    clone_source(&rig);
+    let _observer = remote_publication(&rig);
+    let socket = Socket::start(&rig);
+    peer_transport(&rig, false);
+    let (code, started) = lead(&rig, &socket, SLUG, "  remote\nfirst prompt\n");
+    assert_eq!(code, 0, "{started}");
+    assert_eq!(started["host"], "netcup");
+    assert_eq!(started["pane"], "w9:p1");
+    assert_eq!(leads(&rig), Vec::<Value>::new());
+    assert_eq!(records(&rig, "peer-state")[0]["phase"], "ready");
+    assert!(rig.dir.join("peer-home/dev/repo/.git").is_dir());
+    assert!(!rig.dir.join("home/dev/repo").exists());
+    assert_eq!(
+        socket.prompts(),
+        [json!({"target":"w9:p1","text":"  remote\nfirst prompt\n"})]
+    );
+    let log = rig.log("ssh.log");
+    assert_eq!(log.lines().count(), 1, "{log}");
+    assert!(
+        log.contains("peer-host") && log.contains("host lead --input -"),
+        "{log}"
+    );
+    assert!(!log.contains("first prompt"), "{log}");
+    let mut delivery = rig.read("lead-delivery.json");
+    let selected: String = rig
+        .database()
+        .query_row(
+            "SELECT host FROM placement_attempts WHERE id = ?1",
+            [delivery["id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selected, "netcup");
+    // Completed replay is read-only; a changed host cannot change its saved receipt.
+    let replay = peer_call(&rig, &socket, &delivery);
+    assert_eq!(replay["outcome"], "started");
+    assert_eq!(replay["lead"], started);
+    delivery["host"] = json!("other");
+    assert_eq!(peer_call(&rig, &socket, &delivery)["outcome"], "failed");
+    assert_eq!(starts(&rig).len(), 1);
+    assert_eq!(socket.prompts().len(), 1);
+}
+
+fn peer_call(rig: &Rig, socket: &Socket, delivery: &Value) -> Value {
+    let mut child = rig
+        .cmd(&["--json", "host", "lead", "--input", "-"])
+        .env("HOME", rig.dir.join("peer-home"))
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .env("HERDR_SOCKET_PATH", &socket.path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(), delivery).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn lead_peer_prompt_failure_preserves_phase_and_never_reprompts() {
+    let rig = Rig::short("lead-peer-fail");
+    clone_source(&rig);
+    let _observer = remote_publication(&rig);
+    let socket = Socket::start(&rig);
+    peer_transport(&rig, false);
+    fs::write(rig.dir.join("prompt-error"), "").unwrap();
+    let (code, error) = lead(&rig, &socket, SLUG, "go");
+    assert_ne!(code, 0, "{error}");
+    assert!(error.to_string().contains("phase prompting"), "{error}");
+    assert!(error.to_string().contains("pane w9:p1"), "{error}");
+    let delivery = rig.read("lead-delivery.json");
+    let replay = peer_call(&rig, &socket, &delivery);
+    assert_eq!(replay["outcome"], "failed");
+    assert_eq!(replay["phase"], "prompting");
+    assert_eq!(socket.prompts().len(), 1);
+    assert_eq!(starts(&rig).len(), 1);
+    assert_eq!(leads(&rig), Vec::<Value>::new());
+}
+
+#[test]
+fn lead_lost_peer_reply_does_not_retry_or_fall_back_to_local() {
+    let rig = Rig::short("lead-uncertain");
+    clone_source(&rig);
+    let _observer = remote_publication(&rig);
+    let socket = Socket::start(&rig);
+    peer_transport(&rig, true);
+    let (code, error) = lead(&rig, &socket, SLUG, "go");
+    assert_ne!(code, 0, "{error}");
+    assert!(error.to_string().contains("uncertain"), "{error}");
+    assert_eq!(rig.log("ssh.log").lines().count(), 1);
+    assert_eq!(starts(&rig).len(), 1);
+    assert_eq!(socket.prompts().len(), 1);
+    assert_eq!(leads(&rig), Vec::<Value>::new());
+    assert_eq!(records(&rig, "peer-state")[0]["phase"], "ready");
 }

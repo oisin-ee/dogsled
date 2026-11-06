@@ -237,7 +237,6 @@ fn prunable_worktree_never_inherits_main_dirt_or_removes_leftover_content() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     for scope in [Scope::Prune, Scope::Sweep] {
         let mut plan = survey(&node, scope, 100).unwrap();
@@ -404,7 +403,6 @@ fn held_tracked_deletions_are_lossless_and_cleanup_removes_them_without_force() 
             thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
             home: repo.root.to_str().unwrap(),
             cleanup: &cleanup,
-            repos: &[],
         };
         let mut plan = survey(&node, Scope::Sweep, 100).unwrap();
         plan.entries.retain(|e| {
@@ -639,7 +637,6 @@ fn prune_and_sweep_have_identical_idle_pane_candidates_at_the_fifteen_minute_bou
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: &shell.home,
         cleanup: &cleanup,
-        repos: &[],
     };
     let decisions = |scope| {
         survey(&node, scope, now)
@@ -677,7 +674,6 @@ fn survey_continues_past_missing_repositories_and_scopes_follow_ownership() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     // The survey also finds the repository of the process's working directory. Under
     // `cargo test` that is the developer's own checkout, so every assertion reads only this
@@ -769,7 +765,6 @@ fn dirty_worktree_reports_content_until_pending_preparation_holds_it() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     std::fs::write(repo.tree.join("dirty"), "work").unwrap();
     let plan = survey(&node, Scope::Prune, 100).unwrap();
@@ -844,7 +839,6 @@ fn gone_upstream_with_local_work_stays_but_integrated_branch_is_deleted() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     // Only this fixture's entries: the survey also reads the developer's own checkout, and
     // `apply` below must never act on it.
@@ -900,7 +894,6 @@ impl Landed {
             thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
             home: self.repo.root.to_str().unwrap(),
             cleanup: &self.cleanup,
-            repos: &[],
         }
     }
     /// The sweep survey of a closed child's worktree, reduced to this fixture.
@@ -1284,7 +1277,6 @@ fn worktree_whose_git_file_is_gone_is_held_and_removal_refuses_before_unlocking(
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     let held = |scope| {
         survey(&node, scope, 100)
@@ -1479,7 +1471,6 @@ fn worktree_removed_after_listing_is_reconciled_not_failed() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     for scope in [Scope::Sweep, Scope::Prune] {
         if scope == Scope::Prune {
@@ -1584,7 +1575,6 @@ fn worktree_git_lost_after_listing_with_its_directory_is_still_refused() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     let plan = fixture_plan(&node, Scope::Sweep, &repo);
     assert!(racing.fired.load(std::sync::atomic::Ordering::SeqCst));
@@ -3212,7 +3202,6 @@ fn git_status_error_in_an_existing_listed_worktree_still_fails() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     let plan = fixture_plan(&node, Scope::Sweep, &repo);
     assert!(plan.entries[0].removable, "{:?}", plan.entries);
@@ -3286,7 +3275,6 @@ fn damaged_checkout_does_not_block_healthy_sibling_cleanup() {
             thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
             home: repo.root.to_str().unwrap(),
             cleanup: &cleanup,
-            repos: &[],
         };
         let mut plan = survey(&node, Scope::Prune, 100).unwrap();
         plan.entries.retain(|entry| {
@@ -3338,7 +3326,6 @@ fn disappearance_during_survey_keeps_identity_for_locked_reconciliation() {
         thresholds: crate::config::Thresholds::from(&crate::config::Policy::default()),
         home: repo.root.to_str().unwrap(),
         cleanup: &cleanup,
-        repos: &[],
     };
     let plan = fixture_plan(&node, Scope::Prune, &repo);
     assert!(racing.fired.load(std::sync::atomic::Ordering::SeqCst));
