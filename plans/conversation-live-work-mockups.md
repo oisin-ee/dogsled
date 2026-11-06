@@ -2,7 +2,11 @@
 
 ## Scope and status
 
-Status: three new layout directions for owner review. No production behavior, producer, or data contract changed.
+Status: one chosen direction, revised for owner review. No production behavior, producer, or data contract changed.
+
+On 2026-11-06 the owner reviewed three directions and chose **one stream like Pi**.
+The owner also wanted the focus idea (each working agent showing what it is doing now) in a list, not in a card row across the top.
+The split and focus directions were removed; Git history keeps them (`84e045d`).
 
 On 2026-11-06 the owner chose:
 
@@ -15,7 +19,7 @@ They are superseded and are not a starting point. The new directions are in `.im
 
 ## What the previews show
 
-Every direction plays back the same real Pi turn, from `~/.pi/agent/sessions/--Users-oisin-dev-dogsled--/2026-11-06T11-53-15-658Z_*.jsonl`:
+The conversation plays back a real Pi turn, from `~/.pi/agent/sessions/--Users-oisin-dev-dogsled--/2026-11-06T11-53-15-658Z_*.jsonl`:
 
 - The owner asked "why is this happening?" with a screenshot at 11:53:45. The claude-opus-5-5 lead worked for 2m 31s (6 thinking blocks, 13 tool calls) and replied at 11:56:16.
 - The owner wrote "no, give me proper responses, not some handwavey shit." at 12:26:00.
@@ -27,19 +31,26 @@ Thinking renders italic and muted, as Pi's TUI renders it. The newest paragraph 
 Bash calls render as `$ command` with the last lines of output and an "N earlier lines" fold, as Pi does.
 A finished turn folds its work into one line, `Worked for 2m 31s · 6 thoughts · 13 tool calls`, above the reply. Opening it shows the full recorded work.
 
-## The three directions
+## The chosen direction
 
-| File | Direction | Main trade-off |
-| --- | --- | --- |
-| `one-stream.html` | One stream, like Pi. Messages, thinking, tool calls, and replies in recorded order. Inbox and agents share a 300px left column; todos sit on the right from 1400px. | Long reasoning pushes earlier replies up; the fold line is the way back to them. |
-| `split.html` | Dialogue beside Work. The left pane has only messages and replies. The right pane streams thinking and tool calls, with the current todo in its header. Below 1100px they become two tabs, and the composer stays pinned in both. | Two scroll regions. At narrow widths, the work is one tab away. |
-| `focus.html` | Focus on one agent. Working agents become a card row across the top, each with its newest thought or command. The inbox keeps its own column. The chosen agent's stream fills the width. | With many agents the card row scrolls sideways; the full list is behind "All agents". |
+`one-stream.html`:
 
-All three keep the inbox visible and the composer pinned to the bottom. The agents list shows each agent's live phase and its newest thought or command.
+- **Conversation:** one stream, like Pi. Messages, thinking, tool calls, and replies in recorded order, about 1000px wide at 1600px.
+- **Left column:** the inbox on top (never hidden), then the agent list. Todos sit on the right from 1400px.
+- **Agent list:** two groups, Working and Not working.
+  - A working row shows the title, repository, phase, elapsed time, and model.
+    Below that, it shows the newest thought (italic, two lines) or the running command (`$ …`, monospace, two lines).
+  - The selected row has an indigo edge. Its snippet follows the live stream as the thought types in.
+  - A row that is not working is one line of state, such as `Idle · 12m` or `Waiting on its lead`.
+- **Snippets:** the selected agent's snippet is from the replayed turn.
+  The other two are real recorded gpt-6-astra steps: the headline thought `Opening a new tab`, and the command `ssh -o BatchMode=yes -o ConnectTimeout=10 netcup mise x -- python3 -`.
+  Their titles and timings are illustrative.
+
+The Working and Not working grouping replaces the per-repository grouping in this mockup. The repository moves onto each row. The owner should confirm this.
 
 Captures (each `.png` has a `.png.json` provenance sidecar):
 
-- `<direction>-1600.png`, `<direction>-1280.png`, `<direction>-900.png`: live edge at 1600 × 1000, 1280 × 800, and 900 × 800.
+- `one-stream-1600.png`, `one-stream-1280.png`, `one-stream-900.png`: live edge at 1600 × 1000, 1280 × 800, and 900 × 800.
 - `one-stream-history.png`: the top of the conversation with the earlier turn's work opened.
 
 Review through Impeccable:
@@ -70,6 +81,7 @@ The replayed turn shows both shapes: its first thoughts are headlines (`**Checki
 
 | Display | Source | Current gap |
 | --- | --- | --- |
+| Agent-list snippet | The same live reasoning text, or the running tool call, per agent | Agent rows carry only a phase today |
 | Live reasoning text | Pi `message_update` `thinking_delta` events | Publisher drops `delta`; `LiveState` has no text field and denies unknown fields |
 | Finished thoughts in history | Transcript `thinking` blocks | Transcript reader drops them |
 | Tool call line | Transcript `toolCall` arguments; Pi `tool_execution_start` args | Not read or published |
@@ -84,16 +96,14 @@ The portal is Rust, so it cannot call Pi's TypeScript `renderCall`. It must repr
 ## Method and evidence
 
 - Impeccable context was loaded for `web/src/agent_view.rs`. The previews use the `DESIGN.md` palette, type, radii, and segmented-tab tokens.
-- The generator read the session JSONL and wrote the three HTML files. It is a one-off design script and is not in the repository.
-- The managed browser rendered each direction at 1600 × 1000, 1280 × 800, and 900 × 800. No scroll region, header, or top bar had horizontal overflow at any size.
-- The Impeccable detector found:
-  - `overused-font` (Inter) on all three. Inter is the `DESIGN.md` font.
-  - `flat-type-hierarchy` on `one-stream.html` and a `cramped-padding` note on the split tabs. These match the portal's 13–14px Operate scale and the `segmented-tabs` token (2px padding).
-  - It found no other issues.
+- The generator read the session JSONL and wrote the HTML. It is a one-off design script and is not in the repository.
+- The managed browser rendered `one-stream.html` at 1600 × 1000, 1280 × 800, and 900 × 800. No scroll region, header, top bar, or agent row had horizontal overflow at any size.
+- In playback, the selected row's snippet advanced with the typed thought.
+- The Impeccable detector found `overused-font` (Inter, the `DESIGN.md` font) and `flat-type-hierarchy` (the portal's 13–14px Operate scale). It found no other issues.
 
 ## Before implementation
 
-1. The owner picks a direction, or rejects all three with a reason.
-2. Update the editable Squig layout (`plans/chat-conversation.squig.json`) to the chosen direction.
+1. The owner approves the revised direction and the Working / Not working grouping.
+2. Update the editable Squig layout (`plans/chat-conversation.squig.json`) to it.
 3. Define the protocol change: reasoning and tool-argument fields, bounds, and history reads.
 4. Build with the existing Dioxus components; these HTML files are design artifacts only.
