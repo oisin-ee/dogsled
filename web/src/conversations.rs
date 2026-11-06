@@ -138,10 +138,10 @@ impl PaneConversations {
     }
 }
 
-/// Refresh only the transcript. Metadata and terminal reads have separate lifetimes.
+/// Read only when a conversation event triggers it. Keep session and request fencing.
 pub fn use_conversation(
     address: portal_types::agents::AgentAddress,
-    refresh: Signal<u64>,
+    trigger: Signal<u64>,
     mut session: Signal<Option<DetailSession>>,
 ) -> Resource<Result<(), String>> {
     let mut conversations = use_context::<Signal<Conversations>>();
@@ -154,13 +154,16 @@ pub fn use_conversation(
         cache.access(pane);
     });
     use_resource(move || {
-        let _ = refresh();
+        let requested = trigger() != 0;
         let address = address.clone();
         let generation = conversations
             .write()
             .host_mut(&address.host)
             .begin_request(&address.pane);
         async move {
+            if !requested {
+                return Ok(());
+            }
             let result = crate::api::fetch_conversation(&address).await;
             let accepted = conversations
                 .write()
