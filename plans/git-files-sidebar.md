@@ -1,6 +1,6 @@
 # Portal Git files sidebar
 
-Status: mockups ready for review. No production implementation is authorized.
+Status: the owner selected B, **By Stage**, on 2026-11-06. Production implementation is not yet authorized.
 
 ## Scope
 
@@ -34,7 +34,10 @@ The screenshots come from this HTML, not image generation.
 | B: By stage | Explicit Staged, Unstaged, Untracked, and Conflicts groups | A file with both staged and unstaged changes appears twice |
 | C: By folder | Shared path prefixes appear once | Folder headings take more room for small changes |
 
-A is the recommendation, not an approved selection.
+B, **By Stage**, is the selected design. It replaces the earlier recommendation for A.
+Conflicts appear first when present, followed by Staged, Unstaged, and Untracked. Empty groups stay hidden.
+Each group shows its own count. The Files tab counts unique paths, including files that appear in both stage groups.
+The comparison artifacts retain all three alternatives. The desktop and compact screenshots show the earlier A preview, not the selected design.
 The dot in options A and C makes an unchanged status field visible. It is a display convention, not raw Git output.
 The Files count is the number of unique paths. Option B has seven paths across eight rows in the default example.
 Renames show the previous path below the current path.
@@ -84,6 +87,6 @@ pnpm --dir /Users/oisin/dev/squig squig serve /Users/oisin/dev/dogsled/plans/git
 The companion prints a new local editor link. Its token is not stored in this plan.
 The companion used during review stops after the saved artifacts are verified.
 
-## Next decision
+## Next step
 
-Choose A, B, or C, or request a revision. Mockup approval does not authorize production implementation.
+Prepare the implementation plan for the selected By Stage layout. Design approval does not authorize production implementation.
