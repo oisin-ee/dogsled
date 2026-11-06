@@ -621,10 +621,15 @@ fn validate_publication(body: &PublishActivity) -> std::result::Result<(), Activ
         use portal_types::agents::LivePhase;
         let mut ids = std::collections::BTreeSet::new();
         if state.active_tools.len() > 64
+            || state
+                .reasoning
+                .as_ref()
+                .is_some_and(|text| text.len() > 16 * 1024)
             || ((state.phase == LivePhase::ToolRunning) == state.active_tools.is_empty())
             || state.active_tools.iter().any(|tool| {
                 !bounded(&tool.call_id, 256)
                     || !bounded(&tool.name, 128)
+                    || tool.call.as_ref().is_some_and(|call| call.len() > 512)
                     || !ids.insert(&tool.call_id)
                     || tool
                         .parent_call_id

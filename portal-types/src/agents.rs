@@ -68,6 +68,7 @@ pub struct AgentList {
 pub enum Role {
     User,
     Assistant,
+    Thinking,
     Context,
     Tool,
 }
@@ -125,10 +126,17 @@ pub struct ToolSummary {
     pub name: Option<String>,
     /// Completed means a result was recorded, not that its payload claims success.
     pub status: ToolStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
+    /// The bounded tail of the recorded result, up to 20 lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_lines: Option<u32>,
 }
 
-/// One chronological record: message text, attributed context, or a tool summary.
-/// Tool records have empty text; arguments, output, and reasoning are never included.
+/// One chronological record: message text, thinking, attributed context, or tool detail.
+/// Tool records have empty text; their bounded call and result are in `tool`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
     pub id: String,
@@ -242,13 +250,15 @@ pub enum DetailSession {
     Unavailable,
 }
 
-/// One executing tool. No arguments, output, or reasoning cross this boundary.
+/// One executing tool with a bounded display line derived from its arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActiveTool {
     pub call_id: String,
     pub name: String,
     pub parent_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +276,9 @@ pub enum LivePhase {
 pub struct LiveState {
     pub phase: LivePhase,
     pub active_tools: Vec<ActiveTool>,
+    /// Bounded thinking text from the in-flight assistant message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

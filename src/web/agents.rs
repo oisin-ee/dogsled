@@ -1560,7 +1560,7 @@ mod tests {
         assert_eq!(turns[2]["role"], "tool");
         assert_eq!(
             turns[2]["tool"],
-            json!({"call_id":"read-id","name":"read","status":"error"})
+            json!({"call_id":"read-id","name":"read","status":"error","call":"read {\"secret\":\"not public\"}","output":"private output","output_lines":1})
         );
         assert_eq!(turns[2]["text"], "");
         assert_eq!(turns[3]["role"], "context");
@@ -1572,9 +1572,8 @@ mod tests {
         assert_eq!(turns[3]["timestamp"], json!({"ms":12,"meaning":"created"}));
         assert_eq!(payload["truncated"], false);
         assert_ne!(payload["session"].as_str().expect("session key"), "");
-        let wire = payload.to_string();
-        assert!(!wire.contains("not public"));
-        assert!(!wire.contains("private output"));
+        assert_eq!(turns[2]["tool"]["call"], "read {\"secret\":\"not public\"}");
+        assert_eq!(turns[2]["tool"]["output"], "private output");
     }
 
     #[tokio::test]

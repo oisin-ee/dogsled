@@ -289,6 +289,7 @@ mod tests {
                 received_at_ms: 100,
                 valid_for_ms: 500,
                 state: LiveState {
+                    reasoning: None,
                     phase: LivePhase::Thinking,
                     active_tools: vec![],
                 },
@@ -360,6 +361,7 @@ mod tests {
         let mut invalid = view();
         if let ActivityDetail::Available { state, .. } = &mut invalid.detail {
             state.active_tools.push(ActiveTool {
+                call: None,
                 call_id: "call".into(),
                 name: "read".into(),
                 parent_call_id: None,

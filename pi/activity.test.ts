@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   ActivityPublisher,
   ActivityReducer,
+  callLine,
   registerActivity,
   type ActiveTool,
   type ActivityEvent,
@@ -17,11 +20,36 @@ const tool = (id: string, parent: string | null = null): ActiveTool => ({
 });
 const phase = (payload: Payload): string =>
   payload.kind === "snapshot" ? payload.state.phase : payload.kind;
-const block = (index: number, phase: "thinking" | "responding", ended = false): ActivityEvent => ({
+const block = (index: number, phase: "thinking" | "responding", ended = false): Extract<ActivityEvent, { type: "block" }> => ({
   type: "block",
   index,
   phase,
   ended,
+});
+
+test("call lines match the shared transcript and live cases", () => {
+  const cases: { name: string; arguments: unknown; line: string }[] = JSON.parse(
+    readFileSync(join(import.meta.dirname, "../tests/fixtures/call-lines.json"), "utf8"),
+  );
+  for (const entry of cases) assert.equal(callLine(entry.name, entry.arguments), entry.line);
+});
+
+const reasoning = (payload: Payload): string | undefined =>
+  payload.kind === "snapshot" ? payload.state.reasoning : undefined;
+
+test("thinking deltas accumulate per index, keep a UTF-8 tail, and clear at message end or settlement", () => {
+  const r = new ActivityReducer(true);
+  r.reduce({ ...block(1, "thinking"), delta: "second" });
+  r.reduce({ ...block(0, "thinking"), delta: "first" });
+  assert.equal(reasoning(r.reduce({ ...block(0, "thinking"), delta: " thought" })), "first thought\n\nsecond");
+  assert.equal(reasoning(r.reduce(block(0, "thinking", true))), "first thought\n\nsecond");
+  assert.equal(reasoning(r.reduce({ type: "message_end" })), undefined);
+  const thought = "界".repeat(6000) + "!";
+  const current = reasoning(r.reduce({ ...block(0, "thinking"), delta: thought }));
+  assert.equal(current, "界".repeat(5461) + "!");
+  assert.ok(Buffer.byteLength(current!) <= 16 * 1024);
+  assert.equal(reasoning(r.reduce({ type: "settled" })), undefined);
+  assert.equal(reasoning(r.reduce(block(0, "thinking"))), undefined);
 });
 
 test("agent start is working; active blocks use observation order, not content index", () => {

@@ -174,6 +174,7 @@ fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_fr
                 received_at_ms: 1000,
                 valid_for_ms: 10_000,
                 state: LiveState {
+                    reasoning: None,
                     phase: LivePhase::Thinking,
                     active_tools: vec![],
                 },

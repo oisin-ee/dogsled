@@ -323,6 +323,7 @@ mod tests {
             sequence: 1,
             payload: ProducerPayload::Snapshot {
                 state: LiveState {
+                    reasoning: None,
                     phase: LivePhase::Thinking,
                     active_tools: vec![],
                 },
