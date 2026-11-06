@@ -157,6 +157,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn prompt_without_reply_deserializes() -> Result<(), serde_json::Error> {
+        let body: PromptBody = serde_json::from_value(json!({"text":"go on"}))?;
+        assert_eq!(body.text, "go on");
+        assert!(!body.reply);
+        Ok(())
+    }
+
+    #[test]
     fn agent_event_without_revisions_deserializes() -> Result<(), serde_json::Error> {
         let wire = json!({
             "session":{"availability":"unavailable"},
@@ -207,6 +215,9 @@ pub struct Screen {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptBody {
     pub text: String,
+    /// the text answers the agent's blocked prompt
+    #[serde(default)]
+    pub reply: bool,
 }
 
 /// Body of the lead creation request: a registered repository and the first prompt.
