@@ -351,7 +351,7 @@ fn AgentSession(
                     if parts.screen {
                         screen_trigger += 1;
                     }
-                    if parts.files || session_changed {
+                    if parts.files {
                         files_trigger += 1;
                     }
                     if !was_blocked {
@@ -775,20 +775,27 @@ fn changed_parts(
     event: &wire::AgentEvent,
     was_blocked: bool,
 ) -> ChangedParts {
-    let Some(revisions) = &event.revisions else {
-        return ChangedParts {
+    let mut parts = if let Some(revisions) = &event.revisions {
+        let blocked = event_is_blocked(event, was_blocked);
+        ChangedParts {
+            conversation: held.is_none_or(|held| held.conversation != revisions.conversation),
+            files: held.is_none_or(|held| held.files != revisions.files),
+            screen: blocked
+                && (held.is_none_or(|held| held.screen != revisions.screen) || !was_blocked),
+        }
+    } else {
+        ChangedParts {
             conversation: true,
             screen: true,
             files: true,
-        };
+        }
     };
-    let blocked = event_is_blocked(event, was_blocked);
-    ChangedParts {
-        conversation: held.is_none_or(|held| held.conversation != revisions.conversation),
-        files: held.is_none_or(|held| held.files != revisions.files),
-        screen: blocked
-            && (held.is_none_or(|held| held.screen != revisions.screen) || !was_blocked),
+    if let Some(pending) = &event.pending {
+        parts.conversation &= !pending.conversation;
+        parts.screen &= !pending.screen;
+        parts.files &= !pending.files;
     }
+    parts
 }
 
 fn agent_inbox_ids(
@@ -1815,6 +1822,7 @@ mod tests {
 
     fn event(conversation: u64, screen: u64, state: &str) -> wire::AgentEvent {
         wire::AgentEvent {
+            pending: None,
             revisions: Some(wire::DetailRevisions {
                 conversation,
                 screen,
@@ -1845,6 +1853,90 @@ mod tests {
         assert_eq!(
             changed_parts(None, &event(4, 8, "blocked"), true),
             parts(true, true, true)
+        );
+    }
+
+    #[test]
+    fn pending_parts_are_read_once_as_each_becomes_available() {
+        let mut event = event(4, 8, "blocked");
+        event.pending = Some(wire::PendingParts {
+            conversation: true,
+            screen: true,
+            files: true,
+        });
+        assert_eq!(
+            changed_parts(None, &event, false),
+            parts(false, false, false)
+        );
+        let held = event.revisions.clone();
+        if let Some(pending) = event.pending.as_mut() {
+            pending.conversation = false;
+        }
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.conversation += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(true, false, false)
+        );
+        let held = event.revisions.clone();
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, false, false)
+        );
+        if let Some(pending) = event.pending.as_mut() {
+            pending.files = false;
+        }
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.files += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, false, true)
+        );
+        let held = event.revisions.clone();
+        if let Some(pending) = event.pending.as_mut() {
+            pending.screen = false;
+        }
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.screen += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, true, false)
+        );
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, true),
+            parts(false, false, false)
+        );
+    }
+
+    #[test]
+    fn pending_screen_is_not_read_when_becoming_blocked() {
+        let mut event = event(4, 8, "blocked");
+        event.pending = Some(wire::PendingParts {
+            conversation: false,
+            screen: true,
+            files: false,
+        });
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, false),
+            parts(false, false, false)
+        );
+    }
+
+    #[test]
+    fn pending_parts_are_skipped_even_without_part_revisions() {
+        let mut event = event(4, 8, "blocked");
+        event.revisions = None;
+        event.pending = Some(wire::PendingParts {
+            conversation: true,
+            screen: true,
+            files: true,
+        });
+        assert_eq!(
+            changed_parts(None, &event, true),
+            parts(false, false, false)
         );
     }
 

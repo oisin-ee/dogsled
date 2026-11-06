@@ -984,6 +984,14 @@ fn agent_event(publication: &DetailFrame, pane: &str) -> crate::error::Result<St
     let agent = publication.agent.as_ref();
     Ok(serde_json::to_string(&AgentEvent {
         revisions: publication.parts.clone(),
+        pending: Some(portal_types::agents::PendingParts {
+            conversation: matches!(publication.detail.conversation, Content::Pending),
+            screen: matches!(publication.detail.screen, Content::Pending),
+            files: matches!(
+                publication.detail.files,
+                portal_types::files::FilesState::Pending
+            ),
+        }),
         kind: "pane.agent_status_changed".into(),
         pane: pane.into(),
         state: Some(agent.map_or_else(
@@ -2474,6 +2482,62 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert!(server.methods().contains(&"agent.focus".to_owned()));
+    }
+
+    #[test]
+    fn agent_event_serializes_pending_parts_from_detail() {
+        use crate::observation::details::Session;
+        use portal_types::files::FilesState;
+
+        let mut publication = DetailFrame {
+            version: 1,
+            epoch: "serve".into(),
+            revision: 1,
+            found: true,
+            parts: Some(portal_types::agents::DetailRevisions {
+                conversation: 1,
+                screen: 1,
+                files: 1,
+            }),
+            agent: None,
+            detail: Detail {
+                session: Some(Session {
+                    terminal: Some("terminal".into()),
+                    session: "native".into(),
+                    harness: Some("pi".into()),
+                    transcript: None,
+                }),
+                state: "blocked".into(),
+                conversation: Content::Pending,
+                screen: Content::Pending,
+                files: FilesState::Pending,
+            },
+        };
+        for (conversation, screen, files) in [
+            (true, true, true),
+            (false, true, true),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            if !conversation {
+                publication.detail.conversation = Content::Failed("read failed".into());
+            }
+            if !screen {
+                publication.detail.screen = Content::Unavailable("unsupported".into());
+            }
+            if !files {
+                publication.detail.files = FilesState::NotRepository;
+            }
+            let wire: Value =
+                serde_json::from_str(&agent_event(&publication, "pane").unwrap()).unwrap();
+            assert_eq!(
+                wire["pending"],
+                json!({
+                    "conversation": conversation, "screen": screen, "files": files
+                })
+            );
+            assert_eq!(wire["session"]["availability"], "available");
+        }
     }
 
     #[tokio::test]

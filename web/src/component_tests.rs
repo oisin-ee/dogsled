@@ -5,6 +5,58 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+type SessionHandle =
+    std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::agents::DetailSession>>>>>;
+
+fn session_notification_root(
+    props: (SessionHandle, std::rc::Rc<std::cell::Cell<usize>>),
+) -> Element {
+    let session = use_signal(|| None::<portal_types::agents::DetailSession>);
+    props.0.set(Some(session));
+    props.1.set(props.1.get() + 1);
+    rsx! { "{session():?}" }
+}
+
+#[test]
+fn unchanged_conversation_keys_do_not_notify_session_subscribers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let handle = SessionHandle::default();
+    let renders = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut dom =
+        VirtualDom::new_with_props(session_notification_root, (handle.clone(), renders.clone()));
+    dom.rebuild_in_place();
+    let session = handle.get().ok_or("Missing session signal")?;
+    dom.in_runtime(|| crate::conversations::accept_session(session, "native".into()));
+    dom.render_immediate_to_vec();
+    let first = renders.get();
+    assert!(first > 1, "first accepted key must notify subscribers");
+    dom.in_runtime(|| crate::conversations::accept_session(session, "native".into()));
+    dom.render_immediate_to_vec();
+    assert_eq!(renders.get(), first, "unchanged key notified subscribers");
+    dom.in_runtime(|| crate::conversations::accept_session(session, "replacement".into()));
+    dom.render_immediate_to_vec();
+    assert!(renders.get() > first, "a new key must notify subscribers");
+    Ok(())
+}
+
+fn unknown_session_activity_root() -> Element {
+    let session = use_signal(|| None::<portal_types::agents::DetailSession>);
+    let live = crate::activity::use_live_activity(
+        portal_types::agents::AgentAddress::local("pane"),
+        session,
+    );
+    rsx! { "{live():?}" }
+}
+
+#[test]
+fn activity_without_a_known_session_stays_pending_without_browser_requests() {
+    // Poll the real hook on the native test target: browser network calls would panic.
+    let mut dom = VirtualDom::new(unknown_session_activity_root);
+    dom.rebuild_in_place();
+    dom.render_immediate_to_vec();
+    assert_eq!(dioxus_ssr::render(&dom), "Pending");
+}
+
 fn files_root(state: Option<portal_types::files::FilesState>) -> Element {
     rsx! { crate::files::Files { state } }
 }
