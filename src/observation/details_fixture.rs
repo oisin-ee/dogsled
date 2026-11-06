@@ -213,6 +213,7 @@ impl Drop for Repository {
 pub(crate) struct GitShell {
     holds: Mutex<std::collections::VecDeque<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     pub fail: AtomicBool,
+    pub too_many: AtomicBool,
 }
 
 impl GitShell {
@@ -248,6 +249,12 @@ impl crate::shell::Shell for GitShell {
         timeout: Duration,
         limit: usize,
     ) -> crate::error::Result<crate::shell::BytesOutput> {
+        if self.too_many.load(Ordering::Acquire) {
+            return Err(crate::error::Error::OutputLimit {
+                operation: "Git fixture".into(),
+                limit,
+            });
+        }
         if self.fail.load(Ordering::Acquire) {
             return Err(crate::error::Error::Invalid("fixture Git failure".into()));
         }
