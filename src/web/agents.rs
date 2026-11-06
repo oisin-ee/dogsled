@@ -704,14 +704,11 @@ async fn events(
                 sender.send_replace(Some(json!({"error": error}).to_string()));
                 break;
             }
-            let result = agent_event(&connection.publication, &pane)
-                .map(|payload| (payload, connection.publication.revision));
-            match result {
-                Ok((payload, detail)) => {
-                    let signature = (payload.clone(), detail);
-                    if previous.as_ref() != Some(&signature) {
-                        sender.send_replace(Some(payload));
-                        previous = Some(signature);
+            match agent_event(&connection.publication, &pane) {
+                Ok(payload) => {
+                    if previous.as_ref() != Some(&payload) {
+                        sender.send_replace(Some(payload.clone()));
+                        previous = Some(payload);
                     }
                 }
                 Err(error) => {
@@ -739,6 +736,7 @@ async fn events(
 fn agent_event(publication: &DetailFrame, pane: &str) -> crate::error::Result<String> {
     let agent = publication.agent.as_ref();
     Ok(serde_json::to_string(&AgentEvent {
+        revisions: publication.parts.clone(),
         kind: "pane.agent_status_changed".into(),
         pane: pane.into(),
         state: Some(agent.map_or_else(
@@ -1729,6 +1727,78 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert!(server.methods().contains(&"agent.focus".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn agent_events_ignore_portal_revisions_but_publish_screen_changes() {
+        let raw = Arc::new(std::sync::Mutex::new(json!({
+            "pane_id":"w1:p1", "agent":"pi", "name":"worker",
+            "agent_status":"working",
+            "agent_session":{"kind":"path","value":"/work/session.jsonl"}
+        })));
+        let screen = Arc::new(std::sync::Mutex::new(json!({
+            "text":"first screen", "revision":7
+        })));
+        let source = Arc::clone(&raw);
+        let output = Arc::clone(&screen);
+        let server = fake::Server::start(move |method, _| match method {
+            "agent.list" => json!({"result":{"agents":[source.lock().unwrap().clone()]}}),
+            "pane.read" => json!({"result":{"read":output.lock().unwrap().clone()}}),
+            other => panic!("unexpected method {other}"),
+        });
+        let state = with_socket(&server);
+        let fixture =
+            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
+        let _viewer = fixture.client.detail("w1:p1").unwrap();
+        fixture.wait(|frame| frame.views["agent_details"]["data"]["w1:p1"]["screen_revision"] == 7);
+        let response = call(
+            state.clone(),
+            request(Method::GET, "/api/agents/local/w1:p1/events", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first = agent_sse_payload(&first);
+        for name in ["renamed", "renamed again"] {
+            let previous = fixture.client.current().unwrap().revision;
+            raw.lock().unwrap()["name"] = json!(name);
+            fixture.wake();
+            fixture.wait(|frame| frame.revision > previous);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), stream.next())
+                    .await
+                    .is_err(),
+                "unchanged event content must not emit another agent event"
+            );
+        }
+        *screen.lock().unwrap() = json!({"text":"second screen", "revision":8});
+        assert!(fixture.tick("w1:p1"));
+        let second = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = agent_sse_payload(&second);
+        let first = first.revisions.unwrap();
+        let second = second.revisions.unwrap();
+        assert_eq!(second.conversation, first.conversation);
+        assert!(second.screen > first.screen);
+        state.stop.cancel();
+    }
+
+    fn agent_sse_payload(bytes: &[u8]) -> AgentEvent {
+        let frame = std::str::from_utf8(bytes).unwrap();
+        assert!(frame.contains("event: agent"), "the event name: {frame}");
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        serde_json::from_str(data).unwrap()
     }
 
     #[tokio::test]
