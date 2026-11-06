@@ -15,6 +15,29 @@ fn render_files(state: Option<portal_types::files::FilesState>) -> String {
     dioxus_ssr::render(&dom)
 }
 
+fn assert_accordion_has_no_inline_width(html: &str) {
+    let root = html
+        .split('<')
+        .find(|tag| tag.starts_with("div ") && tag.contains("class=\"dx-accordion-"))
+        .and_then(|tag| tag.split('>').next());
+    assert!(
+        root.is_some_and(|tag| {
+            let style = tag
+                .split("style=\"")
+                .nth(1)
+                .and_then(|value| value.split('"').next());
+            style.is_none_or(|style| {
+                style.split(';').all(|declaration| {
+                    declaration
+                        .split_once(':')
+                        .is_none_or(|(property, _)| property.trim() != "width")
+                })
+            })
+        }),
+        "missing accordion root or unexpected inline width: {html}"
+    );
+}
+
 fn checkout(entries: Vec<portal_types::files::Entry>) -> portal_types::files::Files {
     portal_types::files::Files {
         root: "/repo".into(),
@@ -84,6 +107,7 @@ fn files_order_nonempty_groups_and_count_shared_paths_once() {
     let state = FilesState::Current(checkout(entries));
     assert_eq!(crate::files::path_count(Some(&state)), Some(3));
     let html = render_files(Some(state));
+    assert_accordion_has_no_inline_width(&html);
     let mut previous = 0;
     for heading in [
         "Conflicts · 1",
@@ -739,6 +763,7 @@ fn todos_root() -> Element {
 #[test]
 fn todos_count_all_items_and_hide_empty_sections() {
     let html = dioxus_ssr::render(&VirtualDom::prebuilt(todos_root));
+    assert_accordion_has_no_inline_width(&html);
     assert!(html.contains(">1 of 3</span>"), "{html}");
     assert!(!html.contains("Pending · 0"), "{html}");
     // AccordionContent mounts its body in the browser; SSR covers the section triggers.

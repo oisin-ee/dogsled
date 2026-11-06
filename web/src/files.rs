@@ -69,7 +69,7 @@ pub(crate) fn Files(state: Option<FilesState>) -> Element {
                                         ("Untracked", stages.untracked),
                                     ].into_iter().enumerate() {
                                         if !entries.is_empty() {
-                                            AccordionItem { key: "{title}", class: "files-group", index, default_open: true,
+                                            AccordionItem { key: "{title}", index, default_open: true,
                                                 AccordionTrigger { "{title} · {entries.len()}" }
                                                 AccordionContent {
                                                     ItemGroup {
