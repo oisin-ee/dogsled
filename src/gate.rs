@@ -317,6 +317,7 @@ mod tests {
             host: "local".into(),
             pane: None,
             owner_pane: None,
+            owner_host: None,
             title: None,
             cleanup: None,
             unseen: false,

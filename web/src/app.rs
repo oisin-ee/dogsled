@@ -26,6 +26,10 @@ use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon, P
 
 #[derive(Clone, Copy)]
 pub struct ConsoleWidth(pub Signal<u32>);
+
+/// Last right-column choice, retained while navigating within the portal.
+#[derive(Clone, Copy)]
+pub struct LeadDetail(pub Signal<LeadPanel>);
 use crate::notice::{Alert, Status};
 
 /// The time between two reads of the board and the agents.
@@ -40,6 +44,7 @@ pub enum LeadPanel {
     Agents,
     Chat,
     Todos,
+    Workers,
 }
 
 impl LeadPanel {
@@ -48,6 +53,7 @@ impl LeadPanel {
             Self::Agents => "agents",
             Self::Chat => "chat",
             Self::Todos => "todos",
+            Self::Workers => "workers",
         }
     }
 }
@@ -269,6 +275,7 @@ pub fn App() -> Element {
     let board_error = use_memo(move || publication.read().board_error.clone());
     let stream_paused = use_memo(move || publication.read().paused);
     let mut panel = use_context_provider(|| Signal::new(LeadPanel::Chat));
+    let mut detail = use_context_provider(|| LeadDetail(Signal::new(LeadPanel::Todos))).0;
     let mut width = use_context_provider(|| ConsoleWidth(Signal::new(1440))).0;
     use_effect(move || {
         spawn(async move {
@@ -394,6 +401,23 @@ pub fn App() -> Element {
             .sum::<usize>()
     });
 
+    let lead = groups.as_ref().and_then(|groups| {
+        let address = selected()?;
+        groups
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.rows)
+            .find(|row| {
+                !row.worker
+                    && ((row.host == address.host && row.pane.as_ref() == Some(&address.pane))
+                        || row.workers.iter().any(|worker| {
+                            worker.host == address.host
+                                && worker.pane.as_ref() == Some(&address.pane)
+                        }))
+            })
+            .cloned()
+    });
+
     let navigation = rsx! {
             Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
                 SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" }
@@ -430,7 +454,11 @@ pub fn App() -> Element {
         document::Stylesheet { href: asset!("/assets/review.css") }
         SidebarProvider { class: "console-provider",
         Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
-            on_value_change: move |value: String| panel.set(match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, _ => LeadPanel::Chat }),
+            on_value_change: move |value: String| {
+                let next = match value.as_str() { "agents" => LeadPanel::Agents, "todos" => LeadPanel::Todos, "workers" => LeadPanel::Workers, _ => LeadPanel::Chat };
+                if matches!(next, LeadPanel::Todos | LeadPanel::Workers) { detail.set(next); }
+                panel.set(next);
+            },
             header { class: "console-topbar",
                 a { href: "/", aria_label: "Homepage", "Dogsled" }
                 if stream_paused() { Status { "Live updates paused, retrying" } }
@@ -465,7 +493,7 @@ pub fn App() -> Element {
                         let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());
                         let review = pick(InboxKind::Review);
                         let question = pick(InboxKind::Question);
-                        rsx! { AgentView { key: "{pane.host}:{pane.pane}", host: pane.host, pane: pane.pane, review, question, agent_count } }
+                        rsx! { AgentView { key: "{pane.host}:{pane.pane}", host: pane.host, pane: pane.pane, review, question, agent_count, lead: lead.clone(), inbox: items.clone() } }
                     }
                     None if composing() => rsx! { NewLead {} },
                     None => rsx! { div { class: "empty-lead",

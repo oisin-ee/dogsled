@@ -28,7 +28,7 @@ use crate::components::{
     item::{Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSize, ItemTitle},
     scroll_area::ScrollArea,
     skeleton::Skeleton,
-    tabs::{TabContent, TabList, TabTrigger},
+    tabs::{TabContent, TabList, TabTrigger, Tabs},
     textarea::Textarea,
 };
 use crate::conversations::{Conversations, use_conversation};
@@ -93,9 +93,11 @@ pub fn AgentView(
     #[props(default)] review: Option<String>,
     #[props(default)] question: Option<String>,
     agent_count: usize,
+    lead: Option<crate::board::NavigationRow>,
+    inbox: Vec<crate::app::InboxItem>,
 ) -> Element {
     rsx! {
-        AgentSession { key: "{host}:{pane}", host, pane, review, question, agent_count }
+        AgentSession { key: "{host}:{pane}", host, pane, review, question, agent_count, lead, inbox }
     }
 }
 
@@ -106,6 +108,8 @@ fn AgentSession(
     review: Option<String>,
     question: Option<String>,
     agent_count: usize,
+    lead: Option<crate::board::NavigationRow>,
+    inbox: Vec<crate::app::InboxItem>,
 ) -> Element {
     let address = wire::AgentAddress {
         host: host.clone(),
@@ -346,32 +350,46 @@ fn AgentSession(
             .flat_map(|repo| &repo.rows)
             .find(|row| row.host == host && row.pane.as_deref() == Some(&pane))
     });
+    let owner_host = lead
+        .as_ref()
+        .map_or(host.as_str(), |lead| lead.host.as_str());
+    let owner_pane = lead
+        .as_ref()
+        .and_then(|lead| lead.pane.as_deref())
+        .unwrap_or(&pane);
     let todos: Vec<TodoView> = board_view.as_ref().map_or_else(Vec::new, |board| {
         board
             .repos
             .iter()
             .flat_map(|repo| &repo.todos)
-            .filter(|todo| host == "local" && todo.pane == pane)
+            .filter(|todo| owner_host == "local" && todo.pane == owner_pane)
             .cloned()
             .collect()
     });
-    let workers: Vec<(String, String)> = board_view.as_ref().map_or_else(Vec::new, |board| {
-        board
-            .repos
-            .iter()
-            .flat_map(|repo| &repo.rows)
-            .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
-            .collect()
-    });
+    let worker_rows = crate::workers::owned_rows(board_view.as_ref(), lead.as_ref());
+    let workers: Vec<(String, String)> = worker_rows
+        .iter()
+        .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
+        .collect();
+    let worker_count = worker_rows.len();
+    let working_count = crate::workers::working_count(&worker_rows);
     let todo_count: usize = todos
         .iter()
         .flat_map(|todo| &todo.sections)
         .map(|section| section.count)
         .sum();
     let todo_title = todos.iter().find_map(|todo| nonempty(&todo.current));
-    let title = match current.as_ref() {
-        Some(agent) => crate::board::agent_title(todo_title, agent),
-        None => todo_title.unwrap_or(&pane).to_owned(),
+    let title = if let Some(row) = row {
+        row.title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(&row.name)
+            .to_owned()
+    } else {
+        match current.as_ref() {
+            Some(agent) => crate::board::agent_title(todo_title, agent),
+            None => todo_title.unwrap_or(&pane).to_owned(),
+        }
     };
     let branch = todos.iter().find_map(|todo| todo.branch.as_deref());
     let harness = row.and_then(|row| nonempty(&row.what)).or_else(|| {
@@ -423,6 +441,9 @@ fn AgentSession(
         }
     }));
     let width = use_context::<crate::app::ConsoleWidth>().0;
+    let mut detail = use_context::<crate::app::LeadDetail>().0;
+    let worker_view = row.is_some();
+    let placeholder = worker_view.then(|| "Message the worker…".to_owned());
     let first_tab = usize::from(width() < 1100);
     let completed: usize = todos
         .iter()
@@ -508,7 +529,7 @@ fn AgentSession(
                         coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
                         connected: metadata_loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
-                    Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
+                    Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
                         on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
                 }
             }
@@ -519,11 +540,18 @@ fn AgentSession(
         section { class: "lead-panel", "data-review-open": plan_open,
             if !plan_open {
             header { class: "lead-header",
-                div { class: "lead-heading", h1 { "{title}" }
-                    p { class: "lead-meta", "{state} · {role}"
-                        if let Some(harness) = harness { " · {harness}" }
-                        if let Some(host) = host { " · {host}" }
-                        if let Some(branch) = branch { " · {branch}" }
+                if worker_view && lead.is_some() {
+                    if let Some(lead) = &lead {
+                        crate::workers::WorkerHeading { title: title.clone(), lead: lead.clone(),
+                            what: harness.unwrap_or("agent").to_owned(), host: address.host.clone() }
+                    }
+                } else {
+                    div { class: "lead-heading", h1 { "{title}" }
+                        p { class: "lead-meta", "{state} · {role}"
+                            if let Some(harness) = harness { " · {harness}" }
+                            if let Some(host) = host { " · {host}" }
+                            if let Some(branch) = branch { " · {branch}" }
+                        }
                     }
                 }
                 if !plan_open && width() < 1400 {
@@ -532,6 +560,7 @@ fn AgentSession(
                             if width() < 1100 { TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } }
                             TabTrigger { value: "chat", index: first_tab, "Chat" }
                             TabTrigger { value: "todos", index: first_tab + 1, "Todos {completed}/{todo_count}" }
+                            TabTrigger { value: "workers", index: first_tab + 2, "Workers {worker_count}" }
                         }
                     }
                 }
@@ -590,13 +619,31 @@ fn AgentSession(
             } else {
                 if width() >= 1400 {
                     {chat.clone()}
-                    aside { class: "console-todos", Todos { todos: todos.clone(), workers: workers.clone() } }
+                    aside { class: "console-todos",
+                        Tabs { class: "lead-detail", horizontal: true, value: Some(detail().value().to_owned()),
+                            on_value_change: move |value: String| detail.set(if value == "workers" { crate::app::LeadPanel::Workers } else { crate::app::LeadPanel::Todos }),
+                            header { class: "console-column-header detail-header",
+                                div { class: "lead-tabs detail-tabs", TabList { aria_label: "Lead detail",
+                                    TabTrigger { value: "todos", index: 0usize, "Todos {completed}/{todo_count}" }
+                                    TabTrigger { value: "workers", index: 1usize, "Workers {worker_count}" }
+                                } }
+                                if detail() == crate::app::LeadPanel::Workers { span { "{working_count} working" } }
+                            }
+                            TabContent { class: "detail-content", value: "todos", index: 0usize, Todos { todos: todos.clone(), workers: workers.clone() } }
+                            TabContent { class: "detail-content", value: "workers", index: 1usize,
+                                crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone(), header: false }
+                            }
+                        }
+                    }
                 } else {
                     TabContent { class: "chat-tab", value: "chat", index: first_tab, {chat.clone()} }
                     TabContent { class: "todos-tab", value: "todos", index: first_tab + 1,
                         div { class: "todo-tab-body", Todos { todos: todos.clone(), workers: workers.clone() } }
-                        Composer { draft, images, uploading, disabled, busy: busy(), on_error: move |message| action_error.set(Some(message)),
+                        Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
                             on_send: move |_| conversation_send(false) }
+                    }
+                    TabContent { class: "workers-tab", value: "workers", index: first_tab + 2,
+                        crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone() }
                     }
                 }
             }
@@ -991,6 +1038,7 @@ pub(crate) fn Composer(
     busy: bool,
     on_error: EventHandler<String>,
     on_send: EventHandler<()>,
+    #[props(default)] placeholder: Option<String>,
 ) -> Element {
     let mut round = use_signal(|| 0_u32);
     use_drop(move || uploading.set(false));
@@ -1044,7 +1092,7 @@ pub(crate) fn Composer(
                     accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
                     onchange: move |event: FormEvent| upload.call(event.files().iter().filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned()).collect()),
                 }
-                Textarea { name: "message", aria_label: "Message this agent", rows: "1", value: "{draft}", disabled: disabled || busy,
+                Textarea { name: "message", aria_label: "Message this agent", placeholder, rows: "1", value: "{draft}", disabled: disabled || busy,
                     oninput: move |event: FormEvent| draft.set(event.value()),
                     onpaste: move |event: ClipboardEvent| {
                         let files = event.data().try_as_web_event()

@@ -324,10 +324,64 @@ textarea {
 .console-provider .console-shell .console-agents [data-worker="true"][data-needs-owner="true"] {
   color: var(--console-text);
 }
-.console-provider .console-shell .console-agents [data-slot="sidebar-menu-sub"] {
-  border: 0;
-  margin: 0;
-  padding-left: 16px;
+.console-provider .console-shell .worker-summary[data-size] {
+  display: flex;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  height: auto;
+  padding: 4px 8px 8px 24px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .worker-summary[data-waiting="true"] {
+  color: var(--console-waiting);
+}
+.console-provider .console-shell .worker-dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.console-provider .console-shell .worker-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border: 1px solid var(--console-muted);
+  border-radius: 50%;
+}
+.console-provider .console-shell .worker-dot[data-state="working"] {
+  border-color: var(--console-running);
+  background: var(--console-running);
+}
+.console-provider .console-shell .worker-dot[data-state="waiting"] {
+  border-color: var(--console-waiting);
+  background: var(--console-waiting);
+}
+.console-provider .console-shell .worker-dot[data-state="finished"] {
+  border-color: var(--console-dim);
+  background: var(--console-dim);
+}
+.console-provider .console-shell .worker-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.console-provider .console-shell .worker-lead-link[data-size] {
+  display: inline;
+  height: auto;
+  max-width: 240px;
+  overflow: hidden;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  vertical-align: bottom;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-overflow: ellipsis;
 }
 .console-provider .console-shell .console-main {
   grid-column: 3;
@@ -750,6 +804,105 @@ textarea {
 }
 .console-provider .console-shell .console-agents [data-part="finished-branches"] {
   padding: 8px;
+}
+.console-provider .console-shell .lead-detail {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+}
+.console-provider .console-shell .detail-header {
+  padding-inline: 16px;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .detail-tabs {
+  display: block;
+}
+.console-provider .console-shell .detail-header [role="tab"] {
+  padding-inline: 6px;
+}
+.console-provider .console-shell .detail-content {
+  flex: 1;
+  min-height: 0;
+}
+.console-provider .console-shell .detail-content .todo-panel > header {
+  display: none;
+}
+.console-provider .console-shell .workers-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+.console-provider .console-shell .workers-list {
+  padding: 16px 8px;
+}
+.console-provider .console-shell .worker-group + .worker-group {
+  padding-top: 24px;
+}
+.console-provider .console-shell .worker-group h3 {
+  margin: 0;
+  padding: 0 8px 8px;
+  color: var(--console-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.console-provider .console-shell .worker-group[data-state="waiting"] h3 {
+  color: var(--console-waiting);
+}
+.console-provider .console-shell .worker-row[data-size] {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  align-items: baseline;
+  gap: 4px 8px;
+  height: auto;
+  width: 100%;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: left;
+  white-space: normal;
+}
+.console-provider .console-shell .worker-row[aria-current="true"] {
+  background: var(--console-raised);
+  border-left: 1px solid var(--console-accent);
+  padding-left: 7px;
+}
+.console-provider .console-shell .worker-title {
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .worker-phase,
+.console-provider .console-shell .worker-activity {
+  grid-column: 2;
+  color: var(--console-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .worker-row[data-state="waiting"] .worker-phase {
+  color: var(--console-waiting);
+}
+.console-provider .console-shell .worker-row[data-state="working"] .worker-phase {
+  color: var(--console-running);
+}
+.console-provider .console-shell .worker-row[data-state="finished"] .worker-title {
+  color: var(--console-muted);
+}
+.console-provider .console-shell .worker-activity {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.console-provider .console-shell .workers-tab {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
 }
 .console-provider .console-shell .todo-panel {
   display: flex;

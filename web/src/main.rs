@@ -14,6 +14,7 @@ mod new_lead;
 mod notice;
 mod question_form;
 mod review_view;
+mod workers;
 
 fn main() {
     dioxus::launch(app::App);
