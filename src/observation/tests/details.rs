@@ -186,6 +186,10 @@ fn native_revision_change_publishes_once_and_peer_export_excludes_content() {
     let changed =
         fixture.wait(|frame| detail(frame).is_some_and(|detail| detail.screen_revision == Some(8)));
     assert_eq!(changed.revision, first.revision + 1);
+    let original = detail(&first).unwrap();
+    let updated = detail(&changed).unwrap();
+    assert_eq!(updated.parts.conversation, original.parts.conversation);
+    assert!(updated.parts.screen > original.parts.screen);
     assert_eq!(native.reads(), 2);
     fixture.tick("w1:p1");
     assert_eq!(fixture.client.current().unwrap().revision, changed.revision);
@@ -193,6 +197,27 @@ fn native_revision_change_publishes_once_and_peer_export_excludes_content() {
     assert!(!export.contains("changed screen"));
     assert!(!export.contains("original task"));
     assert!(!export.contains("agent_details"));
+}
+
+#[test]
+fn transcript_change_advances_only_the_conversation_revision() {
+    let native = Native::new();
+    let fixture = Fixture::new(native.server.client());
+    let _viewer = fixture.client.detail("w1:p1").unwrap();
+    let first = detail(&fixture.wait(available)).unwrap();
+    std::fs::write(
+        native.agent().transcript.unwrap(),
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"changed task\"}}\n",
+    )
+    .unwrap();
+    assert!(fixture.tick("w1:p1"));
+    let changed = fixture.wait(|frame| {
+        detail(frame).is_some_and(|detail| detail.parts.conversation > first.parts.conversation)
+    });
+    let updated = detail(&changed).unwrap();
+    assert_eq!(updated.parts.screen, first.parts.screen);
+    assert_eq!(updated.parts.conversation, updated.revision);
+    assert_eq!(fixture.collector.lock().unwrap().transcript_reads(), 2);
 }
 
 #[test]
@@ -220,6 +245,8 @@ fn session_replacement_never_reuses_old_conversation_or_screen() {
     let detail = detail(&new).unwrap();
     assert!(matches!(detail.conversation, ReadState::Empty));
     assert!(matches!(detail.screen, ReadState::Empty));
+    assert!(detail.parts.conversation > old.parts.conversation);
+    assert!(detail.parts.screen > old.parts.screen);
 }
 
 #[test]
