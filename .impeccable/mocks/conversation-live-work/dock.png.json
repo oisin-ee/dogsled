@@ -1,0 +1,8 @@
+{
+  "kind": "browser-capture",
+  "source": ".impeccable/mocks/conversation-live-work/dock.html",
+  "viewport": "1600x1000",
+  "prompt": "Browser screenshot of the locally authored dock.html Impeccable mockup. Illustrative content, not a live transcript. No image model generated this raster.",
+  "approved": false,
+  "contentRevision": "Source-backed mockups: active todo title, recorded agent commentary, tool names and targets; no generated summaries or inferred findings."
+}

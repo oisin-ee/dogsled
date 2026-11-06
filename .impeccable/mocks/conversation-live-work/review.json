@@ -1,0 +1,73 @@
+{
+  "title": "Live work, without the guessing",
+  "question": "Three views of the chosen design. Content is illustrative. Task titles come from todos; agent updates are recorded messages, not generated summaries. Tool descriptions use structured names and paths. Expand the images to inspect them. “Build this” records design preference only; production code is unchanged.",
+  "options": [
+    {
+      "id": "inline",
+      "kind": "grounded",
+      "label": "Live work in the timeline",
+      "thesis": "The active task, recorded agent update and tool events stay together in the unfinished turn.",
+      "viewport": "Wide desktop, live turn visible; the compact dock stays hidden.",
+      "risk": "An agent update is optional. No model call fills missing commentary or reasoning.",
+      "palette": [
+        "#0e0f11",
+        "#141518",
+        "#e6e6e9",
+        "#4cb782"
+      ],
+      "materials": [
+        "Chronological timeline",
+        "Readable work context",
+        "Quiet controls"
+      ],
+      "html": ".impeccable/mocks/conversation-live-work/inline.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/conversation-live-work/inline.png"
+    },
+    {
+      "id": "dock",
+      "kind": "grounded",
+      "label": "Read history without losing the agent",
+      "thesis": "A compact dock appears only when the live turn leaves the viewport.",
+      "viewport": "Wide desktop, reading earlier messages; Jump to live returns to the active turn.",
+      "risk": "The dock must not duplicate the full summary or cover the conversation.",
+      "palette": [
+        "#0e0f11",
+        "#141518",
+        "#e6e6e9",
+        "#4cb782"
+      ],
+      "materials": [
+        "Chronological timeline",
+        "Readable work context",
+        "Quiet controls"
+      ],
+      "html": ".impeccable/mocks/conversation-live-work/dock.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/conversation-live-work/dock.png"
+    },
+    {
+      "id": "narrow",
+      "kind": "grounded",
+      "label": "The same work in a narrow window",
+      "thesis": "Keep the inbox and active task readable while the agent thinks; show only recorded text.",
+      "viewport": "900 × 800 desktop window; metadata wraps and the history scrolls internally.",
+      "risk": "Active action names must remain readable rather than truncating to tool IDs.",
+      "palette": [
+        "#0e0f11",
+        "#141518",
+        "#e6e6e9",
+        "#4cb782"
+      ],
+      "materials": [
+        "Chronological timeline",
+        "Readable work context",
+        "Quiet controls"
+      ],
+      "html": ".impeccable/mocks/conversation-live-work/narrow.html",
+      "htmlFrame": "900x800",
+      "comp": ".impeccable/mocks/conversation-live-work/narrow.png"
+    }
+  ],
+  "steer": true
+}
