@@ -1,14 +1,14 @@
 {
-  "title": "Live reasoning: three layouts",
-  "question": "Each layout plays back the same real Pi turn: the claude-opus-5-5 lead from 6 Nov at 12:26, with its recorded thinking, its exact bash commands and their real output. The newest thought types in at the live edge. Nothing is invented, and the old inline/dock/timeline mockups are not reused. Pick a layout, or say what is wrong with all three. “Build this” records a design preference only.",
+  "title": "Live reasoning: one stream with a live agent list",
+  "question": "Your pick: one stream like Pi, with the focus idea moved into the agent list instead of a card row. The conversation replays a real Pi turn (claude-opus-5-5 lead, 6 Nov 12:26). The other agents' snippets are real recorded thoughts and commands from gpt-6-astra sessions; their titles, timings, and the todos are illustrative. “Build this” records a design preference only.",
   "options": [
     {
       "id": "one-stream",
       "kind": "grounded",
-      "label": "One stream, like Pi",
-      "thesis": "The conversation is the Pi session: your message, then the agent's thinking (italic) and tool calls ($ command, output tail) in recorded order, then the reply. A finished turn folds its work into one line above the reply. Inbox and agents share the left column, so the stream gets about 1000px.",
-      "viewport": "1600 × 1000, live edge; also 1280 × 800, 900 × 800, and a history capture with the earlier turn opened.",
-      "risk": "Long Claude reasoning pushes earlier replies far up; you rely on the fold line to find them.",
+      "label": "One stream, with a live agent list",
+      "thesis": "The conversation is the Pi session: your message, the agent's thinking (italic) and tool calls ($ command, output tail) in recorded order, then the reply. A finished turn folds its work into one line. The left column lists agents as Working and Not working; each working row shows its phase, elapsed time, model, and its newest thought or command, and the selected row follows the live stream.",
+      "viewport": "1600 × 1000 at the live edge; also 1280 × 800, 900 × 800, and a history capture with the earlier turn opened.",
+      "risk": "Five or more working agents push idle ones below the fold; the Working group may need its own scroll limit.",
       "palette": [
         "#0e0f11",
         "#141518",
@@ -17,56 +17,12 @@
       ],
       "materials": [
         "Pi transcript order",
-        "Folded finished work",
-        "Shared left column"
+        "Live agent list",
+        "Folded finished work"
       ],
       "html": ".impeccable/mocks/live-reasoning/one-stream.html",
       "htmlFrame": "1600x1000",
       "comp": ".impeccable/mocks/live-reasoning/one-stream-1600.png"
-    },
-    {
-      "id": "split",
-      "kind": "grounded",
-      "label": "Dialogue beside Work",
-      "thesis": "The left pane holds only what you and the agent said to each other. The right pane is the agent's live work: thinking and tool calls streaming, with the current todo in its header. Replies never get buried under tool output.",
-      "viewport": "1600 × 1000 and 1280 × 800 side by side; at 900 × 800, Dialogue and Work become two tabs.",
-      "risk": "Two scroll regions to read. At narrow widths you switch tabs to see the work.",
-      "palette": [
-        "#0e0f11",
-        "#141518",
-        "#e6e6e9",
-        "#4cb782"
-      ],
-      "materials": [
-        "Dialogue pane",
-        "Live work pane",
-        "Todo in header"
-      ],
-      "html": ".impeccable/mocks/live-reasoning/split.html",
-      "htmlFrame": "1600x1000",
-      "comp": ".impeccable/mocks/live-reasoning/split-1600.png"
-    },
-    {
-      "id": "focus",
-      "kind": "grounded",
-      "label": "Focus on one agent",
-      "thesis": "The agents list leaves the left side. Working agents become a row of cards across the top, each with its newest thought or command. The inbox keeps its own column on the left. The chosen agent's stream fills the width below.",
-      "viewport": "1600 × 1000, 1280 × 800 and 900 × 800; todos sit in a right margin from 1400px.",
-      "risk": "With many agents, the card row scrolls sideways, and the full list is one click away.",
-      "palette": [
-        "#0e0f11",
-        "#141518",
-        "#e6e6e9",
-        "#4cb782"
-      ],
-      "materials": [
-        "Agent card row",
-        "Full-width stream",
-        "Inbox column kept"
-      ],
-      "html": ".impeccable/mocks/live-reasoning/focus.html",
-      "htmlFrame": "1600x1000",
-      "comp": ".impeccable/mocks/live-reasoning/focus-1600.png"
     }
   ],
   "steer": true
