@@ -1,12 +1,10 @@
-//! The portal API: one read of the board, then the stream of changes.
+//! The portal stream, independent agent detail reads, and actions.
 
 use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
-use portal_types::agents::{
-    ActivityView, AgentEvent, AgentList, AgentView, Conversation, KeysBody, PromptBody, Screen,
-};
-use portal_types::{BoardView, PortalEvent};
+use portal_types::PortalEvent;
+use portal_types::agents::{ActivityView, AgentEvent, Conversation, KeysBody, PromptBody, Screen};
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -15,15 +13,6 @@ const BASE: &str = match option_env!("DOGSLED_API") {
     Some(base) => base,
     None => "",
 };
-
-/// Independent detail lookup; the portal shell uses only the combined stream.
-pub async fn fetch_board() -> Result<BoardView, String> {
-    let response = Request::get(&format!("{BASE}/api/board"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    read_json(response).await
-}
 
 const MAX_IMAGE_BYTES: f64 = 10.0 * 1024.0 * 1024.0;
 
@@ -63,26 +52,6 @@ async fn failure(response: gloo_net::http::Response) -> String {
             .map_or_else(|| format!("the server answered {status}"), str::to_owned),
         Err(_) => format!("the server answered {status}"),
     }
-}
-
-/// The agents Herdr sees, including their blocked prompts.
-pub async fn fetch_agents() -> Result<Vec<AgentView>, String> {
-    let response = Request::get(&format!("{BASE}/api/agents"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let list: AgentList = read_json(response).await?;
-    Ok(list.agents)
-}
-
-/// The agent in `pane`, with the prompt it waits on while it is blocked.
-pub async fn fetch_agent(
-    address: &portal_types::agents::AgentAddress,
-) -> Result<Option<AgentView>, String> {
-    Ok(fetch_agents()
-        .await?
-        .into_iter()
-        .find(|agent| agent.host == address.host && agent.pane == address.pane))
 }
 
 /// The turns of the agent in `pane`, or `None` when the agent no longer exists.

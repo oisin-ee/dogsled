@@ -24,6 +24,15 @@ use crate::conversations::Conversations;
 use crate::new_lead::{NewConversation, NewLead};
 use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon, Plus};
 
+/// Portal stream projections shared with the selected agent view.
+#[derive(Clone, Copy)]
+pub struct AgentPortal {
+    pub agents: Memo<Vec<Agent>>,
+    pub agent_error: Memo<Option<String>>,
+    pub board: Memo<Option<BoardView>>,
+    pub board_error: Memo<Option<String>>,
+}
+
 #[derive(Clone, Copy)]
 pub struct ConsoleWidth(pub Signal<u32>);
 
@@ -301,6 +310,12 @@ pub fn App() -> Element {
     });
     let agents = use_memo(move || publication.read().agents.clone());
     let agent_error = use_memo(move || publication.read().agent_error.clone());
+    use_context_provider(|| AgentPortal {
+        agents,
+        agent_error,
+        board,
+        board_error,
+    });
     let inbox_state = use_memo(move || publication.read().inbox.clone());
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
