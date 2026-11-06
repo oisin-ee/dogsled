@@ -121,10 +121,23 @@ The browser refetches a part only when its revision differs from the one it hold
 
 **One source per datum.** The agent view reads agent state, the board, and the inbox from the existing portal stream context.
 It stops fetching `/api/board` and `/api/agents`.
-Review and question lists are refetched when the inbox in the portal snapshot changes, not on agent events.
+
+**Reviews and questions follow the inbox.** `web/src/review_view.rs:111–130` and `web/src/question_form.rs:66–79` poll every 2 seconds.
+`ReviewView` also bumps a `tick` counter on every poll (line 123), which refetches the open review (line 193).
+The portal snapshot already carries every pending review and question as an inbox item.
+`InboxItem` gains a `revision`: the review's `revisions` count, or 0 for a question, which never changes.
+The lists are refetched when the set of inbox ids changes. An open review is refetched when its inbox revision changes.
+Both `POLL` constants, both loops, and `tick` are deleted.
+
+**The blocked guard moves to the server.** The `send` closure (`web/src/agent_view.rs:267–290`) fetches the whole agent list before every prompt.
+It refuses to send when the agent is blocked. The `prompt` route (`src/web/agents.rs`) forwards text without that check.
+The route reads the agent's state from the current serve publication and answers 409 for a blocked agent, local or remote.
+The client deletes its pre-send fetch and shows the 409 message.
+A prompt that appears between the last publication and the send is still possible. This change does not claim to close that window; Herdr's `agent.prompt` has no conditional form.
 
 **No timer while live.** The 5-second interval is removed.
-When the agent stream fails, the view reconnects with backoff and then refetches all parts once.
+When the agent stream fails or closes cleanly, the view shows the disconnect, reconnects with backoff, and then refetches all parts once.
+A clean close is a disconnect, not an idle agent.
 Actions do not trigger refetches; their effects arrive as events.
 
 **Files is one more part, not a new pipeline.** The per-pane detail worker already owns viewer interest, session fencing, and the 5-second tick.
@@ -133,9 +146,13 @@ The worker merges the latest files result into the detail payload with its own r
 `GET /api/agents/{host}/{pane}/files` serves it through `detail_response`, like `conversation` and `screen`.
 Remote agents use a new `PeerOperation::Files`, through the existing `peer_read`.
 
-**Remote events.** `peer_events` sends an event only when the remote event differs from the last one sent.
-Unchanged remote replies no longer cause browser refetches.
-Its trigger stays the local portal publication. Replacing that trigger with a held remote subscription is a separate change, not part of Files.
+**Remote detail is a held subscription, not a poll.** `peer_events` (`src/web/agents.rs:298–337`) runs one SSH `agent-detail` call per local portal publication.
+A new host command, `dogsled agent-detail <pane> --follow`, keeps the execution host's detail subscription open.
+It writes one JSON line per changed part revision, read from that host's serve. It never reads Git or transcripts itself.
+The portal server holds one such process per remote pane that has a viewer, shared by all its viewers.
+The last viewer's disconnect kills the process group. A process exit or invalid line is a visible disconnect, followed by reconnect with backoff.
+The conversation, screen, and files routes for remote agents keep using one-shot `peer_read`, triggered only by a changed revision.
+An execution host without `--follow` reports "remote agent stream unsupported". It does not fall back to polling.
 
 ### Git capture
 
@@ -197,12 +214,17 @@ All units use the `writer` profile and run in order. Each starts from the revisi
 
 | Unit | Deliverable | Owned scope | Needs | Acceptance |
 | --- | --- | --- | --- | --- |
-| U1 | Per-part detail revisions in agent events | `src/observation/details.rs`, `src/observation/tests/details.rs`, `portal-types/src/agents.rs`, `src/web/agents.rs` | — | A screen-only change leaves the conversation revision unchanged. Identical consecutive local or remote events are not sent twice. |
-| U2 | Agent view refetches only changed parts | `web/src/agent_view.rs`, `web/src/conversations.rs`, `web/src/api.rs`, `web/src/component_tests.rs` | U1 | No 5-second interval. A screen event refetches only the screen. Board, agent, and inbox come from the portal stream. Stream failure reconnects and refetches once. |
-| U3 | Files capture, part, and route | `src/shell.rs`, new `src/git_status.rs`, new `portal-types/src/files.rs`, `portal-types/src/lib.rs`, `src/observation/details.rs`, `src/web/agents.rs`, `src/main.rs` module list | U2 | Real temporary repositories cover each state, the seven conflict codes, renames, staged-and-unstaged paths, non-UTF-8 names, unborn and detached HEAD, linked worktrees, and the byte limit. A blocked Git read does not delay the conversation part. |
-| U4 | By Stage Files tab | new `web/src/files.rs`, `web/src/app.rs`, `web/src/agent_view.rs`, `web/assets/console.css`, `web/src/component_tests.rs` | U3 | Component tests cover each state, group, and count. Browser check at 1600, 1400, 1200, 1000, and 800px against design B. A files change refetches only files. |
+| U1 | Per-part detail revisions in agent events | `src/observation/details.rs`, `src/observation/tests/details.rs`, `portal-types/src/agents.rs`, `src/web/agents.rs` | — | A screen-only change leaves the conversation revision unchanged. The local event stream sends an event only when a part revision, state, blocked prompt, or session changes. |
+| U2 | Held remote detail subscription | `src/web/agents.rs`, `src/cli.rs`, `src/main.rs`, `tests/cli/observation_portal.rs` | U1 | Two viewers of one remote pane share one SSH process. Unrelated portal publications start no SSH call. The last disconnect kills the process. Process exit and an unsupported peer appear as disconnects. |
+| U3 | Prompt route refuses blocked agents | `src/web/agents.rs` and its tests | U2 | A prompt to a blocked local or remote agent answers 409 and reaches no Herdr call. |
+| U4 | Agent view refetches only changed parts | `web/src/agent_view.rs`, `web/src/conversations.rs`, `web/src/api.rs`, `web/src/component_tests.rs` | U3 | `refresh`, `POLL`, and the interval are gone. A screen event refetches only the screen. Agent, board, and inbox come from the portal stream. Sending makes no agent-list request. Failure and clean close both reconnect and refetch once. |
+| U5 | Reviews and questions follow the inbox | `portal-types/src/inbox.rs`, `src/web/inbox.rs`, `web/src/review_view.rs`, `web/src/question_form.rs`, `web/src/component_tests.rs` | U4 | Both 2-second loops and `tick` are gone. A new inbox id refetches the list once. A changed review revision refetches only that review. |
+| U6 | Files capture, part, and route | `src/shell.rs`, new `src/git_status.rs`, new `portal-types/src/files.rs`, `portal-types/src/lib.rs`, `src/observation/details.rs`, `src/web/agents.rs`, `src/main.rs` module list | U5 | Real temporary repositories cover each state, the seven conflict codes, renames, staged-and-unstaged paths, non-UTF-8 names, unborn and detached HEAD, linked worktrees, and the byte limit. A blocked Git read does not delay the conversation part. A remote files change arrives through the U2 subscription. |
+| U7 | By Stage Files tab | new `web/src/files.rs`, `web/src/app.rs`, `web/src/agent_view.rs`, `web/assets/console.css`, `web/src/component_tests.rs` | U6 | Component tests cover each state, group, and count. Browser check at 1600, 1400, 1200, 1000, and 800px against design B. A files change refetches only files. |
 
-After U4, the lead does the integration review: a real edit in a test checkout reaches the running portal for a local and a remote agent.
+U1–U5 remove every forced reload in the agent view. U6–U7 add Files on top.
+After U7, the lead does the integration review: a real edit in a test checkout reaches the running portal for a local and a remote agent.
+The review also counts requests for 60 idle seconds with an open agent: zero conversation, board, review, or question fetches.
 
 ### Checks
 
