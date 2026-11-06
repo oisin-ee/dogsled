@@ -1,8 +1,7 @@
 //! The form that answers an agent's question, beside the conversation.
 //!
-//! The page polls `GET /api/questions`, lists the forms that wait for the
-//! owner, and posts the answers of the open one to
-//! `POST /api/questions/{id}/answer`.
+//! The agent view supplies the pending question. This form posts its answers
+//! to `POST /api/questions/{id}/answer`.
 
 use std::collections::BTreeMap;
 
@@ -13,11 +12,10 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_primitives::checkbox::CheckboxState;
-use dioxus_sdk_time::sleep;
+use dioxus_sdk_time::use_interval;
 use gloo_net::http::Request;
 use portal_types::questions::{
-    AnswerBody, Media, MediaPosition, Pending, PendingList, Question, QuestionKind, Rejection,
-    ResponseItem,
+    AnswerBody, Media, MediaPosition, Pending, Question, QuestionKind, Rejection, ResponseItem,
 };
 use serde_json::Value;
 
@@ -46,112 +44,22 @@ const BASE: &str = match option_env!("DOGSLED_API") {
     None => "",
 };
 
-/// The time between two reads of the pending questions.
-const POLL: Duration = Duration::from_secs(2);
-
 /// The values the owner has chosen or typed, by question id.
 type Values = Signal<BTreeMap<String, Value>>;
 
 #[component]
-pub fn QuestionForm(
-    #[props(default)] requested: Option<String>,
-    on_done: EventHandler<String>,
-) -> Element {
-    let selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
-    let mut pending = use_signal(Vec::<Pending>::new);
-    let mut opened = use_signal(|| None::<String>);
-    let mut error = use_signal(|| None::<String>);
+pub fn QuestionForm(question: Pending, on_done: EventHandler<String>) -> Element {
     let mut now = use_signal(clock_ms);
-
-    // The page reads the waiting questions every two seconds.
-    use_future(move || async move {
-        loop {
-            match fetch_pending().await {
-                Ok(list) => {
-                    pending.set(list);
-                    error.set(None);
-                }
-                Err(message) => error.set(Some(message)),
-            }
-            sleep(POLL).await;
-            now.set(clock_ms());
-        }
-    });
-
-    let list = pending();
-    let current = match requested.as_deref() {
-        Some(id) => list.iter().find(|item| item.id == id),
-        None => current_form(
-            &list,
-            opened().as_deref(),
-            selected()
-                .as_ref()
-                .filter(|address| address.host == "local")
-                .map(|address| address.pane.as_str()),
-        ),
-    }
-    .cloned();
-    let count = list.len();
+    use_interval(Duration::from_secs(2), move |()| now.set(clock_ms()));
 
     rsx! {
-        if requested.is_none() {
-            Item { ItemContent { ItemTitle { "Needs you: {count}" } } }
-        }
-        if let Some(message) = error() {
-            Alert { "{message}" }
-        }
-        if list.is_empty() {
-            Status { "No question waits." }
-        }
-        // An agent screen opens one form by id; only the standalone page lists them.
-        ItemGroup {
-            for item in list.iter().filter(|_| requested.is_none()) {
-                {
-                    let id = item.id.clone();
-                    let open = current.as_ref().is_some_and(|form| form.id == item.id);
-                    let title = form_title(item);
-                    let age = age(now().saturating_sub(item.created_ms));
-                    rsx! {
-                        Button {
-                            key: "{item.id}",
-                            variant: ButtonVariant::Ghost,
-                            aria_current: open.then_some("true"),
-                            onclick: move |_| opened.set(Some(id.clone())),
-                            "{title}"
-                            Badge { variant: BadgeVariant::Secondary, "{item.pane} · {age}" }
-                        }
-                    }
-                }
-            }
-        }
-        if requested.is_some() && current.is_none() && error().is_none() {
-            Status { "This question is loading, answered, or no longer available." }
-        }
-        if let Some(form) = current {
-            AskForm {
-                key: "{form.id}",
-                elapsed_ms: now().saturating_sub(form.created_ms),
-                pending: form,
-                on_done: move |id: String| {
-                    pending.write().retain(|item| item.id != id);
-                    on_done.call(id);
-                },
-            }
+        AskForm {
+            key: "{question.id}",
+            elapsed_ms: now().saturating_sub(question.created_ms),
+            pending: question,
+            on_done,
         }
     }
-}
-
-/// The questions that wait for an answer.
-async fn fetch_pending() -> Result<Vec<Pending>, String> {
-    let response = Request::get(&format!("{BASE}/api/questions"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !response.ok() {
-        return Err(format!("the questions answered {}", response.status()));
-    }
-    let list: PendingList = response.json().await.map_err(|error| error.to_string())?;
-    Ok(list.pending)
 }
 
 /// What the portal did with an answer.
@@ -192,19 +100,6 @@ async fn send_rejection(id: &str, reason: String) -> Result<Sent, String> {
             "Could not reject the interview (HTTP {status}). Try again."
         )),
     }
-}
-
-/// The form to show: the one clicked, else the first of the selected pane,
-/// else the first.
-fn current_form<'a>(
-    list: &'a [Pending],
-    opened: Option<&str>,
-    selected: Option<&str>,
-) -> Option<&'a Pending> {
-    opened
-        .and_then(|id| list.iter().find(|item| item.id == id))
-        .or_else(|| selected.and_then(|pane| list.iter().find(|item| item.pane == pane)))
-        .or_else(|| list.first())
 }
 
 /// The title of a form, or its first question when it has none.

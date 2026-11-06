@@ -54,6 +54,7 @@ fn workers_render_the_four_groups_in_order_and_mark_the_open_worker()
             kind: crate::app::InboxKind::Prompt,
             id: "prompt".into(),
         },
+        revision: 0,
         title: "Key prompt".into(),
         agent_title: None,
         repository: None,
@@ -352,7 +353,7 @@ fn review_root(props: (u32, u32, bool)) -> Element {
     };
     rsx! { crate::review_view::ReviewEditor { initial, embedded: true,
     lead: "Move state into typed SQLite with a very long task title", role: "lead",
-    repository: "github.com/oisin-ee/dogsled", on_close: |_| {}, on_done: |_| {} } }
+    repository: "github.com/oisin-ee/dogsled", on_close: |_| {} } }
 }
 
 fn question_root() -> Element {
