@@ -585,60 +585,93 @@ textarea {
   color: var(--console-muted);
   font-size: 12px;
 }
-.console-provider .console-shell .conversation-tools .conversation-body {
-  padding-bottom: 24px;
+.console-provider .console-shell .conversation-thought {
   color: var(--console-muted);
-  font-size: 12px;
+  font-style: italic;
 }
-.console-provider .console-shell .conversation-tools .conversation-axis i {
-  width: 5px;
-  height: 5px;
-  margin-top: 7px;
-  border: 0;
-  background: var(--console-muted);
-}
-.console-provider .console-shell .conversation-tools button {
-  gap: 8px;
-  padding: 0;
+.console-provider .console-shell .conversation-thought .markdown-body {
   color: inherit;
+}
+.console-provider .console-shell .conversation-work {
+  min-width: 0;
+  padding-bottom: 16px;
+}
+.console-provider .console-shell .conversation-work button {
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 0;
+  color: var(--console-muted);
   font: inherit;
-  overflow: visible;
+  font-size: 12px;
+  text-align: left;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
-.console-provider .console-shell .conversation-tools button svg {
+.console-provider .console-shell .conversation-work button:hover {
+  color: var(--console-text);
+}
+.console-provider .console-shell .conversation-work button svg {
   flex: none;
   width: 16px;
   height: 16px;
 }
-.console-provider .console-shell .conversation-tools button:focus-visible {
-  outline: 2px solid var(--console-accent);
-  outline-offset: 2px;
-  box-shadow: none;
-}
-.console-provider .console-shell .conversation-tools [data-part="tool-records"] {
+.console-provider .console-shell .conversation-work [data-part="turn-work"] {
   display: block;
+  min-width: 0;
+  padding-top: 12px;
 }
-.console-provider .console-shell .conversation-tools [data-part="tool-records"][data-open="false"] {
+.console-provider .console-shell .conversation-work [data-part="turn-work"][data-open="false"] {
   display: none;
 }
-.console-provider .console-shell .conversation-tools ul {
+.console-provider .console-shell .conversation-tool-panel {
+  min-width: 0;
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
+}
+.console-provider .console-shell .conversation-call,
+.console-provider .console-shell .conversation-output {
+  max-width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .conversation-output {
+  border-top: 1px solid var(--console-line);
+  color: var(--console-muted);
+}
+.console-provider .console-shell .conversation-tool-outcome,
+.console-provider .console-shell .conversation-earlier {
+  margin: 0;
+  padding: 4px 12px;
+  color: var(--console-muted);
+  font-size: 12px;
+}
+.console-provider .console-shell .conversation-tool[data-error="true"] .conversation-tool-panel {
+  border-color: var(--primary-error-color);
+}
+.console-provider .console-shell .conversation-tool[data-error="true"] :is(.conversation-output, .conversation-tool-outcome) {
+  color: var(--primary-error-color);
+}
+.console-provider .console-shell .conversation-live-edge {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.console-provider .console-shell .conversation-tools li {
-  display: grid;
-  grid-template-columns: 46px minmax(0, 1fr);
-  gap: 12px;
-}
-.console-provider .console-shell .conversation-tools li > div {
+  gap: 16px;
   min-width: 0;
 }
-.console-provider .console-shell .conversation-tools li p {
-  margin: 2px 0 0;
+.console-provider .console-shell .conversation-live-thought {
+  color: var(--console-text);
+}
+.console-provider .console-shell .conversation-live-tool {
+  min-width: 0;
+}
+.console-provider .console-shell .conversation-live-tool .conversation-call {
+  border: 1px solid var(--console-line);
+  border-radius: 8px;
+  background: var(--console-panel);
 }
 .console-provider .console-shell .conversation-footer {
   flex: none;
@@ -657,9 +690,9 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  justify-content: space-between;
   gap: 4px 12px;
   min-height: 34px;
+  font-variant-numeric: tabular-nums;
   padding-bottom: 6px;
   color: var(--console-text);
   font-size: 12px;
@@ -670,6 +703,11 @@ textarea {
   overflow-wrap: anywhere;
 }
 .console-provider .console-shell .conversation-activity .activity-detail {
+  margin-left: auto;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .activity-counts,
+.console-provider .console-shell .activity-elapsed {
   color: var(--console-muted);
 }
 @media (max-width: 600px) {

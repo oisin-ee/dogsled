@@ -147,6 +147,7 @@ fn AgentSession(
 
     // Transcript I/O must start and render without waiting for the full agent list.
     let transcript = use_conversation(address.clone(), refresh, detail_session);
+    let live = use_live_activity(address.clone(), detail_session);
 
     let read_pane = address.clone();
     use_resource(move || {
@@ -461,32 +462,18 @@ fn AgentSession(
         .to_owned();
     let mut page = use_signal(|| None::<Rc<MountedData>>);
     let mut following = use_signal(|| true);
-    let mut follow_error = use_signal(|| None::<String>);
+    let follow_error = use_signal(|| None::<String>);
     // Follow the newest turn until the owner scrolls up to read; scrolling back
     // to the end resumes it. The page region is the one that scrolls.
-    use_effect(use_reactive(
-        (&retained, &transcript_loading, &tab),
-        move |_| {
-            if tab != Tab::Conversation || !following() {
-                return;
-            }
-            let Some(page) = page() else {
-                return;
-            };
-            spawn(async move {
-                let scrolled = async {
-                    let size = page.get_scroll_size().await?;
-                    page.scroll(
-                        PixelsVector2D::new(0.0, size.height),
-                        ScrollBehavior::Instant,
-                    )
-                    .await
-                }
-                .await;
-                follow_error.set(scrolled.err().map(|error| error.to_string()));
-            });
-        },
-    ));
+    use_follow_scroll(
+        page,
+        following,
+        follow_error,
+        retained.clone(),
+        transcript_loading,
+        tab == Tab::Conversation,
+        live(),
+    );
     let tracking = attributes!(div {
         onmounted: move |event| {
             page.set(Some(event.data()));
@@ -520,12 +507,13 @@ fn AgentSession(
                     }
                 } else {
                     ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
-                        Conversation { snapshot: retained.clone(), loading: transcript_loading, assistant }
+                        Conversation { snapshot: retained.clone(), loading: transcript_loading, assistant,
+                            live: live(), coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned() }
                     }
                 }
             if tab == Tab::Conversation {
                 footer { class: "conversation-footer",
-                    LiveActivity { address: address.clone(), session: detail_session,
+                    LiveActivity { live: live(), turns: retained.as_ref().map_or_else(Vec::new, |snapshot| snapshot.turns.clone()),
                         coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
                         connected: metadata_loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
@@ -721,23 +709,78 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
     agent.state == "blocked" || agent.blocked.is_some()
 }
 
+/// Reuse the same follow policy for transcript and live-edge changes.
+pub(crate) fn use_follow_scroll(
+    page: Signal<Option<Rc<MountedData>>>,
+    following: Signal<bool>,
+    mut follow_error: Signal<Option<String>>,
+    snapshot: Option<wire::Conversation>,
+    loading: bool,
+    visible: bool,
+    live: Live,
+) {
+    use_effect(use_reactive(
+        (&snapshot, &loading, &visible, &live),
+        move |_| {
+            if !visible || !following() {
+                return;
+            }
+            let Some(page) = page() else {
+                return;
+            };
+            spawn(async move {
+                let scrolled = async {
+                    let size = page.get_scroll_size().await?;
+                    page.scroll(
+                        PixelsVector2D::new(0.0, size.height),
+                        ScrollBehavior::Instant,
+                    )
+                    .await
+                }
+                .await;
+                follow_error.set(scrolled.err().map(|error| error.to_string()));
+            });
+        },
+    ));
+}
+
 #[component]
 pub(crate) fn Conversation(
     snapshot: Option<wire::Conversation>,
     loading: bool,
     assistant: String,
+    #[props(default = Live::Pending)] live: Live,
+    #[props(default = "idle".to_owned())] coarse: String,
 ) -> Element {
-    let records = snapshot.as_ref().map(|snapshot| {
-        snapshot.turns.chunk_by(|a, b| a.role == Role::Tool && b.role == Role::Tool)
-            .filter_map(|group| {
-                let first = group.first()?;
-                Some(if first.role == Role::Tool {
-                    rsx! { ToolRecords { key: "{first.id}", turns: group.to_vec() } }
-                } else {
-                    rsx! { MessageRecord { key: "{first.id}", turn: first.clone(), assistant: assistant.clone() } }
-                })
-            }).collect::<Vec<_>>()
-    }).unwrap_or_default();
+    let turns = snapshot
+        .as_ref()
+        .map_or(&[][..], |snapshot| snapshot.turns.as_slice());
+    let active = match &live {
+        Live::Detail(state) => state.phase != wire::LivePhase::Idle,
+        _ => coarse != "idle",
+    };
+    let groups = turns
+        .chunk_by(|_, next| next.role != Role::User)
+        .collect::<Vec<_>>();
+    let records = groups.iter().enumerate().flat_map(|(index, group)| {
+        let final_reply = group.iter().rposition(|turn| turn.role == Role::Assistant);
+        let finished = !(active && index + 1 == groups.len());
+        let mut records = Vec::new();
+        if let Some(final_reply) = final_reply.filter(|&reply| {
+            finished && group[0].role == Role::User && group[1..reply].iter().any(is_work)
+        }) {
+            records.push(conversation_record(&group[0], &assistant));
+            let work = &group[1..final_reply];
+            let label = worked_label(&group[0], group);
+            records.push(rsx! {
+                ToolRecords { key: "work:{group[0].id}", turns: work.to_vec(), assistant: assistant.clone(), label }
+            });
+            records.extend(group[final_reply..].iter().map(|turn| conversation_record(turn, &assistant)));
+        } else {
+            records.extend(group.iter().map(|turn| conversation_record(turn, &assistant)));
+        }
+        records
+    }).collect::<Vec<_>>();
     rsx! {
         div { class: "conversation-turns",
             div { class: "conversation-column",
@@ -751,9 +794,72 @@ pub(crate) fn Conversation(
                     }
                 }
                 {records.into_iter()}
+                LiveEdge { live, last: turns.last().cloned() }
             }
         }
     }
+}
+
+fn is_work(turn: &Turn) -> bool {
+    matches!(turn.role, Role::Thinking | Role::Tool)
+}
+
+fn conversation_record(turn: &Turn, assistant: &str) -> Element {
+    if turn.role == Role::Tool {
+        rsx! { ToolRecord { key: "{turn.id}", turn: turn.clone() } }
+    } else {
+        rsx! { MessageRecord { key: "{turn.id}", turn: turn.clone(), assistant: assistant.to_owned() } }
+    }
+}
+
+fn work_counts(turns: &[Turn]) -> (usize, usize) {
+    (
+        turns
+            .iter()
+            .filter(|turn| turn.role == Role::Thinking)
+            .count(),
+        turns.iter().filter(|turn| turn.role == Role::Tool).count(),
+    )
+}
+
+fn count_label(thoughts: usize, calls: usize) -> String {
+    format!(
+        "{thoughts} {} · {calls} {}",
+        if thoughts == 1 { "thought" } else { "thoughts" },
+        if calls == 1 {
+            "tool call"
+        } else {
+            "tool calls"
+        }
+    )
+}
+
+fn elapsed_label(seconds: u64) -> String {
+    if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn latest_record_time(turns: &[Turn]) -> Option<u64> {
+    turns
+        .iter()
+        .filter(|turn| turn.role != Role::User)
+        .filter_map(|turn| turn.timestamp.as_ref().map(|time| time.ms))
+        .max()
+}
+
+fn worked_label(owner: &Turn, turns: &[Turn]) -> String {
+    let span = owner
+        .timestamp
+        .as_ref()
+        .zip(latest_record_time(turns))
+        .and_then(|(start, end)| end.checked_sub(start.ms))
+        .map(|ms| format!(" for {}", elapsed_label(ms / 1000)))
+        .unwrap_or_default();
+    let (thoughts, calls) = work_counts(turns);
+    format!("Worked{span} · {}", count_label(thoughts, calls))
 }
 
 /// Attribution comes from typed history, never from the body or today's model settings.
@@ -796,7 +902,7 @@ fn MessageRecord(turn: Turn, assistant: String) -> Element {
         crate::review_view::render_markdown(&text)
     }));
     rsx! {
-        article { class: if owner { "conversation-event conversation-owner" } else { "conversation-event" },
+        article { class: if owner { "conversation-event conversation-owner" } else if turn.role == Role::Thinking { "conversation-event conversation-thought" } else { "conversation-event" },
             "data-record-id": turn.id, aria_label: author.clone(),
             ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
             div { class: "conversation-axis", aria_hidden: "true", i {} }
@@ -809,41 +915,43 @@ fn MessageRecord(turn: Turn, assistant: String) -> Element {
 }
 
 #[component]
-fn ToolRecords(turns: Vec<Turn>) -> Element {
-    let Some(first) = turns.first().cloned() else {
-        return rsx! {};
-    };
-    let names = turns
-        .iter()
-        .map(|turn| {
-            turn.tool
-                .as_ref()
-                .and_then(|tool| tool.name.as_deref())
-                .unwrap_or("Unnamed tool")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+fn ToolRecords(turns: Vec<Turn>, assistant: String, label: String) -> Element {
     rsx! {
-        div { class: "conversation-event conversation-tools", "data-record-id": first.id.clone(),
-            ConversationTime { timestamp: first.timestamp.clone(), role: first.role, source: first.source.clone() }
+        div { class: "conversation-work",
+            Collapsible { keep_mounted: true,
+                CollapsibleTrigger { "{label}" }
+                CollapsibleContent { "data-part": "turn-work",
+                    for turn in &turns { {conversation_record(turn, &assistant)} }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ToolRecord(turn: Turn) -> Element {
+    let tool = turn.tool.as_ref();
+    let call = tool
+        .and_then(|tool| tool.call.as_deref().or(tool.name.as_deref()))
+        .unwrap_or("Unnamed tool");
+    let output = tool.and_then(|tool| tool.output.as_deref());
+    let shown = output.map_or(0, |output| output.lines().count() as u32);
+    let earlier = tool
+        .and_then(|tool| tool.output_lines)
+        .unwrap_or(shown)
+        .saturating_sub(shown);
+    let error = tool.is_some_and(|tool| tool.status == wire::ToolStatus::Error);
+    rsx! {
+        article { class: "conversation-event conversation-tool", "data-record-id": turn.id,
+            "data-error": error,
+            ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
             div { class: "conversation-axis", aria_hidden: "true", i {} }
             div { class: "conversation-body",
-                Collapsible { keep_mounted: true,
-                    CollapsibleTrigger { "{turns.len()} tool records · {names}" }
-                    CollapsibleContent { "data-part": "tool-records",
-                        ul { role: "list",
-                            for turn in turns {
-                                li { key: "{turn.id}", "data-record-id": turn.id.clone(),
-                                    ConversationTime { timestamp: turn.timestamp.clone(), role: turn.role, source: turn.source.clone() }
-                                    div {
-                                        strong { "{turn.tool.as_ref().and_then(|tool| tool.name.as_deref()).unwrap_or(\"Unnamed tool\")}" }
-                                        p { "{tool_outcome(turn.tool.as_ref().map(|tool| tool.status))}" }
-                                        p { "{source_label(&turn, \"Assistant\").1}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                div { class: "conversation-tool-panel",
+                    pre { class: "conversation-call", "{call}" }
+                    p { class: "conversation-tool-outcome", "{tool_outcome(tool.map(|tool| tool.status))}" }
+                    if earlier > 0 { p { class: "conversation-earlier", "{earlier} earlier lines" } }
+                    if let Some(output) = output { pre { class: "conversation-output", "{output}" } }
                 }
             }
         }
@@ -930,17 +1038,85 @@ fn platform_time(ms: u64) -> Option<(String, String, String)> {
     ))
 }
 
-/// The subscription lives below the history component. Heartbeats cannot refresh Markdown.
+/// The live edge shares the history's scrolling region, not the pinned footer.
+#[component]
+pub(crate) fn LiveEdge(live: Live, #[props(default)] last: Option<Turn>) -> Element {
+    let Live::Detail(state) = live else {
+        return rsx! {};
+    };
+    let reasoning = state.reasoning.filter(|text| !text.is_empty());
+    rsx! {
+        div { class: "conversation-live-edge", aria_live: "off",
+            if let Some(text) = reasoning.filter(|text| !last.as_ref().is_some_and(|turn| turn.role == Role::Thinking && turn.text == *text)) {
+                LiveThought { text }
+            }
+            for tool in state.active_tools {
+                div { key: "{tool.call_id}", class: "conversation-live-tool",
+                    p { class: "conversation-meta", "Running · {tool.name}" }
+                    pre { class: "conversation-call", "{tool.call.as_deref().unwrap_or(&tool.name)}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn LiveThought(text: String) -> Element {
+    let markdown = use_memo(use_reactive(&text, |text| {
+        crate::review_view::render_markdown(&text)
+    }));
+    rsx! {
+        article { class: "conversation-thought conversation-live-thought", aria_label: "Live thought",
+            div { class: "markdown-body", dangerous_inner_html: markdown() }
+        }
+    }
+}
+
+/// A timer updates only the footer; unchanged history Markdown stays memoized.
 #[component]
 fn LiveActivity(
-    address: wire::AgentAddress,
-    session: Signal<Option<wire::DetailSession>>,
+    live: Live,
+    turns: Vec<Turn>,
     coarse: String,
     connected: bool,
     waiting: Option<String>,
 ) -> Element {
-    let live = use_live_activity(address, session);
-    rsx! { ActivityRow { live: live(), coarse, connected, waiting } }
+    let mut now = use_signal(now_ms);
+    use_interval(Duration::from_secs(1), move |()| now.set(now_ms()));
+    let turn = current_turn(&turns);
+    let end = if matches!(&live, Live::Detail(state) if state.phase == wire::LivePhase::Idle) {
+        latest_record_time(turn)
+    } else {
+        Some(now())
+    };
+    let elapsed_seconds = turn
+        .first()
+        .filter(|turn| turn.role == Role::User)
+        .and_then(|turn| turn.timestamp.as_ref())
+        .zip(end)
+        .and_then(|(start, end)| end.checked_sub(start.ms))
+        .map(|ms| ms / 1000);
+    rsx! { ActivityRow { live, coarse, connected, waiting, turns, elapsed_seconds } }
+}
+
+fn current_turn(turns: &[Turn]) -> &[Turn] {
+    &turns[turns
+        .iter()
+        .rposition(|turn| turn.role == Role::User)
+        .unwrap_or(0)..]
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> u64 {
+    js_sys::Date::now() as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[component]
@@ -949,11 +1125,42 @@ pub(crate) fn ActivityRow(
     coarse: String,
     connected: bool,
     waiting: Option<String>,
+    #[props(default)] turns: Vec<Turn>,
+    #[props(default)] elapsed_seconds: Option<u64>,
 ) -> Element {
     let (phase, detail) = activity_label(&live, &coarse, connected, waiting.as_deref());
+    let turns = current_turn(&turns);
+    let (mut thoughts, mut calls) = work_counts(turns);
+    if detail == "Live"
+        && let Live::Detail(state) = &live
+    {
+        if state.reasoning.as_ref().is_some_and(|text| {
+            !text.is_empty()
+                && !turns
+                    .last()
+                    .is_some_and(|turn| turn.role == Role::Thinking && turn.text == *text)
+        }) {
+            thoughts += 1;
+        }
+        calls += state
+            .active_tools
+            .iter()
+            .filter(|active| {
+                !turns.iter().any(|turn| {
+                    turn.tool
+                        .as_ref()
+                        .is_some_and(|tool| tool.call_id == active.call_id)
+                })
+            })
+            .count();
+    }
     rsx! {
         div { class: "conversation-activity", "data-state": if detail == "Needs you" { "blocked" } else if phase == "Disconnected" { "disconnected" } else { coarse.as_str() },
             p { role: "status", aria_live: "polite", aria_atomic: "true", "{phase}" }
+            if detail == "Live" {
+                if let Some(seconds) = elapsed_seconds { p { class: "activity-elapsed", "{elapsed_label(seconds)}" } }
+                p { class: "activity-counts", "{count_label(thoughts, calls)}" }
+            }
             p { class: "activity-detail", "{detail}" }
         }
     }
