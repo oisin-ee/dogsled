@@ -404,12 +404,6 @@ fn records(ledger: &Ledger, directory: &str) -> Result<Vec<(String, Option<Value
         records.extend(records!(dispositions, ".disposition.json"));
         return Ok(records);
     }
-    if directory == "job-validity" {
-        return crate::job_store::validities(ledger)?
-            .into_iter()
-            .map(|(id, value)| Ok((format!("{id}.json"), Some(serde_json::to_value(value)?))))
-            .collect();
-    }
     if directory == "cancellations" {
         return crate::job_store::cancellations(ledger)?
             .into_iter()
@@ -438,16 +432,22 @@ type Owners = BTreeMap<String, (String, String)>;
 fn owner_panes<'a>(
     ledger: &Ledger,
     host: &str,
+    validities: &[crate::job_store::OwnedValidity],
     records: impl Iterator<Item = &'a (String, Option<Value>)>,
     tickets: &[crate::work::Ticket],
     jobs: &[crate::jobs::Job],
 ) -> Result<Owners> {
     let mut owners = BTreeMap::new();
-    for saved in crate::job_store::owners(ledger)? {
-        owners.insert(
-            saved.id,
-            (saved.owner, saved.owner_host.unwrap_or_else(|| host.into())),
-        );
+    for saved in validities {
+        if let Some(owner) = &saved.owner {
+            owners.insert(
+                saved.id.clone(),
+                (
+                    owner.clone(),
+                    saved.owner_host.clone().unwrap_or_else(|| host.into()),
+                ),
+            );
+        }
     }
     for id in crate::launch_store::ids(ledger)? {
         let launch = if let Some(release) = crate::launch_store::release(ledger, &id)? {
@@ -628,6 +628,8 @@ fn owner_hold(owners: &Owners, host: &str, code: &str, resource: String, id: &st
 /// The host reports existing claims; it never decides whether to release them.
 pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<Hold>> {
     let mut holds = Vec::new();
+    // Validity holds and their owners come from this one read.
+    let validities = crate::job_store::owned_validities(ledger)?;
     let admissions = records(ledger, "admissions")?;
     let launches = crate::launch_store::progress_entries(ledger)?;
     let grants = records(ledger, "placement-grants")?;
@@ -636,6 +638,7 @@ pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<H
     let owners = owner_panes(
         ledger,
         host,
+        &validities,
         admissions.iter().chain(&launches).chain(&grants),
         &tickets,
         &jobs,
@@ -668,7 +671,19 @@ pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<H
     holds.extend(capacity(ledger, host, now, ttl_ms, &tickets, &owned)?);
     for (directory, code, saved) in [
         ("placement-grants", "placement_grant", grants),
-        ("job-validity", "validity", records(ledger, "job-validity")?),
+        (
+            "job-validity",
+            "validity",
+            validities
+                .iter()
+                .map(|saved| {
+                    Ok((
+                        format!("{}.json", saved.id),
+                        Some(serde_json::to_value(saved.validity)?),
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
     ] {
         for (name, value) in saved {
             if directory == "placement-grants" && name.ends_with(".lifecycle.json") {

@@ -446,6 +446,39 @@ pub(crate) fn put_validity(tx: &Transaction<'_>, id: &str, validity: Validity) -
     Ok(())
 }
 
+/// A request's validity with the owner recorded on the same row.
+pub(crate) struct OwnedValidity {
+    pub id: String,
+    pub validity: Validity,
+    pub owner: Option<String>,
+    pub owner_host: Option<String>,
+}
+
+/// Every validity and its owner from one read, so a reader never pairs a validity row with
+/// an owner list captured before that row was issued.
+pub(crate) fn owned_validities(ledger: &Ledger) -> Result<Vec<OwnedValidity>> {
+    store::read(ledger, |tx| {
+        let mut statement = tx.prepare_cached(
+            "SELECT id, version, created_ms, owner, owner_host FROM job_validity
+             ORDER BY created_ms, id",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut values = Vec::new();
+        while let Some(row) = rows.next()? {
+            values.push(OwnedValidity {
+                id: required(row, "id")?,
+                validity: Validity {
+                    version: row.get("version")?,
+                    created_ms: rows::unsigned(row.get("created_ms")?)?,
+                },
+                owner: row.get("owner")?,
+                owner_host: row.get("owner_host")?,
+            });
+        }
+        Ok(values)
+    })
+}
+
 pub(crate) fn validities(ledger: &Ledger) -> Result<Vec<(String, Validity)>> {
     store::read(ledger, |tx| {
         let mut statement = tx.prepare_cached(
