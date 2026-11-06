@@ -35,18 +35,18 @@ A finished turn folds its work into one line, `Worked for 2m 31s · 6 thoughts �
 
 `one-stream.html`:
 
-- **Conversation:** one stream, like Pi. Messages, thinking, tool calls, and replies in recorded order, about 1000px wide at 1600px.
-- **Left column:** the inbox on top (never hidden), then the agent list. Todos sit on the right from 1400px.
-- **Agent list:** two groups, Working and Not working.
-  - A working row shows the title, repository, phase, elapsed time, and model.
-    Below that, it shows the newest thought (italic, two lines) or the running command (`$ …`, monospace, two lines).
-  - The selected row has an indigo edge. Its snippet follows the live stream as the thought types in.
-  - A row that is not working is one line of state, such as `Idle · 12m` or `Waiting on its lead`.
-- **Snippets:** the selected agent's snippet is from the replayed turn.
-  The other two are real recorded gpt-6-astra steps: the headline thought `Opening a new tab`, and the command `ssh -o BatchMode=yes -o ConnectTimeout=10 netcup mise x -- python3 -`.
+- **Conversation:** one stream, like Pi. Messages, thinking, tool calls, and replies in recorded order.
+- **Left sidebars:** unchanged from the shipped portal. The inbox (280px) and the agents list (248px) are two separate columns, per the 2026-11-02 steer.
+  Todos sit on the right from 1400px and become a tab below it. Below 1100px, agents become a tab, as shipped.
+  The owner rejected stacking agents under the inbox on 2026-11-06.
+- **Agent rows:** grouped by repository, as shipped. A working row adds two things:
+  - its phase and elapsed time, such as `Thinking · 1m 19s`;
+  - its newest thought (italic, two lines) or its running command (`$ …`, monospace, two lines).
+  The selected row has an indigo edge, and its snippet follows the live stream. A row that is not working keeps one line of state, such as `Idle · 12m`.
+- **Snippets:** the selected agent's snippet comes from the replayed turn.
+  The other two are real recorded gpt-6-astra steps: the thought `Opening a new tab`, and the command `ssh -o BatchMode=yes -o ConnectTimeout=10 netcup mise x -- python3 -`.
   Their titles and timings are illustrative.
-
-The Working and Not working grouping replaces the per-repository grouping in this mockup. The repository moves onto each row. The owner should confirm this.
+- **Space:** with the shipped columns, the conversation is 772px at 1600px wide. This mockup does not gain width. That is an open question for the owner.
 
 Captures (each `.png` has a `.png.json` provenance sidecar):
 
@@ -97,13 +97,13 @@ The portal is Rust, so it cannot call Pi's TypeScript `renderCall`. It must repr
 
 - Impeccable context was loaded for `web/src/agent_view.rs`. The previews use the `DESIGN.md` palette, type, radii, and segmented-tab tokens.
 - The generator read the session JSONL and wrote the HTML. It is a one-off design script and is not in the repository.
-- The managed browser rendered `one-stream.html` at 1600 × 1000, 1280 × 800, and 900 × 800. No scroll region, header, top bar, or agent row had horizontal overflow at any size.
+- The managed browser rendered `one-stream.html` at 1600 × 1000, 1280 × 800, and 900 × 800. No scroll region, header, top bar, agent row, or phase line had horizontal overflow at any size.
 - In playback, the selected row's snippet advanced with the typed thought.
 - The Impeccable detector found `overused-font` (Inter, the `DESIGN.md` font) and `flat-type-hierarchy` (the portal's 13–14px Operate scale). It found no other issues.
 
 ## Before implementation
 
-1. The owner approves the revised direction and the Working / Not working grouping.
+1. The owner approves the revised direction and decides how, if at all, the conversation gets more width.
 2. Update the editable Squig layout (`plans/chat-conversation.squig.json`) to it.
 3. Define the protocol change: reasoning and tool-argument fields, bounds, and history reads.
 4. Build with the existing Dioxus components; these HTML files are design artifacts only.

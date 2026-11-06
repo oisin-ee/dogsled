@@ -1,14 +1,14 @@
 {
   "title": "Live reasoning: one stream with a live agent list",
-  "question": "Your pick: one stream like Pi, with the focus idea moved into the agent list instead of a card row. The conversation replays a real Pi turn (claude-opus-5-5 lead, 6 Nov 12:26). The other agents' snippets are real recorded thoughts and commands from gpt-6-astra sessions; their titles, timings, and the todos are illustrative. “Build this” records a design preference only.",
+  "question": "One stream like Pi. The inbox and agents are back as two separate sidebars, and the live focus is in each agent row. The conversation replays a real Pi turn (claude-opus-5-5 lead, 6 Nov 12:26). The other agents' snippets are real recorded gpt-6-astra steps; their titles, timings, and the todos are illustrative.",
   "options": [
     {
       "id": "one-stream",
       "kind": "grounded",
-      "label": "One stream, with a live agent list",
-      "thesis": "The conversation is the Pi session: your message, the agent's thinking (italic) and tool calls ($ command, output tail) in recorded order, then the reply. A finished turn folds its work into one line. The left column lists agents as Working and Not working; each working row shows its phase, elapsed time, model, and its newest thought or command, and the selected row follows the live stream.",
+      "label": "One stream, with live agent rows",
+      "thesis": "The conversation is the Pi session: thinking (italic) and tool calls ($ command, output tail) in recorded order, then the reply. The inbox and agents stay two separate sidebars, as shipped. Each working agent row adds its phase, elapsed time, and newest thought or command.",
       "viewport": "1600 × 1000 at the live edge; also 1280 × 800, 900 × 800, and a history capture with the earlier turn opened.",
-      "risk": "Five or more working agents push idle ones below the fold; the Working group may need its own scroll limit.",
+      "risk": "With the shipped columns, the conversation stays 772px wide at 1600px.",
       "palette": [
         "#0e0f11",
         "#141518",
@@ -17,8 +17,8 @@
       ],
       "materials": [
         "Pi transcript order",
-        "Live agent list",
-        "Folded finished work"
+        "Live agent rows",
+        "Shipped two sidebars"
       ],
       "html": ".impeccable/mocks/live-reasoning/one-stream.html",
       "htmlFrame": "1600x1000",
