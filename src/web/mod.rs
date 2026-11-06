@@ -8,6 +8,7 @@ pub mod board;
 pub mod guard;
 pub mod inbox;
 pub mod oneshot;
+mod peer_stream;
 pub mod questions;
 pub mod reviews;
 pub mod store;
@@ -78,6 +79,7 @@ pub struct AppState {
     questions: store::Store,
     stop: CancellationToken,
     leads: Option<Arc<LeadLaunch>>,
+    followers: peer_stream::Followers,
 }
 
 impl AppState {
@@ -101,6 +103,7 @@ impl AppState {
             questions,
             stop: CancellationToken::new(),
             leads: None,
+            followers: peer_stream::Followers::default(),
         }
     }
 

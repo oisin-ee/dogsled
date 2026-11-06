@@ -744,6 +744,8 @@ pub enum HostCommand {
         pane: String,
         #[arg(long)]
         input: String,
+        #[arg(long)]
+        follow: bool,
     },
     /// Export host-owned observer facts, optionally waiting for a new local revision.
     Observation {
