@@ -47,15 +47,11 @@ In `src/web/agents.rs` tests:
 - The remote route sends `{"operation":"files"}` over the peer command and relays the reply.
 - An event line for a files change carries `revisions.files`.
 
-Commands, all of which must pass:
-- `cargo test --bin dogsled observation::tests::details`
-- `cargo test --bin dogsled web::agents`
-- `cargo test -p portal-types`
+These pass: `cargo test --bin dogsled observation::tests::details`, `cargo test --bin dogsled web::agents`, `cargo test -p portal-types`.
 
 ## Checks
-- Run `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`.
-- The lead builds `web/public` in your worktree and runs web-lint. Don't run web-build. Wait for `BUNDLE_EXIT=0` in the log the lead names before you compile the server crate.
-- Commit through the pre-commit hook, without bypassing it.
+- Run `cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings`. Commit through the pre-commit hook, without bypassing it.
+- The lead builds `web/public` and runs web-lint. Don't run web-build. Wait for `BUNDLE_EXIT=0` in the named log before you compile the server crate.
 
 ## Base
-The revision that contains U6a and U5, named in the spawn. This brief is complete; it depends on no plan file.
+The revision with U6a and U5, named in the spawn. This brief is complete; it depends on no plan file.
