@@ -1,12 +1,12 @@
 {
   "title": "Live reasoning: one stream with a live agent list",
-  "question": "One stream like Pi. The inbox and agents are back as two separate sidebars, and the live focus is in each agent row. The conversation replays a real Pi turn (claude-opus-5-5 lead, 6 Nov 12:26). The other agents' snippets are real recorded gpt-6-astra steps; their titles, timings, and the todos are illustrative.",
+  "question": "One stream like Pi, two separate sidebars, and workers nested under each lead. The conversation replays a real Pi turn (dogsled lead, 6 Nov 12:26). The rondo lead and its three workers are the real fleet at 13:24 the same day, with their real thoughts and commands. Todos and host meters are illustrative.",
   "options": [
     {
       "id": "one-stream",
       "kind": "grounded",
-      "label": "One stream, with live agent rows",
-      "thesis": "The conversation is the Pi session: thinking (italic) and tool calls ($ command, output tail) in recorded order, then the reply. The inbox and agents stay two separate sidebars, as shipped. Each working agent row adds its phase, elapsed time, and newest thought or command.",
+      "label": "One stream, live agent rows, workers under their lead",
+      "thesis": "The conversation is the Pi session: thinking (italic) and tool calls ($ command, output tail) in recorded order, then the reply. Inbox and agents stay two separate sidebars. Each lead row shows its phase and newest thought or command. Its workers nest under it, each with its own phase and newest thought or command.",
       "viewport": "1600 × 1000 at the live edge; also 1280 × 800, 900 × 800, and a history capture with the earlier turn opened.",
       "risk": "With the shipped columns, the conversation stays 772px wide at 1600px.",
       "palette": [
@@ -18,7 +18,7 @@
       "materials": [
         "Pi transcript order",
         "Live agent rows",
-        "Shipped two sidebars"
+        "Workers nested under lead"
       ],
       "html": ".impeccable/mocks/live-reasoning/one-stream.html",
       "htmlFrame": "1600x1000",
