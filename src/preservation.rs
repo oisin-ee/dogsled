@@ -449,7 +449,8 @@ impl Operation {
             if saved.context.as_ref() != Some(&context) {
                 return Err(Refusal::VerificationFailed.into());
             }
-            verify(shell, checkout, &saved)?;
+            // `show` has just proved the archive.
+            unchanged(shell, checkout, &saved)?;
             Ok(saved)
         } else if exists.status == 1 {
             capture(shell, checkout, id, Some(context))
@@ -493,7 +494,7 @@ impl Operation {
             .initial
             .as_ref()
             .ok_or_else(|| self.refusal("missing initial snapshot"))?;
-        match verify(shell, checkout, previous) {
+        match unchanged(shell, checkout, previous) {
             Ok(()) => (),
             Err(Error::Refused(Refusal::VerificationFailed | Refusal::CheckoutChanged)) => {
                 if self.successor_id.is_none() {
@@ -670,11 +671,21 @@ fn git_words(checkout: &Path, index: Option<&Path>, args: &[&str]) -> Result<Vec
 }
 
 fn raw(shell: &dyn Shell, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = shell.run_bytes_bounded(
-        "env",
-        &git_words(repo, None, args)?,
-        shell.budget().remaining("git")?,
-    )?;
+    raw_input(shell, repo, args, None)
+}
+
+fn raw_input(
+    shell: &dyn Shell,
+    repo: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let words = git_words(repo, None, args)?;
+    let budget = shell.budget().remaining("git")?;
+    let out = match input {
+        Some(input) => shell.run_input_bytes_bounded("env", &words, input, budget)?,
+        None => shell.run_bytes_bounded("env", &words, budget)?,
+    };
     if out.status != 0 {
         return Err(crate::error::Error::Command {
             program: "git".into(),
@@ -903,6 +914,8 @@ fn worktree_tree(
     )?;
     let mut removals = String::new();
     let mut entries = String::new();
+    // Regular files are hashed together below: one Git process, not one per file.
+    let mut files: Vec<(&str, &str)> = Vec::new();
     for quoted in paths.lines().filter(|path| !path.is_empty()) {
         let bytes = unquote_path(quoted)?;
         let path = Path::new(std::ffi::OsStr::from_bytes(&bytes));
@@ -919,25 +932,46 @@ fn worktree_tree(
             }
             continue;
         }
-        let (mode, content) = if meta.is_symlink() {
+        if meta.is_symlink() {
             let target = fs::read_link(&absolute)?;
-            ("120000", target.as_os_str().as_bytes().to_vec())
+            let args = ["hash-object", "-w", "--no-filters", "--stdin"];
+            let out = git_input(
+                shell,
+                checkout,
+                None,
+                &args,
+                Some(target.as_os_str().as_bytes()),
+            )?;
+            let hash = crate::shell::checked("git", &args.map(String::from), out)?.stdout;
+            let _ = writeln!(entries, "120000 {}\t{quoted}", hash.trim());
         } else if meta.is_file() {
-            (
-                if meta.permissions().mode() & 0o111 == 0 {
-                    "100644"
-                } else {
-                    "100755"
-                },
-                fs::read(&absolute)?,
-            )
+            let mode = if meta.permissions().mode() & 0o111 == 0 {
+                "100644"
+            } else {
+                "100755"
+            };
+            files.push((mode, quoted));
         } else {
             return Err(Refusal::UnsupportedFileType(absolute).into());
-        };
-        let args = ["hash-object", "-w", "--no-filters", "--stdin"];
-        let out = git_input(shell, checkout, None, &args, Some(&content))?;
-        let hash = crate::shell::checked("git", &args.map(String::from), out)?.stdout;
-        let _ = writeln!(entries, "{mode} {}\t{quoted}", hash.trim());
+        }
+    }
+    if !files.is_empty() {
+        // `--stdin-paths` reads the C-quoted names that `ls-files` printed, one per line,
+        // and prints one object name per line in the same order.
+        let names = files.iter().fold(String::new(), |mut names, (_, quoted)| {
+            let _ = writeln!(names, "{quoted}");
+            names
+        });
+        let args = ["hash-object", "-w", "--no-filters", "--stdin-paths"];
+        let out = git_input(shell, checkout, None, &args, Some(names.as_bytes()))?;
+        let hashes = crate::shell::checked("git", &args.map(String::from), out)?.stdout;
+        let hashes: Vec<&str> = hashes.lines().collect();
+        if hashes.len() != files.len() {
+            return Err(Refusal::VerificationFailed.into());
+        }
+        for ((mode, quoted), hash) in files.iter().zip(hashes) {
+            let _ = writeln!(entries, "{mode} {}\t{quoted}", hash.trim());
+        }
     }
     // Remove directory/file conflicts before adding their replacements.
     removals.push_str(&entries);
@@ -1229,10 +1263,18 @@ fn capture(
 }
 
 /// Verify the pinned record, both trees, and the unchanged live checkout.
+/// Close proves the archive twice: right after the pin, and right before normalization
+/// clears captured files. Every other step compares the live checkout with [`unchanged`].
 pub fn verify(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
+    verify_archived(shell, checkout, snapshot)?;
+    unchanged(shell, checkout, snapshot)
+}
+
+/// The live checkout still holds exactly the captured HEAD, index, and working bytes, and
+/// the pinned ref still names the snapshot. It does not re-read the archived objects.
+fn unchanged(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
     preflight(shell, checkout)?;
     let before = observe(shell, checkout)?;
-    verify_archived(shell, checkout, snapshot)?;
     let scratch = Scratch::new()?;
     let current_index = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
     let current_working = worktree_tree(shell, checkout, &scratch, &current_index)?;
@@ -1269,7 +1311,8 @@ impl VerifiedRemoval {
         {
             return Err(close_error(Refusal::CheckoutChanged.into()));
         }
-        verify(shell, Path::new(&tree.path), saved).map_err(close_error)?;
+        // The archive was proved after its pin; `normalize` proves it again before clearing.
+        unchanged(shell, Path::new(&tree.path), saved).map_err(close_error)?;
         Ok(Self {
             tree: tree.tree(),
             snapshot: saved.clone(),
@@ -1613,9 +1656,32 @@ struct FileEntry {
     bytes: Vec<u8>,
 }
 
+/// Read one `<oid> blob <size>\n<content>\n` record of `git cat-file --batch` output.
+/// A missing, ambiguous, or non-blob object fails verification.
+fn batch_blob<'a>(output: &'a [u8], oid: &str) -> Result<(&'a [u8], &'a [u8])> {
+    let end = output
+        .iter()
+        .position(|b| *b == b'\n')
+        .ok_or(Refusal::VerificationFailed)?;
+    let header = std::str::from_utf8(&output[..end]).map_err(|_| Refusal::VerificationFailed)?;
+    let mut words = header.split(' ');
+    let (Some(name), Some("blob"), Some(size), None) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return Err(Refusal::VerificationFailed.into());
+    };
+    let size: usize = size.parse().map_err(|_| Refusal::VerificationFailed)?;
+    let body = &output[end + 1..];
+    if name != oid || body.len() <= size || body[size] != b'\n' {
+        return Err(Refusal::VerificationFailed.into());
+    }
+    Ok((&body[..size], &body[size + 1..]))
+}
+
 fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>> {
     let listing = raw(shell, repo, &["ls-tree", "-r", "-z", tree])?;
     let mut files = Vec::new();
+    let mut blobs = Vec::new();
     let mut paths = std::collections::BTreeSet::new();
     for entry in listing.split(|b| *b == 0).filter(|s| !s.is_empty()) {
         let tab = entry
@@ -1636,13 +1702,11 @@ fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>
         let mode = words.next().ok_or(Refusal::VerificationFailed)?;
         let kind = words.next().ok_or(Refusal::VerificationFailed)?;
         let oid = words.next().ok_or(Refusal::VerificationFailed)?;
-        let bytes = match (mode, kind) {
-            ("100644" | "100755" | "120000", "blob") => {
-                raw(shell, repo, &["cat-file", "blob", oid])?
-            }
-            ("160000", "commit") => Vec::new(),
+        match (mode, kind) {
+            ("100644" | "100755" | "120000", "blob") => blobs.push((files.len(), oid)),
+            ("160000", "commit") => {}
             _ => return Err(Refusal::VerificationFailed.into()),
-        };
+        }
         let path = PathBuf::from(std::ffi::OsStr::from_bytes(name));
         if !paths.insert(path.clone()) {
             return Err(Refusal::VerificationFailed.into());
@@ -1650,8 +1714,29 @@ fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>
         files.push(FileEntry {
             path,
             mode: mode.into(),
-            bytes,
+            bytes: Vec::new(),
         });
+    }
+    if !blobs.is_empty() {
+        let names = blobs.iter().fold(String::new(), |mut names, (_, oid)| {
+            let _ = writeln!(names, "{oid}");
+            names
+        });
+        let batch = raw_input(
+            shell,
+            repo,
+            &["cat-file", "--batch"],
+            Some(names.as_bytes()),
+        )?;
+        let mut rest = batch.as_slice();
+        for (file, oid) in blobs {
+            let (bytes, next) = batch_blob(rest, oid)?;
+            files[file].bytes = bytes.to_vec();
+            rest = next;
+        }
+        if !rest.is_empty() {
+            return Err(Refusal::VerificationFailed.into());
+        }
     }
     for path in &paths {
         if path
@@ -2327,6 +2412,18 @@ mod tests {
             self.replace(args)?;
             Ok(output)
         }
+        fn run_input_bytes_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            input: &[u8],
+            timeout: std::time::Duration,
+        ) -> crate::error::Result<crate::shell::BytesOutput> {
+            let output =
+                System::default().run_input_bytes_bounded(program, args, input, timeout)?;
+            self.replace(args)?;
+            Ok(output)
+        }
     }
 
     #[test]
@@ -2538,6 +2635,24 @@ mod tests {
     }
 
     #[test]
+    fn quoted_names_keep_their_own_bytes_in_one_batch() {
+        let repo = Repo::new(true);
+        let names = ["we\"ird\nname", "tab\there", "caf\u{e9}", "plain"];
+        for (index, name) in names.iter().enumerate() {
+            fs::write(repo.path.join(name), format!("content {index}\0")).unwrap();
+        }
+        let saved = repo.round_trip();
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(
+                fs::read(repo.scratch.0.join("restored").join(name)).unwrap(),
+                format!("content {index}\0").as_bytes(),
+                "{name:?}"
+            );
+        }
+        verify(&System::default(), &repo.path, &saved).unwrap();
+    }
+
+    #[test]
     fn crlf_attributes_preserve_raw_bytes() {
         let repo = Repo::new(true);
         fs::write(repo.path.join(".gitattributes"), b"* text eol=lf\n").unwrap();
@@ -2615,6 +2730,21 @@ mod tests {
             timeout: std::time::Duration,
         ) -> crate::error::Result<crate::shell::BytesOutput> {
             System::default().run_bytes_bounded("env", &self.args(program, args), timeout)
+        }
+
+        fn run_input_bytes_bounded(
+            &self,
+            program: &str,
+            args: &[String],
+            input: &[u8],
+            timeout: std::time::Duration,
+        ) -> crate::error::Result<crate::shell::BytesOutput> {
+            System::default().run_input_bytes_bounded(
+                "env",
+                &self.args(program, args),
+                input,
+                timeout,
+            )
         }
 
         fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {

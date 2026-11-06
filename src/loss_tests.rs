@@ -1023,6 +1023,16 @@ impl Shell for ShellIn {
         crate::shell::System::default().run_bytes_bounded(program, args, timeout)
     }
 
+    fn run_input_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<crate::shell::BytesOutput> {
+        crate::shell::System::default().run_input_bytes_bounded(program, args, input, timeout)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         let value = if program == "herdr" && args == ["pane", "list"] {
             Some(serde_json::json!({"result":{"panes":[
@@ -1648,6 +1658,16 @@ impl Shell for LifecycleShell {
         timeout: std::time::Duration,
     ) -> Result<crate::shell::BytesOutput> {
         crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+    }
+
+    fn run_input_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<crate::shell::BytesOutput> {
+        crate::shell::System::default().run_input_bytes_bounded(program, args, input, timeout)
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
