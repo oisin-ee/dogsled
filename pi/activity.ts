@@ -8,20 +8,49 @@ export interface ActiveTool {
   call_id: string;
   name: string;
   parent_call_id: string | null;
+  call?: string;
 }
 export type Payload =
-  | { kind: "snapshot"; state: { phase: Phase; active_tools: ActiveTool[] } }
+  | { kind: "snapshot"; state: { phase: Phase; active_tools: ActiveTool[]; reasoning?: string } }
   | { kind: "unavailable"; reason: "resyncing" | "overflow" }
   | { kind: "closed" };
 export type ActivityEvent =
   | { type: "agent_start" | "agent_end" | "settled" | "message_end" }
-  | { type: "block"; index: number; phase: "thinking" | "responding"; ended: boolean }
+  | { type: "block"; index: number; phase: "thinking" | "responding"; ended: boolean; delta?: string }
   | { type: "tool_start"; tool: ActiveTool }
   | { type: "tool_end"; id: string };
+
+/** The same call-line rule is used by the transcript reader in src/activity.rs. */
+export function callLine(name: string, arguments_: unknown): string {
+  let args = arguments_;
+  if (typeof args === "string") {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      // Non-JSON strings remain literal arguments in the fallback display.
+    }
+  }
+  if (record(args)) {
+    const command = args["command"] ?? args["cmd"];
+    if (typeof command === "string") return `$ ${command}`;
+    const path = args["path"] ?? args["file_path"];
+    if (typeof path === "string") return `${name.toLowerCase()} ${path}`;
+  }
+  return `${name} ${JSON.stringify(args) ?? "null"}`;
+}
+
+/** Newest UTF-8 bytes, without splitting a character. */
+function tail(value: string, max: number): string {
+  const bytes = Buffer.from(value);
+  let start = Math.max(0, bytes.length - max);
+  while (start < bytes.length && ((bytes.at(start) ?? 0) & 0xc0) === 0x80) start++;
+  return bytes.subarray(start).toString();
+}
 
 /** Preparation events never enter this reducer. Overflow is sticky until verified settlement. */
 export class ActivityReducer {
   private blocks = new Map<number, "thinking" | "responding">();
+  private thoughts = new Map<number, string>();
   private tools = new Map<string, ActiveTool>();
   private gap: "resyncing" | "overflow" | undefined;
   private idle: boolean;
@@ -34,23 +63,30 @@ export class ActivityReducer {
   reduce(event: ActivityEvent): Payload {
     if (event.type === "settled") {
       this.blocks.clear();
+      this.thoughts.clear();
       this.tools.clear();
       this.gap = undefined;
       this.idle = true;
     } else if (!this.gap) {
       if (event.type === "agent_start" || event.type === "agent_end") this.idle = false;
-      else if (event.type === "message_end") this.blocks.clear();
-      else if (event.type === "block") {
+      else if (event.type === "message_end") {
+        this.blocks.clear();
+        this.thoughts.clear();
+      } else if (event.type === "block") {
         this.idle = false;
         this.blocks.delete(event.index);
         if (!event.ended) this.blocks.set(event.index, event.phase);
+        if (event.phase === "thinking") {
+          this.thoughts.set(event.index, (this.thoughts.get(event.index) ?? "") + (event.delta ?? ""));
+        }
       } else if (event.type === "tool_start") {
         this.idle = false;
         this.tools.set(event.tool.call_id, { ...event.tool });
       } else if (event.type === "tool_end") this.tools.delete(event.id);
-      if (this.blocks.size > 64 || this.tools.size > 64) {
+      if (this.blocks.size > 64 || this.thoughts.size > 64 || this.tools.size > 64) {
         this.gap = "overflow";
         this.blocks.clear();
+        this.thoughts.clear();
         this.tools.clear();
       }
     }
@@ -63,7 +99,15 @@ export class ActivityReducer {
     const phase = active_tools.length
       ? "tool_running"
       : ([...this.blocks.values()].at(-1) ?? (this.idle ? "idle" : "working"));
-    return { kind: "snapshot", state: { phase, active_tools } };
+    const reasoning = tail(
+      [...this.thoughts.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([, thought]) => thought)
+        .filter((thought) => thought.length > 0)
+        .join("\n\n"),
+      16 * 1024,
+    );
+    return { kind: "snapshot", state: { phase, active_tools, ...(reasoning ? { reasoning } : {}) } };
   }
 }
 
@@ -401,6 +445,7 @@ export function registerActivity(pi: ExtensionAPI, client: Client, pane: string 
           index: update.contentIndex,
           phase: update.type.startsWith("thinking") ? "thinking" : "responding",
           ended: update.type.endsWith("_end"),
+          ...(update.type === "thinking_delta" ? { delta: update.delta } : {}),
         });
         break;
     }
@@ -415,6 +460,7 @@ export function registerActivity(pi: ExtensionAPI, client: Client, pane: string 
         call_id: event.toolCallId,
         name: event.toolName,
         parent_call_id: event.parentToolCallId ?? null,
+        call: tail(callLine(event.toolName, event.args), 512),
       },
     });
   });

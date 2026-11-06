@@ -159,9 +159,11 @@ test("the extension publishes real activity through PortalClient with bearer aut
 	});
 	let first!: () => void;
 	let thinking!: () => void;
+	let tool!: () => void;
 	let closed!: () => void;
 	const firstPublication = new Promise<void>(resolve => { first = resolve; });
 	const thinkingPublication = new Promise<void>(resolve => { thinking = resolve; });
+	const toolPublication = new Promise<void>(resolve => { tool = resolve; });
 	const closure = new Promise<void>(resolve => { closed = resolve; });
 	const publications: any[] = [];
 	t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
@@ -174,6 +176,7 @@ test("the extension publishes real activity through PortalClient with bearer aut
 			publications.push(body.payload);
 			if (body.payload.state?.phase === "idle") first();
 			if (body.payload.state?.phase === "thinking") thinking();
+			if (body.payload.state?.phase === "tool_running") tool();
 			if (body.payload.kind === "closed") closed();
 		}
 		return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", generation: 1,
@@ -185,12 +188,19 @@ test("the extension publishes real activity through PortalClient with bearer aut
 	await firstPublication;
 	await r.invoke("agent_start");
 	await r.invoke("message_update", { message: { role: "assistant" }, assistantMessageEvent: {
-		type: "thinking_delta", contentIndex: 0, delta: "private reasoning that must not leave Pi",
+		type: "thinking_delta", contentIndex: 0, delta: "recorded reasoning that reaches the portal",
 	} });
 	await thinkingPublication;
+	await r.invoke("tool_execution_start", { toolCallId: "call", toolName: "bash",
+		args: { command: "界".repeat(200) + "\n!" } });
+	await toolPublication;
+	const call = publications.find(payload => payload.state?.phase === "tool_running")?.state.active_tools[0].call;
+	assert.equal(call, "界".repeat(170) + "\n!");
+	assert.equal(Buffer.byteLength(call), 512);
 	await r.invoke("session_shutdown");
 	await closure;
-	assert.equal(JSON.stringify(publications).includes("private reasoning"), false);
+	assert.equal(publications.find(payload => payload.state?.phase === "thinking")?.state.reasoning,
+		"recorded reasoning that reaches the portal");
 	assert.deepEqual(publications.at(-1), { kind: "closed" });
 });
 

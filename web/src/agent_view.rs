@@ -774,6 +774,7 @@ fn source_label(turn: &Turn, assistant: &str) -> (String, String, bool) {
             let author = match turn.role {
                 Role::User => "You",
                 Role::Assistant => assistant,
+                Role::Thinking => "Thinking",
                 Role::Context => "Context",
                 Role::Tool => "Tool",
             };

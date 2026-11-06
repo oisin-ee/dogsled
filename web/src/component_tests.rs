@@ -736,6 +736,9 @@ fn tool_turn(
     use portal_types::agents::{Role, ToolSummary};
     let mut turn = history_turn(id, Role::Tool, "Do not render raw tool text or reasoning.");
     turn.tool = Some(ToolSummary {
+        call: None,
+        output: None,
+        output_lines: None,
         call_id: format!("call-{id}"),
         name: name.map(str::to_owned),
         status,
@@ -918,14 +921,17 @@ fn every_live_phase_uses_only_actual_detail_and_names_all_active_tools() {
     ] {
         let html = render_activity(
             Live::Detail(LiveState {
+                reasoning: None,
                 phase,
                 active_tools: vec![
                     ActiveTool {
+                        call: None,
                         call_id: "read".into(),
                         name: "read".into(),
                         parent_call_id: None,
                     },
                     ActiveTool {
+                        call: None,
                         call_id: "bash".into(),
                         name: "bash".into(),
                         parent_call_id: Some("read".into()),
@@ -949,6 +955,7 @@ fn blocked_pending_requests_and_agent_disconnection_take_priority_over_live_deta
     use crate::activity::Live;
     use portal_types::agents::{LivePhase, LiveState};
     let live = Live::Detail(LiveState {
+        reasoning: None,
         phase: LivePhase::Thinking,
         active_tools: Vec::new(),
     });
@@ -1026,6 +1033,7 @@ fn telemetry_loss_and_session_mismatch_remove_detail_but_keep_the_history_and_wo
     fn live_root(handle: LiveHandle) -> Element {
         let live = use_signal(|| {
             Live::Detail(LiveState {
+                reasoning: None,
                 phase: LivePhase::Responding,
                 active_tools: Vec::new(),
             })
