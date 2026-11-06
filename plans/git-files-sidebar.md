@@ -90,185 +90,123 @@ The companion used during review stops after the saved artifacts are verified.
 
 ## Implementation plan
 
-Source review: `128f2d3`, 2026-11-06. The selected layout is B, not the A previews in the saved desktop screenshots.
-The scope remains read-only paths and status. No model generates summaries, labels, or groups.
+Source review: `01423b6`, 2026-11-06. This section replaces the plan committed in `dfe5c0b`.
+That plan routed Files around a defect in agent-view updates instead of fixing it, and added a second observer and SSH relay.
+The scope remains read-only paths and Git status. No model generates summaries, labels, or groups.
 
-### Ownership and approach
+### The defect to fix first
 
-The missing capability is a full checkout-status observation, not another renderer for the existing dirty flag.
-`src/facts.rs::worktree` covers linked worktrees and returns cleanup facts.
-`src/loss.rs::dirty_paths` drops status metadata and can filter deletions. Neither is the Files data source.
+The agent view reloads everything whenever anything changes.
 
-`serve` owns Git reads, sampling, checkout identity, and publication.
-A file observer lives beside the existing detail observer in `src/observation/files.rs`.
-It uses the existing terminal capture and native-session identity. It does not discover agents independently.
-A separate worker prevents a slow Git command from delaying transcript delivery or the main observation loop.
-The HTTP handlers and browser consume its publications. They do not run Git, rediscover hosts, or read foreign filesystem paths.
+- `src/observation/details.rs:187` sets `conversation_revision` to the whole detail revision.
+  A screen change therefore looks like a conversation change.
+- `src/web/agents.rs:711` emits an agent event on every detail revision.
+  The event carries only state, blocked prompt, and session (`portal-types/src/agents.rs` `AgentEvent`).
+- `web/src/agent_view.rs:258` answers every event with `refresh += 1`.
+  One counter (line 131) drives the conversation, agent, screen, board, review, and question fetches (lines 145–205).
+- `web/src/agent_view.rs:265` also bumps the counter every 5 seconds while the stream is live.
+  Prompt, key, and question actions bump it again (lines 305, 322, 491).
+- The board, agent list, and inbox already arrive on `/api/stream` and live in `web/src/app.rs` (lines 209–295).
+  The agent view fetches them again through `/api/board` and `/api/agents`.
+- `src/web/agents.rs:298–337` (`peer_events`) forwards every remote reply, changed or not, on each local portal publication.
 
-The observer shares a capture across viewers of the same checkout on one execution host.
-The canonical Git administrative directory identifies the checkout, not the repository origin or branch name.
-Different worktrees of one repository remain separate. Several panes in the same checkout share file facts but retain distinct pane/session envelopes.
-Opening a selected agent establishes interest so its Files count can update while Todos is visible.
-Closing the agent view releases that interest. The last viewer stops its worker and any owned subprocess.
+Result: each terminal repaint of the selected agent downloads and re-renders its full transcript, plus the board and inbox lists.
+Adding Files to this path would add a Git-triggered reload. Building a separate path around it would leave the defect in place.
 
-Use a dedicated files channel through the existing observation IPC socket.
-Do not attach file payloads to the transcript payload or change `AgentEvent` to refresh conversations whenever Git changes.
-The service supplies the existing native-session binding to this channel. File-specific checkout binding does not become another session authority.
+### Design
 
-| Approach | Decision |
-| --- | --- |
-| Browser or HTTP-handler Git polling | Reject: multiplies collection and breaks producer ownership |
-| Add full lists to every fleet snapshot | Reject: collects unviewed checkouts and enlarges unrelated publications |
-| Run Git synchronously in the transcript worker | Reject: delays conversation loading and detail publication |
-| Serve-owned, viewer-scoped file channel | Proposed: shares collection and isolates Git latency |
+**Per-part revisions.** The detail payload gets one revision per part: conversation, screen, and files.
+A part's revision increases only when that part's content changes. `AgentEvent` carries these revisions.
+The browser refetches a part only when its revision differs from the one it holds.
 
-Memory guidance agrees with this boundary: **One observer per host** and **Conventions and patterns** assign observation to `serve`.
-Current source evidence is `src/observation/details.rs`, `src/observation/ipc.rs`, and `src/service.rs`.
+**One source per datum.** The agent view reads agent state, the board, and the inbox from the existing portal stream context.
+It stops fetching `/api/board` and `/api/agents`.
+Review and question lists are refetched when the inbox in the portal snapshot changes, not on agent events.
 
-### Git capture and typed data
+**No timer while live.** The 5-second interval is removed.
+When the agent stream fails, the view reconnects with backoff and then refetches all parts once.
+Actions do not trigger refetches; their effects arrive as events.
 
-Use the existing byte-preserving process boundary in `src/shell.rs`.
-It already removes inherited Git routing variables and kills timed-out process groups.
-Its current `wait_with_output` call does not cap output bytes. Add a bounded-output path there before using it for file enumeration.
-Do not add a second command runner inside the observer.
+**Files is one more part, not a new pipeline.** The per-pane detail worker already owns viewer interest, session fencing, and the 5-second tick.
+Git runs on a second thread inside that worker, so a slow repository never delays the conversation or screen.
+The worker merges the latest files result into the detail payload with its own revision.
+`GET /api/agents/{host}/{pane}/files` serves it through `detail_response`, like `conversation` and `screen`.
+Remote agents use a new `PeerOperation::Files`, through the existing `peer_read`.
 
-Resolve the checkout from the captured agent CWD, including subdirectories, ordinary checkouts, and linked worktrees.
-`src/worktree.rs::snapshot` is existing read-only prior art that also supports unborn main checkouts.
-Do not call registration helpers that write generation markers. A repository without an origin remains valid.
-Keep checkout resolution errors distinct from a successful finding that the directory is not a repository.
+**Remote events.** `peer_events` sends an event only when the remote event differs from the last one sent.
+Unchanged remote replies no longer cause browser refetches.
+Its trigger stays the local portal publication. Replacing that trigger with a held remote subscription is a separate change, not part of Files.
 
-Run the status command at the resolved root, with arguments passed separately:
+### Git capture
+
+Run at the checkout root resolved from the agent's working directory:
 
 ```text
-git --no-optional-locks -C <root> status --porcelain=v2 --branch -z --untracked-files=all --ignore-submodules=none
+git --no-optional-locks -C <root> status --porcelain=v2 --branch -z --untracked-files=normal
 ```
 
-Parse bytes before producing display text. Preserve both status fields and rename source paths.
-Recognize ordinary, renamed/copied, unmerged, and untracked records. Ignore unknown optional headers, not unknown entry formats.
-Retain submodule flags and label submodule changes without recursively listing its contents.
-Represent unborn and detached HEAD states explicitly. Do not invent a branch or require a valid HEAD commit.
-Escape control characters and invalid UTF-8 bytes for display without merging distinct filenames into one row identity.
-Never use an escaped display string as a filesystem path.
+- `--no-optional-locks` keeps the background read from taking the index lock while the agent commits.
+- `--untracked-files=normal` is Git's default. An untracked directory is one row, as in `git status`.
+- Parse ordinary, rename/copy, unmerged, and untracked records. Keep index and worktree codes separate.
+  Keep the rename source. Treat all seven unmerged codes as conflicts, including `AA` and `DD`.
+- Paths are exact. A path that is valid UTF-8 is a string. Any other path also carries its raw bytes,
+  so two files never collapse into one row or one count.
+- Branch headers give the branch, detached HEAD, or unborn HEAD. Nothing is invented.
 
-Define the wire contract in `portal-types/src/files.rs`, exported by `portal-types/src/lib.rs`:
+`src/shell.rs:238` collects output with `wait_with_output` and has no size limit.
+Add a byte limit to `execute_bytes` for all callers: stop reading at the limit, kill the process group, and return an error.
+Files uses 1 MiB. Over the limit, Files shows "too many changes to list", never a partial list or a clean tree.
 
-| Field | Contract |
+Read Git only through `src/shell.rs`. Do not use `src/loss.rs::dirty_paths`: it drops status codes and can filter deletions.
+
+### States
+
+| State | Meaning |
 | --- | --- |
-| Envelope | Protocol version, execution host, pane, native-session key, serve epoch, monotonic revision |
-| Checkout | Opaque observation binding, root display path, branch state, optional HEAD |
-| Entry | Stable byte-preserving path identity, display path, optional previous path, index/worktree codes, conflict and submodule details |
-| Snapshot | Entries and last successful capture time, with exact unique-path count |
-| Availability | Pending, current, stale with retained same-binding snapshot, not a repository, or unavailable with a typed reason |
+| Pending | No Git result yet for this session and checkout |
+| Current | Git succeeded. Zero entries is the only state shown as "Working tree clean" |
+| Stale | The last read failed. The previous snapshot stays, labelled with its capture time |
+| Not a repository | The working directory is not inside a Git checkout |
+| Unavailable | No working directory, or Git failed with no earlier snapshot |
 
-The proposed resource limits are a five-second sample cadence, matching the current detail cadence, and no overlapping captures per checkout.
-Use the existing shell command deadline policy, not a new retry timer that hides a failed read.
-Cap raw status output at 1 MiB, diagnostic output at 64 KiB, and parsed entries at 10,000.
-These are proposed engineering limits, not measured repository sizes.
-A limit violation reports an explicit failure. A prior snapshot can remain visible only as stale data for the same checkout binding.
-It never presents a partial list as complete or clean.
-The JSON codec must bound escaped output and fit the existing 16 MiB observation frame ceiling.
+Each result is tagged with the agent session and checkout root it was read for.
+The worker discards a result whose session or root no longer matches. A stale snapshot is kept only for the same root.
 
-Revalidate the captured checkout binding before publishing a completed command.
-A pane/session change, CWD change to another checkout, checkout replacement, or publisher restart invalidates the old result.
-Discard in-flight results for the former binding. Do not display its files under the new checkout heading.
-A branch change in the same checkout publishes the new branch and status together.
-Read failures retain a previous snapshot only for the same binding, with a stale label and its original success time.
-Receipt time and keepalive traffic never become a successful Git capture time.
+### By Stage projection
 
-Primary Git evidence, checked against installed Git 2.56.0:
-[porcelain v2](https://git-scm.com/docs/git-status#_porcelain_format_version_2),
-[NUL path format](https://git-scm.com/docs/git-status#_pathname_format_notes_and_z), and
-[background refresh](https://git-scm.com/docs/git-status#_background_refresh).
-These document separate status fields, explicit unmerged records, rename paths, and the optional-lock restriction.
-No new Git library or dependency is proposed.
+One pure function in `portal-types` turns entries into groups and counts, so the server tests and the UI use the same rules.
 
-### Local and remote delivery
+1. Conflicts: all unmerged records, and nothing else.
+2. Staged: non-conflict entries with an index change. Unstaged: non-conflict entries with a worktree change. A path can appear in both.
+3. Untracked: untracked entries. Ignored files are never listed.
+4. Empty groups are hidden. Each group is sorted by path and shows its own count.
+5. The Files tab count is the number of unique paths.
 
-Expose `GET /api/agents/{host}/{pane}/files/events` as a files-only SSE stream.
-The first event is a complete state, including Pending if capture has not finished. Later events replace that state.
-Use the existing same-origin/Host protections, no-store policy, SSE keepalive, and shutdown cancellation.
-There are no path parameters supplied by the browser, write methods, or arbitrary Git arguments.
+### UI
 
-| Condition | Response |
-| --- | --- |
-| Known agent with a valid subscription | 200 SSE, event name `files`, versioned complete state |
-| Malformed address | 400 using the existing error envelope |
-| Positively absent host or pane | 404, not an empty file list |
-| Local publisher unavailable or unsupported | 503 before stream start; an unavailable event and stream close after start |
-| Remote transport unavailable | 502 before stream start; a stale/unavailable event and stream close after start |
+- Add `Files` to `LeadPanel` in `web/src/app.rs`. Put the tab's rendering in `web/src/files.rs`.
+- Use the existing Dioxus Tabs, Accordion, Item, ScrollArea, Skeleton, and Status components. Do not edit generated component sources.
+- At 1400px and wider, Todos and Files are tabs in the right sidebar. Todos is selected first.
+  Below 1400px, Files joins the header tabs. Resizing keeps an explicit Files selection.
+- Rows are not interactive. Paths wrap. A rename shows its previous path underneath.
+- Selecting another agent clears the shown files before the new agent's files arrive.
 
-A known agent without a checkout, a Git failure, and a non-repository directory are domain states inside the stream.
-A successful empty Git result is Current with zero entries. Only that result means the working tree is clean.
+### Units
 
-Remote delivery needs a maintained remote interest, not repeated one-shot detail calls.
-`src/web/agents.rs::peer_events` currently repeats a one-shot read on portal publications.
-Copying that path would repeatedly acquire and drop file interest, tying Git reads to unrelated board traffic.
-Instead, a serve-owned relay holds one remote files subscription per execution-host/pane pair and shares it among local viewers.
-It uses the existing host inventory, remote argument construction, process environment isolation, and observation IPC.
-A hidden files-stream host command forwards the execution host's publications without collecting Git itself.
-The portal receives local IPC publications for both local and remote agents and does not spawn SSH per viewer.
+All units use the `writer` profile and run in order. Each starts from the revision that contains its predecessor.
 
-The relay preserves execution-host epochs, revisions, native sessions, and checkout bindings.
-It does not normalize remote paths on the portal host. Disconnects remain visible, and closing the last viewer cancels the remote process group.
-An older peer without the files protocol is unavailable, not a reason to fall back to remote Git commands.
-This feature does not rewrite the existing conversation or activity transport.
+| Unit | Deliverable | Owned scope | Needs | Acceptance |
+| --- | --- | --- | --- | --- |
+| U1 | Per-part detail revisions in agent events | `src/observation/details.rs`, `src/observation/tests/details.rs`, `portal-types/src/agents.rs`, `src/web/agents.rs` | — | A screen-only change leaves the conversation revision unchanged. Identical consecutive local or remote events are not sent twice. |
+| U2 | Agent view refetches only changed parts | `web/src/agent_view.rs`, `web/src/conversations.rs`, `web/src/api.rs`, `web/src/component_tests.rs` | U1 | No 5-second interval. A screen event refetches only the screen. Board, agent, and inbox come from the portal stream. Stream failure reconnects and refetches once. |
+| U3 | Files capture, part, and route | `src/shell.rs`, new `src/git_status.rs`, new `portal-types/src/files.rs`, `portal-types/src/lib.rs`, `src/observation/details.rs`, `src/web/agents.rs`, `src/main.rs` module list | U2 | Real temporary repositories cover each state, the seven conflict codes, renames, staged-and-unstaged paths, non-UTF-8 names, unborn and detached HEAD, linked worktrees, and the byte limit. A blocked Git read does not delay the conversation part. |
+| U4 | By Stage Files tab | new `web/src/files.rs`, `web/src/app.rs`, `web/src/agent_view.rs`, `web/assets/console.css`, `web/src/component_tests.rs` | U3 | Component tests cover each state, group, and count. Browser check at 1600, 1400, 1200, 1000, and 800px against design B. A files change refetches only files. |
 
-### By Stage projection and UI
+After U4, the lead does the integration review: a real edit in a test checkout reaches the running portal for a local and a remote agent.
 
-One pure projection produces groups and counts from typed entries. It has no filesystem, network, or model access.
-The shared contract owns the grouping rules so tests and renderers use the same policy.
+### Checks
 
-1. Put all unmerged records in Conflicts only, including `AA` and `DD`, not only codes containing `U`.
-2. Put non-conflict index changes in Staged and non-conflict worktree changes in Unstaged. A path can occur in both groups.
-3. Put untracked paths in Untracked only. Exclude ignored paths.
-4. Hide empty groups and sort each group by repository-relative path. Count unique paths in the Files tab and rows within each group.
-5. Show a rename's current path and previous path. Keep status text accessible without color or a hover tooltip.
-
-Use the portal's existing Dioxus Tabs, Accordion, Item, ScrollArea, Skeleton, and status components.
-Do not copy the mockup's plain controls into production or edit the generated component sources.
-Add `Files` to `LeadPanel` in `web/src/app.rs` and isolate file subscription/reducer/rendering code in `web/src/files.rs`.
-`web/src/agent_view.rs` embeds it beside Todos and passes the selected address and existing session identity.
-
-On wide screens, the right sidebar has a separate Todos/Files tab state from the main conversation view.
-On narrower screens, Files joins the existing lead tabs. Resizing preserves an explicit Files selection without hiding the composer or inbox.
-Todos remains the initial sidebar selection. Selecting another agent clears its file snapshot before accepting the new subscription.
-Rows remain plain read-only content, with wrapping paths and bounded scrolling. No diff, staging, discard, or generated summaries appear.
-
-A file-channel update does not increment the conversation refresh counter.
-File transport failures affect only Files. They do not mark the agent idle, finished, or unreachable for conversation actions.
-The reducer rejects out-of-order frames and mismatched bindings. A new epoch resets accepted revision state and invalidates prior current data.
-
-### Ordered implementation units
-
-These units are planned, not dispatched. All writers use the `writer` profile.
-Each dependent unit starts only after its predecessor is accepted and available in its base revision.
-Shared paths have sequential ownership rather than concurrent edits.
-
-| Unit | Deliverable and owned scope | Prerequisite | Acceptance |
-| --- | --- | --- | --- |
-| F1 — Typed Git status capture | `portal-types/src/files.rs`, its module export, `src/git_status.rs`, its module registration, and bounded byte-output changes in `src/shell.rs` | None | Real temporary repositories prove status parsing, grouping, path identity, root resolution, deadlines, byte limits, and process cleanup. Wire round trips preserve all states. |
-| F2 — Local files observer | `src/observation/files.rs`, files-related integration in `src/observation.rs`, `src/observation/ipc.rs`, `src/service.rs`, `src/service/wake.rs`, and observer tests | F1 | Two viewers share one capture. Unviewed checkouts have no files worker. Session/checkout rebinding discards old results. Slow Git cannot block transcript or board publication. Disconnect and shutdown release work. |
-| F3 — Host-qualified delivery | `src/observation/files_remote.rs`, files-only integration in the F2 observer/service/IPC modules, files-stream wiring in `src/cli.rs` and `src/main.rs`, `src/web/files.rs`, router registration, and CLI/HTTP tests | F2 | Actual routes stream local and remote snapshots, share remote interest, preserve bindings and error states, and cancel on disconnect. More browser clients add no Git capture or per-client SSH work. |
-| F4 — By Stage portal | `web/src/files.rs`, `web/src/api.rs`, `web/src/app.rs`, `web/src/agent_view.rs`, `web/assets/console.css`, module registration, and component/reducer tests | F3 | Selected design works at 1600, 1400, 1200, 1000, and 800px. Groups, duplicate stage membership, unique counts, stale/error states, keyboard tabs, and independent scrolling pass. File updates do not refresh transcripts. |
-| F5 — Integrated proof | `tests/cli/observation_files.rs`, required test registration, and the Evidence section of this plan | F4 | A real Git edit reaches the running portal through serve and IPC, including a remote relay fixture. The final integrated revision passes the repository gates and a visual review against B. |
-
-F1 tests cover main and linked checkouts, subdirectory CWD, no origin, unborn HEAD, detached HEAD, staged deletion, rename, copy records, and submodule flags.
-Parser fixtures cover all seven conflict codes, filenames with spaces/newlines, invalid UTF-8 bytes, malformed records, and output limits.
-Real Git cases prove staged-plus-unstaged membership, untracked files, and ignored-file exclusion.
-
-F2 and F3 tests use deterministic clocks, manual ticks, acknowledgements, and call counters, following `src/observation/tests/details.rs`.
-They also cover two panes sharing a checkout, two worktrees of one repository, a late old result, publisher restart, and remote host failure.
-`tests/cli/observation_portal.rs` is the existing real-HTTP/IPC harness example.
-F3 must include a transport fixture that executes the remote forwarding command, not only a mocked HTTP body.
-
-F4 tests cover clean versus unavailable, retained stale rows, all groups, long paths, large lists, duplicate names in different directories, and resize transitions.
-Browser checks use the repository browser workflow against an isolated build and test state, not the installed portal service.
-No local installation, release, or fleet rollout is part of this work.
-
-### Checks and review gate
-
-Run focused tests for each unit at its exact revision. Preserve existing assertions and observer boundary tests.
-For final integration, use the repository targets from `moon.yml`:
+Each unit runs its focused tests. The final revision runs:
 
 ```sh
 moon run dogsled:check dogsled:web-lint
@@ -276,13 +214,4 @@ cargo test -p portal-types
 cargo test -p web
 ```
 
-`dogsled:check` includes formatting, Clippy, Rust tests, and the Pi checks. Its Rust targets build the web bundle first.
-Use `dx` for generated web assets. Do not edit generated output by hand.
-Report unavailable checks or pre-existing failures separately. Start no hosted CI run solely to obtain evidence.
-
-Source review found no unresolved product choice after the By Stage selection.
-The independent files channel and shared remote relay are proposed architecture, not existing functionality.
-Before dispatch, review their scope against this plan rather than silently replacing them with browser polling or one-shot remote reads.
-Plan review against `128f2d3` found no dependency cycle or conflicting ownership after F3's observer integration paths were made explicit.
-F1 through F5 are sequential. Current source confirms the nearby mechanisms, but no implementation test has run.
-Production implementation and its runtime acceptance remain unperformed.
+No production code has changed. No implementation test has run yet.
