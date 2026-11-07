@@ -353,7 +353,7 @@ fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
         assert!(Instant::now() < deadline, "waiting caller did not enqueue");
         std::thread::sleep(Duration::from_millis(10));
     }
-    drop(observer);
+    super::place::stop_observer(&rig, observer);
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     assert_eq!(advance(&rig)["state"], "failed");
     assert_eq!(command.wait().code(), Some(2));
@@ -1555,7 +1555,7 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    drop(observer);
+    super::place::stop_observer(&rig, observer);
     rig.put("reserve.json", &json!({"reserved":true,"headroom":null}));
     assert_eq!(advance(&rig)["state"], "failed");
     let output = child.wait_with_output().unwrap();
