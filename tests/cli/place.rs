@@ -1685,7 +1685,11 @@ pub(super) fn placement_observer_every(rig: &Rig, interval: &str) -> Background 
     } else {
         toml::Table::new()
     };
+    // This serve probes the real host. Headroom must not depend on what the runner has
+    // free: a 7 GiB macOS runner running three tests drops below the 3 GiB memory reserve,
+    // and placement then waits until the test deadline.
     policy.insert("free_core_fraction_min".into(), toml::Value::Integer(0));
+    policy.insert("memory_reserve_bytes".into(), toml::Value::Integer(0));
     rig.config(&toml::to_string(&policy).unwrap());
     let disk = rig.host()["probe"]["disk_free_percent"].as_f64().unwrap();
     rig.script("df", &format!("#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 10000 0 {} 0%% /\n'\n", disk * 100.0));

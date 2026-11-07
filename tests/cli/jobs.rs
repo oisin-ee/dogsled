@@ -1368,10 +1368,13 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     super::wait_publication(&rig, |frame| {
         frame["views"]["status_display"]["data"]["counts"]["queued"] == 2
     });
+    let brief = rig.run(&["status", "--brief"]);
     assert!(
-        String::from_utf8(rig.run(&["status", "--brief"]).stdout)
-            .unwrap()
-            .contains("2 queued")
+        String::from_utf8_lossy(&brief.stdout).contains("2 queued"),
+        "status --brief exited {:?}\nstdout: {}\nstderr: {}",
+        brief.status.code(),
+        String::from_utf8_lossy(&brief.stdout),
+        String::from_utf8_lossy(&brief.stderr)
     );
     drop(observer);
     // Admission behavior is independent of the CI runner's real probe load/disk.
