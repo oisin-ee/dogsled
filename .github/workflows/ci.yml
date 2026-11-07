@@ -52,10 +52,25 @@ jobs:
 
   rust:
     needs: checks
+    name: rust (${{ matrix.os }}${{ matrix.shard && format(' {0}/2', matrix.shard) || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # The 3-core macOS runner cannot run the whole suite inside the timeout,
+        # so two macOS jobs each run half of it (scripts/test-shard.sh). Lint
+        # runs once per OS.
+        include:
+          - os: ubuntu-24.04
+            tests: dogsled:test
+            lint: true
+          - os: macos-15
+            shard: 1
+            tests: dogsled:test-shard-1
+            lint: true
+          - os: macos-15
+            shard: 2
+            tests: dogsled:test-shard-2
+            lint: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -74,11 +89,12 @@ jobs:
       # The checks job already satisfied the web-build dependency. Keep the
       # local Moon dependencies, but do not rebuild the downloaded bundle.
       - name: Lint
+        if: matrix.lint
         run: moon run dogsled:lint :clippy --upstream none
       # Stream test output. A buffered task loses its output when the job
       # timeout cancels it, so a hung test would leave no name in the log.
       - name: Test
-        run: moon run dogsled:test todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test --upstream none --output-style stream
+        run: moon run ${{ matrix.tests }} todo-core:test todo-wasm:test prewalk-core:test prewalk-wasm:test --upstream none --output-style stream
 
   typescript:
     runs-on: ubuntu-24.04
