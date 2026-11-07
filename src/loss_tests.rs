@@ -990,7 +990,7 @@ fn worktree_held_by_a_process_after_the_plan_is_skipped_not_removed_or_failed() 
     assert!(applied.failures.is_empty(), "{:?}", applied.failures);
     assert_eq!(applied.skipped.len(), 1, "{:?}", applied.skipped);
     assert!(
-        applied.skipped[0].contains("held: a process works in"),
+        applied.skipped[0].contains(&format!("held: process {} works in", child.id())),
         "{}",
         applied.skipped[0]
     );

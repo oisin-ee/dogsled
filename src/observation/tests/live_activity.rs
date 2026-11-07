@@ -60,6 +60,7 @@ fn snapshot(ack: &ActivityAck, sequence: u64) -> PublishActivity {
         sequence,
         payload: ProducerPayload::Snapshot {
             state: LiveState {
+                reasoning: None,
                 phase: LivePhase::Thinking,
                 active_tools: vec![],
             },
@@ -404,30 +405,81 @@ fn invalid_counters_states_and_unknown_fields_are_rejected() {
     body.sequence = 1;
     body.payload = ProducerPayload::Snapshot {
         state: LiveState {
+            reasoning: None,
             phase: LivePhase::ToolRunning,
             active_tools: vec![],
         },
     };
     assert!(validate_publication(&body).is_err());
     let tool = ActiveTool {
+        call: None,
         call_id: "one".into(),
         name: "read".into(),
         parent_call_id: None,
     };
     body.payload = ProducerPayload::Snapshot {
         state: LiveState {
+            reasoning: None,
             phase: LivePhase::ToolRunning,
             active_tools: vec![tool.clone(), tool],
         },
     };
     assert!(validate_publication(&body).is_err());
     let mut wire = serde_json::to_value(snapshot(&ack, 1)).unwrap();
-    wire["payload"]["state"]["reasoning"] = json!("private");
+    wire["payload"]["state"]["unknown"] = json!("unrecognized");
     assert!(serde_json::from_value::<PublishActivity>(wire).is_err());
     body.version = 2;
     assert_eq!(
         validate_publication(&body).unwrap_err().code,
         ActivityCode::UnsupportedVersion
+    );
+}
+
+#[test]
+fn reasoning_and_call_lines_accept_the_exact_byte_bounds_and_reject_overflow() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let ack = authority
+        .register(
+            "w1:p1",
+            native.register("producer", 0),
+            Instant::now(),
+            1000,
+        )
+        .unwrap();
+    let mut body = snapshot(&ack, 1);
+    let ProducerPayload::Snapshot { state } = &mut body.payload else {
+        panic!("snapshot")
+    };
+    state.reasoning = Some("界".repeat(5461) + "!");
+    assert!(validate_publication(&body).is_ok());
+    let ProducerPayload::Snapshot { state } = &mut body.payload else {
+        panic!("snapshot")
+    };
+    state.reasoning.as_mut().unwrap().push('!');
+    assert_eq!(
+        validate_publication(&body).unwrap_err().code,
+        ActivityCode::InvalidRequest
+    );
+    let ProducerPayload::Snapshot { state } = &mut body.payload else {
+        panic!("snapshot")
+    };
+    state.reasoning = None;
+    state.phase = LivePhase::ToolRunning;
+    state.active_tools.push(ActiveTool {
+        call_id: "call".into(),
+        name: "bash".into(),
+        parent_call_id: None,
+        call: Some("界".repeat(170) + "\n!"),
+    });
+    assert!(validate_publication(&body).is_ok());
+    let ProducerPayload::Snapshot { state } = &mut body.payload else {
+        panic!("snapshot")
+    };
+    state.active_tools[0].call.as_mut().unwrap().push('!');
+    assert_eq!(
+        validate_publication(&body).unwrap_err().code,
+        ActivityCode::InvalidRequest
     );
 }
 

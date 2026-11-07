@@ -360,7 +360,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
     {
         // The shell starts its child before it reads stdin, so the table shows both.
         let mut shell = Command::new("sh")
-            .args(["-c", "sleep 60 & echo ready; wait"])
+            .args(["-c", "sleep 60 & echo $!; wait"])
             .current_dir(&tree)
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -371,6 +371,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
             &mut ready,
         )
         .unwrap();
+        let holder_pid: u32 = ready.trim().parse().unwrap();
         let shell = Worker(shell);
         let pid = shell.0.id().to_string();
         fs::write(rig.dir.join("shell_pid"), &pid).unwrap();
@@ -397,7 +398,7 @@ fn serve_sweeps_a_clean_integrated_worktree_only_when_nothing_holds_it() {
             entry["detail"]
                 .as_str()
                 .unwrap()
-                .contains("a process works in")
+                .contains(&format!("process {holder_pid} works in"))
         );
         fs::remove_file(rig.dir.join("shell_pid")).unwrap();
         let _ = Command::new("pkill").args(["-P", &pid]).status();

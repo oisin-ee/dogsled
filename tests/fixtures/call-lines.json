@@ -1,0 +1,18 @@
+[
+  { "name": "bash", "arguments": { "command": "pwd\nprintf done" }, "line": "$ pwd\nprintf done" },
+  { "name": "shell", "arguments": { "cmd": "git status" }, "line": "$ git status" },
+  { "name": "READ", "arguments": { "path": "src/main.rs" }, "line": "read src/main.rs" },
+  { "name": "Edit", "arguments": { "file_path": "a\nb" }, "line": "edit a\nb" },
+  { "name": "read", "arguments": { "command": "pwd", "path": "ignored" }, "line": "$ pwd" },
+  { "name": "run", "arguments": "{\"command\":\"echo codex\"}", "line": "$ echo codex" },
+  { "name": "read", "arguments": "{\"file_path\":\"codex.rs\"}", "line": "read codex.rs" },
+  { "name": "Search", "arguments": { "query": "needle" }, "line": "Search {\"query\":\"needle\"}" },
+  { "name": "tool", "arguments": {}, "line": "tool {}" },
+  { "name": "tool", "arguments": "literal arguments", "line": "tool \"literal arguments\"" },
+  { "name": "tool", "arguments": null, "line": "tool null" },
+  { "name": "tool", "arguments": [1, true], "line": "tool [1,true]" },
+  { "name": "read", "arguments": { "command": null, "cmd": "pwd" }, "line": "$ pwd" },
+  { "name": "read", "arguments": { "command": 1, "cmd": "ignored", "path": "file" }, "line": "read file" },
+  { "name": "read", "arguments": { "path": null, "file_path": "file" }, "line": "read file" },
+  { "name": "bash", "arguments": { "command": "" }, "line": "$ " }
+]

@@ -403,6 +403,90 @@ fn close_refuses_active_unsupported_foreign_locked_or_own_work_without_changes()
     assert!(rig.items()[0]["closed_ms"].is_null());
 }
 
+/// This fixture has no ancestry under fake Herdr's shell (pid 10), and leads its own
+/// process group. Only its inherited pane/server identity can attribute it to the agent.
+/// macOS returns no environment for Apple platform binaries such as `/bin/sleep`, and kills
+/// a copy of one, so the fixture re-executes this test binary, as a real tool server runs
+/// its own installed binary.
+fn detached_tool(rig: &Rig, tree: &Path, attributed: bool) -> Owned {
+    let mut command = isolated(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "close::detached_tool_process", "--quiet"])
+        .env(DETACHED_TOOL, "1")
+        .stdout(std::process::Stdio::null())
+        .current_dir(tree);
+    if attributed {
+        command
+            .env("HERDR_PANE_ID", "w2:p1")
+            .env("HERDR_SOCKET_PATH", rig.dir.join("herdr.sock"));
+    } else {
+        command
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SOCKET_PATH");
+    }
+    Owned::spawn(&mut command)
+}
+
+const DETACHED_TOOL: &str = "DOGSLED_TEST_DETACHED_TOOL";
+
+/// The body of `detached_tool`: it works in its checkout until the test reaps it. Run
+/// directly by the harness, it returns at once.
+#[test]
+fn detached_tool_process() {
+    if std::env::var_os(DETACHED_TOOL).is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+#[test]
+fn detached_agent_tool_environment_allows_close_without_signalling_the_tool() {
+    let (rig, tree) = close_rig("close-detached-tool");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    fs::write(tree.join("draft"), "preserve before closing the pane").unwrap();
+    let mut tool = detached_tool(&rig, &tree, true);
+    let out = rig.run(&["close", "w2:p1", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!tree.exists());
+    assert!(
+        tool.child_mut().try_wait().unwrap().is_none(),
+        "close must not signal the tool"
+    );
+    let closed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(!closed["recovery"].is_null(), "{closed}");
+    let log = rig.log("herdr.log");
+    let after = log.split_once("workspace close w2").unwrap().1;
+    assert!(
+        !after.contains("pane process-info"),
+        "hold checks must precede pane closure: {log}"
+    );
+}
+
+#[test]
+fn detached_foreign_tool_refuses_close_with_its_pid() {
+    let (rig, tree) = close_rig("close-detached-foreign");
+    advance_main(&rig);
+    panes(&rig, "idle", &tree);
+    item(&rig, "local");
+    let mut tool = detached_tool(&rig, &tree, false);
+    let pid = tool.child_mut().id();
+    let out = rig.run(&["close", "w2:p1"]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains(&format!("held: process {pid} works in {}", tree.display())),
+        "{error}"
+    );
+    assert!(tree.exists());
+    assert!(!rig.log("herdr.log").contains("workspace close"));
+    assert_eq!(rig.log("hook.log"), "");
+}
+
 #[test]
 fn failed_teardown_keeps_the_worktree_its_panes_lock_and_item() {
     let (rig, tree) = close_rig("close-hook-fails");

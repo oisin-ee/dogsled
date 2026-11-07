@@ -170,6 +170,9 @@ toml = "1.1.6"
 toml_edit = "0.25.18"
 todo-core = { workspace = true, features = ["schema"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+sysinfo = { version = "=0.40.1", default-features = false, features = ["system"] }
+
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
 

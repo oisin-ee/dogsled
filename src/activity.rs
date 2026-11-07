@@ -245,12 +245,16 @@ pub(crate) fn conversation_with_limit(
     let mut history = History::default();
     let mut texts = 0;
     let mut tools = 0;
+    let mut thoughts = 0;
     let mut deliveries = std::collections::HashSet::new();
     let cut = lines_backwards(path, limit, CHUNK_BYTES, |offset, line| {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return true;
         };
-        for mut record in records(agent, &value, offset).into_iter().rev() {
+        for mut record in records(agent, &value, offset, &mut history.truncated)
+            .into_iter()
+            .rev()
+        {
             if let Source::Dogsled { .. } = &record.source
                 && !deliveries.insert(record.id.clone())
             {
@@ -271,6 +275,9 @@ pub(crate) fn conversation_with_limit(
                         if tool.name.is_none() {
                             tool.name = result.name;
                         }
+                        tool.call = tool.call.take().or(result.call);
+                        tool.output = tool.output.take().or(result.output);
+                        tool.output_lines = tool.output_lines.or(result.output_lines);
                     }
                 } else if tools == CONVERSATION_TOOLS {
                     history.truncated = true;
@@ -278,9 +285,20 @@ pub(crate) fn conversation_with_limit(
                 } else {
                     tools += 1;
                 }
+            } else if record.role == Role::Thinking {
+                if thoughts == CONVERSATION_THOUGHTS {
+                    history.truncated = true;
+                    continue;
+                }
+                thoughts += 1;
             } else {
                 let group = (agent == "claude")
-                    .then(|| history.turns.iter().rposition(|t| t.tool.is_none()))
+                    .then(|| {
+                        history
+                            .turns
+                            .iter()
+                            .rposition(|t| t.tool.is_none() && t.role != Role::Thinking)
+                    })
                     .flatten()
                     .filter(|&index| {
                         history.turns.get(index).is_some_and(|previous| {
@@ -312,6 +330,9 @@ pub(crate) fn conversation_with_limit(
 
 /// Tool rows cannot consume the text-message allowance.
 const CONVERSATION_TOOLS: usize = 400;
+
+/// Thinking cannot consume the text-message or tool allowances.
+const CONVERSATION_THOUGHTS: usize = 400;
 
 /// The most text turns a conversation returns.
 const CONVERSATION_TURNS: usize = 200;
@@ -572,7 +593,56 @@ fn custom_records(value: &Value, offset: u64) -> Vec<Turn> {
         .collect()
 }
 
-/// Convert only supported call/result metadata. No arguments or result content leave here.
+/// A call line shared with the Pi activity producer's `callLine` rule.
+#[must_use]
+pub fn call_line(name: &str, arguments: &Value) -> String {
+    let decoded = arguments
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let arguments = decoded.as_ref().unwrap_or(arguments);
+    if let Some(command) = arguments
+        .get("command")
+        .filter(|v| !v.is_null())
+        .or_else(|| arguments.get("cmd"))
+        .and_then(Value::as_str)
+    {
+        return format!("$ {command}");
+    }
+    if let Some(path) = arguments
+        .get("path")
+        .filter(|v| !v.is_null())
+        .or_else(|| arguments.get("file_path"))
+        .and_then(Value::as_str)
+    {
+        return format!("{} {path}", name.to_lowercase());
+    }
+    format!("{name} {arguments}")
+}
+
+fn prefix(text: &str, max: usize) -> String {
+    text.split_at(text.floor_char_boundary(max)).0.to_owned()
+}
+
+fn tail_bytes(text: &str, max: usize) -> String {
+    text.split_at(text.ceil_char_boundary(text.len().saturating_sub(max)))
+        .1
+        .to_owned()
+}
+
+fn result_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return Some(text.to_owned());
+    }
+    let blocks = content.as_array()?;
+    let text: Vec<_> = blocks
+        .iter()
+        .filter(|block| block["type"] == "text")
+        .filter_map(|block| block["text"].as_str())
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
+/// Convert supported calls and results into bounded transcript detail.
 fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option<Turn> {
     let (call_id, name, status) = match (agent, block["type"].as_str()) {
         ("pi", Some("toolCall")) | ("claude", Some("tool_use")) => (
@@ -603,10 +673,44 @@ fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option
     let mut record = envelope(agent, value, offset);
     record.id = format!("{}:tool:{call_id}", record.id);
     record.role = Role::Tool;
+    let call = (status == ToolStatus::Unknown).then(|| {
+        let arguments = if agent == "claude" {
+            &block["input"]
+        } else {
+            &block["arguments"]
+        };
+        prefix(
+            &call_line(name.as_deref().unwrap_or_default(), arguments),
+            4 * 1024,
+        )
+    });
+    let result = (status != ToolStatus::Unknown)
+        .then(|| {
+            result_text(if agent == "codex" {
+                &block["output"]
+            } else {
+                &block["content"]
+            })
+        })
+        .flatten();
+    let output_lines = result
+        .as_ref()
+        .map(|text| u32::try_from(text.lines().count()).unwrap_or(u32::MAX));
+    let output = result.map(|text| {
+        let lines: Vec<_> = text.lines().collect();
+        let recent = lines
+            .get(lines.len().saturating_sub(20)..)
+            .unwrap_or_default()
+            .join("\n");
+        tail_bytes(&recent, 4 * 1024)
+    });
     record.tool = Some(ToolSummary {
         call_id,
         name: name.map(|name| short(&plain(&name), 120)),
         status,
+        call,
+        output,
+        output_lines,
     });
     Some(record)
 }
@@ -619,7 +723,7 @@ fn result_status(error: &Value) -> ToolStatus {
     }
 }
 
-fn records(agent: &str, value: &Value, offset: u64) -> Vec<Turn> {
+fn records(agent: &str, value: &Value, offset: u64, truncated: &mut bool) -> Vec<Turn> {
     if agent == "pi" && value["type"] == "custom_message" {
         return custom_records(value, offset);
     }
@@ -634,7 +738,18 @@ fn records(agent: &str, value: &Value, offset: u64) -> Vec<Turn> {
     let mut text = turn(agent, value, offset);
     let mut found = Vec::new();
     if let Some(blocks) = message["content"].as_array() {
-        for block in blocks {
+        for (index, block) in blocks.iter().enumerate() {
+            if matches!(agent, "pi" | "claude")
+                && block["type"] == "thinking"
+                && let Some(thinking) = block["thinking"].as_str().filter(|text| !text.is_empty())
+            {
+                let mut thought = envelope(agent, value, offset);
+                thought.id = format!("{}:thinking:{index}", thought.id);
+                thought.role = Role::Thinking;
+                thought.text = prefix(thinking, 32 * 1024);
+                *truncated |= thinking.len() > 32 * 1024;
+                found.push(thought);
+            }
             if matches!(
                 block["type"].as_str(),
                 Some("text" | "input_text" | "output_text")
@@ -941,6 +1056,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 (Role::User, "fix the bug"),
+                (Role::Thinking, "hm"),
                 (Role::Assistant, "on it"),
                 (Role::Assistant, "fixed")
             ]
@@ -1204,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn recorded_tools_correlate_results_without_exposing_payloads_or_claiming_live_work() {
+    fn recorded_tools_correlate_calls_results_and_thinking_without_claiming_live_work() {
         for (agent, lines) in [
             (
                 "pi",
@@ -1236,7 +1352,7 @@ mod tests {
             let path = transcript(&lines);
             let history = conversation(agent, &path);
             let turns = history.turns;
-            assert_eq!(turns.len(), 3, "{agent}");
+            assert_eq!(turns.len(), if agent == "codex" { 3 } else { 4 }, "{agent}");
             assert_eq!(turns[0].text, "checking");
             let summary = turns[1].tool.as_ref().expect("tool summary");
             assert_eq!(summary.call_id, "a");
@@ -1251,19 +1367,142 @@ mod tests {
             );
             assert!(turns[1].id.starts_with("call-entry:tool:"));
             assert_eq!(
-                turns[2].tool.as_ref().expect("unmatched call").status,
+                turns
+                    .last()
+                    .expect("unmatched call")
+                    .tool
+                    .as_ref()
+                    .expect("tool")
+                    .status,
                 ToolStatus::Unknown
             );
             assert!(
                 turns[1..]
                     .iter()
-                    .all(|turn| turn.role == Role::Tool && turn.text.is_empty())
+                    .filter(|turn| turn.role == Role::Tool)
+                    .all(|turn| turn.text.is_empty())
             );
-            let wire = serde_json::to_string(&turns).expect("wire");
-            for secret in ["raw-arguments", "raw-output", "raw-reasoning"] {
-                assert!(!wire.contains(secret), "{agent} leaked {secret}");
+            assert_eq!(
+                summary.call.as_deref(),
+                Some(if agent == "codex" {
+                    "read \"raw-arguments\""
+                } else {
+                    "read {\"secret\":\"raw-arguments\"}"
+                })
+            );
+            assert_eq!(summary.output.as_deref(), Some("raw-output"));
+            assert_eq!(summary.output_lines, Some(1));
+            if agent != "codex" {
+                assert_eq!(turns[2].role, Role::Thinking);
+                assert_eq!(turns[2].text, "raw-reasoning");
+                assert_eq!(turns[2].id, "call-entry:thinking:2");
             }
         }
+    }
+
+    #[test]
+    fn call_lines_match_the_shared_live_and_transcript_cases() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../tests/fixtures/call-lines.json"))
+                .expect("call-line cases");
+        for case in cases {
+            assert_eq!(
+                call_line(case["name"].as_str().expect("name"), &case["arguments"]),
+                case["line"].as_str().expect("line")
+            );
+        }
+    }
+
+    #[test]
+    fn pi_and_claude_thoughts_calls_and_result_text_blocks_stay_in_recorded_order() {
+        for agent in ["pi", "claude"] {
+            let content = json!([
+                {"type":"thinking","thinking":"first thought"},
+                {"type":"thinking","thinking":""},
+                {"type":"text","text":"checking"},
+                {"type":"thinking","thinking":"second thought"},
+                {"type":if agent == "pi" {"toolCall"} else {"tool_use"},"id":"a","name":"bash","arguments":{"command":"pwd\nls"},"input":{"command":"pwd\nls"}}
+            ]);
+            let assistant = if agent == "pi" {
+                json!({"type":"message","id":"message","message":{"role":"assistant","content":content}})
+            } else {
+                json!({"type":"assistant","message":{"id":"message","content":content}})
+            };
+            let result = if agent == "pi" {
+                json!({"type":"message","message":{"role":"toolResult","toolCallId":"a","content":[{"type":"text","text":"first"},{"type":"image","data":"ignored"},{"type":"text","text":"second"}]}})
+            } else {
+                json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":"first"},{"type":"image","data":"ignored"},{"type":"text","text":"second"}]}]}})
+            };
+            let history = conversation(agent, &transcript(&[assistant, result]));
+            assert!(!history.truncated);
+            let turns = history.turns;
+            assert_eq!(
+                turns.iter().map(|turn| turn.role).collect::<Vec<_>>(),
+                [Role::Thinking, Role::Assistant, Role::Thinking, Role::Tool]
+            );
+            assert_eq!(turns[0].id, "message:thinking:0");
+            assert_eq!(turns[0].text, "first thought");
+            assert_eq!(turns[2].id, "message:thinking:3");
+            let tool = turns[3].tool.as_ref().expect("tool");
+            assert_eq!(tool.call.as_deref(), Some("$ pwd\nls"));
+            assert_eq!(tool.output.as_deref(), Some("first\nsecond"));
+            assert_eq!(tool.output_lines, Some(2));
+        }
+    }
+
+    #[test]
+    fn thinking_has_its_own_count_bound_and_a_utf8_prefix_bound() {
+        let mut lines = vec![
+            json!({"type":"message","id":"useful","message":{"role":"user","content":"useful text"}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"a","name":"read","arguments":{}}]}}),
+        ];
+        for index in 0..CONVERSATION_THOUGHTS + 5 {
+            lines.push(json!({"type":"message","id":format!("m-{index}"),"message":{"role":"assistant","content":[{"type":"thinking","thinking":"thought"}]}}));
+        }
+        let history = conversation("pi", &transcript(&lines));
+        assert!(history.truncated);
+        assert_eq!(history.turns.len(), CONVERSATION_THOUGHTS + 2);
+        assert_eq!(history.turns[0].text, "useful text");
+        assert_eq!(history.turns[1].role, Role::Tool);
+        assert_eq!(history.turns[2].id, "m-5:thinking:0");
+        for agent in ["pi", "claude"] {
+            let value = if agent == "pi" {
+                json!({"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"界".repeat(12000)}]}})
+            } else {
+                json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":"界".repeat(12000)}]}})
+            };
+            let history = conversation(agent, &transcript(&[value]));
+            assert!(history.truncated);
+            assert_eq!(history.turns[0].text, "界".repeat(10922));
+        }
+    }
+
+    #[test]
+    fn tool_call_prefixes_and_output_tails_obey_byte_and_line_bounds() {
+        let output = (1..=30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = [
+            json!({"type":"response_item","payload":{"type":"function_call","call_id":"a","name":"bash","arguments":json!({"command":"界".repeat(2000)}).to_string()}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"a","output":output}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"b","output":"界".repeat(2000)}}),
+        ];
+        let history = conversation("codex", &transcript(&lines));
+        let tool = history.turns[0].tool.as_ref().expect("tool");
+        assert_eq!(tool.call, Some(format!("$ {}", "界".repeat(1364))));
+        assert_eq!(tool.output_lines, Some(30));
+        assert_eq!(tool.output.as_ref().expect("output").lines().count(), 20);
+        assert!(
+            tool.output
+                .as_ref()
+                .expect("output")
+                .starts_with("line 11\n")
+        );
+        assert!(tool.output.as_ref().expect("output").ends_with("line 30"));
+        let tool = history.turns[1].tool.as_ref().expect("result");
+        assert_eq!(tool.output, Some("界".repeat(1365)));
+        assert_eq!(tool.output_lines, Some(1));
     }
 
     #[test]
