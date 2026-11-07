@@ -1,36 +1,26 @@
 #!/bin/sh
-# Diagnostic only: run shard 2's CLI tests and sample any long-lived dogsled process.
+# Diagnostic only: run shard 2 exactly as CI does, and sample any long-lived process
+# under the test binary, with its children.
 set -u
-modules="sweep:: launch_retry:: jobs:: preservation:: close:: signals::"
-skips=""
-for module in $modules; do skips="$skips --skip $module"; done
-cargo test --test cli --no-run
-# shellcheck disable=SC2086
-cargo test --test cli -- $skips &
+cargo test --no-run --bins --test plugins --test cli
+sh scripts/test-shard.sh 2 &
 tests=$!
-sampled=""
+: >/tmp/sampled
 while kill -0 "$tests" 2>/dev/null; do
-	sleep 20
-	ps -axo pid=,etime=,command= | while read -r pid etime command; do
-		case "$command" in
-		*target/debug/dogsled*) ;;
-		*) continue ;;
-		esac
-		case "$etime" in
-		0[2-9]:* | [1-9][0-9]:* | *-*:*) ;;
-		01:[3-5]?) ;;
-		*) continue ;;
-		esac
-		case " $sampled " in *" $pid "*) continue ;; esac
-		echo "=== STALL pid $pid etime $etime: $command"
-		ps -axo pid=,ppid=,stat=,etime=,command= | awk -v p="$pid" '$2 == p || $1 == p'
-		sample "$pid" 2 -mayDie 2>/dev/null | sed -n '/Call graph/,/Total number in stack/p' | head -80
+	sleep 15
+	ps -axo pid=,ppid=,etime=,command= >/tmp/ps.now
+	# Processes older than 90 s whose command names the rig or the dogsled binary.
+	awk '{ split($3, t, /[-:]/); n = length(t); s = t[n] + 60 * t[n - 1] + (n > 2 ? 3600 * t[n - 2] : 0) + (n > 3 ? 86400 * t[1] : 0);
+		if (s >= 90 && ($0 ~ /target\/debug\/dogsled/ || $0 ~ /\/rig/ || $0 ~ /herdr|lsof|git /)) print $1 }' /tmp/ps.now | while read -r pid; do
+		grep -qx "$pid" /tmp/sampled && continue
 		echo "$pid" >>/tmp/sampled
+		echo "=== STALL $(grep -E "^ *$pid " /tmp/ps.now)"
+		awk -v p="$pid" '$2 == p' /tmp/ps.now | sed 's/^/=== child /'
+		sample "$pid" 2 -mayDie 2>/dev/null | sed -n '/Call graph/,/Total number in stack/p' | head -60
 	done
-	sampled=$(cat /tmp/sampled 2>/dev/null)
-	if [ "$(wc -l </tmp/sampled 2>/dev/null || echo 0)" -ge 6 ]; then
+	if [ "$(wc -l </tmp/sampled)" -ge 8 ]; then
 		echo "=== enough samples"
-		ps -axo pid,ppid,stat,etime,%cpu,command | head -400
+		cat /tmp/ps.now
 		kill "$tests"
 		break
 	fi
