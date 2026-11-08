@@ -17,8 +17,15 @@ use crate::observation::{
     live_activity::{self, Command},
 };
 
+/// Released Pi extensions publish to the unqualified local producer paths.
+/// These paths must stay stable across binary upgrades while Pi sessions keep running.
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/agents/{pane}/activity",
+            get(local_current).put(local_publish),
+        )
+        .route("/api/agents/{pane}/activity/producer", post(local_register))
         .route(
             "/api/agents/{host}/{pane}/activity",
             get(current).put(publish),
@@ -49,6 +56,36 @@ pub(super) fn failure(error: ActivityError) -> Response {
 
 fn value(view: ActivityView) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
+}
+
+async fn local_current(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
+    current(State(state), Path((crate::hosts::LOCAL.into(), pane))).await
+}
+
+async fn local_register(
+    State(state): State<AppState>,
+    Path(pane): Path<String>,
+    request: Request,
+) -> Response {
+    register(
+        State(state),
+        Path((crate::hosts::LOCAL.into(), pane)),
+        request,
+    )
+    .await
+}
+
+async fn local_publish(
+    State(state): State<AppState>,
+    Path(pane): Path<String>,
+    request: Request,
+) -> Response {
+    publish(
+        State(state),
+        Path((crate::hosts::LOCAL.into(), pane)),
+        request,
+    )
+    .await
 }
 
 async fn current(
@@ -280,6 +317,8 @@ mod tests {
         let fixture = Fixture::new();
         let app = super::super::router(state(&fixture));
         for (method, path) in [
+            (Method::POST, "/api/agents/w1:p1/activity/producer"),
+            (Method::PUT, "/api/agents/w1:p1/activity"),
             (Method::POST, "/api/agents/local/w1:p1/activity/producer"),
             (Method::PUT, "/api/agents/local/w1:p1/activity"),
             (Method::POST, "/api/agents/netcup/w1:p1/activity/producer"),
@@ -294,6 +333,114 @@ mod tests {
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             assert_eq!(json(response).await["code"], "unauthorized");
         }
+    }
+
+    #[tokio::test]
+    async fn unqualified_get_matches_local_qualified_get_in_the_full_router() {
+        let fixture = Fixture::new();
+        let app = super::super::router(state(&fixture));
+        let mut views = Vec::new();
+        for path in [
+            "/api/agents/w1%3Ap1/activity",
+            "/api/agents/local/w1%3Ap1/activity",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(Method::GET, path, Body::empty(), false))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            views.push(json(response).await);
+        }
+        assert_eq!(views[0], views[1]);
+    }
+
+    #[tokio::test]
+    async fn unqualified_register_and_publish_are_visible_through_qualified_get() {
+        let fixture = Fixture::new();
+        let app = super::super::router(state(&fixture));
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/agents/w1%3Ap1/activity/producer",
+                serde_json::to_vec(&fixture.registration).unwrap(),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let ack: ActivityAck = serde_json::from_value(json(response).await).unwrap();
+        let mut update = PublishActivity {
+            version: 1,
+            epoch: ack.epoch,
+            generation: ack.generation,
+            producer_id: ack.producer_id,
+            session: ack.session,
+            sequence: 1,
+            payload: ProducerPayload::Snapshot {
+                state: LiveState {
+                    reasoning: None,
+                    phase: LivePhase::Thinking,
+                    active_tools: vec![],
+                },
+            },
+        };
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::PUT,
+                "/api/agents/w1%3Ap1/activity",
+                serde_json::to_vec(&update).unwrap(),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let published: ActivityAck = serde_json::from_value(json(response).await).unwrap();
+        assert_eq!(published.sequence, 1);
+        // The command acknowledgment can precede its immutable publication.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    Method::GET,
+                    "/api/agents/local/w1%3Ap1/activity",
+                    Body::empty(),
+                    false,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let view: ActivityView = serde_json::from_value(json(response).await).unwrap();
+            if let ActivityDetail::Available {
+                sequence: 1, state, ..
+            } = view.detail
+            {
+                assert_eq!(state.phase, LivePhase::Thinking);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        update.generation += 1;
+        let response = app
+            .oneshot(request(
+                Method::PUT,
+                "/api/agents/w1%3Ap1/activity",
+                serde_json::to_vec(&update).unwrap(),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(json(response).await["code"], "stale_generation");
     }
 
     #[tokio::test]
