@@ -2,6 +2,57 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.34.0](https://github.com/oisin-ee/dogsled/compare/v0.33.0...v0.34.0) (2026-11-08)
+
+
+### Features
+
+* **activity:** carry reasoning and tool detail on the wire ([2c85a42](https://github.com/oisin-ee/dogsled/commit/2c85a42a1ad1abd63db0e2545af01078d58bd0a6))
+* **activity:** carry reasoning and tool detail on the wire ([f553fb8](https://github.com/oisin-ee/dogsled/commit/f553fb88abf0fdbaa290116b1314fe99d1448760))
+* **files:** capture bounded typed Git status ([3435682](https://github.com/oisin-ee/dogsled/commit/343568258e531fa5ff99153084d68747093f0047))
+* **leads:** GitHub catalogue, leads on any host, portal on every host ([83c65d7](https://github.com/oisin-ee/dogsled/commit/83c65d71396d24388cebb7ec9e1836965bcd9643))
+* **leads:** start leads on the roomiest fleet host ([11f3cb2](https://github.com/oisin-ee/dogsled/commit/11f3cb27745a4d06f4b912c5cc44d56f8f0656d9))
+* **portal:** address agents across fleet hosts ([ce9f63b](https://github.com/oisin-ee/dogsled/commit/ce9f63bc5732f9aba5ca8f619ecc796b515e6702))
+* **portal:** move lead workers into a Workers tab ([73dea6c](https://github.com/oisin-ee/dogsled/commit/73dea6c2d4a70ac82084964c31722a5c31776c42))
+* **portal:** move lead workers into a Workers tab ([c484cae](https://github.com/oisin-ee/dogsled/commit/c484cae3af6aa158b666dbafd2f7f256d1c80ac4))
+* **portal:** serve files as an independent agent detail part ([3560f36](https://github.com/oisin-ee/dogsled/commit/3560f364284124558ba2f71f73c0177d3102da4d))
+* **portal:** show checkout changes in a Files tab ([fac7a08](https://github.com/oisin-ee/dogsled/commit/fac7a080f40c9275c8801ebf12f2e8251b3cf232))
+* **portal:** show checkout changes in Files tab ([7d0b93e](https://github.com/oisin-ee/dogsled/commit/7d0b93ece29883adc60e47671ee38215bfa019a3))
+* **repos:** publish GitHub catalogue for the New picker ([28f71c0](https://github.com/oisin-ee/dogsled/commit/28f71c04a4b37097828751e3c3be9cebbf4e7ad3))
+* **web:** render reasoning and tools in one conversation stream ([d55a567](https://github.com/oisin-ee/dogsled/commit/d55a5675fadc27b7ca0f899643c003a9c3ef4bfe))
+* **web:** render reasoning and tools in one conversation stream ([4d1c504](https://github.com/oisin-ee/dogsled/commit/4d1c504d34501e4ce2ebf55f8754d28535624719))
+* **web:** share held remote agent streams ([9fa7520](https://github.com/oisin-ee/dogsled/commit/9fa752034675ae1abed31b0f3a00b496f49486ca))
+
+
+### Bug Fixes
+
+* **agents:** publish independent detail part revisions ([f8221b2](https://github.com/oisin-ee/dogsled/commit/f8221b29327c85fd84929780bcd4348d85db95b6))
+* **board:** leave hold rows without an owner host ([f84b922](https://github.com/oisin-ee/dogsled/commit/f84b9225aad753ae0b8e18103ef69d7c2d3feccf))
+* **cleanup:** attribute detached agent tool processes to panes ([a6bfc95](https://github.com/oisin-ee/dogsled/commit/a6bfc9569bbacec36279ef78c623fcaefdbe456c))
+* **cleanup:** attribute detached agent tool processes to panes ([7b2add5](https://github.com/oisin-ee/dogsled/commit/7b2add5e182bd7b0060cbc3b90c4131df387cc98))
+* **files:** pin Git status diagnostics to the C locale ([126c728](https://github.com/oisin-ee/dogsled/commit/126c72831d602e6c0c61472569508c02047be472))
+* **holds:** read validity rows and their owners together ([29f5b91](https://github.com/oisin-ee/dogsled/commit/29f5b91c1498bb33f5adcc11d128456663382bc6))
+* **observation:** a missing long state path reads as serve not running ([ca8dfdf](https://github.com/oisin-ee/dogsled/commit/ca8dfdf8925234937f36b7323eb9e1b05a0fea50))
+* **observation:** an unlisted pane is not found even with a captured detail ([bc12f7b](https://github.com/oisin-ee/dogsled/commit/bc12f7bc8dee0ce6a6a5519acf5eda1e89137e17))
+* **observation:** deliver pane detail directly from workers ([5e28a8c](https://github.com/oisin-ee/dogsled/commit/5e28a8c72272f8d8a91f86c4691a43f4bca6d551))
+* **observation:** deliver pane detail directly from workers ([8316294](https://github.com/oisin-ee/dogsled/commit/83162943c6f3e7de9bc77281ce67148e1ce85b20))
+* **observation:** publish revisions only for content changes ([1b91542](https://github.com/oisin-ee/dogsled/commit/1b91542ec2394b4972b8e8c2adc5e1b119b32e04))
+* **portal:** distinguish unsupported files from peer failures ([d59ce3b](https://github.com/oisin-ee/dogsled/commit/d59ce3bef8a4743667add24abad217d79f04b3a2))
+* **portal:** let accordions fill their column ([16d1458](https://github.com/oisin-ee/dogsled/commit/16d14587cdef20ceb683700d10d128b6ac07aaaa))
+* **portal:** refetch only changed agent view parts ([2c160b4](https://github.com/oisin-ee/dogsled/commit/2c160b4f703c8d8fead23d77df3d01d1962b0d87))
+* **portal:** refuse unrelated prompts to blocked agents ([601a48f](https://github.com/oisin-ee/dogsled/commit/601a48f0e202a86ec43b05d8d6feb28a1d3323d3))
+* **preservation:** hash and read snapshot files in one Git process each ([03d8d08](https://github.com/oisin-ee/dogsled/commit/03d8d08ddad7b932ffb2b113f84e131fbaf6202d))
+* **preservation:** hash and read snapshot files in one Git process each ([4455067](https://github.com/oisin-ee/dogsled/commit/4455067c8ab514669abdf8f0950d9065864ca6e2))
+* **release:** gate and tag only the commit the run is for ([8af7b39](https://github.com/oisin-ee/dogsled/commit/8af7b3919b2a3471e58953c96bb8409a77d96af8))
+* **release:** settle every outstanding release, not only the push that merged it ([c0a85bf](https://github.com/oisin-ee/dogsled/commit/c0a85bf6c444534530a4e736c1130c14bb8e8988))
+* **release:** settle every outstanding release, not only the push that merged it ([e659c8c](https://github.com/oisin-ee/dogsled/commit/e659c8c114d8169e41cd9b58b1f841ce618ea6fb))
+* **sidebar:** keep observation gaps off the terminal it draws on ([f16b8a8](https://github.com/oisin-ee/dogsled/commit/f16b8a8420afa43b988cba177314ff78ca31c997))
+* **web:** drop the review list's unused import ([841fee4](https://github.com/oisin-ee/dogsled/commit/841fee40da7fc98c2b930a864bc628bf5772ec27))
+* **web:** keep agent view loading until its first snapshot ([1f5498e](https://github.com/oisin-ee/dogsled/commit/1f5498eca1dfe93be7492ea06d10cdb185d68a06))
+* **web:** make reviews and questions follow inbox revisions ([fe23d64](https://github.com/oisin-ee/dogsled/commit/fe23d64e2867ddc661ed60712a39897fd87d4e31))
+* **web:** read agent parts once and retain activity stream ([698841e](https://github.com/oisin-ee/dogsled/commit/698841ed11a8b2610bbf10f87151a571c9042922))
+* **web:** refetch only changed agent view parts ([b620dcc](https://github.com/oisin-ee/dogsled/commit/b620dcc7a8e9cd7072359ccbe11bf8d6817ac4f9))
+
 ## [0.33.0](https://github.com/oisin-ee/dogsled/compare/v0.32.0...v0.33.0) (2026-11-05)
 
 
