@@ -741,12 +741,13 @@ mod tests {
     fn stdout_limit_kills_the_owned_group_before_natural_exit() {
         let root = std::env::temp_dir().join(crate::ledger::new_id());
         std::fs::create_dir_all(&root).unwrap();
-        let marker = root.join("completed");
+        // The descendant would outlive the call's deadline, so an output-limit error proves
+        // the call returned before any natural exit, however slowly the host spawns.
+        let pidfile = root.join("descendant");
         let script = format!(
-            "(sleep 1; touch {}) & printf 123456789; wait",
-            quote(marker.to_str().unwrap())
+            "sleep 30 & echo $! > {}; printf 123456789; wait",
+            quote(pidfile.to_str().unwrap())
         );
-        let start = std::time::Instant::now();
         let error = System::default()
             .run_bytes_bounded(
                 "sh",
@@ -755,10 +756,26 @@ mod tests {
                 8,
             )
             .unwrap_err();
-        assert!(matches!(error, Error::OutputLimit { limit: 8, .. }));
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        assert!(!marker.exists(), "descendant survived stdout overflow");
+        assert!(
+            matches!(error, Error::OutputLimit { limit: 8, .. }),
+            "{error:?}"
+        );
+        // The group kill reached the descendant. Its new parent reaps it on its own
+        // schedule, so wait for the pid to vanish on a bound.
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while nix::sys::signal::kill(pid, None) != Err(nix::errno::Errno::ESRCH) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "descendant {pid} survived stdout overflow"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
