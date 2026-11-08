@@ -47,7 +47,12 @@ pub struct NavigationRow {
 /// Closed rows remain in their lead's Workers tab, but never become sidebar entries.
 pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation {
     let mut navigation = Navigation::default();
-    let rows: Vec<_> = board.repos.iter().flat_map(|repo| &repo.rows).collect();
+    let rows: Vec<_> = board
+        .repos
+        .iter()
+        .flat_map(|repo| &repo.rows)
+        .filter(|row| is_navigation_row(row))
+        .collect();
     for agent in agents.iter().filter(|agent| {
         agent.state != "closed"
             && !rows
@@ -82,7 +87,7 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
             });
     }
     for repo in &board.repos {
-        for row in &repo.rows {
+        for row in repo.rows.iter().filter(|row| is_navigation_row(row)) {
             let repository = row
                 .repository
                 .as_ref()
@@ -125,6 +130,10 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
         .repos
         .retain(|repo| !repo.rows.is_empty() || repo.to_land > 0);
     navigation
+}
+
+pub(crate) fn is_navigation_row(row: &RowView) -> bool {
+    row.kind != "hold"
 }
 
 pub(crate) fn owns_worker(lead: &NavigationRow, row: &RowView) -> bool {
