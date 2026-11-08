@@ -64,10 +64,12 @@ Dist publishes the binaries and calls the existing npm publisher.
 The publish job changes `autorelease: pending` to `autorelease: tagged` so release-please can prepare the next release.
 
 Until its tag exists, the merged release PR stays the outstanding release.
-Every later push to `main` validates and publishes it again, and `scripts/release-prepare.sh` decides what each run owes.
+Every run of `release-please.yml` settles it, and `scripts/release-prepare.sh` decides what the run owes.
+The gate validates only the commit the run is for, so only a run for the release commit itself can tag it.
 
-- If CI failed for a reason outside the release commit, dispatch `release-please.yml` on `main` to retry it.
-- If the release commit itself cannot pass, revert it on `main` with a `chore(release):` subject.
+- If CI failed for a reason outside the release commit, and `main` has not moved on, dispatch `release-please.yml` on `main` to retry it.
+- If `main` has moved past the release commit, the run fails and names the commit to revert.
+  Revert it on `main` with a `chore(release):` subject.
   The next run marks its PR `autorelease: superseded`, and release-please opens a fresh release PR for the same version.
 - If a tag exists but its PR still has `autorelease: pending`, the next run changes the label to `autorelease: tagged`.
 

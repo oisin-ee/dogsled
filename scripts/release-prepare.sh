@@ -8,14 +8,18 @@
 # - Its tag exists: an earlier run published it. Relabel it `autorelease: tagged`.
 # - The manifest on main no longer holds its version: its release commit was reverted, so
 #   it will never be published. Relabel it `autorelease: superseded`.
-# - Otherwise it is the outstanding release. Print its tag and its merge commit, so the
-#   workflow validates that exact commit and then tags it.
+# - Otherwise it is the outstanding release. The gate validates only the commit this run
+#   checked out, so the tag goes only on that commit. When this run is for the release
+#   commit itself (its push, or a dispatch retry before main moved on), print its tag and
+#   commit. When main has moved past it, nothing can validate the release commit any more:
+#   fail, and name the revert that supersedes it.
 #
 # Output: `release-pr=`, `tag=` and `sha=` lines for $GITHUB_OUTPUT, or nothing when no
 # release is outstanding. With DRY_RUN=1 the script changes no labels.
 set -eu
 
 repo=${GITHUB_REPOSITORY:?}
+head_sha=$(git rev-parse HEAD)
 head_version=$(jq -er '.["."]' .release-please-manifest.json)
 
 relabel() {
@@ -45,6 +49,10 @@ printf '%s\n' "$pending" | grep . |
 				relabel "$pr" "autorelease: superseded"
 			elif [ -n "$outstanding" ]; then
 				echo "#$pr and #$outstanding both claim $tag" >&2
+				exit 1
+			elif [ "$sha" != "$head_sha" ]; then
+				echo "#$pr: $tag never passed its gate at $sha, and main has moved on to $head_sha." >&2
+				echo "Supersede it: revert $sha on main with a chore(release): subject." >&2
 				exit 1
 			else
 				outstanding=$pr
