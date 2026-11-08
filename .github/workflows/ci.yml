@@ -5,6 +5,12 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      # The release gate validates the release commit, which a retry runs after main
+      # has moved on. Empty means the triggering commit.
+      ref:
+        type: string
+        default: ""
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -24,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.ref }}
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
@@ -76,6 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
       - name: Download web bundle
         uses: actions/download-artifact@v8
@@ -102,6 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.ref }}
           # Moon diffs against main, so it needs the full history.
           fetch-depth: 0
       - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4

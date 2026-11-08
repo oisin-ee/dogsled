@@ -1,8 +1,13 @@
 name: Release please
 
+# Every push to main settles the release main still owes, not only the push that merged
+# it. A release whose gate failed is retried by the next push, or at once by a dispatch.
+# A release that cannot pass is abandoned by reverting its release commit; the next run
+# then marks its PR superseded and release-please opens a fresh release PR.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Keep release-PR updates behind publication and its lifecycle-label change.
 concurrency:
@@ -17,37 +22,23 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: read
+      issues: write
+      pull-requests: write
     outputs:
-      release-pr: ${{ steps.release.outputs.pr }}
+      release-pr: ${{ steps.release.outputs.release-pr }}
       tag: ${{ steps.release.outputs.tag }}
-      publish: ${{ steps.release.outputs.publish }}
+      sha: ${{ steps.release.outputs.sha }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
-      - name: Detect a merged release PR without a tag
+          # The script reads the manifest at each release PR's merge commit.
+          fetch-depth: 0
+      - name: Settle merged release PRs and find the outstanding release
         id: release
-        run: |
-          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --paginate |
-            jq -r --arg sha "$GITHUB_SHA" '.[] | select(
-              .merged_at != null and .merge_commit_sha == $sha and
-              .base.ref == "main" and (.head.ref | startswith("release-please--")) and
-              any(.labels[]; .name == "autorelease: pending")
-            ) | .number')
-          if test -z "$pr"; then
-            exit 0
-          fi
-          echo "pr=$pr" >> "$GITHUB_OUTPUT"
-          version=$(jq -er '.["."]' .release-please-manifest.json)
-          tag="v$version"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          remote_tag=$(git ls-remote --tags origin "refs/tags/$tag")
-          if test -z "$remote_tag"; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+        run: sh scripts/release-prepare.sh >> "$GITHUB_OUTPUT"
 
   release-please:
     needs: prepare
@@ -67,31 +58,36 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-release: true
 
+  # Validate the release commit itself, which is the commit the tag will name.
   ci:
     needs: prepare
-    if: needs.prepare.outputs.publish == 'true'
+    if: needs.prepare.outputs.release-pr != ''
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
 
   publish:
     needs: [prepare, ci]
-    if: needs.prepare.outputs.publish == 'true'
+    if: needs.prepare.outputs.release-pr != ''
     runs-on: ubuntu-24.04
     permissions:
       actions: write
       contents: write
+      issues: write
       pull-requests: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ needs.prepare.outputs.tag }}
+      SHA: ${{ needs.prepare.outputs.sha }}
       RELEASE_PR: ${{ needs.prepare.outputs.release-pr }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare.outputs.sha }}
       - name: Tag the validated release commit and dispatch dist
         run: |
           test -z "$(git ls-remote --tags origin "refs/tags/$TAG")"
-          git tag "$TAG" "$GITHUB_SHA"
+          git tag "$TAG" "$SHA"
           git push origin "refs/tags/$TAG"
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f "tag=$TAG"
       - name: Complete the release-please lifecycle

@@ -58,12 +58,19 @@ The bot uses `GITHUB_TOKEN`, so its release-PR updates do not start CI.
 Nothing auto-merges the release PR.
 
 When the user requests a release, merge the open release-please PR.
-The merge runs the full CI suite through the reusable CI workflow.
+The merge runs the full CI suite on the release commit through the reusable CI workflow.
 After CI passes, the publish job creates `vX.Y.Z` at that release commit and dispatches dist.
 Dist publishes the binaries and calls the existing npm publisher.
 The publish job changes `autorelease: pending` to `autorelease: tagged` so release-please can prepare the next release.
 
-If CI fails before tag creation, rerun the failed jobs at the same revision.
+Until its tag exists, the merged release PR stays the outstanding release.
+Every later push to `main` validates and publishes it again, and `scripts/release-prepare.sh` decides what each run owes.
+
+- If CI failed for a reason outside the release commit, dispatch `release-please.yml` on `main` to retry it.
+- If the release commit itself cannot pass, revert it on `main` with a `chore(release):` subject.
+  The next run marks its PR `autorelease: superseded`, and release-please opens a fresh release PR for the same version.
+- If a tag exists but its PR still has `autorelease: pending`, the next run changes the label to `autorelease: tagged`.
+
 If dispatch fails after tag creation, dispatch the existing tag manually:
 
 ```sh
@@ -72,7 +79,6 @@ gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z
 
 Never move an existing tag.
 A partial publication can leave conflicting assets and requires review before a retry.
-If dispatch failed before the label change, change the merged PR label from `autorelease: pending` to `autorelease: tagged` after dispatch succeeds.
 
 ## Web portal
 
