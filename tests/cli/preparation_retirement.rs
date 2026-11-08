@@ -52,7 +52,10 @@ for remote do :; done
 remote=${{remote#* host }}
 case "$remote" in
   'preparation-lookup '*|'prepared '*)
-    if test -f "$RIG/unreachable-release"; then exit 255; fi
+    case "$remote" in
+      'prepared '*)
+        if test -f "$RIG/unreachable-release"; then exit 255; fi ;;
+    esac
     DOGSLED_STATE="$RIG/peer-state" sh -c '{} host '"$remote" > "$RIG/retirement-response"
     status=$?; test "$status" = 0 || exit "$status"
     case "$remote" in
@@ -278,6 +281,9 @@ fn lost_ack_replays_the_same_retirement() {
 fn unreachable_peer_reports_pending_not_released() {
     let (rig, _) = prepared("retire-unreachable", "a");
     remote(&rig);
+    let claims = rig.preparation_record("peer-state", "claims", "").read();
+    assert_eq!(claims.as_array().unwrap().len(), 1);
+    fs::write(rig.dir.join("unreachable-release"), "").unwrap();
     let publisher = rig.serve();
     wait_publication(&rig, |frame| {
         frame["views"]["hosts"]["data"]
@@ -286,7 +292,7 @@ fn unreachable_peer_reports_pending_not_released() {
             .iter()
             .any(|host| host["id"] == "8103" && host["target"] == "netcup-dev")
     });
-    // Capture and authorize once, then lose transport before the host transaction.
+    // Capture and authorize once while transport to the host transaction is unavailable.
     let output = rig
         .cmd(&[
             "retire-preparation",
@@ -301,8 +307,6 @@ fn unreachable_peer_reports_pending_not_released() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(86), "{output:?}");
-    let claims = rig.preparation_record("peer-state", "claims", "").read();
-    fs::write(rig.dir.join("unreachable-release"), "").unwrap();
     let (code, pending) = remote_retire(&rig);
     assert_eq!(code, 1, "{pending}");
     assert_eq!(pending["ownership"], "pending");
