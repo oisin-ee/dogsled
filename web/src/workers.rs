@@ -73,7 +73,9 @@ pub(crate) fn owned_rows(
             .repos
             .iter()
             .flat_map(|repo| &repo.rows)
-            .filter(|row| crate::board::owns_worker(lead, row))
+            .filter(|row| {
+                crate::board::is_navigation_row(row) && crate::board::owns_worker(lead, row)
+            })
             .cloned()
             .collect(),
         _ => Vec::new(),

@@ -307,6 +307,14 @@ fn worker_row(id: &str, state: &str) -> Result<portal_types::RowView, serde_json
     }))
 }
 
+fn hold_row(id: &str, owner: Option<&str>) -> Result<portal_types::RowView, serde_json::Error> {
+    serde_json::from_value(serde_json::json!({
+        "group": "attention", "kind": "hold", "id": id, "name": id,
+        "what": "resource hold", "host": "local", "pane": null, "owner_pane": owner,
+        "state": "held", "activity": "", "age_ms": 0
+    }))
+}
+
 fn worker_context(selected: Option<portal_types::agents::AgentAddress>) {
     use_context_provider(|| Signal::new(selected));
     use_context_provider(|| Signal::new(None::<crate::app::InboxSelection>));
@@ -416,6 +424,85 @@ fn worker_sidebar_root(
         pane: "worker".into(),
     }));
     rsx! { crate::components::sidebar::SidebarProvider { crate::board::RepoGroup { group: props.0, inbox: props.1 } } }
+}
+
+#[test]
+fn resource_holds_are_excluded_from_owned_workers_and_sidebar_summary()
+-> Result<(), serde_json::Error> {
+    let mut job = worker_row("job", "done")?;
+    job.kind = "job".into();
+    job.pane = None;
+    job.group = portal_types::GroupView::ToLand;
+    let board = portal_types::BoardView {
+        hosts: Vec::new(),
+        generated_ms: 0,
+        repos: vec![portal_types::RepoGroup {
+            repository: Some("owner/repo".into()),
+            todos: Vec::new(),
+            rows: vec![
+                worker_row("worker", "working")?,
+                job,
+                hold_row("resource", Some("lead"))?,
+            ],
+        }],
+    };
+    let agents =
+        serde_json::from_value::<Vec<portal_types::agents::AgentView>>(serde_json::json!([{
+            "host": "local", "pane": "lead", "name": "Ship the portal",
+            "state": "working", "repository": "owner/repo"
+        }]))?;
+    let navigation = crate::board::navigation_groups(&board, &agents);
+    assert_eq!(navigation.repos.len(), 1);
+    let repo = &navigation.repos[0];
+    assert_eq!(repo.agent_count(), 1);
+    assert_eq!(repo.rows.len(), 1);
+    assert_eq!(repo.to_land, 1);
+    let lead = &repo.rows[0];
+    assert_eq!(
+        lead.workers
+            .iter()
+            .map(|row| row.role.as_str())
+            .collect::<Vec<_>>(),
+        ["agent", "job"]
+    );
+    let owned = crate::workers::owned_rows(Some(&board), Some(lead));
+    assert_eq!(
+        owned.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        ["worker", "job"]
+    );
+    let mut dom = VirtualDom::new_with_props(worker_sidebar_root, (repo.clone(), Vec::new()));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("2 workers · 1 working"), "{html}");
+    assert!(
+        html.contains("Show 2 workers for Ship the portal"),
+        "{html}"
+    );
+    assert_eq!(html.matches("class=\"worker-dot\"").count(), 2, "{html}");
+    assert!(!html.contains("resource"), "{html}");
+    Ok(())
+}
+
+#[test]
+fn unowned_resource_holds_never_become_sidebar_rows() -> Result<(), serde_json::Error> {
+    for repository in [None, Some("owner/repo".to_owned())] {
+        let board = portal_types::BoardView {
+            hosts: Vec::new(),
+            generated_ms: 0,
+            repos: vec![portal_types::RepoGroup {
+                repository,
+                todos: Vec::new(),
+                rows: vec![
+                    hold_row("unowned", None)?,
+                    hold_row("orphan", Some("missing"))?,
+                ],
+            }],
+        };
+        let navigation = crate::board::navigation_groups(&board, &[]);
+        assert!(navigation.repos.is_empty());
+        assert_eq!(navigation.finished_without_repository, 0);
+    }
+    Ok(())
 }
 
 #[test]
