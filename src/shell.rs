@@ -101,6 +101,18 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
         Err(Error::Invalid("shell does not support stdin input".into()))
     }
 
+    /// Stdin input with raw stdout, for batch protocols such as `git cat-file --batch`.
+    fn run_input_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<BytesOutput> {
+        let _ = (program, args, input, timeout);
+        Err(Error::Invalid("shell does not support byte output".into()))
+    }
+
     /// Setup has a separate ceiling; the command deadline still takes precedence.
     fn run_setup(&self, program: &str, args: &[String]) -> Result<Output> {
         self.run_bounded(
@@ -174,6 +186,16 @@ impl Shell for System {
         timeout: std::time::Duration,
     ) -> Result<Output> {
         self.execute(program, args, Some(input), timeout)
+    }
+
+    fn run_input_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<BytesOutput> {
+        self.execute_bytes(program, args, Some(input), timeout)
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {

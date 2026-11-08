@@ -1643,6 +1643,35 @@ pub(super) fn peer_observer(rig: &Rig) -> Background {
     observer
 }
 
+/// Stop an observer between admission attempts. The service marks a ticket `admitting` only
+/// while it holds that request's admission lock, so a kill while the test holds every queued
+/// request's lock cannot leave a ticket admitting. A loaded machine otherwise lands the kill
+/// inside an attempt, and the next pass fails the ticket as interrupted.
+pub(super) fn stop_observer(rig: &Rig, observer: Background) {
+    let dir = rig.dir.join("state/admissions");
+    fs::create_dir_all(&dir).unwrap();
+    let locks: Vec<fs::File> = rig
+        .tickets()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|ticket| {
+            let id = ticket["request"]["id"].as_str().unwrap();
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(dir.join(format!("{id}.lock")))
+                .unwrap();
+            lock.lock().unwrap();
+            lock
+        })
+        .collect();
+    drop(observer);
+    drop(locks);
+}
+
 /// Crash/replay fixtures neutralize only the host's real CPU load, not other capacity checks.
 pub(super) fn placement_observer(rig: &Rig) -> Background {
     placement_observer_every(rig, "1")
@@ -1656,7 +1685,11 @@ pub(super) fn placement_observer_every(rig: &Rig, interval: &str) -> Background 
     } else {
         toml::Table::new()
     };
+    // This serve probes the real host. Headroom must not depend on what the runner has
+    // free: a 7 GiB macOS runner running three tests drops below the 3 GiB memory reserve,
+    // and placement then waits until the test deadline.
     policy.insert("free_core_fraction_min".into(), toml::Value::Integer(0));
+    policy.insert("memory_reserve_bytes".into(), toml::Value::Integer(0));
     rig.config(&toml::to_string(&policy).unwrap());
     let disk = rig.host()["probe"]["disk_free_percent"].as_f64().unwrap();
     rig.script("df", &format!("#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 10000 0 {} 0%% /\n'\n", disk * 100.0));

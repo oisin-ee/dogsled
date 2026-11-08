@@ -78,6 +78,35 @@ tasks:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "web/public/**/*"
+  # The two halves of `test`. A CI runner too slow for the whole suite runs one each.
+  test-shard-1:
+    command: sh scripts/test-shard.sh 1
+    description: Run the first half of the Rust tests.
+    deps:
+      - web-build
+    inputs:
+      - "scripts/test-shard.sh"
+      - "src/**/*"
+      - "tests/**/*"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "web/public/**/*"
+  test-shard-2:
+    command: sh scripts/test-shard.sh 2
+    description: Run the second half of the Rust tests.
+    deps:
+      - web-build
+    inputs:
+      - "scripts/test-shard.sh"
+      - "src/**/*"
+      - "tests/**/*"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "web/public/**/*"
   web-lint:
     command: cargo clippy -p web --target wasm32-unknown-unknown -- -D warnings
     description: Run Clippy on the web portal UI for the WASM target.
