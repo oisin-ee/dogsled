@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::herdr_socket::Client;
 use crate::probe::Agent;
 use crate::service::wake;
-use portal_types::agents::{Conversation, Screen};
+use portal_types::agents::{Conversation, DetailRevisions, Screen};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -139,7 +139,7 @@ pub(crate) struct Reference {
     pub pane: String,
     pub session: Option<Session>,
     pub revision: u64,
-    pub conversation_revision: u64,
+    pub parts: DetailRevisions,
     pub screen_revision: Option<u64>,
     pub state: String,
     pub conversation: ReadState,
@@ -152,6 +152,8 @@ pub(crate) struct DetailFrame {
     pub epoch: String,
     pub revision: u64,
     pub found: bool,
+    #[serde(default)]
+    pub parts: Option<DetailRevisions>,
     pub agent: Option<portal_types::agents::AgentView>,
     pub detail: Detail,
 }
@@ -164,7 +166,12 @@ pub(crate) struct Payload {
 }
 
 impl Payload {
-    fn new(detail: Detail, pane: &str, sequence: &AtomicU64) -> Result<Self> {
+    fn new(
+        detail: Detail,
+        pane: &str,
+        sequence: &AtomicU64,
+        previous: Option<&Self>,
+    ) -> Result<Self> {
         fn state<T>(content: &Content<T>, empty: impl FnOnce(&T) -> bool) -> ReadState {
             match content {
                 Content::Pending => ReadState::Pending,
@@ -184,7 +191,20 @@ impl Payload {
             pane: pane.into(),
             session: detail.session.clone(),
             revision,
-            conversation_revision: revision,
+            parts: DetailRevisions {
+                conversation: previous
+                    .filter(|previous| {
+                        previous.detail.session == detail.session
+                            && previous.detail.conversation == detail.conversation
+                    })
+                    .map_or(revision, |previous| previous.reference.parts.conversation),
+                screen: previous
+                    .filter(|previous| {
+                        previous.detail.session == detail.session
+                            && previous.detail.screen == detail.screen
+                    })
+                    .map_or(revision, |previous| previous.reference.parts.screen),
+            },
             screen_revision: match &detail.screen {
                 Content::Available(screen) => Some(screen.revision),
                 _ => None,
@@ -474,10 +494,12 @@ impl Registry {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = agent.clone();
             } else {
+                let previous = output.borrow().clone();
                 output.send_replace(Some(Arc::new(Payload::new(
                     Detail::pending(agent),
                     pane,
                     &self.sequence,
+                    previous.as_deref(),
                 )?)));
                 self.workers.insert(
                     pane.into(),
@@ -495,7 +517,12 @@ impl Registry {
             let detail = Detail::unavailable(agent.as_ref(), "agent session unavailable");
             let previous = output.borrow().clone();
             if previous.as_ref().map(|payload| &payload.detail) != Some(&detail) {
-                output.send_replace(Some(Arc::new(Payload::new(detail, pane, &self.sequence)?)));
+                output.send_replace(Some(Arc::new(Payload::new(
+                    detail,
+                    pane,
+                    &self.sequence,
+                    previous.as_deref(),
+                )?)));
             }
         }
         let payload = output.borrow().clone();
@@ -577,13 +604,14 @@ impl Worker {
                     .map(|payload: &Arc<Payload>| &payload.detail)
                     != Some(&detail)
                 {
-                    let payload = Payload::new(detail, &agent.pane, &sequence).or_else(|error| {
-                        let mut failed =
-                            Detail::unavailable(Some(&agent), "detail serialization failed");
-                        failed.conversation = Content::Failed(error.to_string());
-                        failed.screen = Content::Failed(error.to_string());
-                        Payload::new(failed, &agent.pane, &sequence)
-                    });
+                    let payload = Payload::new(detail, &agent.pane, &sequence, previous.as_deref())
+                        .or_else(|error| {
+                            let mut failed =
+                                Detail::unavailable(Some(&agent), "detail serialization failed");
+                            failed.conversation = Content::Failed(error.to_string());
+                            failed.screen = Content::Failed(error.to_string());
+                            Payload::new(failed, &agent.pane, &sequence, previous.as_deref())
+                        });
                     match payload {
                         Ok(payload) => {
                             let changed = output.send_if_modified(|value| {
