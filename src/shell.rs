@@ -3,6 +3,10 @@
 
 use std::process::{Command, Stdio};
 
+/// Text commands must admit the largest legitimate reader: an SSH peer reply whose
+/// body is bounded by the detail codec, plus its status/body JSON envelope and newline.
+pub(crate) const OUTPUT_LIMIT: usize = crate::observation::details::CODEC.wire_limit() + 64;
+
 use crate::error::{Error, Result};
 
 /// Repository-local variables from `git rev-parse --local-env-vars`, plus namespace
@@ -66,8 +70,9 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
         program: &str,
         args: &[String],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<BytesOutput> {
-        let _ = (program, args, timeout);
+        let _ = (program, args, timeout, limit);
         Err(Error::Invalid("shell does not support byte output".into()))
     }
     fn budget(&self) -> crate::budget::Budget {
@@ -108,8 +113,9 @@ pub trait Shell: Send + Sync + std::fmt::Debug {
         args: &[String],
         input: &[u8],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<BytesOutput> {
-        let _ = (program, args, input, timeout);
+        let _ = (program, args, input, timeout, limit);
         Err(Error::Invalid("shell does not support byte output".into()))
     }
 
@@ -163,8 +169,9 @@ impl Shell for System {
         program: &str,
         args: &[String],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<BytesOutput> {
-        self.execute_bytes(program, args, None, timeout)
+        self.execute_bytes(program, args, None, timeout, limit)
     }
     fn budget(&self) -> crate::budget::Budget {
         self.budget
@@ -194,8 +201,9 @@ impl Shell for System {
         args: &[String],
         input: &[u8],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<BytesOutput> {
-        self.execute_bytes(program, args, Some(input), timeout)
+        self.execute_bytes(program, args, Some(input), timeout, limit)
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
@@ -211,7 +219,7 @@ impl System {
         input: Option<&[u8]>,
         timeout: std::time::Duration,
     ) -> Result<Output> {
-        let out = self.execute_bytes(program, args, input, timeout)?;
+        let out = self.execute_bytes(program, args, input, timeout, OUTPUT_LIMIT)?;
         Ok(Output {
             status: out.status,
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -225,6 +233,7 @@ impl System {
         args: &[String],
         input: Option<&[u8]>,
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<BytesOutput> {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt as _;
@@ -256,19 +265,13 @@ impl System {
             })
         });
         let (send, recv) = std::sync::mpsc::channel();
+        let capture_operation = operation.clone();
         let worker = std::thread::spawn(move || {
-            let output = child.wait_with_output();
-            let written = writer.map(std::thread::JoinHandle::join);
-            let result = output.and_then(|output| {
-                if let Some(written) = written {
-                    written.map_err(|_| std::io::Error::other("stdin worker failed"))??;
-                }
-                Ok(output)
-            });
+            let result = capture(child, writer, limit, capture_operation);
             let _ = send.send(result);
         });
         let result = match recv.recv_timeout(timeout) {
-            Ok(result) => result.map_err(Error::from),
+            Ok(result) => result,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 let deadline = Error::Deadline(operation);
                 if let Err(error) = kill_group(pid) {
@@ -285,12 +288,73 @@ impl System {
         worker
             .join()
             .map_err(|_| Error::Invalid("command worker failed".into()))?;
-        let out = result?;
-        Ok(BytesOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        result
+    }
+}
+
+/// Drain stderr concurrently while reading at most one byte beyond the stdout bound.
+fn capture(
+    mut child: std::process::Child,
+    writer: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    limit: usize,
+    operation: String,
+) -> Result<BytesOutput> {
+    use std::io::Read as _;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut stderr) = stderr {
+            stderr.read_to_end(&mut bytes)?;
+        }
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let mut bytes = Vec::new();
+    let read = stdout.map_or(Ok(0), |stdout| {
+        stdout
+            .take(u64::try_from(limit.saturating_add(1)).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)
+    });
+    let exceeded = bytes.len() > limit;
+    if exceeded || read.is_err() {
+        kill_child_group(&mut child)?;
+    }
+    let status = child.wait();
+    let stderr = errors
+        .join()
+        .map_err(|_| Error::Invalid("stderr worker failed".into()))?;
+    let written = writer.map(std::thread::JoinHandle::join);
+    if exceeded {
+        return Err(Error::OutputLimit { operation, limit });
+    }
+    read?;
+    let status = status?;
+    if let Some(written) = written {
+        written.map_err(|_| Error::Invalid("stdin worker failed".into()))??;
+    }
+    Ok(BytesOutput {
+        status: status.code().unwrap_or(-1),
+        stdout: bytes,
+        stderr: String::from_utf8_lossy(&stderr?).into_owned(),
+    })
+}
+
+/// Kill our own child's group. Darwin answers EPERM while the group's only member is an
+/// exiting leader, because a zombie cannot be signalled. The leader is our child, so reap it;
+/// the group must then be gone or signalable.
+fn kill_child_group(child: &mut std::process::Child) -> Result<()> {
+    let mut refused = false;
+    let killed = kill_group_with(child.id(), |group, signal| {
+        let result = nix::sys::signal::killpg(group, signal);
+        refused |= result == Err(nix::errno::Errno::EPERM);
+        result
+    });
+    match killed {
+        Err(_) if refused => {
+            child.wait()?;
+            kill_group(child.id())
+        }
+        other => other,
     }
 }
 
@@ -359,6 +423,27 @@ impl Fake {
 
 #[cfg(test)]
 impl Shell for Fake {
+    fn run_bytes_bounded(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+        limit: usize,
+    ) -> Result<BytesOutput> {
+        let out = self.run_bounded(program, args, timeout)?;
+        if out.stdout.len() > limit {
+            return Err(Error::OutputLimit {
+                operation: crate::diagnostic::shell_operation(program).into(),
+                limit,
+            });
+        }
+        Ok(BytesOutput {
+            status: out.status,
+            stdout: out.stdout.into_bytes(),
+            stderr: out.stderr,
+        })
+    }
+
     fn run_bounded(
         &self,
         program: &str,
@@ -530,7 +615,12 @@ mod tests {
                 for output in [
                     shell.run_ok("env", &[]).unwrap().stdout.into_bytes(),
                     shell
-                        .run_bytes_bounded("env", &[], std::time::Duration::from_secs(2))
+                        .run_bytes_bounded(
+                            "env",
+                            &[],
+                            std::time::Duration::from_secs(2),
+                            OUTPUT_LIMIT,
+                        )
                         .unwrap()
                         .stdout,
                     shell
@@ -631,6 +721,7 @@ mod tests {
                 "sh",
                 &["-c".into(), "printf '\\000\\377'".into()],
                 std::time::Duration::from_secs(2),
+                2,
             )
             .unwrap();
         assert_eq!(output.status, 0);
@@ -640,9 +731,54 @@ mod tests {
                 "sh",
                 &["-c".into(), "sleep 1".into()],
                 std::time::Duration::from_millis(10),
+                2,
             )
             .unwrap_err();
         assert!(matches!(error.root(), Error::Deadline(_)));
+    }
+
+    #[test]
+    fn stdout_limit_kills_the_owned_group_before_natural_exit() {
+        let root = std::env::temp_dir().join(crate::ledger::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let marker = root.join("completed");
+        let script = format!(
+            "(sleep 1; touch {}) & printf 123456789; wait",
+            quote(marker.to_str().unwrap())
+        );
+        let start = std::time::Instant::now();
+        let error = System::default()
+            .run_bytes_bounded(
+                "sh",
+                &["-c".into(), script],
+                std::time::Duration::from_secs(5),
+                8,
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::OutputLimit { limit: 8, .. }));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(!marker.exists(), "descendant survived stdout overflow");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fake_enforces_the_same_stdout_bound() {
+        let shell = Fake::new();
+        shell.on("git status", "12345");
+        for limit in [0, 4, 5] {
+            let result = shell.run_bytes_bounded(
+                "git",
+                &["status".into()],
+                std::time::Duration::from_secs(1),
+                limit,
+            );
+            if limit < 5 {
+                assert!(matches!(result, Err(Error::OutputLimit { .. })));
+            } else {
+                assert_eq!(result.unwrap().stdout, b"12345");
+            }
+        }
     }
 
     #[test]
@@ -663,6 +799,30 @@ mod tests {
             assert!(!sink.contains("TASK_SECRET"), "{sink}");
             assert!(!sink.contains("TOKEN_SECRET"), "{sink}");
         }
+    }
+
+    #[test]
+    fn kill_child_group_reaps_an_exited_leader() {
+        use std::os::unix::process::CommandExt as _;
+        let mut child = std::process::Command::new("true")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // Wait, without reaping, until the leader is a zombie. Its group then still exists:
+        // Darwin refuses to signal it (EPERM) and Linux accepts.
+        let pid = child.id().to_string();
+        while !String::from_utf8_lossy(
+            &std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim_start()
+        .starts_with('Z')
+        {}
+        kill_child_group(&mut child).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]

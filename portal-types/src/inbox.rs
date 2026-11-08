@@ -15,6 +15,9 @@ pub enum InboxKind {
 pub struct InboxItem {
     pub kind: InboxKind,
     pub id: String,
+    /// The review's number of submitted revisions; 0 for other kinds.
+    #[serde(default)]
+    pub revision: u64,
     pub pane: String,
     pub title: String,
     pub agent_title: Option<String>,

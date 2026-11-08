@@ -49,8 +49,9 @@ impl Shell for Source {
         program: &str,
         args: &[String],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> crate::error::Result<crate::shell::BytesOutput> {
-        System::default().run_bytes_bounded("env", &isolated(program, args), timeout)
+        System::default().run_bytes_bounded("env", &isolated(program, args), timeout, limit)
     }
     fn run_input_bytes_bounded(
         &self,
@@ -58,8 +59,15 @@ impl Shell for Source {
         args: &[String],
         input: &[u8],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> crate::error::Result<crate::shell::BytesOutput> {
-        System::default().run_input_bytes_bounded("env", &isolated(program, args), input, timeout)
+        System::default().run_input_bytes_bounded(
+            "env",
+            &isolated(program, args),
+            input,
+            timeout,
+            limit,
+        )
     }
     fn run_input_bounded(
         &self,

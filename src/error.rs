@@ -57,6 +57,8 @@ pub enum Error {
     Invalid(String),
     #[error("deadline reached: {0}")]
     Deadline(String),
+    #[error("stdout limit reached: {operation} ({limit} bytes)")]
+    OutputLimit { operation: String, limit: usize },
     /// Terminal diagnostics retain the original error classification and payload.
     #[error("{source}; startup output from {pane}:\n{output}")]
     Startup {
@@ -111,6 +113,8 @@ pub enum Refusal {
     JobClockUnavailable,
     /// The peer does not speak the job validity protocol.
     JobValidityUnsupported,
+    /// The peer explicitly rejects the Files detail operation.
+    AgentFilesUnsupported,
 }
 
 impl Refusal {
@@ -128,6 +132,7 @@ impl Refusal {
             Self::JobFromFuture => "JOB_FROM_FUTURE",
             Self::JobClockUnavailable => "JOB_CLOCK_UNAVAILABLE",
             Self::JobValidityUnsupported => "JOB_VALIDITY_UNSUPPORTED",
+            Self::AgentFilesUnsupported => "AGENT_FILES_UNSUPPORTED",
         }
     }
 
@@ -145,6 +150,7 @@ impl Refusal {
             Self::JobFromFuture,
             Self::JobClockUnavailable,
             Self::JobValidityUnsupported,
+            Self::AgentFilesUnsupported,
         ]
         .into_iter()
         .find(|r| r.code() == code)
@@ -170,6 +176,7 @@ impl Refusal {
                 "job request creation time is ahead of this host clock; new execution refused"
             }
             Self::JobClockUnavailable => "job validity clock is unavailable; new execution refused",
+            Self::AgentFilesUnsupported => "files unsupported",
             Self::JobValidityUnsupported => {
                 "this host does not support job request validity: host too old for job startup ownership; upgrade it; new execution refused"
             }

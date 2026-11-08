@@ -180,6 +180,7 @@ mod tests {
         });
         let event: AgentEvent = serde_json::from_value(wire.clone())?;
         assert_eq!(event.revisions, None);
+        assert_eq!(event.pending, None);
         assert_eq!(serde_json::to_value(event)?, wire);
         Ok(())
     }
@@ -434,12 +435,22 @@ pub struct ActivityError {
     pub code: ActivityCode,
 }
 
-/// Independent revisions of an agent's conversation and screen content.
+/// Independent revisions of an agent's conversation, screen and files content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DetailRevisions {
     pub conversation: u64,
     pub screen: u64,
+    #[serde(default)]
+    pub files: u64,
+}
+
+/// Parts whose content is not ready to read yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingParts {
+    pub conversation: bool,
+    pub screen: bool,
+    pub files: bool,
 }
 
 /// A change the agent stream pushes.
@@ -448,6 +459,9 @@ pub struct AgentEvent {
     /// Absent when the peer does not supply part revisions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revisions: Option<DetailRevisions>,
+    /// Absent when the peer does not supply pending-part metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingParts>,
     pub session: DetailSession,
     /// The Herdr event name, such as `pane.agent_status_changed`.
     pub kind: String,

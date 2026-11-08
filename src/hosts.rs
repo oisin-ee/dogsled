@@ -150,6 +150,29 @@ impl std::fmt::Display for Failure {
     }
 }
 
+/// Translate only the legacy Files parse rejection, never arbitrary remote error text.
+fn agent_files_refusal(
+    args: &[String],
+    out: &crate::shell::Output,
+) -> Option<crate::error::Refusal> {
+    use crate::error::Refusal;
+    const LEGACY_REJECTION: &str = "JSON: unknown variant `files`, expected one of `conversation`, `screen`, `event`, `activity`, `register`, `publish` at line 1 column 20";
+    if args.first().map(String::as_str) != Some("agent-detail") {
+        return None;
+    }
+    let input = args.windows(2).find(|pair| pair[0] == "--input")?;
+    let input: serde_json::Value = serde_json::from_str(&input[1]).ok()?;
+    if input != serde_json::json!({"operation":"files"}) {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).ok()?;
+    if value["code"].as_str().and_then(Refusal::from_code) == Some(Refusal::AgentFilesUnsupported) {
+        return Some(Refusal::AgentFilesUnsupported);
+    }
+    (value.get("code").is_none() && value["error"].as_str() == Some(LEGACY_REJECTION))
+        .then_some(Refusal::AgentFilesUnsupported)
+}
+
 /// Environment variable naming a local file that receives the raw ssh and remote error text.
 /// Unset by default, so raw text goes nowhere. This is the only sink for it: it is never put
 /// in an `Error`, a ticket, a handoff, a unit record, or a log line.
@@ -572,6 +595,15 @@ impl<'a> Fleet<'a> {
                 target: host.label.clone(),
                 failure: Failure::of_ssh(out.status, &out.stderr),
                 refusal: None,
+            });
+        }
+        if out.status != 0
+            && let Some(refusal) = agent_files_refusal(args, out)
+        {
+            return Err(Error::Ssh {
+                target: host.label.clone(),
+                failure: Failure::RemoteCommandFailed,
+                refusal: Some(refusal),
             });
         }
         if out.status != 0 && out.status != 1 {
@@ -1423,6 +1455,105 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_files_parse_rejection_becomes_a_typed_refusal_only_for_files() {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "operation",
+            content = "body",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum BeforeFiles {
+            Conversation,
+            Screen,
+            Event,
+            Activity,
+            Register,
+            Publish,
+        }
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let input = r#"{"operation":"files"}"#;
+        let rejection = serde_json::from_str::<BeforeFiles>(input).err().unwrap();
+        let output = crate::shell::Output {
+            status: 2,
+            stderr: String::new(),
+            stdout: serde_json::json!({"error":format!("JSON: {rejection}")}).to_string(),
+        };
+        let args = vec![
+            "agent-detail".into(),
+            "pane".into(),
+            "--input".into(),
+            input.into(),
+        ];
+        let error = Fleet::parse_remote::<serde_json::Value>(&host, &args, &output).unwrap_err();
+        assert!(matches!(
+            error.root(),
+            Error::Ssh {
+                refusal: Some(Refusal::AgentFilesUnsupported),
+                ..
+            }
+        ));
+        assert_eq!(error.to_string(), "ssh peer: files unsupported");
+        let mut conversation = args.clone();
+        conversation[3] = r#"{"operation":"conversation"}"#.into();
+        assert!(matches!(
+            Fleet::parse_remote::<serde_json::Value>(&host, &conversation, &output)
+                .unwrap_err()
+                .root(),
+            Error::Ssh {
+                refusal: None,
+                failure: Failure::RemoteCommandFailed,
+                ..
+            }
+        ));
+        let mut other = args.clone();
+        other[0] = "snapshot".into();
+        assert!(agent_files_refusal(&other, &output).is_none());
+        let mut different = output.clone();
+        different.stdout = serde_json::json!({"error":"ledger missing"}).to_string();
+        assert!(agent_files_refusal(&args, &different).is_none());
+        different.stdout =
+            serde_json::json!({"error":format!("JSON: {rejection}; {SECRET}")}).to_string();
+        assert!(agent_files_refusal(&args, &different).is_none());
+        different.stdout = String::new();
+        different.stderr = format!("JSON: {rejection}");
+        assert!(agent_files_refusal(&args, &different).is_none());
+    }
+
+    #[test]
+    fn explicit_files_refusal_keeps_the_fixed_typed_cause() {
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer-ssh".into()),
+        };
+        let args = vec![
+            "agent-detail".into(),
+            "pane".into(),
+            "--input".into(),
+            r#"{"operation":"files"}"#.into(),
+        ];
+        let output = crate::shell::Output {
+            status: 2, stderr: SECRET.into(),
+            stdout: serde_json::json!({"code":"AGENT_FILES_UNSUPPORTED","error":SECRET,"diagnostic":{"version":1}}).to_string(),
+        };
+        let error = Fleet::parse_remote::<serde_json::Value>(&host, &args, &output).unwrap_err();
+        assert!(matches!(
+            error.root(),
+            Error::Ssh {
+                refusal: Some(Refusal::AgentFilesUnsupported),
+                ..
+            }
+        ));
+        assert_eq!(error.to_string(), "ssh peer: files unsupported");
+        assert!(!format!("{error:?}").contains(SECRET));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! them. This crate holds data only, so it compiles to wasm32 as well.
 
 pub mod agents;
+pub mod files;
 pub mod inbox;
 pub mod questions;
 pub mod reviews;

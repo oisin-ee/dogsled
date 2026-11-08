@@ -1019,8 +1019,9 @@ impl Shell for ShellIn {
         program: &str,
         args: &[String],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<crate::shell::BytesOutput> {
-        crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+        crate::shell::System::default().run_bytes_bounded(program, args, timeout, limit)
     }
 
     fn run_input_bytes_bounded(
@@ -1029,8 +1030,10 @@ impl Shell for ShellIn {
         args: &[String],
         input: &[u8],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<crate::shell::BytesOutput> {
-        crate::shell::System::default().run_input_bytes_bounded(program, args, input, timeout)
+        crate::shell::System::default()
+            .run_input_bytes_bounded(program, args, input, timeout, limit)
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
@@ -1656,8 +1659,9 @@ impl Shell for LifecycleShell {
         program: &str,
         args: &[String],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<crate::shell::BytesOutput> {
-        crate::shell::System::default().run_bytes_bounded(program, args, timeout)
+        crate::shell::System::default().run_bytes_bounded(program, args, timeout, limit)
     }
 
     fn run_input_bytes_bounded(
@@ -1666,8 +1670,10 @@ impl Shell for LifecycleShell {
         args: &[String],
         input: &[u8],
         timeout: std::time::Duration,
+        limit: usize,
     ) -> Result<crate::shell::BytesOutput> {
-        crate::shell::System::default().run_input_bytes_bounded(program, args, input, timeout)
+        crate::shell::System::default()
+            .run_input_bytes_bounded(program, args, input, timeout, limit)
     }
 
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {

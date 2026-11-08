@@ -2,19 +2,16 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::time::Duration;
 
 use dioxus::html::FileData;
 use dioxus::prelude::*;
 use dioxus::web::WebEventExt;
 use dioxus_primitives::dioxus_attributes::attributes;
-use dioxus_sdk_time::sleep;
 use futures_util::StreamExt;
 use gloo_net::http::{Request, RequestBuilder, Response};
 use js_sys::wasm_bindgen::JsCast;
 use portal_types::reviews::{
-    Annotation, AnnotationsBody, ApproveBody, ChangeKind, DiffView, GeneralBody, Review,
-    ReviewList, ReviewSummary, plan_title,
+    Annotation, AnnotationsBody, ApproveBody, ChangeKind, DiffView, GeneralBody, Review, plan_title,
 };
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use serde::de::DeserializeOwned;
@@ -30,17 +27,13 @@ use crate::components::{
     input::Input,
     item::{
         Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemMediaVariant,
-        ItemSize, ItemTitle, ItemVariant,
+        ItemSize, ItemVariant,
     },
     label::Label,
-    skeleton::Skeleton,
     tabs::{TabContent, TabList, TabTrigger, Tabs},
     textarea::Textarea,
 };
 use crate::notice::{Alert, Status};
-
-/// The time between two reads of the open plan reviews.
-const POLL: Duration = Duration::from_secs(2);
 
 fn segment(value: &str) -> String {
     String::from(js_sys::encode_uri_component(value))
@@ -93,86 +86,17 @@ async fn send<T: serde::Serialize>(request: RequestBuilder, body: &T) -> Result<
 
 #[component]
 pub fn ReviewView(
-    #[props(default)] review_id: Option<String>,
+    review_id: String,
+    revision: u64,
     #[props(default)] embedded: bool,
     #[props(default)] lead: String,
     #[props(default)] role: String,
     #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
 ) -> Element {
-    let local_selected = use_signal(|| None::<portal_types::agents::AgentAddress>);
-    let mut selected = try_use_context::<Signal<Option<portal_types::agents::AgentAddress>>>()
-        .unwrap_or(local_selected);
-    let mut list = use_signal(Vec::<ReviewSummary>::new);
-    let mut opened = use_signal(|| None::<String>);
-    let mut error = use_signal(|| None::<String>);
-    let mut tick = use_signal(|| 0_u64);
-    let mut loading = use_signal(|| true);
-    use_future(move || async move {
-        loop {
-            match get::<ReviewList>("/api/reviews").await {
-                Ok(value) => {
-                    list.set(
-                        value
-                            .reviews
-                            .into_iter()
-                            .filter(|item| item.decision.is_none())
-                            .collect(),
-                    );
-                    error.set(None);
-                    tick += 1;
-                }
-                Err(message) => error.set(Some(message)),
-            }
-            loading.set(false);
-            sleep(POLL).await;
-        }
-    });
-    let reviews = list();
-    let current = review_id.clone().or_else(|| {
-        reviews
-            .iter()
-            .find(|item| {
-                selected()
-                    .is_some_and(|address| address.host == "local" && item.pane == address.pane)
-                    && Some(&item.id) == opened().as_ref()
-            })
-            .or_else(|| {
-                reviews.iter().find(|item| {
-                    selected()
-                        .is_some_and(|address| address.host == "local" && item.pane == address.pane)
-                })
-            })
-            .map(|item| item.id.clone())
-    });
     rsx! {
-        if !embedded && review_id.is_none() {
-            Item { ItemContent { ItemTitle { "Plans · Needs you: {reviews.len()}" } } }
-            ItemGroup { aria_label: "Plans needing review",
-                for item in reviews {
-                    Button { variant: ButtonVariant::Outline,
-                        key: "{item.id}", r#type: "button",
-                        aria_current: (current.as_ref() == Some(&item.id)).then_some("true"),
-                        onclick: {
-                            let pane = item.pane.clone();
-                            let id = item.id.clone();
-                            move |_| { selected.set(Some(portal_types::agents::AgentAddress::local(pane.clone()))); opened.set(Some(id.clone())); }
-                        },
-                        "{item.path} · {item.pane}"
-                    }
-                }
-            }
-        }
-        if let Some(message) = error() { Alert { "{message}" } }
-        if let Some(id) = current {
-            ReviewLoader {
-                key: "{id}", id, tick: tick(), embedded, lead, role, repository, on_close,
-                on_done: move |id: String| list.write().retain(|item| item.id != id),
-            }
-        } else if loading() {
-            Skeleton { role: "status", aria_label: "Loading plans" }
-        } else {
-            Status { "Select a plan above, or an agent with an open plan." }
+        ReviewLoader {
+            key: "{review_id}", id: review_id, revision, embedded, lead, role, repository, on_close,
         }
     }
 }
@@ -180,17 +104,16 @@ pub fn ReviewView(
 #[component]
 fn ReviewLoader(
     id: String,
-    tick: u64,
+    revision: u64,
     embedded: bool,
     lead: String,
     role: String,
     repository: String,
     on_close: EventHandler<()>,
-    on_done: EventHandler<String>,
 ) -> Element {
     let mut review = use_signal(|| None::<Review>);
     let mut error = use_signal(|| None::<String>);
-    use_resource(use_reactive((&id, &tick), move |(id, _)| async move {
+    use_resource(use_reactive((&id, &revision), move |(id, _)| async move {
         match get::<Review>(&format!("/api/reviews/{}", segment(&id))).await {
             Ok(value) => {
                 review.set(Some(value));
@@ -205,7 +128,7 @@ fn ReviewLoader(
             if value.decision.is_some() {
                 Status { "This review is closed." }
             } else {
-                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, lead, role, repository, on_close, on_done }
+                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, lead, role, repository, on_close }
             }
         } else { Status { "Loading plan…" } }
     }
@@ -629,7 +552,6 @@ pub(crate) fn ReviewEditor(
     #[props(default)] role: String,
     #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
-    on_done: EventHandler<String>,
 ) -> Element {
     let mut review = use_signal(|| initial);
     let mut general = use_signal(|| review.peek().general.clone());
@@ -720,9 +642,6 @@ pub(crate) fn ReviewEditor(
                     Ok(value) => {
                         if closes_editor {
                             editing.set(None);
-                        }
-                        if value.decision.is_some() {
-                            on_done.call(value.id.clone());
                         }
                         review.set(value);
                     }

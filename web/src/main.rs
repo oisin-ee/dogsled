@@ -9,6 +9,7 @@ mod board;
 mod component_tests;
 pub mod components;
 mod conversations;
+mod files;
 mod highlight;
 mod new_lead;
 mod notice;

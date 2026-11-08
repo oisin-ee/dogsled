@@ -194,6 +194,7 @@ fn AgentSession(
     let mut conversations = use_context::<Signal<Conversations>>();
     let mut detail_session = use_signal(|| None::<wire::DetailSession>);
     let mut screen = use_signal(|| None::<wire::Screen>);
+    let mut files = use_signal(|| None::<portal_types::files::FilesState>);
     let mut screen_error = use_signal(|| None::<String>);
     let mut pending_error = use_signal(|| None::<String>);
     let mut stream_error = use_signal(|| None::<String>);
@@ -201,6 +202,7 @@ fn AgentSession(
     let mut busy = use_signal(|| false);
     let mut conversation_trigger = use_signal(|| 0_u64);
     let mut screen_trigger = use_signal(|| 0_u64);
+    let mut files_trigger = use_signal(|| 0_u64);
     // A choice belongs to the request that was visible when it was made.
     // A new request opens in front; the same request preserves the tab.
     let mut choice = use_signal(|| None::<(String, Tab)>);
@@ -258,6 +260,36 @@ fn AgentSession(
         }
     });
 
+    let files_pane = address.clone();
+    use_resource(move || {
+        let trigger = files_trigger();
+        let session = detail_session.peek().clone();
+        let pane = files_pane.clone();
+        async move {
+            if trigger == 0 {
+                return;
+            }
+            let result = api::fetch_files(&pane).await;
+            if *detail_session.peek() != session {
+                return;
+            }
+            use portal_types::files::FilesState;
+            let state = match result {
+                Ok(state) => state,
+                Err(error) => match files.peek().as_ref() {
+                    Some(FilesState::Current(files) | FilesState::Stale { files, .. }) => {
+                        FilesState::Stale {
+                            files: files.clone(),
+                            error,
+                        }
+                    }
+                    _ => FilesState::Unavailable(error),
+                },
+            };
+            files.set(Some(state));
+        }
+    });
+
     let pending_address = address.clone();
     let inbox_ids = use_memo(use_reactive(&inbox, move |inbox| {
         agent_inbox_ids(&inbox, &pending_address)
@@ -295,7 +327,8 @@ fn AgentSession(
                     stream_error.set(None);
                     let parts = changed_parts(revisions.as_ref(), &event, was_blocked);
                     was_blocked = event_is_blocked(&event, was_blocked);
-                    if detail_session.peek().as_ref() != Some(&event.session) {
+                    let session_changed = detail_session.peek().as_ref() != Some(&event.session);
+                    if session_changed {
                         match &event.session {
                             wire::DetailSession::Available(session) => conversations
                                 .write()
@@ -307,6 +340,7 @@ fn AgentSession(
                                 .unavailable(&pane.pane),
                         }
                         screen.set(None);
+                        files.set(None);
                         detail_session.set(Some(event.session.clone()));
                     }
                     revisions.clone_from(&event.revisions);
@@ -316,6 +350,9 @@ fn AgentSession(
                     }
                     if parts.screen {
                         screen_trigger += 1;
+                    }
+                    if parts.files {
+                        files_trigger += 1;
                     }
                     if !was_blocked {
                         screen.set(None);
@@ -423,6 +460,8 @@ fn AgentSession(
         .iter()
         .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
         .collect();
+    let files_count = crate::files::path_count(files.read().as_ref())
+        .map_or_else(String::new, |paths| paths.to_string());
     let worker_count = worker_rows.len();
     let working_count = crate::workers::working_count(&worker_rows);
     let todo_count: usize = todos
@@ -548,10 +587,14 @@ fn AgentSession(
                 if tab == Tab::Pending {
                     match &pending {
                         Some(RequestTab::Questions(id, _)) => rsx! {
-                            QuestionForm { requested: id.clone(), on_done: move |id: String| {
-                                if let Some(pending) = questions.write().as_mut() { pending.retain(|item| item.id != id); }
-                                if selection.peek().as_ref().is_some_and(|item| item.kind == crate::app::InboxKind::Question && item.id == id) { selection.set(None); }
-                            } }
+                            if let Some(question) = questions().and_then(|items| items.into_iter().find(|item| item.id == *id)) {
+                                QuestionForm { question, on_done: move |id: String| {
+                                    if let Some(pending) = questions.write().as_mut() { pending.retain(|item| item.id != id); }
+                                    if selection.peek().as_ref().is_some_and(|item| item.kind == crate::app::InboxKind::Question && item.id == id) { selection.set(None); }
+                                } }
+                            } else {
+                                Status { "This question is loading, answered, or no longer available." }
+                            }
                         },
                         Some(RequestTab::Prompt) => rsx! {
                             BlockedPanel { prompt: current.as_ref().and_then(|agent| agent.blocked.clone()), screen: screen().filter(|value| detail_session.peek().as_ref().is_none_or(|session| session == &wire::DetailSession::Available(value.session.clone()))).map(|value| value.text),
@@ -603,6 +646,7 @@ fn AgentSession(
                             TabTrigger { value: "chat", index: first_tab, "Chat" }
                             TabTrigger { value: "todos", index: first_tab + 1, "Todos {completed}/{todo_count}" }
                             TabTrigger { value: "workers", index: first_tab + 2, "Workers {worker_count}" }
+                            TabTrigger { value: "files", index: first_tab + 3, "Files {files_count}" }
                         }
                     }
                 }
@@ -651,7 +695,9 @@ fn AgentSession(
             if plan_open {
                 div { class: "pending-review",
                     if let Some(RequestTab::Review(id)) = &pending {
-                        ReviewView { review_id: id.clone(), embedded: true,
+                        ReviewView { review_id: id.clone(),
+                            revision: inbox.iter().find(|item| item.selection.host == address.host && item.selection.pane == address.pane && item.selection.kind == crate::app::InboxKind::Review && item.selection.id == *id).map_or(0, |item| item.revision),
+                            embedded: true,
                             lead: title.clone(), role: role.to_owned(),
                             repository: current.as_ref().and_then(|agent| agent.repository.clone()).unwrap_or_else(|| "Unknown repository".to_owned()),
                             on_close: move |_| choice.set(Some((review_identity.clone(), Tab::Conversation))),
@@ -663,17 +709,29 @@ fn AgentSession(
                     {chat.clone()}
                     aside { class: "console-todos",
                         Tabs { class: "lead-detail", horizontal: true, value: Some(detail().value().to_owned()),
-                            on_value_change: move |value: String| detail.set(if value == "workers" { crate::app::LeadPanel::Workers } else { crate::app::LeadPanel::Todos }),
+                            on_value_change: move |value: String| {
+                                let next = match value.as_str() {
+                                    "workers" => crate::app::LeadPanel::Workers,
+                                    "files" => crate::app::LeadPanel::Files,
+                                    _ => crate::app::LeadPanel::Todos,
+                                };
+                                detail.set(next);
+                                panel.set(next);
+                            },
                             header { class: "console-column-header detail-header",
                                 div { class: "lead-tabs detail-tabs", TabList { aria_label: "Lead detail",
                                     TabTrigger { value: "todos", index: 0usize, "Todos {completed}/{todo_count}" }
                                     TabTrigger { value: "workers", index: 1usize, "Workers {worker_count}" }
+                                    TabTrigger { value: "files", index: 2usize, "Files {files_count}" }
                                 } }
                                 if detail() == crate::app::LeadPanel::Workers { span { "{working_count} working" } }
                             }
                             TabContent { class: "detail-content", value: "todos", index: 0usize, Todos { todos: todos.clone(), workers: workers.clone() } }
                             TabContent { class: "detail-content", value: "workers", index: 1usize,
                                 crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone(), header: false }
+                            }
+                            TabContent { class: "detail-content", value: "files", index: 2usize,
+                                crate::files::Files { state: files() }
                             }
                         }
                     }
@@ -687,6 +745,9 @@ fn AgentSession(
                     TabContent { class: "workers-tab", value: "workers", index: first_tab + 2,
                         crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone() }
                     }
+                    TabContent { class: "files-tab", value: "files", index: first_tab + 3,
+                        crate::files::Files { state: files() }
+                    }
                 }
             }
         }
@@ -697,6 +758,7 @@ fn AgentSession(
 struct ChangedParts {
     conversation: bool,
     screen: bool,
+    files: bool,
 }
 
 fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
@@ -707,34 +769,43 @@ fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
             .map_or(was_blocked, |state| state == "blocked")
 }
 
-/// Older peers lack revisions; their events must invalidate both parts.
+/// Older peers lack revisions; their events must invalidate all three parts.
 fn changed_parts(
     held: Option<&wire::DetailRevisions>,
     event: &wire::AgentEvent,
     was_blocked: bool,
 ) -> ChangedParts {
-    let Some(revisions) = &event.revisions else {
-        return ChangedParts {
+    let mut parts = if let Some(revisions) = &event.revisions {
+        let blocked = event_is_blocked(event, was_blocked);
+        ChangedParts {
+            conversation: held.is_none_or(|held| held.conversation != revisions.conversation),
+            files: held.is_none_or(|held| held.files != revisions.files),
+            screen: blocked
+                && (held.is_none_or(|held| held.screen != revisions.screen) || !was_blocked),
+        }
+    } else {
+        ChangedParts {
             conversation: true,
             screen: true,
-        };
+            files: true,
+        }
     };
-    let blocked = event_is_blocked(event, was_blocked);
-    ChangedParts {
-        conversation: held.is_none_or(|held| held.conversation != revisions.conversation),
-        screen: blocked
-            && (held.is_none_or(|held| held.screen != revisions.screen) || !was_blocked),
+    if let Some(pending) = &event.pending {
+        parts.conversation &= !pending.conversation;
+        parts.screen &= !pending.screen;
+        parts.files &= !pending.files;
     }
+    parts
 }
 
 fn agent_inbox_ids(
     inbox: &[crate::app::InboxItem],
     address: &wire::AgentAddress,
-) -> std::collections::BTreeSet<String> {
+) -> std::collections::BTreeSet<(String, u64)> {
     inbox
         .iter()
         .filter(|item| item.selection.host == address.host && item.selection.pane == address.pane)
-        .map(|item| item.selection.id.clone())
+        .map(|item| (item.selection.id.clone(), item.revision))
         .collect()
 }
 
@@ -1751,9 +1822,11 @@ mod tests {
 
     fn event(conversation: u64, screen: u64, state: &str) -> wire::AgentEvent {
         wire::AgentEvent {
+            pending: None,
             revisions: Some(wire::DetailRevisions {
                 conversation,
                 screen,
+                files: 0,
             }),
             session: wire::DetailSession::Available("session".into()),
             kind: "pane.agent_status_changed".into(),
@@ -1763,10 +1836,11 @@ mod tests {
         }
     }
 
-    fn parts(conversation: bool, screen: bool) -> ChangedParts {
+    fn parts(conversation: bool, screen: bool, files: bool) -> ChangedParts {
         ChangedParts {
             conversation,
             screen,
+            files,
         }
     }
 
@@ -1774,11 +1848,95 @@ mod tests {
     fn first_event_reads_the_conversation_and_only_a_blocked_screen() {
         assert_eq!(
             changed_parts(None, &event(4, 8, "working"), false),
-            parts(true, false)
+            parts(true, false, true)
         );
         assert_eq!(
             changed_parts(None, &event(4, 8, "blocked"), true),
-            parts(true, true)
+            parts(true, true, true)
+        );
+    }
+
+    #[test]
+    fn pending_parts_are_read_once_as_each_becomes_available() {
+        let mut event = event(4, 8, "blocked");
+        event.pending = Some(wire::PendingParts {
+            conversation: true,
+            screen: true,
+            files: true,
+        });
+        assert_eq!(
+            changed_parts(None, &event, false),
+            parts(false, false, false)
+        );
+        let held = event.revisions.clone();
+        if let Some(pending) = event.pending.as_mut() {
+            pending.conversation = false;
+        }
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.conversation += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(true, false, false)
+        );
+        let held = event.revisions.clone();
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, false, false)
+        );
+        if let Some(pending) = event.pending.as_mut() {
+            pending.files = false;
+        }
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.files += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, false, true)
+        );
+        let held = event.revisions.clone();
+        if let Some(pending) = event.pending.as_mut() {
+            pending.screen = false;
+        }
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.screen += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, true, false)
+        );
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, true),
+            parts(false, false, false)
+        );
+    }
+
+    #[test]
+    fn pending_screen_is_not_read_when_becoming_blocked() {
+        let mut event = event(4, 8, "blocked");
+        event.pending = Some(wire::PendingParts {
+            conversation: false,
+            screen: true,
+            files: false,
+        });
+        assert_eq!(
+            changed_parts(event.revisions.as_ref(), &event, false),
+            parts(false, false, false)
+        );
+    }
+
+    #[test]
+    fn pending_parts_are_skipped_even_without_part_revisions() {
+        let mut event = event(4, 8, "blocked");
+        event.revisions = None;
+        event.pending = Some(wire::PendingParts {
+            conversation: true,
+            screen: true,
+            files: true,
+        });
+        assert_eq!(
+            changed_parts(None, &event, true),
+            parts(false, false, false)
         );
     }
 
@@ -1787,7 +1945,7 @@ mod tests {
         let event = event(4, 8, "blocked");
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, true),
-            parts(false, false)
+            parts(false, false, false)
         );
     }
 
@@ -1796,15 +1954,15 @@ mod tests {
         let held = event(4, 8, "blocked").revisions;
         assert_eq!(
             changed_parts(held.as_ref(), &event(4, 9, "blocked"), true),
-            parts(false, true)
+            parts(false, true, false)
         );
         assert_eq!(
             changed_parts(held.as_ref(), &event(4, 9, "working"), false),
-            parts(false, false)
+            parts(false, false, false)
         );
         assert_eq!(
             changed_parts(held.as_ref(), &event(4, 9, "working"), true),
-            parts(false, false)
+            parts(false, false, false)
         );
     }
 
@@ -1813,11 +1971,11 @@ mod tests {
         let held = event(4, 8, "blocked").revisions;
         assert_eq!(
             changed_parts(held.as_ref(), &event(5, 8, "blocked"), true),
-            parts(true, false)
+            parts(true, false, false)
         );
         assert_eq!(
             changed_parts(held.as_ref(), &event(5, 8, "working"), false),
-            parts(true, false)
+            parts(true, false, false)
         );
     }
 
@@ -1826,7 +1984,7 @@ mod tests {
         let mut event = event(4, 8, "blocked");
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, false),
-            parts(false, true)
+            parts(false, true, false)
         );
         event.state = Some("idle".into());
         event.blocked = Some(BlockedPrompt {
@@ -1835,25 +1993,38 @@ mod tests {
         });
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, false),
-            parts(false, true)
+            parts(false, true, false)
         );
         event.state = None;
         event.blocked = None;
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, true),
-            parts(false, false)
+            parts(false, false, false)
         );
     }
 
     #[test]
-    fn an_older_peer_invalidates_both_parts_on_every_event() {
+    fn a_files_only_revision_change_reads_only_files() {
+        let mut event = event(4, 8, "blocked");
+        let held = event.revisions.clone();
+        if let Some(revisions) = event.revisions.as_mut() {
+            revisions.files += 1;
+        }
+        assert_eq!(
+            changed_parts(held.as_ref(), &event, true),
+            parts(false, false, true)
+        );
+    }
+
+    #[test]
+    fn an_older_peer_invalidates_all_three_parts_on_every_event() {
         let mut event = event(4, 8, "working");
         let held = event.revisions.take();
         assert_eq!(
             changed_parts(held.as_ref(), &event, false),
-            parts(true, true)
+            parts(true, true, true)
         );
-        assert_eq!(changed_parts(None, &event, false), parts(true, true));
+        assert_eq!(changed_parts(None, &event, false), parts(true, true, true));
     }
 
     #[test]
@@ -1861,9 +2032,9 @@ mod tests {
         let event = event(4, 8, "blocked");
         assert_eq!(
             changed_parts(event.revisions.as_ref(), &event, true),
-            parts(false, false)
+            parts(false, false, false)
         );
-        assert_eq!(changed_parts(None, &event, true), parts(true, true));
+        assert_eq!(changed_parts(None, &event, true), parts(true, true, true));
     }
 
     #[test]
@@ -1877,7 +2048,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_list_identity_uses_only_this_agents_inbox_id_set() {
+    fn pending_list_identity_uses_only_this_agents_inbox_ids_and_revisions() {
         use crate::app::{InboxItem, InboxKind, InboxSelection};
         let item = |host: &str, pane: &str, id: &str| InboxItem {
             selection: InboxSelection {
@@ -1886,6 +2057,7 @@ mod tests {
                 id: id.into(),
                 kind: InboxKind::Question,
             },
+            revision: 0,
             title: "Question".into(),
             agent_title: None,
             repository: None,
@@ -1899,11 +2071,22 @@ mod tests {
             item("local", "other-pane", "foreign-pane"),
         ];
         let ids = agent_inbox_ids(&inbox, &address);
-        assert_eq!(ids, ["a".to_owned(), "b".to_owned()].into_iter().collect());
-        inbox.reverse();
+        assert_eq!(
+            ids,
+            [("a".to_owned(), 0), ("b".to_owned(), 0)]
+                .into_iter()
+                .collect()
+        );
         inbox[0].age_ms = 2_000;
-        inbox[3].title = "Updated title".into();
+        inbox[1].title = "Updated title".into();
+        inbox.reverse();
         inbox.push(item("local", "pane", "a"));
+        assert_eq!(agent_inbox_ids(&inbox, &address), ids);
+        inbox[2].revision = 1;
+        assert_ne!(agent_inbox_ids(&inbox, &address), ids);
+        inbox[2].revision = 0;
+        assert_eq!(agent_inbox_ids(&inbox, &address), ids);
+        inbox[0].revision = 2;
         assert_eq!(agent_inbox_ids(&inbox, &address), ids);
         inbox.retain(|item| item.selection.id != "a");
         assert_ne!(agent_inbox_ids(&inbox, &address), ids);

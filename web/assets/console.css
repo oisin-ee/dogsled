@@ -937,6 +937,63 @@ textarea {
   -webkit-line-clamp: 2;
   overflow: hidden;
 }
+.console-provider .console-shell .files-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+.console-provider .console-shell .files-list {
+  padding: 6px 16px 12px;
+}
+.console-provider .console-shell .files-list button {
+  padding: 9px 0 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--console-muted);
+}
+.console-provider .console-shell .files-list [data-slot="item-group"] {
+  gap: 0;
+}
+.console-provider .console-shell .files-row[data-slot="item"] {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 5px 0 6px;
+  border: 0;
+  border-radius: 0;
+  font: 12px/1.6 "JetBrains Mono", ui-monospace, monospace;
+  color: var(--console-text);
+}
+.console-provider .console-shell .files-row [data-slot="item-title"] {
+  display: block;
+  min-width: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .files-code {
+  white-space: pre;
+}
+.console-provider .console-shell .files-row .files-previous {
+  margin: 2px 0 0;
+  font: 11px/1.6 "JetBrains Mono", ui-monospace, monospace;
+  color: var(--console-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .files-loading > div {
+  height: 10px;
+  width: 75%;
+  margin-block: 18px;
+  background: var(--console-raised);
+}
+.console-provider .console-shell .files-loading > div:nth-child(2n) {
+  width: 57%;
+}
+.console-provider .console-shell .files-tab,
 .console-provider .console-shell .workers-tab {
   grid-column: 1;
   grid-row: 3;

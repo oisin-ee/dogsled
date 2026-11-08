@@ -72,6 +72,7 @@ const SCREEN_LINES: u32 = 200;
 pub(crate) enum PeerOperation {
     Conversation,
     Screen,
+    Files,
     Event,
     Activity,
     Register(portal_types::agents::RegisterProducer),
@@ -226,7 +227,7 @@ async fn peer_read(
                 state,
                 pane,
                 |detail| matches!(detail.conversation, Content::Pending),
-                |detail| &detail.conversation,
+                |detail| content_response(&detail.conversation),
             )
             .await
         }
@@ -235,7 +236,16 @@ async fn peer_read(
                 state,
                 pane,
                 |detail| matches!(detail.screen, Content::Pending),
-                |detail| &detail.screen,
+                |detail| content_response(&detail.screen),
+            )
+            .await
+        }
+        PeerOperation::Files => {
+            detail_response(
+                state,
+                pane,
+                |detail| matches!(detail.files, portal_types::files::FilesState::Pending),
+                |detail| Json(&detail.files).into_response(),
             )
             .await
         }
@@ -341,8 +351,25 @@ pub(super) async fn peer_response(
     operation: PeerOperation,
 ) -> Response {
     let label = host.clone();
+    let files = matches!(operation, PeerOperation::Files);
     match tokio::task::spawn_blocking(move || peer_call(&state, &host, &pane, &operation)).await {
         Ok(Ok(reply)) => peer_reply_response(&label, reply),
+        Ok(Err(error))
+            if files
+                && matches!(
+                    error.root(),
+                    crate::error::Error::Ssh {
+                        refusal: Some(crate::error::Refusal::AgentFilesUnsupported),
+                        ..
+                    }
+                ) =>
+        {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": format!("host {label}: files unsupported")})),
+            )
+                .into_response()
+        }
         Ok(Err(error)) => peer_error(&label, &error),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
@@ -526,6 +553,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents", get(list))
         .route("/api/agents/{host}/{pane}/conversation", get(conversation))
         .route("/api/agents/{host}/{pane}/screen", get(screen))
+        .route("/api/agents/{host}/{pane}/files", get(files))
         .route("/api/agents/{host}/{pane}/prompt", post(prompt))
         .route("/api/agents/{host}/{pane}/keys", post(keys))
         .route("/api/agents/{host}/{pane}/focus", post(focus))
@@ -673,7 +701,7 @@ async fn conversation(
         state,
         pane,
         |detail| matches!(detail.conversation, Content::Pending),
-        |detail| &detail.conversation,
+        |detail| content_response(&detail.conversation),
     )
     .await
 }
@@ -690,16 +718,44 @@ async fn screen(
         state,
         pane,
         |detail| matches!(detail.screen, Content::Pending),
-        |detail| &detail.screen,
+        |detail| content_response(&detail.screen),
     )
     .await
 }
 
-async fn detail_response<T: serde::Serialize + Send + 'static>(
+/// The checkout state has its own capture and does not wait for other detail parts.
+async fn files(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
+    if host != crate::hosts::LOCAL {
+        return peer_response(state, host, pane, PeerOperation::Files).await;
+    }
+    detail_response(
+        state,
+        pane,
+        |detail| matches!(detail.files, portal_types::files::FilesState::Pending),
+        |detail| Json(&detail.files).into_response(),
+    )
+    .await
+}
+
+fn content_response<T: serde::Serialize>(content: &Content<T>) -> Response {
+    match content {
+        Content::Available(content) => Json(content).into_response(),
+        Content::Unavailable(error) => crate::web::observation_error(error),
+        Content::Failed(error) => {
+            (StatusCode::BAD_GATEWAY, Json(json!({"error":error}))).into_response()
+        }
+        Content::Pending => crate::web::observation_error("agent detail pending"),
+    }
+}
+
+async fn detail_response(
     state: AppState,
     pane: String,
     pending: fn(&Detail) -> bool,
-    select: fn(&Detail) -> &Content<T>,
+    select: fn(&Detail) -> Response,
 ) -> Response {
     match tokio::task::spawn_blocking(move || {
         let mut subscription = ipc::Client::at(&state.web.dir).detail(&pane)?;
@@ -714,16 +770,7 @@ async fn detail_response<T: serde::Serialize + Send + 'static>(
             }
             let detail = &connection.publication.detail;
             if !pending(detail) {
-                let response = match select(detail) {
-                    Content::Available(content) => Json(content).into_response(),
-                    Content::Unavailable(error) => crate::web::observation_error(error),
-                    Content::Failed(error) => {
-                        (StatusCode::BAD_GATEWAY, Json(json!({"error":error}))).into_response()
-                    }
-                    Content::Pending => {
-                        return Err(crate::error::Error::Invalid("agent detail pending".into()));
-                    }
-                };
+                let response = select(detail);
                 return Ok(stamped(response, &connection.publication));
             }
             if state.stop.is_cancelled() || Instant::now() >= deadline {
@@ -937,6 +984,14 @@ fn agent_event(publication: &DetailFrame, pane: &str) -> crate::error::Result<St
     let agent = publication.agent.as_ref();
     Ok(serde_json::to_string(&AgentEvent {
         revisions: publication.parts.clone(),
+        pending: Some(portal_types::agents::PendingParts {
+            conversation: matches!(publication.detail.conversation, Content::Pending),
+            screen: matches!(publication.detail.screen, Content::Pending),
+            files: matches!(
+                publication.detail.files,
+                portal_types::files::FilesState::Pending
+            ),
+        }),
         kind: "pane.agent_status_changed".into(),
         pane: pane.into(),
         state: Some(agent.map_or_else(
@@ -1397,6 +1452,118 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED, "{route}");
         }
         assert_eq!(local.methods(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn remote_files_sends_the_files_operation_and_relays_its_reply() {
+        let fixture = PeerFixture::new();
+        assert_eq!(
+            serde_json::to_value(PeerOperation::Files).unwrap(),
+            json!({"operation":"files"})
+        );
+        let body = json!({"current":{"root":"/peer/checkout","head":{"branch":"main"},"entries":[],"captured_ms":123}});
+        let command = fixture.command("w1:p1", &PeerOperation::Files);
+        fixture
+            .shell
+            .on(&command, &json!({"status":200,"body":body}).to_string());
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(body_json(response).await, body);
+        assert_eq!(*fixture.shell.calls.lock().unwrap(), [command]);
+    }
+
+    #[tokio::test]
+    async fn older_peer_files_is_unsupported_without_a_fallback() {
+        let fixture = PeerFixture::new();
+        let command = fixture.command("w1:p1", &PeerOperation::Files);
+        fixture.shell.on_output(&command, crate::shell::Output {
+            status: 2,
+            stdout: json!({"error":"JSON: unknown variant `files`, expected one of `conversation`, `screen`, `event`, `activity`, `register`, `publish` at line 1 column 20"}).to_string(),
+            stderr: String::new(),
+        });
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"host netcup: files unsupported"})
+        );
+        assert_eq!(*fixture.shell.calls.lock().unwrap(), [command]);
+    }
+
+    #[tokio::test]
+    async fn current_peer_files_failure_is_not_reported_as_unsupported() {
+        let fixture = PeerFixture::new();
+        let command = fixture.command("w1:p1", &PeerOperation::Files);
+        for (status, category) in [(1, "unexpected output"), (2, "remote command failed")] {
+            fixture.shell.on_output(
+                &command,
+                crate::shell::Output {
+                    status,
+                    stdout: json!({"error":"ledger missing"}).to_string(),
+                    stderr: String::new(),
+                },
+            );
+            let response = call(
+                fixture.state.clone(),
+                request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(
+                body_json(response).await,
+                json!({"error":format!("host netcup: unreachable: {category}")})
+            );
+        }
+        fixture.shell.on_output(
+            &command,
+            crate::shell::Output {
+                status: 2,
+                stdout: json!({"error":"serve failed","diagnostic":{"version":1}}).to_string(),
+                stderr: String::new(),
+            },
+        );
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"host netcup: unreachable: other"})
+        );
+    }
+
+    #[tokio::test]
+    async fn files_transport_failure_keeps_its_transport_category() {
+        let fixture = PeerFixture::new();
+        fixture.shell.on_output(
+            &fixture.command("w1:p1", &PeerOperation::Files),
+            crate::shell::Output {
+                status: 255,
+                stdout: String::new(),
+                stderr: "Connection refused".into(),
+            },
+        );
+        let response = call(
+            fixture.state.clone(),
+            request(Method::GET, "/api/agents/netcup/w1:p1/files", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"host netcup: unreachable: connection refused"})
+        );
     }
 
     #[tokio::test]
@@ -1898,6 +2065,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_files_waits_for_current_state_and_peer_read_serves_the_same_state() {
+        use crate::observation::details::fixture::{Fixture, GitShell, Repository};
+        let repo = Repository::new();
+        std::fs::write(repo.0.join("untracked"), "new").unwrap();
+        let cwd = repo.0.clone();
+        let server = fake::Server::start(move |method, _| match method {
+            "agent.list" => json!({"result":{"agents":[{
+                "pane_id":"w1:p1","agent":"pi","agent_status":"working","cwd":cwd,
+                "agent_session":{"kind":"path","value":"/work/session.jsonl"}
+            }]}}),
+            "pane.read" => json!({"result":{"read":{"text":"screen","revision":1}}}),
+            other => panic!("unexpected method {other}"),
+        });
+        let shell = Arc::new(GitShell::default());
+        let (entered, release) = shell.hold();
+        let fixture = Fixture::with_files_shell(server.client(), shell);
+        let _viewer = fixture.client.detail("w1:p1").unwrap();
+        entered.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut state = with_socket(&server);
+        state.web = fixture.ledger.clone();
+        let task_state = state.clone();
+        let mut response = tokio::spawn(async move {
+            call(
+                task_state,
+                request(Method::GET, "/api/agents/local/w1:p1/files", None),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut response)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(response.headers().contains_key("x-observation-revision"));
+        let body = body_json(response).await;
+        assert_eq!(body["current"]["root"], json!(repo.0));
+        assert_eq!(body["current"]["entries"][0]["path"]["text"], "untracked");
+        let reply = peer_read(state.clone(), "w1:p1".into(), PeerOperation::Files)
+            .await
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body, body);
+        let response = call(
+            state,
+            request(Method::GET, "/api/agents/local/missing/files", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn files_change_event_carries_only_the_files_revision_change() {
+        use crate::observation::details::fixture::{Fixture, Repository};
+        let repo = Repository::new();
+        let cwd = repo.0.clone();
+        let server = fake::Server::start(move |method, _| match method {
+            "agent.list" => json!({"result":{"agents":[{
+                "pane_id":"w1:p1","agent":"pi","agent_status":"working","cwd":cwd,
+                "agent_session":{"kind":"path","value":"/work/session.jsonl"}
+            }]}}),
+            "pane.read" => json!({"result":{"read":{"text":"screen","revision":1}}}),
+            other => panic!("unexpected method {other}"),
+        });
+        let state = with_socket(&server);
+        let fixture = Fixture::at(server.client(), state.web.clone());
+        let _viewer = fixture.client.detail("w1:p1").unwrap();
+        fixture.wait(|frame| {
+            frame.views["agent_details"]["data"]["w1:p1"]["files"]["availability"] == "empty"
+        });
+        let response = call(
+            state.clone(),
+            request(Method::GET, "/api/agents/local/w1:p1/events", None),
+        )
+        .await;
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first = agent_sse_payload(&first).revisions.unwrap();
+        std::fs::write(repo.0.join("file"), "edited\n").unwrap();
+        assert!(fixture.files_tick("w1:p1"));
+        let second = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = agent_sse_payload(&second).revisions.unwrap();
+        assert!(second.files > first.files);
+        assert_eq!(second.conversation, first.conversation);
+        assert_eq!(second.screen, first.screen);
+        state.stop.cancel();
+    }
+
+    #[tokio::test]
     async fn the_conversation_of_an_unknown_agent_is_not_found() {
         let server = agent_server();
         let state = with_socket(&server);
@@ -2227,6 +2494,62 @@ mod tests {
         assert!(server.methods().contains(&"agent.focus".to_owned()));
     }
 
+    #[test]
+    fn agent_event_serializes_pending_parts_from_detail() {
+        use crate::observation::details::Session;
+        use portal_types::files::FilesState;
+
+        let mut publication = DetailFrame {
+            version: 1,
+            epoch: "serve".into(),
+            revision: 1,
+            found: true,
+            parts: Some(portal_types::agents::DetailRevisions {
+                conversation: 1,
+                screen: 1,
+                files: 1,
+            }),
+            agent: None,
+            detail: Detail {
+                session: Some(Session {
+                    terminal: Some("terminal".into()),
+                    session: "native".into(),
+                    harness: Some("pi".into()),
+                    transcript: None,
+                }),
+                state: "blocked".into(),
+                conversation: Content::Pending,
+                screen: Content::Pending,
+                files: FilesState::Pending,
+            },
+        };
+        for (conversation, screen, files) in [
+            (true, true, true),
+            (false, true, true),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            if !conversation {
+                publication.detail.conversation = Content::Failed("read failed".into());
+            }
+            if !screen {
+                publication.detail.screen = Content::Unavailable("unsupported".into());
+            }
+            if !files {
+                publication.detail.files = FilesState::NotRepository;
+            }
+            let wire: Value =
+                serde_json::from_str(&agent_event(&publication, "pane").unwrap()).unwrap();
+            assert_eq!(
+                wire["pending"],
+                json!({
+                    "conversation": conversation, "screen": screen, "files": files
+                })
+            );
+            assert_eq!(wire["session"]["availability"], "available");
+        }
+    }
+
     #[tokio::test]
     async fn agent_events_ignore_portal_revisions_but_publish_screen_changes() {
         let raw = Arc::new(std::sync::Mutex::new(json!({
@@ -2292,7 +2615,11 @@ mod tests {
     #[test]
     fn peer_follow_refuses_one_shot_operations() {
         let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        for operation in [PeerOperation::Conversation, PeerOperation::Screen] {
+        for operation in [
+            PeerOperation::Conversation,
+            PeerOperation::Screen,
+            PeerOperation::Files,
+        ] {
             let error = peer_follow(
                 "w1:p1",
                 &serde_json::to_string(&operation).unwrap(),

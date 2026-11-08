@@ -5,6 +5,286 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+type SessionHandle =
+    std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::agents::DetailSession>>>>>;
+
+fn session_notification_root(
+    props: (SessionHandle, std::rc::Rc<std::cell::Cell<usize>>),
+) -> Element {
+    let session = use_signal(|| None::<portal_types::agents::DetailSession>);
+    props.0.set(Some(session));
+    props.1.set(props.1.get() + 1);
+    rsx! { "{session():?}" }
+}
+
+#[test]
+fn unchanged_conversation_keys_do_not_notify_session_subscribers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let handle = SessionHandle::default();
+    let renders = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut dom =
+        VirtualDom::new_with_props(session_notification_root, (handle.clone(), renders.clone()));
+    dom.rebuild_in_place();
+    let session = handle.get().ok_or("Missing session signal")?;
+    dom.in_runtime(|| crate::conversations::accept_session(session, "native".into()));
+    dom.render_immediate_to_vec();
+    let first = renders.get();
+    assert!(first > 1, "first accepted key must notify subscribers");
+    dom.in_runtime(|| crate::conversations::accept_session(session, "native".into()));
+    dom.render_immediate_to_vec();
+    assert_eq!(renders.get(), first, "unchanged key notified subscribers");
+    dom.in_runtime(|| crate::conversations::accept_session(session, "replacement".into()));
+    dom.render_immediate_to_vec();
+    assert!(renders.get() > first, "a new key must notify subscribers");
+    Ok(())
+}
+
+fn unknown_session_activity_root() -> Element {
+    let session = use_signal(|| None::<portal_types::agents::DetailSession>);
+    let live = crate::activity::use_live_activity(
+        portal_types::agents::AgentAddress::local("pane"),
+        session,
+    );
+    rsx! { "{live():?}" }
+}
+
+#[test]
+fn activity_without_a_known_session_stays_pending_without_browser_requests() {
+    // Poll the real hook on the native test target: browser network calls would panic.
+    let mut dom = VirtualDom::new(unknown_session_activity_root);
+    dom.rebuild_in_place();
+    dom.render_immediate_to_vec();
+    assert_eq!(dioxus_ssr::render(&dom), "Pending");
+}
+
+fn files_root(state: Option<portal_types::files::FilesState>) -> Element {
+    rsx! { crate::files::Files { state } }
+}
+
+fn render_files(state: Option<portal_types::files::FilesState>) -> String {
+    let mut dom = VirtualDom::new_with_props(files_root, state);
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
+}
+
+fn assert_accordion_has_no_inline_width(html: &str) {
+    let root = html
+        .split('<')
+        .find(|tag| tag.starts_with("div ") && tag.contains("class=\"dx-accordion-"))
+        .and_then(|tag| tag.split('>').next());
+    assert!(
+        root.is_some_and(|tag| {
+            let style = tag
+                .split("style=\"")
+                .nth(1)
+                .and_then(|value| value.split('"').next());
+            style.is_none_or(|style| {
+                style.split(';').all(|declaration| {
+                    declaration
+                        .split_once(':')
+                        .is_none_or(|(property, _)| property.trim() != "width")
+                })
+            })
+        }),
+        "missing accordion root or unexpected inline width: {html}"
+    );
+}
+
+fn checkout(entries: Vec<portal_types::files::Entry>) -> portal_types::files::Files {
+    portal_types::files::Files {
+        root: "/repo".into(),
+        head: portal_types::files::Head::Branch("feat/files".into()),
+        entries,
+        captured_ms: 1234,
+    }
+}
+
+fn file_entry(path: &[u8], change: portal_types::files::Change) -> portal_types::files::Entry {
+    portal_types::files::Entry {
+        path: portal_types::files::GitPath::new(path),
+        change,
+    }
+}
+
+#[test]
+fn files_render_loading_clean_and_all_unavailable_states() {
+    use portal_types::files::FilesState;
+    for state in [None, Some(FilesState::Pending)] {
+        let html = render_files(state.clone());
+        assert!(
+            html.contains(r#"aria-label="Loading file status""#),
+            "{html}"
+        );
+        // Skeleton class names carry a build-specific asset hash; count the placeholders.
+        assert_eq!(html.matches("skeleton").count(), 3, "{html}");
+        assert!(!html.contains("Working tree clean"), "{html}");
+        assert_eq!(crate::files::path_count(state.as_ref()), None);
+    }
+    for (state, message) in [
+        (
+            FilesState::Current(checkout(Vec::new())),
+            "Working tree clean",
+        ),
+        (FilesState::NotRepository, "Not a Git checkout"),
+        (FilesState::TooMany, "Too many changes to list"),
+        (
+            FilesState::Unavailable("host files unsupported".into()),
+            "host files unsupported",
+        ),
+    ] {
+        let count = crate::files::path_count(Some(&state));
+        let html = render_files(Some(state));
+        assert!(html.contains(message), "{html}");
+        assert!(html.contains(r#"role="status""#), "{html}");
+        assert_eq!(count, (message == "Working tree clean").then_some(0));
+        assert!(!html.contains("files-group"), "{html}");
+    }
+}
+
+#[test]
+fn files_order_nonempty_groups_and_count_shared_paths_once() {
+    use portal_types::files::{Change, FilesState};
+    let shared = file_entry(
+        b"both.rs",
+        Change::Ordinary {
+            index: 'M',
+            worktree: 'M',
+        },
+    );
+    let entries = vec![
+        file_entry(b"new.rs", Change::Untracked),
+        shared.clone(),
+        file_entry(b"conflict.rs", Change::Conflict { code: ['U', 'U'] }),
+    ];
+    let state = FilesState::Current(checkout(entries));
+    assert_eq!(crate::files::path_count(Some(&state)), Some(3));
+    let html = render_files(Some(state));
+    assert_accordion_has_no_inline_width(&html);
+    let mut previous = 0;
+    for heading in [
+        "Conflicts · 1",
+        "Staged · 1",
+        "Unstaged · 1",
+        "Untracked · 1",
+    ] {
+        let position = html.find(heading);
+        assert!(
+            position.is_some_and(|position| position >= previous),
+            "missing/out of order {heading}: {html}"
+        );
+        previous = position.unwrap_or(previous);
+    }
+    let html = render_files(Some(FilesState::Current(checkout(vec![shared]))));
+    assert!(
+        html.contains("Staged · 1") && html.contains("Unstaged · 1"),
+        "{html}"
+    );
+    assert!(
+        !html.contains("Conflicts") && !html.contains("Untracked"),
+        "{html}"
+    );
+}
+
+#[test]
+fn stale_files_keep_the_last_groups_count_time_and_error() {
+    use portal_types::files::{Change, FilesState};
+    let state = FilesState::Stale {
+        files: checkout(vec![file_entry(b"last.rs", Change::Untracked)]),
+        error: "Git read failed".into(),
+    };
+    assert_eq!(crate::files::path_count(Some(&state)), Some(1));
+    let html = render_files(Some(state));
+    for text in [
+        "Last read at 1234 ms since Unix epoch: Git read failed",
+        "Untracked · 1",
+    ] {
+        assert!(html.contains(text), "missing {text}: {html}");
+    }
+    assert!(!html.contains("Working tree clean"), "{html}");
+}
+
+fn file_row_root(props: (portal_types::files::Entry, usize)) -> Element {
+    rsx! { crate::files::FileRow { entry: props.0, stage: props.1 } }
+}
+
+#[test]
+fn file_rows_show_stage_codes_and_rename_paths_without_actions() {
+    use portal_types::files::{Change, GitPath};
+    for (change, stage, code, previous) in [
+        (
+            Change::Renamed {
+                index: 'R',
+                worktree: '.',
+                from: GitPath::new(b"old/<name>.rs"),
+            },
+            1,
+            "R",
+            true,
+        ),
+        (
+            Change::Ordinary {
+                index: 'A',
+                worktree: 'M',
+            },
+            1,
+            "A",
+            false,
+        ),
+        (
+            Change::Ordinary {
+                index: 'A',
+                worktree: 'M',
+            },
+            2,
+            "M",
+            false,
+        ),
+        (Change::Conflict { code: ['U', 'U'] }, 0, "UU", false),
+        (Change::Untracked, 3, "?", false),
+    ] {
+        let mut dom = VirtualDom::new_with_props(
+            file_row_root,
+            (file_entry(b"long/path/<new>.rs", change), stage),
+        );
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        // The renderer may spell the escape as a named or numeric entity; neither is markup.
+        assert!(
+            html.contains("long/path/") && !html.contains("<new>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(&format!(r#"class="files-code">{code}</span>"#)),
+            "{html}"
+        );
+        assert_eq!(
+            html.contains("from old/") && !html.contains("<name>"),
+            previous,
+            "{html}"
+        );
+        for action in [
+            "<button",
+            "<a ",
+            "href=",
+            "onclick",
+            "onkeydown",
+            "tabindex=",
+        ] {
+            assert!(!html.contains(action), "unexpected {action}: {html}");
+        }
+    }
+}
+
+#[test]
+fn files_count_exact_paths_even_when_display_text_matches() {
+    use portal_types::files::{Change, FilesState};
+    let state = FilesState::Current(checkout(vec![
+        file_entry(b"\xff", Change::Untracked),
+        file_entry(b"\xfe", Change::Untracked),
+    ]));
+    assert_eq!(crate::files::path_count(Some(&state)), Some(2));
+}
+
 fn worker_lead() -> crate::board::NavigationRow {
     crate::board::NavigationRow {
         pane: Some("lead".into()),
@@ -54,6 +334,7 @@ fn workers_render_the_four_groups_in_order_and_mark_the_open_worker()
             kind: crate::app::InboxKind::Prompt,
             id: "prompt".into(),
         },
+        revision: 0,
         title: "Key prompt".into(),
         agent_title: None,
         repository: None,
@@ -352,7 +633,7 @@ fn review_root(props: (u32, u32, bool)) -> Element {
     };
     rsx! { crate::review_view::ReviewEditor { initial, embedded: true,
     lead: "Move state into typed SQLite with a very long task title", role: "lead",
-    repository: "github.com/oisin-ee/dogsled", on_close: |_| {}, on_done: |_| {} } }
+    repository: "github.com/oisin-ee/dogsled", on_close: |_| {} } }
 }
 
 fn question_root() -> Element {
@@ -534,6 +815,7 @@ fn todos_root() -> Element {
 #[test]
 fn todos_count_all_items_and_hide_empty_sections() {
     let html = dioxus_ssr::render(&VirtualDom::prebuilt(todos_root));
+    assert_accordion_has_no_inline_width(&html);
     assert!(html.contains(">1 of 3</span>"), "{html}");
     assert!(!html.contains("Pending · 0"), "{html}");
     // AccordionContent mounts its body in the browser; SSR covers the section triggers.
