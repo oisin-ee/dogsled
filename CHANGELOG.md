@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.34.1](https://github.com/oisin-ee/dogsled/compare/v0.34.0...v0.34.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **portal:** keep resource holds out of the Workers tab ([a13b8aa](https://github.com/oisin-ee/dogsled/commit/a13b8aa4777fdeb3c3d5cacfcc307696dcb5fc71))
+* **portal:** keep resource holds out of the Workers tab ([834ecbb](https://github.com/oisin-ee/dogsled/commit/834ecbbd736840092ba52757dc0a66c9dfd409b8))
+* **web:** keep the local activity producer routes stable ([cbaf87d](https://github.com/oisin-ee/dogsled/commit/cbaf87d485c32e1191310e6bd94f1fb4b5687c5f))
+* **web:** keep the local activity producer routes stable ([b63db6e](https://github.com/oisin-ee/dogsled/commit/b63db6e1bf2d8ef11936644b825489003dde36a8))
+
 ## [0.34.0](https://github.com/oisin-ee/dogsled/compare/v0.33.0...v0.34.0) (2026-11-08)
 
 
