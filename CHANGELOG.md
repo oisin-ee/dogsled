@@ -2,26 +2,6 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.34.0](https://github.com/oisin-ee/dogsled/compare/v0.33.0...v0.34.0) (2026-11-06)
-
-
-### Features
-
-* **leads:** GitHub catalogue, leads on any host, portal on every host ([83c65d7](https://github.com/oisin-ee/dogsled/commit/83c65d71396d24388cebb7ec9e1836965bcd9643))
-* **leads:** start leads on the roomiest fleet host ([11f3cb2](https://github.com/oisin-ee/dogsled/commit/11f3cb27745a4d06f4b912c5cc44d56f8f0656d9))
-* **portal:** address agents across fleet hosts ([ce9f63b](https://github.com/oisin-ee/dogsled/commit/ce9f63bc5732f9aba5ca8f619ecc796b515e6702))
-* **repos:** publish GitHub catalogue for the New picker ([28f71c0](https://github.com/oisin-ee/dogsled/commit/28f71c04a4b37097828751e3c3be9cebbf4e7ad3))
-
-
-### Bug Fixes
-
-* **holds:** read validity rows and their owners together ([29f5b91](https://github.com/oisin-ee/dogsled/commit/29f5b91c1498bb33f5adcc11d128456663382bc6))
-* **observation:** a missing long state path reads as serve not running ([ca8dfdf](https://github.com/oisin-ee/dogsled/commit/ca8dfdf8925234937f36b7323eb9e1b05a0fea50))
-* **observation:** an unlisted pane is not found even with a captured detail ([bc12f7b](https://github.com/oisin-ee/dogsled/commit/bc12f7bc8dee0ce6a6a5519acf5eda1e89137e17))
-* **observation:** deliver pane detail directly from workers ([5e28a8c](https://github.com/oisin-ee/dogsled/commit/5e28a8c72272f8d8a91f86c4691a43f4bca6d551))
-* **observation:** deliver pane detail directly from workers ([8316294](https://github.com/oisin-ee/dogsled/commit/83162943c6f3e7de9bc77281ce67148e1ce85b20))
-* **sidebar:** keep observation gaps off the terminal it draws on ([f16b8a8](https://github.com/oisin-ee/dogsled/commit/f16b8a8420afa43b988cba177314ff78ca31c997))
-
 ## [0.33.0](https://github.com/oisin-ee/dogsled/compare/v0.32.0...v0.33.0) (2026-11-05)
 
 
