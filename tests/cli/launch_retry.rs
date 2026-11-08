@@ -1786,7 +1786,7 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     let (_, board) = {
         let observer = rig.serve_at(&rig.dir.join("state"), "3600");
         let board = rig.json(&["board", "--all"]);
-        super::place::stop_observer(&rig, observer);
+        drop(observer);
         board
     };
     assert_eq!(
@@ -1799,7 +1799,7 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     let (_, board) = {
         let observer = rig.serve_at(&rig.dir.join("state"), "3600");
         let board = rig.json(&["board", "--all"]);
-        super::place::stop_observer(&rig, observer);
+        drop(observer);
         board
     };
     let reason = board["rows"][0]["activity"].as_str().unwrap();

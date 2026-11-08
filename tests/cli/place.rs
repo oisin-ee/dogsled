@@ -1643,35 +1643,6 @@ pub(super) fn peer_observer(rig: &Rig) -> Background {
     observer
 }
 
-/// Stop an observer between admission attempts. The service marks a ticket `admitting` only
-/// while it holds that request's admission lock, so a kill while the test holds every queued
-/// request's lock cannot leave a ticket admitting. A loaded machine otherwise lands the kill
-/// inside an attempt, and the next pass fails the ticket as interrupted.
-pub(super) fn stop_observer(rig: &Rig, observer: Background) {
-    let dir = rig.dir.join("state/admissions");
-    fs::create_dir_all(&dir).unwrap();
-    let locks: Vec<fs::File> = rig
-        .tickets()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|ticket| {
-            let id = ticket["request"]["id"].as_str().unwrap();
-            let lock = fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(dir.join(format!("{id}.lock")))
-                .unwrap();
-            lock.lock().unwrap();
-            lock
-        })
-        .collect();
-    drop(observer);
-    drop(locks);
-}
-
 /// Crash/replay fixtures neutralize only the host's real CPU load, not other capacity checks.
 pub(super) fn placement_observer(rig: &Rig) -> Background {
     placement_observer_every(rig, "1")

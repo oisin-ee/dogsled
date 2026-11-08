@@ -337,9 +337,50 @@ pub(crate) struct Background {
     reader: Option<std::thread::JoinHandle<()>>,
     /// The command's output, sent when the command's streams close.
     output: std::sync::mpsc::Receiver<(String, String)>,
+    /// For a serve: the command that lists its tickets, and its admission lock directory.
+    /// The service marks a ticket `admitting` only while it holds that request's admission
+    /// lock. A kill inside an attempt makes the next pass fail the ticket as "service
+    /// stopped during admission", so the guard holds every lock across the kill.
+    admissions: Option<(Command, PathBuf)>,
 }
 
 impl Background {
+    /// Hold every ticket's admission lock, so the kill lands between admissions. Each
+    /// lock is held for at most the process bound; an admission that never ends is killed.
+    fn quiesce(&mut self) -> Vec<fs::File> {
+        let Some((mut tickets, dir)) = self.admissions.take() else {
+            return Vec::new();
+        };
+        let Ok(out) = tickets.output() else {
+            return Vec::new();
+        };
+        let tickets: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        let _ = fs::create_dir_all(&dir);
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        tickets
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|ticket| ticket["request"]["id"].as_str())
+            .filter_map(|id| {
+                let lock = fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(dir.join(format!("{id}.lock")))
+                    .ok()?;
+                while lock.try_lock().is_err() {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    std::thread::yield_now();
+                }
+                Some(lock)
+            })
+            .collect()
+    }
+
     /// The command's output, or fail the test on the bound. A command that never ends
     /// fails the test instead of hanging it.
     pub(crate) fn output(&self) -> (String, String) {
@@ -360,7 +401,9 @@ impl Drop for Background {
         // The owned command group is killed and reaped first. The reader ends only when
         // the command's streams close, so joining the reader before the kill waits on a
         // command that never ends.
+        let held = self.quiesce();
         self.owned.terminate();
+        drop(held);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
@@ -778,7 +821,10 @@ esac
     fn serve_at(&self, state: &Path, interval: &str) -> Background {
         let mut command = self.cmd(&["serve", "--interval", interval]);
         command.env("DOGSLED_STATE", state);
-        let observer = Self::background(command);
+        let mut observer = Self::background(command);
+        let mut tickets = self.cmd(&["state", "tickets", "--json"]);
+        tickets.env("DOGSLED_STATE", state);
+        observer.admissions = Some((tickets, state.join("admissions")));
         wait_publication_at(self, state, |frame| frame["revision"].is_u64());
         observer
     }
@@ -793,7 +839,17 @@ esac
                 .write(true)
                 .open(self.dir.join("state/service.lock"))
                 .unwrap();
-            lock.try_lock().unwrap();
+            // Only a serve holds this lock. A dropped observer's leader is reaped, but a
+            // child it forked in its own process group shares the lock until that child
+            // execs, so the claim waits for the release on the process bound.
+            let deadline = Instant::now() + PROCESS_DEADLINE;
+            while let Err(error) = lock.try_lock() {
+                assert!(
+                    Instant::now() < deadline,
+                    "a serve still holds the service lock: {error:?}"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
             *service = Some(ServiceLock(lock));
         }
     }
@@ -987,6 +1043,7 @@ esac
             owned,
             reader: Some(reader),
             output,
+            admissions: None,
         }
     }
 
