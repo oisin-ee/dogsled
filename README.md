@@ -13,13 +13,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.34.0 # x-release-please-version
+mise use github:oisin-ee/dogsled@v0.33.0 # x-release-please-version
 ```
 
 Pi (extension, tools, the `todo` tool, and skill), from npm:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.34.0 # x-release-please-version
+pi install npm:@oisin-ee/pi-dogsled@0.33.0 # x-release-please-version
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -58,12 +58,21 @@ The bot uses `GITHUB_TOKEN`, so its release-PR updates do not start CI.
 Nothing auto-merges the release PR.
 
 When the user requests a release, merge the open release-please PR.
-The merge runs the full CI suite through the reusable CI workflow.
+The merge runs the full CI suite on the release commit through the reusable CI workflow.
 After CI passes, the publish job creates `vX.Y.Z` at that release commit and dispatches dist.
 Dist publishes the binaries and calls the existing npm publisher.
 The publish job changes `autorelease: pending` to `autorelease: tagged` so release-please can prepare the next release.
 
-If CI fails before tag creation, rerun the failed jobs at the same revision.
+Until its tag exists, the merged release PR stays the outstanding release.
+Every run of `release-please.yml` settles it, and `scripts/release-prepare.sh` decides what the run owes.
+The gate validates only the commit the run is for, so only a run for the release commit itself can tag it.
+
+- If CI failed for a reason outside the release commit, and `main` has not moved on, dispatch `release-please.yml` on `main` to retry it.
+- If `main` has moved past the release commit, the run fails and names the commit to revert.
+  Revert it on `main` with a `chore(release):` subject.
+  The next run marks its PR `autorelease: superseded`, and release-please opens a fresh release PR for the same version.
+- If a tag exists but its PR still has `autorelease: pending`, the next run changes the label to `autorelease: tagged`.
+
 If dispatch fails after tag creation, dispatch the existing tag manually:
 
 ```sh
@@ -72,7 +81,6 @@ gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z
 
 Never move an existing tag.
 A partial publication can leave conflicting assets and requires review before a retry.
-If dispatch failed before the label change, change the merged PR label from `autorelease: pending` to `autorelease: tagged` after dispatch succeeds.
 
 ## Web portal
 
