@@ -48,6 +48,58 @@ test("frames parse into a board and history; unpublished domains are explicit er
 	assert.match(parseFrame(JSON.stringify({ revision: 1, board, history: {} })).error ?? "", /job history/);
 });
 
+test("terminal CLI errors retain their cause without requiring a publication revision", () => {
+	assert.deepEqual(parseFrame(JSON.stringify({ error: "observation unavailable: serve stopped\u001b", deadline: false })), {
+		error: "observation unavailable: serve stopped ", terminal: true,
+	});
+	for (const invalid of [
+		{ error: "not a CLI error" },
+		{ error: 2, deadline: false },
+		{ error: "bad revision", deadline: false, revision: "1" },
+	]) assert.equal(parseFrame(JSON.stringify(invalid)).error, "Dogsled observation sent an invalid frame");
+});
+
+test("terminal stdout errors survive close once, before or after valid frames", async () => {
+	for (const published of [false, true]) {
+		const r = rig();
+		r.observation.start();
+		const watcher = r.watchers[0]!;
+		if (published) watcher.stdout.write(line(5));
+		const error = "observation unavailable: dogsled serve is not running";
+		watcher.stdout.write(`${JSON.stringify({ error, deadline: false })}\n`);
+		const closed = new Promise<void>(resolve => watcher.once("close", () => resolve()));
+		watcher.exit(2, "unrelated diagnostic\n");
+		await closed;
+		assert.deepEqual(r.observed, [
+			...(published ? [{ frame: { revision: 5, board, history } }] : []),
+			{ error },
+		]);
+		assert.equal(r.observation.running, false);
+		r.observation.start();
+		r.watchers[1]!.stdout.write(line(1));
+		assert.equal(r.observed.at(-1)?.frame?.revision, 1);
+		// The previous subscription's error must not hide a new unexplained exit.
+		const reclosed = new Promise<void>(resolve => r.watchers[1]!.once("close", () => resolve()));
+		r.watchers[1]!.exit(2);
+		await reclosed;
+		assert.equal(r.observed.at(-1)?.error, "Dogsled observation unavailable: dogsled board exited with 2");
+	}
+});
+
+test("a recoverable publication gap does not hide a later transport failure", async () => {
+	const r = rig();
+	r.observation.start();
+	const watcher = r.watchers[0]!;
+	watcher.stdout.write(line(3, { error: "board was not published" }));
+	const closed = new Promise<void>(resolve => watcher.once("close", () => resolve()));
+	watcher.exit(2, "publisher disconnected");
+	await closed;
+	assert.deepEqual(r.observed, [
+		{ error: "board was not published" },
+		{ error: "Dogsled observation unavailable: publisher disconnected" },
+	]);
+});
+
 test("one subscription per owner, forward revisions only, and no resubscription while live", async () => {
 	const r = rig();
 	r.observation.start();

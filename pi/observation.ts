@@ -24,12 +24,19 @@ export type Spawn = (binary: string, args: string[]) => Watcher;
 
 const spawnWatcher: Spawn = (binary, args) => spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
 
+/** A publication result, or the CLI's terminal JSON error from stdout. */
+type Parsed = Observed & { terminal?: true };
+
 /** One line of `dogsled board --watch --json`. */
-export function parseFrame(line: string): Observed {
+export function parseFrame(line: string): Parsed {
 	let value: unknown;
 	try { value = JSON.parse(line); } catch { return { error: "Dogsled observation sent an invalid frame" }; }
 	if (!value || typeof value !== "object") return { error: "Dogsled observation sent an invalid frame" };
 	const frame = value as Record<string, unknown>;
+	// main emits { error, deadline } on failure, outside the revisioned publication stream.
+	if (!("revision" in frame) && typeof frame["error"] === "string" && typeof frame["deadline"] === "boolean") {
+		return { error: clean(frame["error"]), terminal: true };
+	}
 	if (typeof frame["revision"] !== "number") return { error: "Dogsled observation sent an invalid frame" };
 	if (typeof frame["error"] === "string") return { error: clean(frame["error"]) };
 	try {
@@ -72,12 +79,17 @@ export class Observation {
 		}
 		this.watcher = watcher;
 		let stderr = "";
+		let terminalError: string | undefined;
 		watcher.stderr?.setEncoding("utf8");
 		watcher.stderr?.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-2_000); });
 		const lines = createInterface({ input: watcher.stdout! });
 		lines.on("line", line => {
 			if (!current()) return;
 			const observed = parseFrame(line);
+			if (observed.terminal) {
+				terminalError = observed.error;
+				return;
+			}
 			// Revisions only move forward within one subscription.
 			if (observed.frame) {
 				if (observed.frame.revision <= this.revision) return;
@@ -93,7 +105,8 @@ export class Observation {
 			if (!current()) return;
 			this.watcher = undefined;
 			this.revision = 0;
-			this.listener({ error: `Dogsled observation unavailable: ${clean(detail)}` });
+			// Report the CLI cause once, after stdout has drained, rather than its generic exit code.
+			this.listener({ error: terminalError ?? `Dogsled observation unavailable: ${clean(detail)}` });
 		};
 		watcher.once("close", code => ended(stderr.trim() || `dogsled board exited with ${code ?? "a signal"}`));
 		watcher.once("error", error => ended(String(error)));
