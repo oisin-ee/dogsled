@@ -126,3 +126,23 @@ jobs:
         run: moon run pi-todo:test pi-prewalk:test pi-tiers:test pi-guardrails:test
       - name: Shim tests
         run: moon run dogsled:test-shim
+
+  # Record the tree this run proved. A release commit changes only release-please's
+  # version files, so the release gate reuses this proof for the tree it was merged onto
+  # instead of running the suite again (scripts/release-prepare.sh).
+  tested:
+    needs: [checks, rust, typescript]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - id: tree
+        run: |
+          git rev-parse 'HEAD^{tree}' > tested-tree
+          echo "tree=$(cat tested-tree)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tested-tree-${{ steps.tree.outputs.tree }}
+          path: tested-tree
+          if-no-files-found: error
+          retention-days: 90
