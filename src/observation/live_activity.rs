@@ -321,18 +321,11 @@ impl Authority {
         now_ms: u64,
     ) -> Outcome {
         validate_registration(&body)?;
-        let binding = match self.binding(pane, now_ms) {
-            Ok(binding) => binding,
-            Err(error) => {
-                if error.code == ActivityCode::UpstreamUnavailable {
-                    // A stale binding must arrange its own recovery even before a producer
-                    // exists. Keep one host-wide lease because sampling reads the agent list.
-                    // Receipt never changes next_sample or starts detail capture.
-                    self.registration_interest = Some(now);
-                }
-                return Err(error);
-            }
-        };
+        // Every validated attempt arranges cheap binding recovery, including missing
+        // panes and session transitions. Receipt never moves the sampling deadline
+        // or starts detail capture.
+        self.registration_interest = Some(now);
+        let binding = self.binding(pane, now_ms)?;
         if binding.evidence.as_ref() != Some(&body.evidence)
             || verified_evidence(binding.session.as_ref()).as_ref() != Some(&body.evidence)
         {
@@ -360,14 +353,12 @@ impl Authority {
                 "producer registration no longer current",
             ));
         }
-        if self
-            .producers
-            .get(pane)
-            .is_some_and(|producer| producer.registration.producer_id == body.producer_id)
-        {
+        if self.producers.get(pane).is_some_and(|producer| {
+            producer.fresh(now) || producer.registration.producer_id == body.producer_id
+        }) {
             return Err(error(
                 ActivityCode::StaleGeneration,
-                "producer identity cannot be reused",
+                "producer is live or identity cannot be reused",
             ));
         }
         if !self.producers.contains_key(pane) && self.producers.len() >= CAPACITY {

@@ -16,7 +16,13 @@ export type Payload =
   | { kind: "closed" };
 export type ActivityEvent =
   | { type: "agent_start" | "agent_end" | "settled" | "message_end" }
-  | { type: "block"; index: number; phase: "thinking" | "responding"; ended: boolean; delta?: string }
+  | {
+      type: "block";
+      index: number;
+      phase: "thinking" | "responding";
+      ended: boolean;
+      delta?: string;
+    }
   | { type: "tool_start"; tool: ActiveTool }
   | { type: "tool_end"; id: string };
 
@@ -77,7 +83,10 @@ export class ActivityReducer {
         this.blocks.delete(event.index);
         if (!event.ended) this.blocks.set(event.index, event.phase);
         if (event.phase === "thinking") {
-          this.thoughts.set(event.index, (this.thoughts.get(event.index) ?? "") + (event.delta ?? ""));
+          this.thoughts.set(
+            event.index,
+            (this.thoughts.get(event.index) ?? "") + (event.delta ?? ""),
+          );
         }
       } else if (event.type === "tool_start") {
         this.idle = false;
@@ -107,7 +116,10 @@ export class ActivityReducer {
         .join("\n\n"),
       16 * 1024,
     );
-    return { kind: "snapshot", state: { phase, active_tools, ...(reasoning ? { reasoning } : {}) } };
+    return {
+      kind: "snapshot",
+      state: { phase, active_tools, ...(reasoning ? { reasoning } : {}) },
+    };
   }
 }
 
@@ -175,6 +187,7 @@ export class ActivityPublisher {
   private lastAttempt = -Infinity;
   private retryAt = -Infinity;
   private retryDelay = 500;
+  private lastBackoff: string | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private heartbeat: ReturnType<typeof setInterval>;
   private controller: AbortController | undefined;
@@ -190,7 +203,8 @@ export class ActivityPublisher {
     this.path = `/api/agents/local/${encodeURIComponent(pane)}/activity`;
     this.reducer = new ActivityReducer(idle);
     this.pending = this.reducer.snapshot();
-    this.request = { method: "GET", path: this.path };
+    this.request = this.registration(null, 0);
+    this.diagnostic("POST", 0, "start", "bootstrap");
     this.heartbeat = setInterval(() => {
       if (this.disposed || this.stopped) return;
       this.pending = this.reducer.snapshot();
@@ -242,7 +256,7 @@ export class ActivityPublisher {
           deadline = setTimeout(() => {
             controller.abort();
             reject(new Error("activity request deadline"));
-          }, 1000);
+          }, 6000);
           deadline.unref();
         }),
       ]);
@@ -276,13 +290,54 @@ export class ActivityPublisher {
       const { status, body } = await this.send(request, controller);
       if (this.disposed) return;
       if (status < 200 || status >= 300) {
-        const code = record(body) && typeof body["error"] === "string" ? body["code"] : undefined;
+        const receivedCode =
+          record(body) && typeof body["error"] === "string" ? body["code"] : undefined;
+        const code =
+          [
+            "invalid_request",
+            "unsupported_version",
+            "unauthorized",
+            "sequence_conflict",
+            "agent_missing",
+            "session_unverified",
+            "upstream_unavailable",
+            "session_changed",
+            "stale_generation",
+            "producer_closed",
+            "capacity",
+            "upstream_invalid",
+          ].find((known) => known === receivedCode) ?? "unknown";
+        if (
+          code === "invalid_request" ||
+          code === "unsupported_version" ||
+          code === "unauthorized" ||
+          code === "sequence_conflict" ||
+          (status === 404 && code !== "agent_missing")
+        ) {
+          this.stop(request.method, status, code);
+          return;
+        }
+        // A 5xx may follow a committed mutation, even with a typed error body.
+        // Discovery failures return to POST so startup keeps cheap sampling alive.
+        if (
+          status >= 500 ||
+          code === "agent_missing" ||
+          code === "session_unverified" ||
+          code === "upstream_unavailable"
+        ) {
+          if (
+            request.method === "GET" &&
+            (code === "agent_missing" ||
+              code === "session_unverified" ||
+              code === "upstream_unavailable")
+          )
+            this.request = this.registration(null, 0);
+          this.backoff(request.method, status, "retry", code);
+          return;
+        }
         if (
           (request.method === "POST" &&
-            (code === "session_changed" ||
-              code === "session_unverified" ||
-              code === "upstream_unavailable" ||
-              code === "stale_generation")) ||
+            (code === "session_changed" || code === "stale_generation")) ||
           (request.method === "PUT" &&
             (code === "stale_generation" ||
               code === "session_changed" ||
@@ -292,13 +347,10 @@ export class ActivityPublisher {
           this.sequence = 0;
           this.pending = this.reducer.snapshot();
           this.request = { method: "GET", path: this.path };
-          this.retryAt = performance.now() + this.retryDelay;
-          this.retryDelay = Math.min(5000, this.retryDelay * 2);
+          this.backoff(request.method, status, "discover", code);
           return;
         }
-        // A server failure may follow a committed mutation. Retry this exact request.
-        if (status >= 500) return;
-        this.stop();
+        this.stop(request.method, status, code);
         return;
       }
       if (request.method === "GET") {
@@ -309,30 +361,30 @@ export class ActivityPublisher {
           !text(body["epoch"], 256) ||
           !record(body["producer"]) ||
           !counter(body["producer"]["generation"]) ||
-          (body["producer"]["id"] !== null && body["producer"]["id"] !== undefined)
+          (body["producer"]["id"] !== null && !text(body["producer"]["id"], 256))
         ) {
-          this.stop();
+          this.stop(request.method, status);
           return;
         }
-        // Freeze fresh compare-and-swap evidence only while the pane is unowned.
-        this.request = {
-          method: "POST",
-          path: `${this.path}/producer`,
-          body: {
-            version: 1,
-            epoch: body["epoch"],
-            expected_generation: body["producer"]["generation"],
-            producer_id: this.producer,
-            evidence: { ...this.evidence },
-          },
-        };
+        const detail = body["detail"];
+        const retired =
+          record(detail) &&
+          detail["availability"] === "unavailable" &&
+          (detail["reason"] === "producer_closed" || detail["reason"] === "expired");
+        if (body["producer"]["id"] !== null && !retired) {
+          // Generation-0 probes renew sampling interest by design without claiming the live generation.
+          this.request = this.registration(null, 0);
+          this.backoff(request.method, status, "wait_owner");
+          return;
+        }
+        this.request = this.registration(body["epoch"], body["producer"]["generation"]);
       } else {
         if (
           !acknowledgement(body, this.pane, this.producer) ||
           body.sequence !== (request.method === "POST" ? 0 : this.sequence) ||
           (request.method === "POST" &&
             record(request.body) &&
-            (body.epoch !== request.body["epoch"] ||
+            ((request.body["epoch"] !== null && body.epoch !== request.body["epoch"]) ||
               !counter(request.body["expected_generation"]) ||
               body.generation <= request.body["expected_generation"])) ||
           (this.stamp &&
@@ -340,9 +392,10 @@ export class ActivityPublisher {
               body.generation !== this.stamp.generation ||
               body.session !== this.stamp.session))
         ) {
-          this.stop();
+          this.stop(request.method, status);
           return;
         }
+        if (request.method === "POST") this.diagnostic("POST", status, "ack", "publishing");
         this.stamp = {
           epoch: body.epoch,
           generation: body.generation,
@@ -350,12 +403,14 @@ export class ActivityPublisher {
           session: body.session,
         };
         this.request = undefined;
+        this.lastBackoff = undefined;
         this.retryDelay = 500;
         this.retryAt = -Infinity;
       }
     } catch {
       // Offline and ambiguous outcomes are telemetry gaps, never hook failures.
       if (this.disposed) return;
+      this.backoff(request.method, 0, "retry_transport", "transport");
     } finally {
       if (!this.disposed) {
         this.busy = false;
@@ -365,7 +420,39 @@ export class ActivityPublisher {
     }
   }
 
-  private stop(): void {
+  private registration(epoch: string | null, generation: number): Request {
+    return {
+      method: "POST",
+      path: `${this.path}/producer`,
+      body: {
+        version: 1,
+        epoch,
+        expected_generation: generation,
+        producer_id: this.producer,
+        evidence: { ...this.evidence },
+      },
+    };
+  }
+
+  private diagnostic(method: string, status: number, code: string, decision: string): void {
+    // Match the extension's console reporting; never log response text or native evidence.
+    console.error(
+      `[dogsled activity] pane=${encodeURIComponent(this.pane).slice(0, 384)} method=${method} status=${status} code=${code} decision=${decision}`,
+    );
+  }
+
+  private backoff(method: string, status: number, decision: string, code = "recovery"): void {
+    const key = `${method}:${code}:${decision}`;
+    if (this.lastBackoff !== key) {
+      this.diagnostic(method, status, code, decision);
+      this.lastBackoff = key;
+    }
+    this.retryAt = performance.now() + this.retryDelay;
+    this.retryDelay = Math.min(5000, this.retryDelay * 2);
+  }
+
+  private stop(method: string, status: number, code = "invalid_response"): void {
+    this.diagnostic(method, status, code, "stop");
     this.stopped = true;
     clearInterval(this.heartbeat);
     if (this.timer) clearTimeout(this.timer);
@@ -374,6 +461,7 @@ export class ActivityPublisher {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.diagnostic(this.request?.method ?? "PUT", 0, "dispose", "stop");
     clearInterval(this.heartbeat);
     if (this.timer) clearTimeout(this.timer);
     this.controller?.abort();

@@ -119,6 +119,10 @@ fn replacements_fence_duplicates_conflicts_and_delayed_closure() {
             .code,
         ActivityCode::SequenceConflict
     );
+    conflict.sequence = 4;
+    authority
+        .publish("w1:p1", conflict.clone(), now, 1000)
+        .unwrap();
     let second = authority
         .register(
             "w1:p1",
@@ -156,6 +160,135 @@ fn replacements_fence_duplicates_conflicts_and_delayed_closure() {
             .unwrap_err()
             .code,
         ActivityCode::ProducerClosed
+    );
+}
+
+#[test]
+fn fresh_takeover_and_generation_zero_probe_are_refused_but_keep_interest() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let now = Instant::now();
+    let first = authority
+        .register("w1:p1", native.register("producer-a", 0), now, 1000)
+        .unwrap();
+    let mut bootstrap = native.register("producer-b", 0);
+    bootstrap.epoch = None;
+    authority.registration_interest = None;
+    assert_eq!(
+        authority
+            .register("w1:p1", bootstrap, now, 1000)
+            .unwrap_err()
+            .code,
+        ActivityCode::StaleGeneration
+    );
+    assert_eq!(authority.registration_interest, Some(now));
+    assert_eq!(authority.producers["w1:p1"].ack, first);
+    let takeover = native.register("producer-b", first.generation);
+    assert_eq!(
+        authority
+            .register("w1:p1", takeover.clone(), now, 1000)
+            .unwrap_err()
+            .code,
+        ActivityCode::StaleGeneration
+    );
+    // Discovery at expiry is not permission if the old owner renews before POST.
+    assert_eq!(
+        reason(&authority, now + LEASE, 1000),
+        ActivityDetail::Unavailable {
+            reason: UnavailableReason::Expired
+        }
+    );
+    authority
+        .publish("w1:p1", snapshot(&first, 1), now + LEASE, 1000)
+        .unwrap();
+    assert_eq!(
+        authority
+            .register("w1:p1", takeover, now + LEASE, 1000)
+            .unwrap_err()
+            .code,
+        ActivityCode::StaleGeneration
+    );
+    assert_eq!(authority.producers["w1:p1"].ack.producer_id, "producer-a");
+    assert_eq!(authority.producers["w1:p1"].ack.sequence, 1);
+}
+
+#[test]
+fn expired_takeover_fences_delayed_old_updates_and_close() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let now = Instant::now();
+    let first = authority
+        .register("w1:p1", native.register("old", 0), now, 1000)
+        .unwrap();
+    let second = authority
+        .register(
+            "w1:p1",
+            native.register("new", first.generation),
+            now + LEASE,
+            1000,
+        )
+        .unwrap();
+    assert!(second.generation > first.generation);
+    for payload in [snapshot(&first, 1).payload, ProducerPayload::Closed] {
+        let mut delayed = snapshot(&first, 2);
+        delayed.payload = payload;
+        assert_eq!(
+            authority
+                .publish("w1:p1", delayed, now + LEASE, 1000)
+                .unwrap_err()
+                .code,
+            ActivityCode::StaleGeneration
+        );
+    }
+    assert_eq!(authority.producers["w1:p1"].ack, second);
+}
+
+#[tokio::test]
+async fn timed_out_queued_registration_commits_and_exact_replay_does_not_renew() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let commands = authority.commands();
+    let mut registration = native.register("queued", 0);
+    registration.epoch = None;
+    let refusal = tokio::time::timeout(
+        Duration::from_secs(6),
+        commands.send(
+            "w1:p1".into(),
+            Command::Register(registration.clone()),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(refusal.code, ActivityCode::UpstreamUnavailable);
+    assert_eq!(authority.pending.len(), 1);
+    let now = Instant::now();
+    let input = super::super::Publication {
+        published_ms: 1000,
+        sources: super::super::Sources::default(),
+        local: BTreeMap::new(),
+        views: BTreeMap::new(),
+        gaps: vec![],
+    };
+    authority.refresh_at(&input, now, 1000).unwrap();
+    let original = authority.producers["w1:p1"].ack.clone();
+    assert_eq!(original.sequence, 0);
+    authority
+        .publish("w1:p1", snapshot(&original, 1), now, 1000)
+        .unwrap();
+    assert_eq!(
+        authority
+            .register("w1:p1", registration, now + Duration::from_secs(14), 1000)
+            .unwrap(),
+        original
+    );
+    assert_eq!(authority.producers["w1:p1"].received, now);
+    assert_eq!(
+        reason(&authority, now + LEASE, 1000),
+        ActivityDetail::Unavailable {
+            reason: UnavailableReason::Expired
+        }
     );
 }
 
@@ -667,6 +800,73 @@ fn older_general_samples_cannot_undo_a_newer_producer_binding_sample() {
 }
 
 #[test]
+fn cold_bootstrap_and_missing_bindings_keep_cheap_sampling_until_recovery() {
+    for missing in ["cold", "pane", "evidence", "transition"] {
+        let native = Native::new();
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "herdr agent list",
+            &json!({"result":{"agents":[{
+                "pane_id":"w1:p1","agent":"pi","agent_status":"working","terminal_id":"terminal-a",
+                "agent_session":{"kind":"path","value":native.agent.transcript}
+            }]}})
+            .to_string(),
+        );
+        let mut authority = if missing == "cold" {
+            Authority::new("epoch-a".into())
+        } else {
+            native.authority()
+        };
+        match missing {
+            "pane" => authority.observe(&[], 1000, true),
+            "evidence" => authority.bindings.get_mut("w1:p1").unwrap().evidence = None,
+            "transition" => {
+                let mut changed = native.agent.clone();
+                changed.terminal_id = Some("terminal-b".into());
+                authority.observe(&[changed], 1000, true);
+            }
+            _ => {}
+        }
+        let now = Instant::now();
+        let mut bootstrap = native.register("startup", 0);
+        bootstrap.epoch = None;
+        let code = authority
+            .register("w1:p1", bootstrap.clone(), now, 1000)
+            .unwrap_err()
+            .code;
+        assert_eq!(
+            code,
+            match missing {
+                "cold" => ActivityCode::UpstreamUnavailable,
+                "pane" => ActivityCode::AgentMissing,
+                "evidence" => ActivityCode::SessionUnverified,
+                _ => ActivityCode::StaleGeneration,
+            }
+        );
+        assert!(
+            authority.sample_due_at(now),
+            "{missing} must schedule interest without viewers"
+        );
+        assert!(shell.calls.lock().unwrap().is_empty());
+        authority.sample(&shell, 1001);
+        let generation = authority.views(Instant::now(), 1001)["w1:p1"]
+            .producer
+            .generation;
+        let registration = if generation == 0 {
+            bootstrap
+        } else {
+            native.register("startup", generation)
+        };
+        let ack = authority
+            .register("w1:p1", registration, Instant::now(), 1001)
+            .unwrap();
+        assert_eq!(ack.sequence, 0);
+        assert!(!authority.sample_due());
+        assert_eq!(*shell.calls.lock().unwrap(), vec!["herdr agent list"]);
+    }
+}
+
+#[test]
 fn stale_first_registration_schedules_cheap_sampling_and_retry_succeeds() {
     let native = Native::new();
     let shell = crate::shell::Fake::new();
@@ -797,5 +997,10 @@ fn binding_sampling_is_cheap_shared_and_expired_interest_stops_it() {
     }
     assert_eq!(*shell.calls.lock().unwrap(), vec!["herdr agent list"]);
     authority.producers.get_mut("w1:p1").unwrap().received = now.checked_sub(LEASE).unwrap();
+    assert!(
+        authority.next_wake().is_some(),
+        "registration interest remains live"
+    );
+    authority.registration_interest = now.checked_sub(LEASE);
     assert!(authority.next_wake().is_none());
 }
