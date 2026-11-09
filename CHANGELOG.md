@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.34.2](https://github.com/oisin-ee/dogsled/compare/v0.34.1...v0.34.2) (2026-11-09)
+
+
+### Bug Fixes
+
+* **activity:** let producers recover registration without stealing ([#317](https://github.com/oisin-ee/dogsled/issues/317)) ([66c5774](https://github.com/oisin-ee/dogsled/commit/66c577460e728713e55fdd152526c59a132f9b8c))
+* **release:** reuse the PR's CI proof instead of rerunning the suite ([aab621c](https://github.com/oisin-ee/dogsled/commit/aab621c650b1c05f904b52ea48f892b475f72df5))
+* **release:** reuse the PR's CI proof instead of rerunning the suite ([ce78863](https://github.com/oisin-ee/dogsled/commit/ce78863b1b97bad4d9807313d31354a02fea365c))
+
 ## [0.34.1](https://github.com/oisin-ee/dogsled/compare/v0.34.0...v0.34.1) (2026-11-09)
 
 
