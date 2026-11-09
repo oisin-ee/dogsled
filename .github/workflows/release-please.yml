@@ -1,10 +1,12 @@
 name: Release please
 
 # Every push to main settles the release main still owes, not only the push that merged
-# it. The gate validates the commit this run is for, so a release is tagged only by a run
-# for its own release commit: its push, or a dispatch retry before main moves on. A
-# release that main has moved past is abandoned by reverting its release commit; the next
-# run then marks its PR superseded and release-please opens a fresh release PR.
+# it. A release is tagged only by a run for its own release commit: its push, or a
+# dispatch retry before main moves on. The commit is validated once. When it changes only
+# release-please's version files on top of a tree that a passing CI run already proved,
+# that proof stands; otherwise the full CI suite runs on it here. A release that main has
+# moved past is abandoned by reverting its release commit; the next run then marks its PR
+# superseded and release-please opens a fresh release PR.
 on:
   push:
     branches: [main]
@@ -28,12 +30,14 @@ jobs:
     outputs:
       release-pr: ${{ steps.release.outputs.release-pr }}
       tag: ${{ steps.release.outputs.tag }}
+      tested: ${{ steps.release.outputs.tested }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
-          # The script reads the manifest at each release PR's merge commit.
+          # The script reads the manifest at each release PR's merge commit, and the
+          # release commit's parent.
           fetch-depth: 0
       - name: Settle merged release PRs and find the outstanding release
         id: release
@@ -57,15 +61,19 @@ jobs:
           manifest-file: .release-please-manifest.json
           skip-github-release: true
 
-  # Validate the commit this run is for, which prepare proved is the release commit.
+  # Validate the release commit only when no passing CI run already proved its code.
   ci:
     needs: prepare
-    if: needs.prepare.outputs.release-pr != ''
+    if: needs.prepare.outputs.release-pr != '' && needs.prepare.outputs.tested != 'true'
     uses: ./.github/workflows/ci.yml
 
   publish:
     needs: [prepare, ci]
-    if: needs.prepare.outputs.release-pr != ''
+    # A skipped ci job passes only when prepare found the proof it skipped for.
+    if: >-
+      !cancelled() && needs.prepare.outputs.release-pr != '' &&
+      (needs.ci.result == 'success' ||
+       (needs.ci.result == 'skipped' && needs.prepare.outputs.tested == 'true'))
     runs-on: ubuntu-24.04
     permissions:
       actions: write

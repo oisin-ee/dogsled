@@ -14,13 +14,48 @@
 #   commit. When main has moved past it, nothing can validate the release commit any more:
 #   fail, and name the revert that supersedes it.
 #
-# Output: `release-pr=`, `tag=` and `sha=` lines for $GITHUB_OUTPUT, or nothing when no
-# release is outstanding. With DRY_RUN=1 the script changes no labels.
+# For the outstanding release, also decide whether CI must run on it. A release commit
+# that changes only release-please's version files carries the code of its first parent.
+# When a passing CI run from this repository recorded that parent's tree (the `tested`
+# job in ci.yml), the release is already proved: print `tested=true`. Anything else, or a
+# failed lookup, prints `tested=false` and the gate runs the full suite.
+#
+# Output: `release-pr=`, `tag=`, `sha=` and `tested=` lines for $GITHUB_OUTPUT, or nothing
+# when no release is outstanding. With DRY_RUN=1 the script changes no labels.
 set -eu
 
 repo=${GITHUB_REPOSITORY:?}
 head_sha=$(git rev-parse HEAD)
 head_version=$(jq -er '.["."]' .release-please-manifest.json)
+
+# The files release-please writes: the manifest, the changelog and the config's extra files.
+release_files() {
+	printf '%s\n' .release-please-manifest.json CHANGELOG.md
+	jq -r '.packages["."]["extra-files"][] | if type == "string" then . else .path end' \
+		release-please-config.json
+}
+
+# Did a passing CI run from this repository record tree $1?
+proved() {
+	gh api "repos/$repo/actions/artifacts?name=tested-tree-$1&per_page=100" --jq \
+		'any(.artifacts[]; .workflow_run.head_repository_id == .workflow_run.repository_id)'
+}
+
+tested() {
+	parent=$(git rev-parse "$1^1")
+	unproved=$(git diff --name-only "$parent" "$1" | grep -vxF "$(release_files)" || true)
+	if [ -n "$unproved" ]; then
+		echo "the release commit changes more than version files: $(printf '%s' "$unproved" | tr '\n' ' ')" >&2
+		return 1
+	fi
+	tree=$(git rev-parse "$parent^{tree}")
+	if [ "$(proved "$tree")" = true ]; then
+		echo "a passing CI run proved $parent's tree $tree" >&2
+		return 0
+	fi
+	echo "no passing CI run recorded $parent's tree $tree" >&2
+	return 1
+}
 
 relabel() {
 	if [ "${DRY_RUN:-0}" = 1 ]; then
@@ -58,6 +93,11 @@ printf '%s\n' "$pending" | grep . |
 				outstanding=$pr
 				echo "#$pr: $tag is outstanding at $sha" >&2
 				printf 'release-pr=%s\ntag=%s\nsha=%s\n' "$pr" "$tag" "$sha"
+				if tested "$sha"; then
+					echo tested=true
+				else
+					echo tested=false
+				fi
 			fi
 		done
 	}

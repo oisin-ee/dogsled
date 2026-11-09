@@ -58,8 +58,10 @@ The bot uses `GITHUB_TOKEN`, so its release-PR updates do not start CI.
 Nothing auto-merges the release PR.
 
 When the user requests a release, merge the open release-please PR.
-The merge runs the full CI suite on the release commit through the reusable CI workflow.
-After CI passes, the publish job creates `vX.Y.Z` at that release commit and dispatches dist.
+The release commit changes only version files and the changelog.
+Every passing CI run records the tree it tested, so the release gate reuses the PR's proof when the release commit sits on a tree that a run already proved.
+Only otherwise does the merge run the full CI suite on the release commit through the reusable CI workflow.
+After that gate, the publish job creates `vX.Y.Z` at that release commit and dispatches dist.
 Dist publishes the binaries and calls the existing npm publisher.
 The publish job changes `autorelease: pending` to `autorelease: tagged` so release-please can prepare the next release.
 
