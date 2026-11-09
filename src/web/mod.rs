@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{FromRequest, Request, State};
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -301,18 +301,24 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
         *request.method(),
         axum::http::Method::POST | axum::http::Method::PUT
     );
-    if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
-        return activity::failure(crate::observation::live_activity::error(
+    let refusal = if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
+        Some(activity::failure(crate::observation::live_activity::error(
             portal_types::agents::ActivityCode::Unauthorized,
             "activity mutations require bearer authentication",
-        ));
-    }
-    if let Some(response) = guard::check(
-        request.method(),
-        request.headers(),
-        state.port,
-        &state.token,
-    ) {
+        )))
+    } else {
+        guard::check(
+            request.method(),
+            request.headers(),
+            state.port,
+            &state.token,
+        )
+    };
+    if let Some(response) = refusal {
+        // Closing with unread request bytes can reset the connection and hide the refusal.
+        // Bytes uses the same body limit as JSON extraction.
+        // An oversized or broken body still gets the guard's refusal.
+        let _ = axum::body::Bytes::from_request(request, &state).await;
         return response;
     }
     next.run(request).await
@@ -519,6 +525,87 @@ mod tests {
         ))
         .await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn guard_refusals_consume_the_request_body() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for (path, host, origin, status) in [
+            (
+                "/api/board",
+                "evil.example",
+                "http://localhost:7465",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/api/board",
+                "localhost:7465",
+                "http://evil.example",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/api/agents/local/pane/activity",
+                "localhost:7465",
+                "http://localhost:7465",
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let read = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&read);
+            let body = futures_util::stream::iter((0..4).map(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"body"))
+            }));
+            let response = router(state(&PortalState::default()))
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .header(header::HOST, host)
+                        .header(header::ORIGIN, origin)
+                        .body(Body::from_stream(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("refusal");
+            assert_eq!(response.status(), status, "{path} {host} {origin}");
+            assert_eq!(
+                read.load(Ordering::SeqCst),
+                4,
+                "the guard drains every chunk"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_refusal_stops_reading_at_the_body_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let read = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&read);
+        let body = futures_util::stream::iter((0..4).map(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"body"))
+        }));
+        let response = router(state(&PortalState::default()))
+            .layer(axum::extract::DefaultBodyLimit::max(8))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/board")
+                    .header(header::HOST, format!("localhost:{PORT}"))
+                    .body(Body::from_stream(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("refusal");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read.load(Ordering::SeqCst),
+            3,
+            "stop at the first oversized chunk"
+        );
     }
 
     #[tokio::test]

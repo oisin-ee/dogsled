@@ -220,7 +220,8 @@ mod tests {
     }
 
     /// Reach the actual listener without introducing a production HTTP client.
-    async fn post(port: u16, path: String, body: &'static str, origin: u16) -> Result<String> {
+    async fn post(port: u16, path: String, body: &str, origin: u16) -> Result<String> {
+        let body = body.to_owned();
         tokio::task::spawn_blocking(move || -> Result<String> {
             let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -369,6 +370,27 @@ mod tests {
         posted?;
         let answers = answers?.ok_or_else(|| Error::Invalid("no answer".to_owned()))?;
         assert_eq!(serde_json::to_value(answers)?["responses"][0]["value"], "B");
+        std::fs::remove_dir_all(ledger.dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refused_post_with_a_large_body_returns_403_without_a_reset() -> Result<()> {
+        let (ledger, listener, state) = fixture().await?;
+        let app = super::super::router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let id = state.questions.create(ask()?).await?;
+        // Exceed one TCP segment and Hyper's initial read buffer, but stay below the body limit.
+        let body = format!(
+            r#"{{"responses":[],"padding":"{}"}}"#,
+            "x".repeat(128 * 1024)
+        );
+        let response = post(state.port, format!("/api/questions/{id}/answer"), &body, 0).await;
+        server.abort();
+        let _ = server.await;
+        let response = response?;
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert_eq!(state.questions.list().await?.len(), 1);
         std::fs::remove_dir_all(ledger.dir)?;
         Ok(())
     }
