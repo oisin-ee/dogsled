@@ -36,6 +36,21 @@ enum Operation {
     ActivityCommand,
 }
 
+impl Operation {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Subscribe => "subscribe",
+            Self::Peer => "peer",
+            Self::Retry => "retry",
+            Self::Detail => "detail",
+            Self::Activity => "activity",
+            Self::ActivitySubscribe => "activity_subscribe",
+            Self::ActivityCommand => "activity_command",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -219,7 +234,9 @@ async fn serve(
                     let dirty = dirty.clone();
                     let details = details.clone();
                     let activity = activity.clone();
-                    clients.spawn(async move { let _ = connection(socket, receiver, interests, dirty, details, activity).await; });
+                    clients.spawn(connection(socket, receiver, interests, dirty, details, activity));
+                } else {
+                    eprintln!("dogsled observation accept: client refused: MAX_CLIENTS ({MAX_CLIENTS}) reached");
                 }
             }
         }
@@ -279,15 +296,39 @@ async fn failure(socket: &tokio::net::UnixStream, code: &str, message: &str) -> 
 
 async fn connection(
     socket: tokio::net::UnixStream,
+    receiver: watch::Receiver<Option<Arc<Frame>>>,
+    interests: super::peers::Interests,
+    dirty: Option<crate::service::wake::Dirty>,
+    details: super::details::Interests,
+    activity: Option<super::live_activity::Commands>,
+) {
+    let (operation, result) = match tokio::time::timeout(TIMEOUT, request(&socket)).await {
+        Ok(Ok(request)) => (
+            request.operation.name(),
+            respond(
+                socket, receiver, interests, dirty, details, activity, request,
+            )
+            .await,
+        ),
+        _ => (
+            "request",
+            failure(&socket, "invalid", "invalid observation request").await,
+        ),
+    };
+    if let Err(error) = result {
+        eprintln!("dogsled observation {operation}: {error}");
+    }
+}
+
+async fn respond(
+    socket: tokio::net::UnixStream,
     mut receiver: watch::Receiver<Option<Arc<Frame>>>,
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
     activity: Option<super::live_activity::Commands>,
+    request: Request,
 ) -> Result<()> {
-    let Ok(Ok(request)) = tokio::time::timeout(TIMEOUT, request(&socket)).await else {
-        return failure(&socket, "invalid", "invalid observation request").await;
-    };
     if request.version != VERSION {
         return failure(
             &socket,
