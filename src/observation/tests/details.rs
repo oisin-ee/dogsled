@@ -581,7 +581,7 @@ fn transcript_identity_length_and_mtime_skip_unchanged_reads() {
 }
 
 #[tokio::test]
-async fn conversation_over_main_frame_limit_loads_only_through_detail_route() {
+async fn conversation_content_loads_only_through_detail_route() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     let native = Native::new();
@@ -589,7 +589,7 @@ async fn conversation_over_main_frame_limit_loads_only_through_detail_route() {
     let _viewer = fixture.client.detail("w1:p1").unwrap();
     let small = fixture.wait(available);
     let previous = detail(&small).unwrap().revision;
-    let text = "x".repeat(17 * 1024 * 1024);
+    let text = "x".repeat(4 * 1024);
     let path = native.agent().transcript.unwrap();
     let message =
         json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":text}]}});
@@ -636,6 +636,22 @@ async fn conversation_over_main_frame_limit_loads_only_through_detail_route() {
     assert_eq!(conversation.turns.len(), 1);
     assert_eq!(conversation.turns[0].text.len(), text.len());
     assert_eq!(conversation.turns[0].text, text);
+}
+
+#[tokio::test]
+async fn detail_codec_and_route_body_limit_accept_content_over_main_frame_limit() {
+    let codec = super::super::details::CODEC;
+    assert!(codec.wire_limit() > ipc::MAX_FRAME_BYTES);
+    let text = "x".repeat(ipc::MAX_FRAME_BYTES + 1024);
+    let encoded = codec.encode(&text).unwrap();
+    assert!(encoded.len() > ipc::MAX_FRAME_BYTES);
+    // Match the response body limit in web::agents::peer_read.
+    let bytes = axum::body::to_bytes(axum::body::Body::from(encoded), codec.wire_limit())
+        .await
+        .unwrap();
+    let decoded: String = Codec::decode(&bytes, codec.wire_limit()).unwrap();
+    assert_eq!(decoded.len(), text.len());
+    assert_eq!(decoded, text);
 }
 
 #[test]
