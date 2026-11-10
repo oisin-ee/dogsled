@@ -351,7 +351,7 @@ fn publish(
         }
         collection.input.gaps.extend(gaps);
         peers.compose(fleet, &mut collection.input, now, collector.reports())?;
-        activity.refresh(&collection.input)?;
+        activity.refresh(node.shell, &collection.input)?;
         details.refresh(&mut collection.input, dirty)?;
         Ok(collection)
     })?;
