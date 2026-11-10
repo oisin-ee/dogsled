@@ -83,8 +83,11 @@ fn cancellation_rejects_another_requests_saved_disposition() {
 
 #[test]
 fn cancellation_after_resume_completion_is_too_late_with_pending_ticket() {
-    let (rig, _, id, _observer) = interrupted_placement("placement-result-saved");
+    let (rig, _, id, observer) = interrupted_placement("placement-result-saved");
+    // Resume needs a publication, but no live lane may admit the pending ticket.
+    drop(observer);
     queue_interrupted(&rig, &id);
+    let _publisher = super::observation::seeded(&rig);
     let (code, result) = rig.json(&["place", "--resume", &id]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(rig.tickets()[0]["state"], "pending");
