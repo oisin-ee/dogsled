@@ -116,9 +116,20 @@ fn activity_refusals_preserve_typed_codes_without_native_reads() {
     let state = std::env::temp_dir().join(crate::ledger::new_id());
     let mut publisher = super::super::Publisher::new().unwrap();
     let mut server = Server::new(&state).unwrap();
+    let mut activity =
+        super::super::live_activity::ActivityPublisher::new(publisher.epoch().into());
+    let authority = super::super::live_activity::Authority::new(publisher.epoch().into());
+    server.activity(authority.commands(), activity.sender.subscribe());
     server.bind(publisher.subscribe()).unwrap();
     let client = Client::at(&state);
     publisher.replace(activity_input()).unwrap();
+    activity
+        .replace(
+            std::collections::BTreeMap::new(),
+            Some(crate::ledger::now_ms()),
+            std::collections::BTreeSet::new(),
+        )
+        .unwrap();
     assert_eq!(
         client.activity("absent").unwrap_err().code,
         ActivityCode::AgentMissing
@@ -131,9 +142,13 @@ fn activity_refusals_preserve_typed_codes_without_native_reads() {
         client.activity("").unwrap_err().code,
         ActivityCode::InvalidRequest
     );
-    let mut outdated = activity_input();
-    outdated.sources.local.insert("terminals".into(), 1);
-    publisher.replace(outdated).unwrap();
+    activity
+        .replace(
+            std::collections::BTreeMap::new(),
+            Some(1),
+            std::collections::BTreeSet::new(),
+        )
+        .unwrap();
     assert_eq!(
         client.activity("absent").unwrap_err().code,
         ActivityCode::UpstreamUnavailable
@@ -154,44 +169,56 @@ fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_fr
     let state = std::env::temp_dir().join(crate::ledger::new_id());
     let mut publisher = super::super::Publisher::new().unwrap();
     let mut server = Server::new(&state).unwrap();
+    let mut activity =
+        super::super::live_activity::ActivityPublisher::new(publisher.epoch().into());
+    let authority = super::super::live_activity::Authority::new(publisher.epoch().into());
+    server.activity(authority.commands(), activity.sender.subscribe());
     server.bind(publisher.subscribe()).unwrap();
     let client = Client::at(&state);
-    publisher.activity(std::collections::BTreeMap::from([(
-        "pane".into(),
-        ActivityView {
-            version: 1,
-            epoch: publisher.epoch().into(),
-            revision: 0,
-            pane: "pane".into(),
-            session: Some("native-key".into()),
-            coarse_state: Some("working".into()),
-            producer: ActivityProducer {
-                generation: 1,
-                id: Some("producer".into()),
-            },
-            detail: ActivityDetail::Available {
-                sequence: 1,
-                received_at_ms: 1000,
-                valid_for_ms: 10_000,
-                state: LiveState {
-                    reasoning: None,
-                    phase: LivePhase::Thinking,
-                    active_tools: vec![],
+    activity
+        .replace(
+            std::collections::BTreeMap::from([(
+                "pane".into(),
+                ActivityView {
+                    version: 1,
+                    epoch: publisher.epoch().into(),
+                    revision: 0,
+                    pane: "pane".into(),
+                    session: Some("native-key".into()),
+                    coarse_state: Some("working".into()),
+                    producer: ActivityProducer {
+                        generation: 1,
+                        id: Some("producer".into()),
+                    },
+                    detail: ActivityDetail::Available {
+                        sequence: 1,
+                        received_at_ms: 1000,
+                        valid_for_ms: 10_000,
+                        state: LiveState {
+                            reasoning: None,
+                            phase: LivePhase::Thinking,
+                            active_tools: vec![],
+                        },
+                    },
                 },
-            },
-        },
-    )]));
+            )]),
+            Some(crate::ledger::now_ms()),
+            std::collections::BTreeSet::new(),
+        )
+        .unwrap();
     publisher.replace(activity_input()).unwrap();
     let frame = publisher.sender.borrow().clone().unwrap();
-    publisher.sender.send_replace(Some(Arc::new(Frame {
-        published: Arc::clone(&frame.published),
-        bytes: Arc::clone(&frame.bytes),
-        details: frame.details.clone(),
-        activity: frame.activity.clone(),
-        activity_measured: std::time::Instant::now()
-            .checked_sub(Duration::from_secs(2))
-            .unwrap(),
-    })));
+    let activity_frame = activity.sender.borrow().clone();
+    activity
+        .sender
+        .send_replace(Arc::new(super::super::live_activity::ActivityFrame {
+            views: activity_frame.views.clone(),
+            bound: activity_frame.bound.clone(),
+            bindings_measured_ms: activity_frame.bindings_measured_ms,
+            measured: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .unwrap(),
+        }));
     let first = client.activity("pane").unwrap();
     assert!(matches!(
         first.detail,
@@ -210,15 +237,16 @@ fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_fr
             .unwrap()
             .contains("active_tools")
     );
-    publisher.sender.send_replace(Some(Arc::new(Frame {
-        published: Arc::clone(&frame.published),
-        bytes: Arc::clone(&frame.bytes),
-        details: frame.details.clone(),
-        activity: frame.activity.clone(),
-        activity_measured: std::time::Instant::now()
-            .checked_sub(Duration::from_secs(10))
-            .unwrap(),
-    })));
+    activity
+        .sender
+        .send_replace(Arc::new(super::super::live_activity::ActivityFrame {
+            views: activity_frame.views.clone(),
+            bound: activity_frame.bound.clone(),
+            bindings_measured_ms: activity_frame.bindings_measured_ms,
+            measured: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap(),
+        }));
     assert!(matches!(
         client.activity("pane").unwrap().detail,
         ActivityDetail::Unavailable { .. }

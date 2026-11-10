@@ -90,8 +90,8 @@ mod publication {
         assert!(Arc::ptr_eq(&first, &repeated));
         assert!(Arc::ptr_eq(&frame, receiver.borrow().as_ref().unwrap()));
         assert_eq!(
-            frame.activity_measured,
-            receiver.borrow().as_ref().unwrap().activity_measured
+            frame.published.published_ms,
+            receiver.borrow().as_ref().unwrap().published.published_ms
         );
         assert!(!receiver.has_changed().unwrap());
     }
@@ -253,67 +253,113 @@ mod publication {
         }
     }
 
+    fn revision(frame: &live_activity::ActivityFrame) -> u64 {
+        serde_json::from_slice::<portal_types::agents::ActivityView>(&frame.views["w1:p1"])
+            .unwrap()
+            .revision
+    }
+
     #[test]
     fn unchanged_activity_and_a_falling_validity_budget_keep_the_existing_frame() {
-        let mut publisher = Publisher::new().unwrap();
-        let mut initial = input(1);
-        initial.sources.local.insert("terminals".into(), 1000);
-        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]));
-        let first = publisher.replace(initial.clone()).unwrap();
-        let receiver = publisher.subscribe();
-        let frame = Arc::clone(receiver.borrow().as_ref().unwrap());
+        let mut publisher = live_activity::ActivityPublisher::new("serve".into());
+        let first = publisher
+            .replace(
+                BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        let receiver = publisher.sender.subscribe();
+        let frame = Arc::clone(&receiver.borrow());
         assert!(Arc::ptr_eq(
             &first,
-            &publisher.replace(initial.clone()).unwrap()
+            &publisher
+                .replace(
+                    BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]),
+                    Some(1000),
+                    std::collections::BTreeSet::new()
+                )
+                .unwrap()
         ));
         let mut later = activity(1000, 8000);
         later.epoch = "ignored".into();
         later.revision = 99;
-        publisher.activity(BTreeMap::from([("w1:p1".into(), later)]));
-        initial.published_ms = 2000;
-        let repeated = publisher.replace(initial).unwrap();
+        let repeated = publisher
+            .replace(
+                BTreeMap::from([("w1:p1".into(), later)]),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &repeated));
-        assert!(Arc::ptr_eq(&frame, receiver.borrow().as_ref().unwrap()));
-        assert_eq!(
-            frame.activity_measured,
-            receiver.borrow().as_ref().unwrap().activity_measured
-        );
+        assert!(Arc::ptr_eq(&frame, &receiver.borrow()));
+        assert_eq!(frame.measured, receiver.borrow().measured);
         assert!(!receiver.has_changed().unwrap());
     }
 
     #[test]
     fn activity_renewal_publishes_even_when_the_remaining_budget_is_unchanged() {
-        let mut publisher = Publisher::new().unwrap();
-        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]));
-        let first = publisher.replace(input(1)).unwrap();
-        let receiver = publisher.subscribe();
-        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(2000, 9000))]));
-        let renewed = publisher.replace(input(1)).unwrap();
-        assert_eq!(renewed.revision, first.revision + 1);
-        assert_eq!(renewed.local_revision, first.local_revision);
+        let mut main = Publisher::new().unwrap();
+        let general = main.replace(input(1)).unwrap();
+        let mut publisher = live_activity::ActivityPublisher::new(main.epoch().into());
+        let first = publisher
+            .replace(
+                BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        let receiver = publisher.sender.subscribe();
+        let renewed = publisher
+            .replace(
+                BTreeMap::from([("w1:p1".into(), activity(2000, 9000))]),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(revision(&renewed), revision(&first) + 1);
+        assert_eq!(
+            main.current().unwrap().local_revision,
+            general.local_revision
+        );
         assert!(receiver.has_changed().unwrap());
     }
 
     #[test]
     fn activity_expiry_and_removal_are_content_changes() {
-        let mut publisher = Publisher::new().unwrap();
-        publisher.activity(BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]));
-        let first = publisher.replace(input(1)).unwrap();
-        let mut receiver = publisher.subscribe();
+        let mut publisher = live_activity::ActivityPublisher::new("serve".into());
+        let first = publisher
+            .replace(
+                BTreeMap::from([("w1:p1".into(), activity(1000, 9000))]),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        let mut receiver = publisher.sender.subscribe();
         let mut expired = activity(1000, 0);
         expired.detail = portal_types::agents::ActivityDetail::Unavailable {
             reason: portal_types::agents::UnavailableReason::Expired,
         };
-        publisher.activity(BTreeMap::from([("w1:p1".into(), expired)]));
-        let expired = publisher.replace(input(1)).unwrap();
-        assert_eq!(expired.revision, first.revision + 1);
+        let expired = publisher
+            .replace(
+                BTreeMap::from([("w1:p1".into(), expired)]),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        assert_eq!(revision(&expired), revision(&first) + 1);
         assert!(receiver.has_changed().unwrap());
         receiver.borrow_and_update();
-        publisher.activity(BTreeMap::new());
-        assert_eq!(
-            publisher.replace(input(1)).unwrap().revision,
-            expired.revision + 1
-        );
+        let expired_revision = revision(&expired);
+        let removed = publisher
+            .replace(
+                BTreeMap::new(),
+                Some(1000),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(removed.views.is_empty());
+        assert_eq!(publisher.revision, expired_revision + 1);
         assert!(receiver.has_changed().unwrap());
     }
 

@@ -312,7 +312,7 @@ struct Exchange {
     interests: crate::observation::peers::Interests,
     diagnostics: crate::observation::diagnostics::Diagnostics,
     details: crate::observation::details::Collector,
-    activity: crate::observation::live_activity::Authority,
+    activity: crate::observation::live_activity::Handle,
     dirty: wake::Dirty,
     timings: crate::observation::timing::PassTimings,
 }
@@ -381,19 +381,13 @@ fn publish(
         let result = peers.compose(fleet, &mut collection.input, now, collector.reports());
         timings.phase("peers.compose", started.elapsed());
         result?;
-        let started = Instant::now();
-        let result = activity.refresh(node.shell, &collection.input);
-        timings.phase("activity.refresh", started.elapsed());
-        result?;
+        activity.observe(&collection.input)?;
         let started = Instant::now();
         let result = details.refresh(&mut collection.input, dirty);
         timings.phase("details.refresh", started.elapsed());
         result?;
         Ok(collection)
     })?;
-    let started = Instant::now();
-    publisher.activity(activity.views(Instant::now(), now_ms()));
-    timings.phase("activity.views", started.elapsed());
     let started = Instant::now();
     herdr.interests(collector.panes());
     timings.phase("herdr.interests", started.elapsed());
@@ -423,8 +417,11 @@ impl Observation {
         let interests = crate::observation::peers::Interests::default();
         server.branches(interests.clone(), dirty.clone());
         let details = crate::observation::details::Collector::default();
-        let activity = crate::observation::live_activity::Authority::new(publisher.epoch().into());
-        server.activity(activity.commands());
+        let (commands, feed, activity) = crate::observation::live_activity::Authority::spawn(
+            publisher.epoch().into(),
+            System::default(),
+        )?;
+        server.activity(commands, feed);
         server.details(details.interests.clone());
         publisher.details(details.payloads.clone());
         if let Err(error) = server.bind(publisher.subscribe()) {
@@ -456,13 +453,9 @@ impl Observation {
         })
     }
 
-    /// The earliest of the schedule, the first baseline sample, and live activity sampling.
-    fn due(&self, next: Instant, baseline: Option<Instant>) -> Instant {
-        let due = baseline.map_or(next, |at| next.min(at));
-        self.exchange
-            .activity
-            .next_wake()
-            .map_or(due, |at| due.min(at))
+    /// The earliest of the schedule and the first baseline sample.
+    fn due(next: Instant, baseline: Option<Instant>) -> Instant {
+        baseline.map_or(next, |at| next.min(at))
     }
 
     fn timed_refresh(
@@ -526,13 +519,6 @@ impl Observation {
         self.exchange.timings.phase("discover", started.elapsed());
         if let Err(error) = discovery {
             eprintln!("dogsled peer discovery: {error}");
-        }
-        if self.exchange.activity.sample_due() {
-            let started = Instant::now();
-            self.exchange.activity.sample(node.shell, now_ms());
-            self.exchange
-                .timings
-                .phase("activity.sample", started.elapsed());
         }
         publish(
             node,
@@ -603,7 +589,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             if once && workers.completed.iter().all(|done| *done) && sweep.is_none() {
                 return Ok(());
             }
-            let observation_due = observation.due(next, baseline);
+            let observation_due = Observation::due(next, baseline);
             match recv.recv_timeout(observation_due.saturating_duration_since(Instant::now())) {
                 Ok(Event::Wake) => {
                     requested |=

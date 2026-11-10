@@ -100,7 +100,10 @@ pub(crate) struct Server {
     state: PathBuf,
     interests: super::peers::Interests,
     details: super::details::Interests,
-    activity: Option<super::live_activity::Commands>,
+    activity: Option<(
+        super::live_activity::Commands,
+        super::live_activity::ActivityFeed,
+    )>,
     dirty: Option<crate::service::wake::Dirty>,
 }
 
@@ -142,8 +145,12 @@ impl Server {
         self.details = interests;
     }
 
-    pub fn activity(&mut self, commands: super::live_activity::Commands) {
-        self.activity = Some(commands);
+    pub fn activity(
+        &mut self,
+        commands: super::live_activity::Commands,
+        feed: super::live_activity::ActivityFeed,
+    ) {
+        self.activity = Some((commands, feed));
     }
 
     pub fn bind(&mut self, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<()> {
@@ -219,7 +226,10 @@ async fn serve(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
-    activity: Option<super::live_activity::Commands>,
+    activity: Option<(
+        super::live_activity::Commands,
+        super::live_activity::ActivityFeed,
+    )>,
 ) {
     let mut clients = tokio::task::JoinSet::new();
     loop {
@@ -300,7 +310,10 @@ async fn connection(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
-    activity: Option<super::live_activity::Commands>,
+    activity: Option<(
+        super::live_activity::Commands,
+        super::live_activity::ActivityFeed,
+    )>,
 ) {
     let (operation, result) = match tokio::time::timeout(TIMEOUT, request(&socket)).await {
         Ok(Ok(request)) => (
@@ -326,7 +339,10 @@ async fn respond(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
-    activity: Option<super::live_activity::Commands>,
+    activity: Option<(
+        super::live_activity::Commands,
+        super::live_activity::ActivityFeed,
+    )>,
     request: Request,
 ) -> Result<()> {
     if request.version != VERSION {
@@ -338,13 +354,13 @@ async fn respond(
         .await;
     }
     if matches!(request.operation, Operation::ActivityCommand) {
-        return activity_command(&socket, request, activity, dirty.as_ref()).await;
+        return activity_command(&socket, request, activity.map(|(commands, _)| commands)).await;
     }
     if matches!(
         request.operation,
         Operation::Activity | Operation::ActivitySubscribe
     ) {
-        return activity_connection(&socket, &mut receiver, request).await;
+        return activity_connection(&socket, activity.map(|(_, feed)| feed), request).await;
     }
     if matches!(request.operation, Operation::Detail) {
         let Some(pane) = request.pane.as_deref() else {
@@ -504,11 +520,10 @@ async fn activity_command(
     socket: &tokio::net::UnixStream,
     request: Request,
     activity: Option<super::live_activity::Commands>,
-    dirty: Option<&crate::service::wake::Dirty>,
 ) -> Result<()> {
     use portal_types::agents::ActivityCode;
     let result = match (request.pane, request.activity, activity) {
-        (Some(pane), Some(command), Some(activity)) => activity.send(pane, command, dirty).await,
+        (Some(pane), Some(command), Some(activity)) => activity.send(pane, command).await,
         (_, _, None) => Err(super::live_activity::error(
             ActivityCode::UpstreamUnavailable,
             "activity authority unavailable",
@@ -525,7 +540,7 @@ async fn activity_command(
 
 async fn activity_connection(
     socket: &tokio::net::UnixStream,
-    receiver: &mut watch::Receiver<Option<Arc<Frame>>>,
+    feed: Option<super::live_activity::ActivityFeed>,
     request: Request,
 ) -> Result<()> {
     let Some(pane) = request.pane else {
@@ -534,6 +549,14 @@ async fn activity_connection(
     if super::live_activity::validate_pane(&pane).is_err() {
         return failure(socket, "invalid_request", "invalid activity pane").await;
     }
+    let Some(mut receiver) = feed else {
+        return failure(
+            socket,
+            "upstream_unavailable",
+            "activity authority unavailable",
+        )
+        .await;
+    };
     loop {
         if receiver.has_changed().is_err() {
             return failure(
@@ -544,18 +567,15 @@ async fn activity_connection(
             .await;
         }
         let frame = receiver.borrow_and_update().clone();
-        let Some(frame) = frame else {
-            return failure(socket, "upstream_unavailable", "observation unavailable").await;
-        };
-        if let Some(bytes) = frame.activity.get(&pane) {
+        if let Some(bytes) = frame.views.get(&pane) {
             // Relative validity is a transport budget, not renewed by reading a retained
             // publication. Subtract queue/retention time before handing it to a consumer.
             let mut activity: portal_types::agents::ActivityView = serde_json::from_slice(bytes)?;
             if let portal_types::agents::ActivityDetail::Available { valid_for_ms, .. } =
                 &mut activity.detail
             {
-                let elapsed = u64::try_from(frame.activity_measured.elapsed().as_millis())
-                    .unwrap_or(u64::MAX);
+                let elapsed =
+                    u64::try_from(frame.measured.elapsed().as_millis()).unwrap_or(u64::MAX);
                 *valid_for_ms = valid_for_ms.saturating_sub(elapsed);
                 if *valid_for_ms == 0 {
                     activity.detail = portal_types::agents::ActivityDetail::Unavailable {
@@ -566,22 +586,11 @@ async fn activity_connection(
             let mut bytes = serde_json::to_vec(&activity)?;
             bytes.push(b'\n');
             write(socket, &bytes).await?;
-        } else if frame
-            .published
-            .views
-            .get("portal")
-            .and_then(|view| view.pointer("/data/agents"))
-            .is_some_and(serde_json::Value::is_array)
-            && selected_agent(&frame.published, &pane)?.is_none()
-            && frame
-                .published
-                .sources
-                .local
-                .get("terminals")
-                .is_some_and(|measured| {
-                    crate::ledger::now_ms().saturating_sub(*measured)
-                        < super::live_activity::NATIVE_TTL_MS
-                })
+        } else if !frame.bound.contains(&pane)
+            && frame.bindings_measured_ms.is_some_and(|measured| {
+                crate::ledger::now_ms().saturating_sub(measured)
+                    < super::live_activity::NATIVE_TTL_MS
+            })
         {
             return failure(socket, "agent_missing", "agent is absent").await;
         } else {
@@ -592,7 +601,9 @@ async fn activity_connection(
             )
             .await;
         }
-        if matches!(request.operation, Operation::Activity) || !updated(socket, receiver).await? {
+        if matches!(request.operation, Operation::Activity)
+            || !updated(socket, &mut receiver).await?
+        {
             return Ok(());
         }
     }
@@ -679,9 +690,9 @@ async fn write_detail(
 }
 
 /// Observe peer closure even when there are no new publications, releasing its client slot.
-async fn updated(
+async fn updated<T: Send + Sync>(
     socket: &tokio::net::UnixStream,
-    receiver: &mut watch::Receiver<Option<Arc<Frame>>>,
+    receiver: &mut watch::Receiver<T>,
 ) -> Result<bool> {
     loop {
         tokio::select! {

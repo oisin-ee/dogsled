@@ -80,8 +80,6 @@ pub(crate) struct Frame {
     pub bytes: Arc<[u8]>,
     /// Host-local detail channels advance independently of the main publication.
     pub details: details::Payloads,
-    pub activity: BTreeMap<String, Arc<[u8]>>,
-    pub activity_measured: std::time::Instant,
 }
 
 /// The single producer owns revision assignment. Watch retains only the latest value.
@@ -89,7 +87,6 @@ pub(crate) struct Frame {
 pub(crate) struct Publisher {
     epoch: String,
     details: details::Payloads,
-    activity: BTreeMap<String, portal_types::agents::ActivityView>,
     sender: watch::Sender<Option<Arc<Frame>>>,
 }
 
@@ -109,17 +106,12 @@ impl Publisher {
         Ok(Self {
             epoch,
             details: details::Payloads::default(),
-            activity: BTreeMap::new(),
             sender: watch::channel(None).0,
         })
     }
 
     pub fn epoch(&self) -> &str {
         &self.epoch
-    }
-
-    pub fn activity(&mut self, activity: BTreeMap<String, portal_types::agents::ActivityView>) {
-        self.activity = activity;
     }
 
     pub fn details(&mut self, details: details::Payloads) {
@@ -144,7 +136,6 @@ impl Publisher {
             && previous.published.sources == input.sources
             && previous.published.gaps == input.gaps
             && same_views(&previous.published.views, &input.views)
-            && same_activity(&previous.activity, &self.activity)?
         {
             return Ok(Arc::clone(&previous.published));
         }
@@ -196,24 +187,10 @@ impl Publisher {
         if bytes.len() > ipc::MAX_FRAME_BYTES {
             return Err(Error::Invalid("observation publication too large".into()));
         }
-        let activity = self
-            .activity
-            .iter()
-            .map(|(pane, activity)| {
-                let mut activity = activity.clone();
-                activity.epoch.clone_from(&self.epoch);
-                activity.revision = revision;
-                let mut bytes = serde_json::to_vec(&activity)?;
-                bytes.push(b'\n');
-                Ok((pane.clone(), Arc::from(bytes)))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
         self.sender.send_replace(Some(Arc::new(Frame {
             published: Arc::clone(&published),
             bytes: bytes.into(),
             details: self.details.clone(),
-            activity,
-            activity_measured: std::time::Instant::now(),
         })));
         Ok(published)
     }
@@ -238,40 +215,6 @@ fn portal_content(view: &Value) -> Value {
         for field in ["epoch", "revision", "published_ms"] {
             snapshot.remove(field);
         }
-    }
-    view
-}
-
-fn same_activity(
-    previous: &BTreeMap<String, Arc<[u8]>>,
-    current: &BTreeMap<String, portal_types::agents::ActivityView>,
-) -> Result<bool> {
-    if previous.len() != current.len() {
-        return Ok(false);
-    }
-    for (pane, current) in current {
-        let Some(bytes) = previous.get(pane) else {
-            return Ok(false);
-        };
-        let previous = serde_json::from_slice(bytes)?;
-        if activity_content(previous) != activity_content(current.clone()) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn activity_content(
-    mut view: portal_types::agents::ActivityView,
-) -> portal_types::agents::ActivityView {
-    view.epoch.clear();
-    view.revision = 0;
-    // The deadline is min(received + LEASE, terminals measurement + NATIVE_TTL_MS)
-    // (live_activity.rs:529-535). Receipt clocks advance together (:413-414, :456-457),
-    // and sources includes the terminals measurement (:205, :232, :263). Comparing
-    // received_at_ms and sources therefore preserves the deadline, not its countdown.
-    if let portal_types::agents::ActivityDetail::Available { valid_for_ms, .. } = &mut view.detail {
-        *valid_for_ms = 0;
     }
     view
 }
