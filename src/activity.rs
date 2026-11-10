@@ -230,31 +230,47 @@ fn conversation(agent: &str, path: &str) -> History {
     try_conversation(agent, path).unwrap_or_default()
 }
 
-/// Detail publication preserves I/O failures instead of publishing empty success.
+/// Fresh-read reference for the incremental reader's tests.
+#[cfg(test)]
 pub(crate) fn try_conversation(agent: &str, path: &str) -> std::io::Result<History> {
     conversation_with_limit(agent, path, CONVERSATION_BYTES)
 }
 
 /// Read newest text and tool records independently, then restore transcript order.
 /// Claude's adjacent message blocks remain one text record, even across tool rows.
+#[cfg(test)]
 pub(crate) fn conversation_with_limit(
     agent: &str,
     path: &str,
     limit: u64,
 ) -> std::io::Result<History> {
-    let mut history = History::default();
-    let mut texts = 0;
-    let mut tools = 0;
-    let mut thoughts = 0;
-    let mut deliveries = std::collections::HashSet::new();
+    let mut window = Window::default();
     let cut = lines_backwards(path, limit, CHUNK_BYTES, |offset, line| {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            return true;
-        };
-        for mut record in records(agent, &value, offset, &mut history.truncated)
-            .into_iter()
-            .rev()
-        {
+        window.push(agent, ParsedLine::new(agent, offset, line))
+    })?;
+    Ok(window.finish(cut))
+}
+
+#[derive(Debug, Default)]
+struct Window {
+    history: History,
+    texts: usize,
+    tools: usize,
+    thoughts: usize,
+    deliveries: std::collections::HashSet<String>,
+}
+
+impl Window {
+    fn push(&mut self, agent: &str, line: ParsedLine) -> bool {
+        let Self {
+            history,
+            texts,
+            tools,
+            thoughts,
+            deliveries,
+        } = self;
+        history.truncated |= line.truncated;
+        for mut record in line.records.into_iter().rev() {
             if let Source::Dogsled { .. } = &record.source
                 && !deliveries.insert(record.id.clone())
             {
@@ -279,18 +295,18 @@ pub(crate) fn conversation_with_limit(
                         tool.output = tool.output.take().or(result.output);
                         tool.output_lines = tool.output_lines.or(result.output_lines);
                     }
-                } else if tools == CONVERSATION_TOOLS {
+                } else if *tools == CONVERSATION_TOOLS {
                     history.truncated = true;
                     continue;
                 } else {
-                    tools += 1;
+                    *tools += 1;
                 }
             } else if record.role == Role::Thinking {
-                if thoughts == CONVERSATION_THOUGHTS {
+                if *thoughts == CONVERSATION_THOUGHTS {
                     history.truncated = true;
                     continue;
                 }
-                thoughts += 1;
+                *thoughts += 1;
             } else {
                 let group = (agent == "claude")
                     .then(|| {
@@ -312,20 +328,79 @@ pub(crate) fn conversation_with_limit(
                     record.timestamp = record.timestamp.or(previous.timestamp);
                     record.text = joined(&[record.text, previous.text]).unwrap_or_default();
                 } else {
-                    if texts == CONVERSATION_TURNS {
+                    if *texts == CONVERSATION_TURNS {
                         history.truncated = true;
                         return false;
                     }
-                    texts += 1;
+                    *texts += 1;
                 }
             }
             history.turns.push(record);
         }
         true
-    });
-    history.truncated |= cut?;
-    history.turns.reverse();
-    Ok(history)
+    }
+
+    fn finish(mut self, cut: bool) -> History {
+        self.history.truncated |= cut;
+        self.history.turns.reverse();
+        self.history
+    }
+}
+
+/// Parsed, unmerged rows retain their byte positions. Replaying these bounded
+/// rows preserves the backward reader's pairing and grouping when the byte
+/// floor moves, without reading or parsing the old transcript again.
+#[derive(Debug, Clone)]
+struct ParsedLine {
+    offset: u64,
+    records: Vec<Turn>,
+    truncated: bool,
+}
+
+impl ParsedLine {
+    fn new(agent: &str, offset: u64, line: &str) -> Self {
+        let mut parsed = Self {
+            offset,
+            records: Vec::new(),
+            truncated: false,
+        };
+        if !line.trim().is_empty() && record_kind(agent, line) {
+            #[cfg(test)]
+            {
+                VALUE_PARSES.with(|count| count.set(count.get() + 1));
+                VALUE_BYTES.with(|count| count.set(count.get() + line.len()));
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                parsed.records = records(agent, &value, offset, &mut parsed.truncated);
+            }
+        }
+        parsed
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static VALUE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VALUE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Ignore large custom state entries without allocating a JSON tree. On an
+/// ambiguous envelope, let the full parser decide rather than dropping a turn.
+fn record_kind(agent: &str, line: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Kind<'a> {
+        #[serde(rename = "type", borrow)]
+        kind: std::borrow::Cow<'a, str>,
+    }
+    let Ok(kind) = serde_json::from_str::<Kind<'_>>(line) else {
+        return true;
+    };
+    match agent {
+        "pi" => matches!(kind.kind.as_ref(), "message" | "custom_message"),
+        "claude" => matches!(kind.kind.as_ref(), "user" | "assistant"),
+        "codex" => kind.kind == "response_item",
+        _ => false,
+    }
 }
 
 /// Tool rows cannot consume the text-message allowance.
@@ -343,9 +418,285 @@ pub(crate) const CONVERSATION_BYTES: u64 = 32 * 1024 * 1024;
 /// The size of one backward read.
 const CHUNK_BYTES: u64 = 1024 * 1024;
 
+/// A per-session reader. Growth parses appended bytes and compares at most 8 KiB:
+/// the first line (up to 4 KiB) and the window ending at the previous length.
+/// A mismatch, replacement, or truncation rescans the byte window.
+///
+/// A rewrite preserving both fingerprints but changing the middle is not
+/// detected. Pi migrations change the header version; forks use a new file.
+/// Unchanged metadata needs no byte reads. An unfinished line is retained.
+#[derive(Debug, Default)]
+pub(crate) struct Incremental {
+    stamp: Option<std::fs::Metadata>,
+    agent: String,
+    offset: u64,
+    line_start: u64,
+    pending: Vec<u8>,
+    fingerprints: Fingerprints,
+    // Keep unmerged records within the byte window, not only published turns:
+    // an expired call, result, or delivery can change the retained grouping.
+    rows: std::collections::VecDeque<ParsedLine>,
+    history: History,
+    #[cfg(test)]
+    pub(crate) reads: usize,
+    // Window/suffix input bytes; fingerprint comparisons are counted separately.
+    #[cfg(test)]
+    bytes_read: u64,
+}
+
+impl Incremental {
+    pub(crate) fn advance(&mut self, agent: &str, path: &str) -> std::io::Result<&History> {
+        self.advance_with_limit(agent, path, CONVERSATION_BYTES)
+    }
+
+    fn advance_with_limit(
+        &mut self,
+        agent: &str,
+        path: &str,
+        limit: u64,
+    ) -> std::io::Result<&History> {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut file = std::fs::File::open(path)?;
+        let stamp = file.metadata()?;
+        let same = self.agent == agent
+            && self
+                .stamp
+                .as_ref()
+                .is_some_and(|old| old.dev() == stamp.dev() && old.ino() == stamp.ino());
+        if same
+            && stamp.len() == self.offset
+            && self
+                .stamp
+                .as_ref()
+                .and_then(|old| old.modified().ok())
+                .zip(stamp.modified().ok())
+                .is_some_and(|(old, new)| old == new)
+        {
+            return Ok(&self.history);
+        }
+        #[cfg(test)]
+        {
+            self.reads += 1;
+        }
+        let result = (|| {
+            if same
+                && stamp.len() >= self.offset
+                && self.fingerprints.matches(&mut file, self.offset)?
+            {
+                self.append(&mut file, agent, stamp.len(), limit)
+            } else {
+                self.rescan(&mut file, agent, stamp.len(), limit)
+            }
+        })();
+        if let Err(error) = result {
+            // A failed read must not leave an apparently reusable partial update.
+            self.stamp = None;
+            return Err(error);
+        }
+        self.offset = stamp.len();
+        agent.clone_into(&mut self.agent);
+        self.stamp = Some(stamp);
+        self.rebuild(agent, limit);
+        Ok(&self.history)
+    }
+
+    fn rescan(
+        &mut self,
+        file: &mut std::fs::File,
+        agent: &str,
+        len: u64,
+        limit: u64,
+    ) -> std::io::Result<()> {
+        self.rows.clear();
+        self.pending.clear();
+        self.line_start = len;
+        if len > 0 && !newline_before(file, len)? {
+            // A trailing line cut by the window cannot become eligible on growth.
+            self.line_start = 0;
+        }
+        let mut fingerprints = Fingerprints::default();
+        let mut header = vec![
+            0;
+            usize::try_from(len.min(FINGERPRINT_BYTES as u64))
+                .map_err(std::io::Error::other)?
+        ];
+        lines_backwards_file(
+            file,
+            len,
+            limit,
+            CHUNK_BYTES,
+            |offset, line| {
+                if offset + line.len() as u64 == len {
+                    self.line_start = offset;
+                    self.pending.extend_from_slice(line);
+                } else {
+                    let parsed = ParsedLine::new(agent, offset, &String::from_utf8_lossy(line));
+                    if !parsed.records.is_empty() || parsed.truncated {
+                        self.rows.push_front(parsed);
+                    }
+                }
+                true
+            },
+            |offset, bytes| {
+                if offset + bytes.len() as u64 == len {
+                    fingerprints.remember(bytes);
+                }
+                if offset < header.len() as u64 {
+                    let start = offset as usize;
+                    let take = bytes.len().min(header.len() - start);
+                    header[start..start + take].copy_from_slice(&bytes[..take]);
+                }
+            },
+        )?;
+        if len > limit {
+            // The header lies outside the backward window on large sessions.
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut header)?;
+        }
+        fingerprints.head.clear();
+        fingerprints.remember_head(&header);
+        #[cfg(test)]
+        {
+            fingerprints.compared = self.fingerprints.compared;
+        }
+        self.fingerprints = fingerprints;
+        #[cfg(test)]
+        {
+            self.bytes_read += len.min(limit);
+        }
+        Ok(())
+    }
+
+    fn append(
+        &mut self,
+        file: &mut std::fs::File,
+        agent: &str,
+        len: u64,
+        limit: u64,
+    ) -> std::io::Result<()> {
+        let floor = len.saturating_sub(limit);
+        if self.line_start < floor {
+            self.pending.clear();
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut at = self.offset;
+        let mut bytes =
+            vec![0; usize::try_from((len - at).min(CHUNK_BYTES)).map_err(std::io::Error::other)?];
+        while at < len {
+            let size =
+                usize::try_from((len - at).min(CHUNK_BYTES)).map_err(std::io::Error::other)?;
+            let chunk = &mut bytes[..size];
+            file.read_exact(chunk)?;
+            self.fingerprints.remember(chunk);
+            #[cfg(test)]
+            {
+                self.bytes_read += size as u64;
+            }
+            for part in chunk.split_inclusive(|byte| *byte == b'\n') {
+                at += part.len() as u64;
+                if self.line_start >= floor {
+                    self.pending.extend_from_slice(part);
+                }
+                if part.last() == Some(&b'\n') {
+                    if self.line_start >= floor {
+                        let parsed = ParsedLine::new(
+                            agent,
+                            self.line_start,
+                            &String::from_utf8_lossy(&self.pending),
+                        );
+                        if !parsed.records.is_empty() || parsed.truncated {
+                            self.rows.push_back(parsed);
+                        }
+                    }
+                    self.pending.clear();
+                    self.line_start = at;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild(&mut self, agent: &str, limit: u64) {
+        let floor = self.offset.saturating_sub(limit);
+        while self.rows.front().is_some_and(|line| line.offset < floor) {
+            self.rows.pop_front();
+        }
+        let mut window = Window::default();
+        // The fresh reader accepts valid JSON at EOF without a newline. Preview
+        // it, but do not commit it: a later append may complete or invalidate it.
+        let preview = self.line_start >= floor
+            && window.push(
+                agent,
+                ParsedLine::new(
+                    agent,
+                    self.line_start,
+                    &String::from_utf8_lossy(&self.pending),
+                ),
+            );
+        if preview {
+            for line in self.rows.iter().rev() {
+                if !window.push(agent, line.clone()) {
+                    break;
+                }
+            }
+        }
+        self.history = window.finish(floor > 0);
+    }
+}
+
+const FINGERPRINT_BYTES: usize = 4 * 1024;
+
+/// Byte-exact rewrite probes. Appends update them from the bytes just read.
+#[derive(Debug, Default)]
+struct Fingerprints {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    #[cfg(test)]
+    compared: u64,
+}
+
+impl Fingerprints {
+    fn remember_head(&mut self, bytes: &[u8]) {
+        if self.head.len() < FINGERPRINT_BYTES && self.head.last() != Some(&b'\n') {
+            let end = bytes
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |at| at + 1);
+            let take = end.min(FINGERPRINT_BYTES - self.head.len());
+            self.head.extend_from_slice(&bytes[..take]);
+        }
+    }
+
+    fn remember(&mut self, bytes: &[u8]) {
+        self.remember_head(bytes);
+        let suffix = &bytes[bytes.len().saturating_sub(FINGERPRINT_BYTES)..];
+        let discard = (self.tail.len() + suffix.len()).saturating_sub(FINGERPRINT_BYTES);
+        self.tail.drain(..discard);
+        self.tail.extend_from_slice(suffix);
+    }
+
+    fn matches(&mut self, file: &mut std::fs::File, len: u64) -> std::io::Result<bool> {
+        let mut bytes = [0; FINGERPRINT_BYTES];
+        for (offset, expected) in [(0, &self.head), (len - self.tail.len() as u64, &self.tail)] {
+            file.seek(SeekFrom::Start(offset))?;
+            let actual = &mut bytes[..expected.len()];
+            file.read_exact(actual)?;
+            #[cfg(test)]
+            {
+                self.compared += expected.len() as u64;
+            }
+            if actual != expected {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
 /// Give the complete lines of `path` to `visit`, newest first, until `visit`
 /// returns `false` or `limit` bytes are read, `step` bytes at a time. A line
 /// cut by the limit is not given.
+#[cfg(test)]
 fn lines_backwards(
     path: &str,
     limit: u64,
@@ -354,6 +705,24 @@ fn lines_backwards(
 ) -> std::io::Result<bool> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
+    lines_backwards_file(
+        &mut file,
+        len,
+        limit,
+        step,
+        |offset, line| visit(offset, &String::from_utf8_lossy(line)),
+        |_, _| {},
+    )
+}
+
+fn lines_backwards_file(
+    file: &mut std::fs::File,
+    len: u64,
+    limit: u64,
+    step: u64,
+    mut visit: impl FnMut(u64, &[u8]) -> bool,
+    mut observe: impl FnMut(u64, &[u8]),
+) -> std::io::Result<bool> {
     let floor = len.saturating_sub(limit);
     let mut end = len;
     // The bytes after this chunk that belong to a line starting in it.
@@ -364,12 +733,13 @@ fn lines_backwards(
         let mut bytes = vec![0; size];
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut bytes)?;
+        observe(start, &bytes);
         bytes.extend_from_slice(&carry);
         let chunk = bytes;
         // The first line is complete at the start of the file, or at the read
         // limit when a newline comes just before it. Elsewhere the bytes before
         // the first newline end a line that starts earlier.
-        let whole = start == 0 || (start == floor && newline_before(&mut file, start)?);
+        let whole = start == 0 || (start == floor && newline_before(file, start)?);
         let (head, lines) = if whole {
             (&[][..], &chunk[..])
         } else {
@@ -382,7 +752,7 @@ fn lines_backwards(
         for line in lines.rsplit(|byte| *byte == b'\n') {
             offset =
                 offset.saturating_sub(u64::try_from(line.len()).map_err(std::io::Error::other)?);
-            if !line.is_empty() && !visit(offset, &String::from_utf8_lossy(line)) {
+            if !line.is_empty() && !visit(offset, line) {
                 return Ok(true);
             }
             offset = offset.saturating_sub(1);
@@ -1037,6 +1407,442 @@ mod tests {
         }
         std::fs::write(&path, text).expect("the transcript");
         path.to_string_lossy().into_owned()
+    }
+
+    fn incremental_fixture(agent: &str) -> Vec<Value> {
+        let mut lines = Vec::new();
+        for index in 0..CONVERSATION_TOOLS + 5 {
+            let id = format!("m-{index}");
+            let call = format!("call-{index}");
+            let pair = match agent {
+                "pi" => [
+                    json!({"type":"message","id":id,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"界 thought"},{"type":"toolCall","id":call,"name":"read","arguments":{}},{"type":"text","text":id}]}}),
+                    json!({"type":"message","message":{"role":"toolResult","toolCallId":call,"toolName":"read","isError":index % 2 == 0,"content":"result"}}),
+                ],
+                "claude" => [
+                    json!({"type":"assistant","message":{"id":id,"content":[{"type":"thinking","thinking":"界 thought"},{"type":"tool_use","id":call,"name":"read","input":{}},{"type":"text","text":id}]}}),
+                    json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":call,"content":"result"}]}}),
+                ],
+                _ => [
+                    json!({"type":"response_item","payload":{"type":"function_call","call_id":call,"name":"read","arguments":"{}"}}),
+                    json!({"type":"response_item","payload":{"type":"function_call_output","call_id":call,"output":"result"}}),
+                ],
+            };
+            lines.extend(pair);
+            if agent == "claude" {
+                lines.push(json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":"second block"}]}}));
+            }
+            // Keep enough tool/thought rows after the newest text turn to
+            // exercise their independent caps, not only the text cutoff.
+            if index < CONVERSATION_TURNS + 5 {
+                if agent == "codex" {
+                    lines.push(json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":id}]}}));
+                }
+            } else if agent != "codex" {
+                for value in lines
+                    .iter_mut()
+                    .rev()
+                    .take(if agent == "claude" { 3 } else { 2 })
+                {
+                    if let Some(blocks) = value["message"]["content"].as_array_mut() {
+                        blocks.retain(|block| block["type"] != "text");
+                    }
+                }
+            }
+        }
+        if agent == "pi" {
+            let delivery = json!({"type":"custom_message","customType":"dogsled","display":true,"details":{"records":[{"id":"delivery","sender":"lead","kind":"message","created_ms":7,"text":"request"}]}});
+            lines.insert(0, delivery.clone());
+            lines.push(delivery);
+            lines.push(json!({"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"界".repeat(12000)}]}}));
+        }
+        lines
+    }
+
+    #[test]
+    fn incremental_matches_fresh_reads_after_random_and_midline_appends() {
+        for agent in ["pi", "claude", "codex"] {
+            let path = transcript(&[]);
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            let mut incremental = Incremental::default();
+            let mut random = 17_u64;
+            let mut appended = 0;
+            for value in incremental_fixture(agent) {
+                let mut line = value.to_string().into_bytes();
+                line.push(b'\n');
+                let mut start = 0;
+                while start < line.len() {
+                    random = random
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    let end = (start + 1 + (random as usize % 1024)).min(line.len());
+                    file.write_all(&line[start..end]).unwrap();
+                    appended += (end - start) as u64;
+                    assert_eq!(
+                        incremental.advance(agent, &path).unwrap(),
+                        &conversation_with_limit(agent, &path, CONVERSATION_BYTES).unwrap(),
+                        "{agent} at byte {appended}"
+                    );
+                    start = end;
+                }
+            }
+            assert!(incremental.history.truncated);
+            assert_eq!(
+                incremental.bytes_read, appended,
+                "suffix reads exceeded the append size"
+            );
+            let reads = incremental.reads;
+            incremental.advance(agent, &path).unwrap();
+            assert_eq!(incremental.reads, reads);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn incremental_independent_caps_and_byte_window_match_fresh_reads() {
+        for agent in ["pi", "claude", "codex"] {
+            let mut lines = incremental_fixture(agent);
+            // Remove text so all tools and thoughts must use their own caps.
+            for line in &mut lines {
+                for key in ["message", "payload"] {
+                    if let Some(blocks) = line[key]["content"].as_array_mut() {
+                        blocks.retain(|block| {
+                            !matches!(block["type"].as_str(), Some("text" | "output_text"))
+                        });
+                    }
+                }
+            }
+            let path = transcript(&lines);
+            let mut incremental = Incremental::default();
+            assert_eq!(
+                incremental.advance(agent, &path).unwrap(),
+                &conversation(agent, &path)
+            );
+            assert_eq!(
+                incremental
+                    .history
+                    .turns
+                    .iter()
+                    .filter(|turn| turn.tool.is_some())
+                    .count(),
+                CONVERSATION_TOOLS
+            );
+            if agent != "codex" {
+                assert_eq!(
+                    incremental
+                        .history
+                        .turns
+                        .iter()
+                        .filter(|turn| turn.role == Role::Thinking)
+                        .count(),
+                    CONVERSATION_THOUGHTS
+                );
+            }
+            let mut incremental = Incremental::default();
+            let limit = 2048;
+            incremental.advance_with_limit(agent, &path, limit).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            for line in &lines[..20] {
+                for byte in format!("{line}\n").bytes() {
+                    file.write_all(&[byte]).unwrap();
+                    assert_eq!(
+                        incremental.advance_with_limit(agent, &path, limit).unwrap(),
+                        &conversation_with_limit(agent, &path, limit).unwrap()
+                    );
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn incremental_keeps_unmatched_results_when_calls_cross_the_byte_floor() {
+        for agent in ["pi", "claude", "codex"] {
+            let lines = incremental_fixture(agent);
+            let start = usize::from(agent == "pi");
+            let path = transcript(&lines[start..start + 2]);
+            let size = std::fs::metadata(&path).unwrap().len();
+            let limit = size + 10;
+            let mut incremental = Incremental::default();
+            incremental.advance_with_limit(agent, &path, limit).unwrap();
+            let call = incremental
+                .history
+                .turns
+                .iter()
+                .find_map(|turn| turn.tool.as_ref())
+                .unwrap();
+            assert!(call.call.is_some());
+            assert!(call.output.is_some());
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            // This short ignored row moves the floor into the call, but leaves
+            // the result whole. Its published identity must now be the result's.
+            let padding = b"{\"type\":\"ignored\"}\n";
+            file.write_all(padding).unwrap();
+            assert_eq!(
+                incremental.advance_with_limit(agent, &path, limit).unwrap(),
+                &conversation_with_limit(agent, &path, limit).unwrap()
+            );
+            assert_eq!(incremental.bytes_read, size + padding.len() as u64);
+            let tool = incremental
+                .history
+                .turns
+                .iter()
+                .find_map(|turn| turn.tool.as_ref())
+                .unwrap();
+            assert!(tool.call.is_none());
+            assert_eq!(tool.output.as_deref(), Some("result"));
+            // An unfinished line larger than the window must stay excluded,
+            // even after its newline arrives. Following rows become eligible.
+            file.write_all(&vec![b'x'; limit as usize + 1]).unwrap();
+            assert_eq!(
+                incremental.advance_with_limit(agent, &path, limit).unwrap(),
+                &conversation_with_limit(agent, &path, limit).unwrap()
+            );
+            writeln!(file, "\n{}", lines[start + 1]).unwrap();
+            assert_eq!(
+                incremental.advance_with_limit(agent, &path, limit).unwrap(),
+                &conversation_with_limit(agent, &path, limit).unwrap()
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn incremental_previews_valid_unterminated_json_without_committing_it() {
+        let path = transcript(&[]);
+        let mut incremental = Incremental::default();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(br#"{"type":"message","message":{"role":"user","content":"preview"}}"#)
+            .unwrap();
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        assert_eq!(incremental.history.turns[0].text, "preview");
+        file.write_all(b"invalid suffix\n").unwrap();
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        assert_eq!(incremental.history.turns, Vec::<Turn>::new());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn incremental_rescans_after_truncation_and_replacement_and_keeps_io_errors() {
+        let lines = incremental_fixture("pi");
+        let path = transcript(&lines[..5]);
+        let mut incremental = Incremental::default();
+        incremental.advance("pi", &path).unwrap();
+        std::fs::write(&path, format!("{}\n", lines[3])).unwrap();
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        let replacement = transcript(&lines[..2]);
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        assert_eq!(incremental.reads, 3);
+        std::fs::remove_file(&path).unwrap();
+        assert!(incremental.advance("pi", &path).is_err());
+        assert!(
+            incremental
+                .advance("pi", &std::env::temp_dir().to_string_lossy())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn incremental_rescans_same_inode_longer_rewrites() {
+        use std::os::unix::fs::MetadataExt as _;
+        let path = transcript(&[
+            json!({"type":"session","version":1}),
+            json!({"type":"message","message":{"role":"user","content":"old"}}),
+        ]);
+        let mut incremental = Incremental::default();
+        incremental.advance("pi", &path).unwrap();
+        let identity = std::fs::metadata(&path).unwrap().ino();
+        // Keep the header identical: the old-end fingerprint must detect this.
+        let replacement = format!(
+            "{}\n{}\n",
+            json!({"type":"session","version":1}),
+            json!({"type":"message","message":{"role":"user","content":"replacement task".repeat(400)}})
+        );
+        let read = incremental.bytes_read;
+        std::fs::write(&path, &replacement).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), identity);
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        assert_eq!(
+            incremental.bytes_read - read,
+            replacement.len() as u64,
+            "rewrite did not rescan"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn incremental_matches_zero_then_partial_in_place_rewrites() {
+        let path = transcript(&incremental_fixture("pi")[..5]);
+        let mut incremental = Incremental::default();
+        incremental.advance("pi", &path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        let replacement = format!(
+            "{}\n{}\n",
+            json!({"type":"session","version":3}),
+            json!({"type":"message","message":{"role":"user","content":"rewritten 界 task"}})
+        );
+        // Observe every byte, including partial JSON and a split UTF-8 codepoint.
+        for byte in replacement.bytes() {
+            file.write_all(&[byte]).unwrap();
+            assert_eq!(
+                incremental.advance("pi", &path).unwrap(),
+                &conversation("pi", &path)
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn incremental_rescans_header_only_rewrites_even_when_the_length_is_unchanged() {
+        use std::os::unix::fs::MetadataExt as _;
+        let header = json!({"type":"session","version":1});
+        let path = transcript(&[
+            header,
+            json!({"type":"message","message":{"role":"user","content":"original task"}}),
+            json!({"type":"custom","customType":"todo-state","data":"x".repeat(12 * 1024)}),
+        ]);
+        let mut incremental = Incremental::default();
+        incremental.advance("pi", &path).unwrap();
+        let stamp = std::fs::metadata(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"session","version":2})).unwrap();
+        file.set_modified(stamp.modified().unwrap() + std::time::Duration::from_secs(1))
+            .unwrap();
+        let read = incremental.bytes_read;
+        let compared = incremental.fingerprints.compared;
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap(),
+            &conversation("pi", &path)
+        );
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!((stamp.ino(), stamp.len()), (after.ino(), after.len()));
+        assert_eq!(
+            incremental.bytes_read - read,
+            after.len(),
+            "header-only rewrite did not rescan"
+        );
+        assert!(
+            incremental.fingerprints.compared - compared < FINGERPRINT_BYTES as u64,
+            "header mismatch should short circuit before checking the identical tail"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn incremental_skips_two_megabyte_todo_state_without_a_value_parse() {
+        let line =
+            json!({"type":"custom","customType":"todo-state","data":"x".repeat(2 * 1024 * 1024)});
+        let path = transcript(&[line]);
+        let before = VALUE_PARSES.with(std::cell::Cell::get);
+        let mut incremental = Incremental::default();
+        assert_eq!(
+            incremental.advance("pi", &path).unwrap().turns,
+            Vec::<Turn>::new()
+        );
+        assert_eq!(VALUE_PARSES.with(std::cell::Cell::get), before);
+        // Escaped discriminants and arbitrary field order still reach records.
+        let line = r#"{"message":{"role":"user","content":"kept"},"type":"mess\u0061ge"}"#;
+        let parsed = ParsedLine::new("pi", 0, line);
+        assert_eq!(parsed.records[0].text, "kept");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn incremental_times_a_thirty_megabyte_fixture_append() {
+        let state =
+            json!({"type":"custom","customType":"todo-state","data":"x".repeat(2 * 1024 * 1024)});
+        let mut lines =
+            vec![json!({"type":"message","message":{"role":"user","content":"initial task"}})];
+        lines.extend(std::iter::repeat_n(state, 15));
+        let path = transcript(&lines);
+        let mut incremental = Incremental::default();
+        incremental.advance("pi", &path).unwrap();
+        let append = format!(
+            "{}\n",
+            json!({"type":"message","message":{"role":"assistant","content":"appended"}})
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(append.as_bytes())
+            .unwrap();
+        let before = std::time::Instant::now();
+        // The pre-incremental reader materialized every line as a Value.
+        let mut window = Window::default();
+        let cut = lines_backwards(&path, CONVERSATION_BYTES, CHUNK_BYTES, |offset, line| {
+            let mut parsed = ParsedLine {
+                offset,
+                records: Vec::new(),
+                truncated: false,
+            };
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                parsed.records = records("pi", &value, offset, &mut parsed.truncated);
+            }
+            window.push("pi", parsed)
+        })
+        .unwrap();
+        let fresh = window.finish(cut);
+        let before = before.elapsed();
+        let read = incremental.bytes_read;
+        let compared = incremental.fingerprints.compared;
+        let parsed = VALUE_BYTES.with(std::cell::Cell::get);
+        let after = std::time::Instant::now();
+        assert_eq!(incremental.advance("pi", &path).unwrap(), &fresh);
+        let after = after.elapsed();
+        let read = incremental.bytes_read - read;
+        let parsed = VALUE_BYTES.with(std::cell::Cell::get) - parsed;
+        let compared = incremental.fingerprints.compared - compared;
+        let size = std::fs::metadata(&path).unwrap().len();
+        eprintln!(
+            "{size}-byte fixture append, debug profile: original backward read {before:?}; incremental {after:?}; appended/read/Value-parsed/compared bytes: {}/{read}/{parsed}/{compared}",
+            append.len()
+        );
+        assert_eq!(read, append.len() as u64);
+        assert_eq!(parsed, append.len());
+        assert_eq!(
+            compared,
+            incremental.fingerprints.head.len() as u64 + FINGERPRINT_BYTES as u64
+        );
+        assert!(compared <= 8 * 1024);
+        assert_eq!(incremental.bytes_read, size);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

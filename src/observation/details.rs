@@ -889,7 +889,7 @@ impl FilesRead {
 
 #[derive(Debug, Default)]
 pub(super) struct Capture {
-    transcript: Option<(std::fs::Metadata, Content<Conversation>)>,
+    transcript: crate::activity::Incremental,
     screen: Option<Screen>,
     session: Option<Session>,
     #[cfg(test)]
@@ -907,7 +907,7 @@ impl Capture {
             return detail;
         };
         if self.session != detail.session {
-            self.transcript = None;
+            self.transcript = crate::activity::Incremental::default();
             self.screen = None;
             self.session.clone_from(&detail.session);
         }
@@ -935,49 +935,28 @@ impl Capture {
         let Some(path) = &agent.transcript else {
             return Content::Unavailable("agent transcript unavailable".into());
         };
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) => return Content::Failed(error.to_string()),
-        };
-        if let Some((stamp, content)) = &self.transcript
-            && same_file(stamp, &metadata)
-        {
-            return content.clone();
-        }
         #[cfg(test)]
-        {
-            self.transcript_reads += 1;
-        }
+        let reads = self.transcript.reads;
         let content = match (|| -> Result<Conversation> {
-            let history = crate::activity::try_conversation(
-                agent.agent.as_deref().unwrap_or_default(),
-                path,
-            )?;
+            let history = self
+                .transcript
+                .advance(agent.agent.as_deref().unwrap_or_default(), path)?;
             Ok(Conversation {
                 pane: agent.pane.clone(),
                 session: serde_json::to_string(session)?,
-                turns: history.turns,
+                turns: history.turns.clone(),
                 truncated: history.truncated,
             })
         })() {
             Ok(conversation) => Content::Available(conversation),
             Err(error) => Content::Failed(error.to_string()),
         };
-        self.transcript = Some((metadata, content.clone()));
+        #[cfg(test)]
+        {
+            self.transcript_reads += self.transcript.reads - reads;
+        }
         content
     }
-}
-
-fn same_file(old: &std::fs::Metadata, new: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    old.dev() == new.dev()
-        && old.ino() == new.ino()
-        && old.len() == new.len()
-        && old
-            .modified()
-            .ok()
-            .zip(new.modified().ok())
-            .is_some_and(|(old, new)| old == new)
 }
 
 fn read_screen_for_session(socket: &Client, agent: &Agent, session: &Session) -> Result<Screen> {
