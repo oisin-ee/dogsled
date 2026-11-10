@@ -297,6 +297,7 @@ struct Exchange {
     details: crate::observation::details::Collector,
     activity: crate::observation::live_activity::Authority,
     dirty: wake::Dirty,
+    timings: crate::observation::timing::PassTimings,
 }
 
 fn publish(
@@ -317,14 +318,18 @@ fn publish(
         details,
         activity,
         dirty,
+        timings,
     } = exchange;
     let now = now_ms();
     let collection = crate::store::observing(|| -> Result<_> {
+        let started = Instant::now();
         let gaps = if domains & (wake::LOCAL | wake::BRANCHES) != 0 {
             branches.observe(node, &interests.current()?, now)?
         } else {
             branches.gaps()
         };
+        timings.phase("branches", started.elapsed());
+        let started = Instant::now();
         let mut collection = if domains & wake::LOCAL == wake::LOCAL {
             collector.collect(node, now)
         } else if domains & (wake::LEDGER | wake::BRANCHES) != 0 {
@@ -333,8 +338,13 @@ fn publish(
             crate::observation::collect::Collection {
                 input: collector.publication(now),
                 sample: Ok(()),
+                timings: Vec::new(),
             }
         };
+        timings.phase("collect", started.elapsed());
+        for (name, elapsed) in collection.timings.drain(..) {
+            timings.phase(name, elapsed);
+        }
         let results = branches.results();
         if !results.is_empty() {
             collection
@@ -350,14 +360,30 @@ fn publish(
             }
         }
         collection.input.gaps.extend(gaps);
-        peers.compose(fleet, &mut collection.input, now, collector.reports())?;
-        activity.refresh(node.shell, &collection.input)?;
-        details.refresh(&mut collection.input, dirty)?;
+        let started = Instant::now();
+        let result = peers.compose(fleet, &mut collection.input, now, collector.reports());
+        timings.phase("peers.compose", started.elapsed());
+        result?;
+        let started = Instant::now();
+        let result = activity.refresh(node.shell, &collection.input);
+        timings.phase("activity.refresh", started.elapsed());
+        result?;
+        let started = Instant::now();
+        let result = details.refresh(&mut collection.input, dirty);
+        timings.phase("details.refresh", started.elapsed());
+        result?;
         Ok(collection)
     })?;
+    let started = Instant::now();
     publisher.activity(activity.views(Instant::now(), now_ms()));
+    timings.phase("activity.views", started.elapsed());
+    let started = Instant::now();
     herdr.interests(collector.panes());
-    diagnostics.publish(publisher, collection.input, now, |line| eprintln!("{line}"))?;
+    timings.phase("herdr.interests", started.elapsed());
+    let started = Instant::now();
+    let result = diagnostics.publish(publisher, collection.input, now, |line| eprintln!("{line}"));
+    timings.phase("publish.replace", started.elapsed());
+    result?;
     if once {
         collection.sample?;
     }
@@ -406,6 +432,7 @@ impl Observation {
                 details,
                 activity,
                 dirty: dirty.clone(),
+                timings: crate::observation::timing::PassTimings::default(),
             },
             _commits: commits,
             herdr: wake::Herdr::start(dirty.clone(), interval),
@@ -419,6 +446,42 @@ impl Observation {
             .activity
             .next_wake()
             .map_or(due, |at| due.min(at))
+    }
+
+    fn timed_refresh(
+        &mut self,
+        node: &Node<'_>,
+        policy: &Policy,
+        dirty: &wake::Dirty,
+        cycle: (u8, bool),
+        scheduled: bool,
+    ) -> Result<()> {
+        let (domains, once) = cycle;
+        self.exchange.timings.pass(
+            domains
+                | if scheduled {
+                    crate::observation::timing::SCHEDULED
+                } else {
+                    0
+                },
+        );
+        let result = self.refresh(
+            node,
+            policy,
+            dirty,
+            (
+                if scheduled {
+                    domains | wake::LOCAL
+                } else {
+                    domains
+                },
+                once,
+            ),
+        );
+        self.exchange
+            .timings
+            .flush(Instant::now(), |line| eprintln!("{line}"));
+        result
     }
 
     fn refresh(
@@ -436,12 +499,23 @@ impl Observation {
             node.home.to_owned(),
             vec![crate::hosts::Host::local()],
         );
+        let started = Instant::now();
         self.exchange.peers.retry(dirty.take_peers());
-        if let Err(error) = self.exchange.peers.discover(&fleet, dirty, once) {
+        self.exchange
+            .timings
+            .phase("peers.retry", started.elapsed());
+        let started = Instant::now();
+        let discovery = self.exchange.peers.discover(&fleet, dirty, once);
+        self.exchange.timings.phase("discover", started.elapsed());
+        if let Err(error) = discovery {
             eprintln!("dogsled peer discovery: {error}");
         }
         if self.exchange.activity.sample_due() {
+            let started = Instant::now();
             self.exchange.activity.sample(node.shell, now_ms());
+            self.exchange
+                .timings
+                .phase("activity.sample", started.elapsed());
         }
         publish(
             node,
@@ -481,18 +555,12 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             baseline = None;
         }
         let domains = dirty.take();
-        observation.refresh(
+        observation.timed_refresh(
             node,
             policy,
             &dirty,
-            (
-                if scheduled || baseline_due {
-                    domains | wake::LOCAL
-                } else {
-                    domains
-                },
-                once,
-            ),
+            (domains, once),
+            scheduled || baseline_due,
         )?;
         if scheduled {
             workers.start(node, policy, once, &send, &observation.publisher)?;
@@ -546,7 +614,13 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     dirty.mark(wake::LEDGER);
                     if once {
                         if LANES[lane] == Lane::Handoff {
-                            observation.refresh(node, policy, &dirty, (wake::LEDGER, once))?;
+                            observation.timed_refresh(
+                                node,
+                                policy,
+                                &dirty,
+                                (wake::LEDGER, once),
+                                false,
+                            )?;
                         }
                         workers.start(node, policy, once, &send, &observation.publisher)?;
                     }

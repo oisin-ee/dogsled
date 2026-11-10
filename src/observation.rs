@@ -15,6 +15,7 @@ pub(crate) mod sidebar;
 mod socket;
 #[cfg(debug_assertions)]
 pub(crate) mod stored;
+pub(crate) mod timing;
 pub(crate) use socket::socket_path;
 
 use crate::error::{Error, Result};

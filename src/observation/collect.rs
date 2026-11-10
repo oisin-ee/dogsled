@@ -12,6 +12,7 @@ use crate::ledger::Ledger;
 use crate::node::{Node, Snapshot, SnapshotReport};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 /// Capture host-owned facts without probing liveness or rereading the capacity sample.
 /// The service supplies its exact new sample; the legacy snapshot adapter supplies its cache.
@@ -94,6 +95,7 @@ fn todos(ledger: &Ledger) -> Result<Vec<crate::board::TodoSections>> {
 pub(crate) struct Collection {
     pub input: Publication,
     pub sample: Result<()>,
+    pub timings: Vec<(&'static str, Duration)>,
 }
 
 /// Retained values keep their original observation time when a source fails. Gaps describe
@@ -194,18 +196,13 @@ impl Collector {
             .and_then(|value| serde_json::from_value(value.clone()).map_err(Into::into))
     }
 
-    /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
-    /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
-    pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
-        if let Some(catalogue) = self.catalogue.refresh(node.shell, now) {
-            self.record("repos", now, Ok(catalogue));
-        }
-        let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
-        let mut terminals = if capture_terminals {
-            crate::probe::terminals(node.shell)
-        } else {
-            self.retained_terminals()
-        };
+    fn capture_snapshot(
+        &mut self,
+        node: &Node<'_>,
+        now: u64,
+        sample: bool,
+        mut terminals: Result<crate::probe::Terminals>,
+    ) -> (Result<Snapshot>, Result<crate::probe::Terminals>) {
         let snapshot = if let Some(error) = self.sample_error.as_ref().filter(|_| !sample) {
             Err(crate::error::Error::Invalid(error.clone()))
         } else if let Some(snapshot) = self.snapshot.as_ref().filter(|_| !sample) {
@@ -237,6 +234,30 @@ impl Collector {
                 }
             }
         };
+        (snapshot, terminals)
+    }
+
+    /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
+    /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
+    pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
+        let mut timings = Vec::with_capacity(7);
+        let started = Instant::now();
+        if let Some(catalogue) = self.catalogue.refresh(node.shell, now) {
+            self.record("repos", now, Ok(catalogue));
+        }
+        timings.push(("collect.catalogue", started.elapsed()));
+        let started = Instant::now();
+        let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
+        let terminals = if capture_terminals {
+            crate::probe::terminals(node.shell)
+        } else {
+            self.retained_terminals()
+        };
+        timings.push(("collect.terminals", started.elapsed()));
+        let started = Instant::now();
+        let (snapshot, mut terminals) = self.capture_snapshot(node, now, sample, terminals);
+        timings.push(("collect.snapshot", started.elapsed()));
+        let started = Instant::now();
         let (host, sample) = match snapshot {
             Ok(snapshot) => {
                 terminals = Ok(crate::probe::Terminals {
@@ -250,6 +271,8 @@ impl Collector {
                 Err(error),
             ),
         };
+        timings.push(("collect.host", started.elapsed()));
+        let started = Instant::now();
         let (headroom, status) = match &host {
             Ok(host) => {
                 self.record_holds(&host.holds);
@@ -275,7 +298,11 @@ impl Collector {
                 (Err(dependency()), Err(dependency()))
             }
         };
+        timings.push(("collect.status", started.elapsed()));
+        let started = Instant::now();
         let todos = todos(node.ledger);
+        timings.push(("collect.todos", started.elapsed()));
+        let started = Instant::now();
         if capture_terminals {
             self.record("terminals", now, terminals);
         }
@@ -288,9 +315,12 @@ impl Collector {
             now,
             super::sidebar::preferences(node.ledger),
         );
+        let input = self.publication(now);
+        timings.push(("collect.publication", started.elapsed()));
         Collection {
-            input: self.publication(now),
+            input,
             sample,
+            timings,
         }
     }
 
