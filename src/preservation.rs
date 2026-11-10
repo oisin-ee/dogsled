@@ -632,7 +632,11 @@ fn git_input(
     })
 }
 
-fn git_words(checkout: &Path, index: Option<&Path>, args: &[&str]) -> Result<Vec<String>> {
+pub(crate) fn git_words(
+    checkout: &Path,
+    index: Option<&Path>,
+    args: &[&str],
+) -> Result<Vec<String>> {
     // Hooks export repository-local routing. The explicit checkout, not the caller's
     // repository or index, owns every Git operation in this module.
     let mut words = Vec::new();

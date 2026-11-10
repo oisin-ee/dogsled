@@ -68,6 +68,14 @@ pub(crate) struct Manifest {
     pub(crate) created_ms: u64,
 }
 
+impl Manifest {
+    pub(crate) fn pinned(&self) -> &str {
+        self.snapshot
+            .as_ref()
+            .map_or(&self.commit, |snapshot| &snapshot.commit)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
@@ -131,7 +139,7 @@ fn validate(manifest: &Manifest, id: &str) -> Result<()> {
             .as_ref()
             .is_some_and(|bundle| !hex(&bundle.sha256, 64) || bundle.bytes == 0)
         || manifest.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.commit != manifest.commit
+            !hex(&snapshot.commit, length)
                 || !hex(&snapshot.index_tree, length)
                 || !hex(&snapshot.worktree_tree, length)
         })
@@ -150,21 +158,8 @@ pub(crate) fn load(ledger: &Ledger, id: &str) -> Result<Manifest> {
 }
 
 fn git(shell: &dyn Shell, checkout: &Path, args: &[&str]) -> Result<Output> {
-    let checkout = checkout.to_str().ok_or(Refusal::UnsupportedSource)?;
-    let mut words = vec![
-        "-u".into(),
-        "GIT_CONFIG_GLOBAL".into(),
-        "-u".into(),
-        "GIT_CONFIG_SYSTEM".into(),
-        "GIT_OPTIONAL_LOCKS=0".into(),
-        "GIT_NO_REPLACE_OBJECTS=1".into(),
-        "git".into(),
-        "-C".into(),
-        checkout.into(),
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-    ];
-    words.extend(args.iter().map(ToString::to_string));
+    let words = crate::preservation::git_words(checkout, None, args)
+        .map_err(|_| Refusal::UnsupportedSource)?;
     shell.run("env", &words).map_err(|_| Refusal::Git)
 }
 
@@ -248,7 +243,7 @@ fn existing(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Result<b
         &["rev-parse", "--verify", "--quiet", &manifest.ref_name],
     )?;
     if output.ok() {
-        if output.stdout.trim() != manifest.commit {
+        if output.stdout.trim() != manifest.pinned() {
             return Err(Refusal::RefConflict);
         }
         return Ok(true);
@@ -259,9 +254,10 @@ fn existing(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Result<b
     Ok(false)
 }
 
-fn pin(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Result<()> {
+/// Returns true only when this call created the ref.
+fn pin(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Result<bool> {
     if existing(shell, checkout, manifest)? {
-        return Ok(());
+        return Ok(false);
     }
     let output = git(
         shell,
@@ -270,14 +266,31 @@ fn pin(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Result<()> {
             "update-ref",
             "--no-deref",
             &manifest.ref_name,
-            &manifest.commit,
-            &"0".repeat(manifest.commit.len()),
+            manifest.pinned(),
+            &"0".repeat(manifest.pinned().len()),
         ],
     )?;
-    if !output.ok() && !existing(shell, checkout, manifest)? {
+    if output.ok() {
+        return Ok(true);
+    }
+    if !existing(shell, checkout, manifest)? {
         return Err(Refusal::Git);
     }
-    Ok(())
+    Ok(false)
+}
+
+fn unpin(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) {
+    let _ = git(
+        shell,
+        checkout,
+        &[
+            "update-ref",
+            "--no-deref",
+            "-d",
+            &manifest.ref_name,
+            manifest.pinned(),
+        ],
+    );
 }
 
 fn digest(path: &Path) -> Result<Bundle> {
@@ -335,9 +348,7 @@ pub(crate) fn capture(
         version: 1,
         repository: repository(shell, checkout)?,
         object_format: object_format(shell, checkout)?,
-        commit: snapshot
-            .as_ref()
-            .map_or(source, |value| value.commit.clone()),
+        commit: source,
         snapshot,
         ref_name: format!("refs/dogsled/transfer/{id}"),
         id: id.clone(),
@@ -351,57 +362,71 @@ pub(crate) fn capture(
         fs::create_dir_all(ledger.dir.join("transfers")).map_err(|_| Refusal::Storage)?;
         fs::create_dir(&temporary).map_err(|_| Refusal::Storage)?;
         let temporary = Temporary(temporary);
-        pin(shell, checkout, &manifest)?;
-        let payload = temporary.0.join("payload.bundle.tmp");
-        let output = git(
+        let created = pin(shell, checkout, &manifest)?;
+        let result = publish(shell, checkout, &mut manifest, &temporary.0, &destination);
+        if result.is_err() && created {
+            unpin(shell, checkout, &manifest);
+        }
+        result?;
+        Ok(manifest)
+    })
+}
+
+fn publish(
+    shell: &dyn Shell,
+    checkout: &Path,
+    manifest: &mut Manifest,
+    temporary: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let payload = temporary.join("payload.bundle.tmp");
+    let output = git(
+        shell,
+        checkout,
+        &[
+            "bundle",
+            "create",
+            payload.to_str().ok_or(Refusal::Storage)?,
+            &manifest.ref_name,
+            "--not",
+            "--remotes=origin",
+        ],
+    )?;
+    if output.ok() {
+        // Prove the produced bundle before publishing its manifest.
+        checked(
             shell,
             checkout,
             &[
                 "bundle",
-                "create",
+                "verify",
                 payload.to_str().ok_or(Refusal::Storage)?,
-                &manifest.ref_name,
-                "--not",
-                "--remotes=origin",
             ],
         )?;
-        if output.ok() {
-            // Prove the produced bundle before publishing its manifest.
-            checked(
-                shell,
-                checkout,
-                &[
-                    "bundle",
-                    "verify",
-                    payload.to_str().ok_or(Refusal::Storage)?,
-                ],
-            )?;
-            manifest.bundle = Some(digest(&payload)?);
-            fs::rename(&payload, temporary.0.join("payload.bundle"))
-                .map_err(|_| Refusal::Storage)?;
-        } else {
-            let containing = checked(
-                shell,
-                checkout,
-                &[
-                    "for-each-ref",
-                    "--format=%(refname)",
-                    "--contains",
-                    &manifest.commit,
-                    "refs/remotes/origin/",
-                ],
-            )?;
-            if containing.is_empty() {
-                return Err(Refusal::Git);
-            }
+        manifest.bundle = Some(digest(&payload)?);
+        fs::rename(&payload, temporary.join("payload.bundle")).map_err(|_| Refusal::Storage)?;
+    } else {
+        let containing = checked(
+            shell,
+            checkout,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "--contains",
+                manifest.pinned(),
+                "refs/remotes/origin/",
+            ],
+        )?;
+        if containing.is_empty() {
+            return Err(Refusal::Git);
         }
-        let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| Refusal::InvalidManifest)?;
-        let file = temporary.0.join("manifest.json.tmp");
-        fs::write(&file, bytes).map_err(|_| Refusal::Storage)?;
-        fs::rename(file, temporary.0.join("manifest.json")).map_err(|_| Refusal::Storage)?;
-        fs::rename(&temporary.0, destination).map_err(|_| Refusal::Storage)?;
-        Ok(manifest)
-    })
+    }
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| Refusal::InvalidManifest)?;
+    let file = temporary.join("manifest.json.tmp");
+    fs::write(&file, bytes).map_err(|_| Refusal::Storage)?;
+    fs::rename(file, temporary.join("manifest.json")).map_err(|_| Refusal::Storage)?;
+    fs::rename(temporary, destination).map_err(|_| Refusal::Storage)?;
+    Ok(())
 }
 
 fn fetch_origin(shell: &dyn Shell, checkout: &Path) -> Result<()> {
@@ -422,10 +447,15 @@ fn fetch_origin(shell: &dyn Shell, checkout: &Path) -> Result<()> {
 }
 
 fn verify_objects(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Result<()> {
-    if resolve(shell, checkout, &manifest.ref_name)? != manifest.commit {
+    if resolve(shell, checkout, &manifest.ref_name)? != manifest.pinned() {
         return Err(Refusal::VerificationFailed);
     }
     if let Some(snapshot) = &manifest.snapshot {
+        let parent = resolve(shell, checkout, &format!("{}^1", manifest.pinned()))
+            .map_err(|_| Refusal::VerificationFailed)?;
+        if parent != manifest.commit {
+            return Err(Refusal::VerificationFailed);
+        }
         for tree in [&snapshot.index_tree, &snapshot.worktree_tree] {
             if !git(
                 shell,
@@ -440,12 +470,12 @@ fn verify_objects(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Re
         let working = checked(
             shell,
             checkout,
-            &["rev-parse", &format!("{}^{{tree}}", manifest.commit)],
+            &["rev-parse", &format!("{}^{{tree}}", manifest.pinned())],
         )?;
         let staged = checked(
             shell,
             checkout,
-            &["rev-parse", &format!("{}^2^{{tree}}", manifest.commit)],
+            &["rev-parse", &format!("{}^2^{{tree}}", manifest.pinned())],
         )?;
         if working != snapshot.worktree_tree || staged != snapshot.index_tree {
             return Err(Refusal::VerificationFailed);
@@ -486,8 +516,15 @@ pub(crate) fn import(
                     return Err(Refusal::BundlePrerequisites);
                 }
             }
-            // Refuse a conflicting ref again after the prerequisite fetch.
-            existing(shell, checkout, &manifest)?;
+            let advertised = checked(
+                shell,
+                checkout,
+                &["bundle", "list-heads", payload, &manifest.ref_name],
+            )?;
+            if advertised != format!("{} {}", manifest.pinned(), manifest.ref_name) {
+                return Err(Refusal::VerificationFailed);
+            }
+            // Import objects without updating a ref; pin owns ref creation below.
             checked(
                 shell,
                 checkout,
@@ -496,17 +533,19 @@ pub(crate) fn import(
                     "--no-tags",
                     "--no-write-fetch-head",
                     payload,
-                    &format!("{}:{}", manifest.ref_name, manifest.ref_name),
+                    &manifest.ref_name,
                 ],
             )?;
-        } else {
-            if resolve(shell, checkout, &manifest.commit).is_err() {
-                fetch_origin(shell, checkout)?;
-                resolve(shell, checkout, &manifest.commit)?;
-            }
-            pin(shell, checkout, &manifest)?;
+        } else if resolve(shell, checkout, manifest.pinned()).is_err() {
+            fetch_origin(shell, checkout)?;
+            resolve(shell, checkout, manifest.pinned())?;
         }
-        verify_objects(shell, checkout, &manifest)?;
+        let created = pin(shell, checkout, &manifest)?;
+        let result = verify_objects(shell, checkout, &manifest);
+        if result.is_err() && created {
+            unpin(shell, checkout, &manifest);
+        }
+        result?;
         Ok(manifest)
     })
 }
@@ -749,11 +788,13 @@ mod tests {
         let manifest = repo.capture(false);
         assert_eq!(manifest.commit, commit);
         assert_eq!(manifest.snapshot, None);
+        assert_eq!(run(&repo.a, &["rev-parse", &manifest.ref_name]), commit);
         assert!(manifest.bundle.is_some());
         assert_eq!(manifest, load(&repo.ledger, &manifest.id).unwrap());
         let shell = Recording::default();
         assert_eq!(repo.import(&shell, &manifest.id).unwrap(), manifest);
         assert_eq!(shell.origin_fetches(), 0);
+        assert_eq!(run(&repo.b, &["rev-parse", &manifest.ref_name]), commit);
         assert_eq!(state(&repo.a), source);
         assert_eq!(state(&repo.b), destination);
         assert_eq!(
@@ -798,9 +839,26 @@ mod tests {
         let manifest = repo.capture(true);
         let snapshot = manifest.snapshot.as_ref().unwrap();
         assert_eq!(snapshot.index_tree, source.index_tree);
-        assert_eq!(snapshot.commit, manifest.commit);
+        assert_eq!(manifest.commit, source.head);
+        assert_ne!(snapshot.commit, manifest.commit);
+        assert_eq!(
+            run(&repo.a, &["rev-parse", &manifest.ref_name]),
+            snapshot.commit
+        );
+        assert_eq!(
+            run(&repo.a, &["rev-parse", &format!("{}^1", snapshot.commit)]),
+            source.head
+        );
         assert_eq!(state(&repo.a), source);
         repo.import(&System::default(), &manifest.id).unwrap();
+        assert_eq!(
+            run(&repo.b, &["rev-parse", &manifest.ref_name]),
+            snapshot.commit
+        );
+        assert_eq!(
+            run(&repo.b, &["rev-parse", &format!("{}^1", snapshot.commit)]),
+            source.head
+        );
         assert_eq!(state(&repo.b), destination);
         assert_eq!(
             run(&repo.a, &["ls-tree", "-r", &snapshot.worktree_tree]),
@@ -888,6 +946,100 @@ mod tests {
         repo.import(&shell, &manifest.id).unwrap();
         assert_eq!(shell.origin_fetches(), 1);
         assert_eq!(state(&repo.b), before);
+    }
+
+    #[test]
+    fn git_words_reuse_preservation_isolation() {
+        let repo = Repo::new();
+        let shell = Recording::default();
+        let args = ["rev-parse", "HEAD"];
+        git(&shell, &repo.a, &args).unwrap();
+        assert_eq!(
+            *shell.calls.lock().unwrap(),
+            vec![crate::preservation::git_words(&repo.a, None, &args).unwrap()]
+        );
+    }
+
+    #[test]
+    fn altered_committed_source_refuses_without_creating_a_ref() {
+        let repo = Repo::new();
+        repo.commit("unpushed");
+        let mut manifest = repo.capture(false);
+        manifest.commit = run(&repo.b, &["rev-parse", "HEAD"]);
+        let path = directory(&repo.ledger, &manifest.id)
+            .unwrap()
+            .join("manifest.json");
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            repo.import(&System::default(), &manifest.id),
+            Err(Refusal::VerificationFailed)
+        );
+        repo.absent(&manifest);
+    }
+
+    #[test]
+    fn altered_source_commit_refuses_and_removes_only_a_new_ref() {
+        for preexisting in [false, true] {
+            let repo = Repo::new();
+            repo.commit("unpushed");
+            let mut manifest = repo.capture(true);
+            if preexisting {
+                repo.import(&System::default(), &manifest.id).unwrap();
+            }
+            manifest.commit = run(&repo.b, &["rev-parse", "HEAD"]);
+            let path = directory(&repo.ledger, &manifest.id)
+                .unwrap()
+                .join("manifest.json");
+            fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert_eq!(
+                repo.import(&System::default(), &manifest.id),
+                Err(Refusal::VerificationFailed)
+            );
+            if preexisting {
+                assert_eq!(
+                    run(&repo.b, &["rev-parse", &manifest.ref_name]),
+                    manifest.pinned()
+                );
+            } else {
+                repo.absent(&manifest);
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct BundleFailure;
+
+    impl Shell for BundleFailure {
+        fn run(&self, program: &str, args: &[String]) -> crate::error::Result<Output> {
+            if args.windows(2).any(|pair| pair == ["bundle", "create"]) {
+                return Ok(Output {
+                    status: 1,
+                    stdout: String::new(),
+                    stderr: "bundle creation failed".into(),
+                });
+            }
+            System::default().run(program, args)
+        }
+    }
+
+    #[test]
+    fn failed_bundle_capture_removes_its_ref_and_temporary_directory() {
+        let repo = Repo::new();
+        repo.commit("unpushed");
+        assert_eq!(
+            capture(&BundleFailure, &repo.ledger, &repo.a, &Options::default()),
+            Err(Refusal::Git)
+        );
+        assert_eq!(
+            run(&repo.a, &["for-each-ref", "refs/dogsled/transfer/"]),
+            ""
+        );
+        assert_eq!(
+            fs::read_dir(repo.ledger.dir.join("transfers"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]
