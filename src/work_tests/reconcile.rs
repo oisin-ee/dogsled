@@ -17,6 +17,7 @@ fn missing_pane_snapshot(peer: &Host) -> Snapshot {
 
 #[test]
 fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() {
+    let retries = crate::launch::ReleaseRetries::default();
     // With skew, the owner's admission time is later than even the disappearance sample.
     for owner_skew in [0, 20_000] {
         let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
@@ -49,7 +50,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
             .refresh(&fleet, &peer, queued_at, Vec::new(), false)
             .unwrap();
         work::enqueue(&ledger, request.clone(), false, queued_at).unwrap();
-        work::tick(&actions(&fleet, queued_at), queued_at).unwrap();
+        work::tick(&actions(&fleet, queued_at), &retries, queued_at).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "pending");
         items::reconcile(&ledger, &reports(&fleet, queued_at), queued_at).unwrap();
         assert!(items::list(&ledger).unwrap().is_empty());
@@ -88,7 +89,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
         ingestion
             .refresh(&fleet, &peer, admitted_at, Vec::new(), false)
             .unwrap();
-        work::tick(&actions(&fleet, admitted_at), admitted_at).unwrap();
+        work::tick(&actions(&fleet, admitted_at), &retries, admitted_at).unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
         let item = items::list(&ledger).unwrap().remove(0);
         assert_eq!(item.created_ms, admitted_at);

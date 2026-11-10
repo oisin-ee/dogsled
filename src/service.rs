@@ -162,6 +162,7 @@ fn actions(
     home: String,
     lane: Lane,
     published: Arc<crate::observation::Published>,
+    release_retries: &crate::launch::ReleaseRetries,
 ) -> Result<()> {
     let shell = System::default();
     if lane == Lane::Handoff {
@@ -173,7 +174,7 @@ fn actions(
     }
     if lane == Lane::Retention {
         // Retention owns its synchronization too; no other service lane is required.
-        crate::launch::release_owned(&fleet)?;
+        crate::launch::release_owned(&fleet, release_retries, now_ms())?;
         return crate::jobs::expire(ledger, now_ms());
     }
     match lane {
@@ -183,7 +184,7 @@ fn actions(
             crate::watchdog::tick(&fleet, &reports, now)?;
             items::reconcile(ledger, &reports, now)
         }
-        Lane::Admission => work::tick(&fleet, now_ms()),
+        Lane::Admission => work::tick(&fleet, release_retries, now_ms()),
         Lane::Children => crate::sweep::children(&fleet, now_ms()),
         Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
         Lane::Quota | Lane::Handoff | Lane::Retention => Ok(()),
@@ -205,13 +206,21 @@ fn ready(lane: Lane, completed: [bool; LANES.len()]) -> bool {
             .any(|(other, done)| *other == Lane::Handoff && done)
 }
 
-#[derive(Default)]
 struct Workers {
+    release_retries: Arc<crate::launch::ReleaseRetries>,
     handles: [Option<std::thread::JoinHandle<()>>; LANES.len()],
     completed: [bool; LANES.len()],
 }
 
 impl Workers {
+    fn new(release_retries: Arc<crate::launch::ReleaseRetries>) -> Self {
+        Self {
+            release_retries,
+            handles: Default::default(),
+            completed: [false; LANES.len()],
+        }
+    }
+
     /// Start eligible lanes without coupling their scheduling to publication or input.
     fn start(
         &mut self,
@@ -270,10 +279,18 @@ impl Workers {
         let home = node.home.to_owned();
         let send = send.clone();
         let published = Arc::clone(published);
+        let release_retries = Arc::clone(&self.release_retries);
         self.handles[lane] = Some(std::thread::spawn(move || {
             let _ = send.send(Event::Finished(
                 lane,
-                actions(&ledger, &policy, home, LANES[lane], published),
+                actions(
+                    &ledger,
+                    &policy,
+                    home,
+                    LANES[lane],
+                    published,
+                    &release_retries,
+                ),
             ));
         }));
     }
@@ -544,7 +561,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     };
     let mut sweep: Option<std::thread::JoinHandle<()>> = None;
     let mut requested = false;
-    let mut workers = Workers::default();
+    let mut workers = Workers::new(Arc::new(crate::launch::ReleaseRetries::default()));
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
     let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);

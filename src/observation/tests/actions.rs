@@ -224,7 +224,7 @@ fn remote_release_lane_and_removed_host_never_connect_to_their_own_publisher() {
         );
         let listener = UnixListener::bind(ledger.dir.join("observation.sock")).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let result = crate::work::tick(&lane, 10_000);
+        let result = crate::work::tick(&lane, &crate::launch::ReleaseRetries::default(), 10_000);
         if removed {
             assert!(
                 result
@@ -322,7 +322,7 @@ fn lanes_use_the_in_process_publication_without_snapshot_reads_or_ipc() {
     })
     .unwrap();
     assert!(crate::host_store::snapshot(&ledger).is_err());
-    crate::work::tick(&actions, 10_000).unwrap();
+    crate::work::tick(&actions, &crate::launch::ReleaseRetries::default(), 10_000).unwrap();
     crate::inbox::tick(&actions, 10_000).unwrap();
     crate::sweep::children(&actions, 10_000).unwrap();
     crate::watchdog::tick(&actions, &actions.reports().unwrap(), 10_000).unwrap();

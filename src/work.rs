@@ -3405,9 +3405,13 @@ pub(crate) fn settled(ledger: &Ledger, id: &str, now: u64) -> Result<bool> {
     Ok(false)
 }
 
-pub fn tick(fleet: &ActionFleet, now: u64) -> Result<()> {
+pub fn tick(
+    fleet: &ActionFleet,
+    release_retries: &crate::launch::ReleaseRetries,
+    now: u64,
+) -> Result<()> {
     reconcile_finished(fleet.ledger)?;
-    crate::launch::release_owned(fleet)?;
+    crate::launch::release_owned(fleet, release_retries, now)?;
     let reports = fleet.reports()?;
     launch_test_barrier("PLACEMENT_SERVICE_BEFORE_ADMISSION")?;
     fleet.ledger.with_lock("admission", || {

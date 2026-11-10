@@ -604,22 +604,82 @@ fn ordinary_certificate(
     Ok(certificate)
 }
 
+/// One serve-owned schedule shared by admission and retention. Restarting allows a retry.
+#[derive(Default)]
+pub(crate) struct ReleaseRetries {
+    failures: std::sync::Mutex<std::collections::BTreeMap<String, ReleaseFailure>>,
+}
+
+#[derive(Default)]
+struct ReleaseFailure {
+    backoff: crate::backoff::Backoff,
+    logged_error: String,
+}
+
+impl ReleaseRetries {
+    fn release(
+        &self,
+        fleet: &crate::hosts::Fleet,
+        now: u64,
+        mut log: impl FnMut(String),
+    ) -> Result<()> {
+        // Keep selection and attempts under one lock: the two lanes cannot both retry
+        // a ready launch, or prune a failure using an older admission snapshot.
+        let mut failures = self
+            .failures
+            .lock()
+            .map_err(|_| Error::Invalid("refused-job release retries lock poisoned".into()))?;
+        let launches: std::collections::BTreeMap<_, _> = crate::admissions::all(fleet.ledger)?
+            .into_iter()
+            .filter(|attempt| {
+                attempt.unit.is_none() && attempt.placement.is_none() && attempt.result.is_none()
+            })
+            .filter_map(|attempt| attempt.launch)
+            .filter(|launch| matches!(launch.action, Action::Job { .. }))
+            .map(|launch| (launch.id.clone(), launch))
+            .collect();
+        failures.retain(|id, _| launches.contains_key(id));
+        for (id, launch) in launches {
+            if failures
+                .get(&id)
+                .is_some_and(|failure| !failure.backoff.ready(now))
+            {
+                continue;
+            }
+            match release_refused_job(fleet, &launch) {
+                Ok(()) => {
+                    if failures.remove(&id).is_some() {
+                        log(format!("dogsled job refusal {id}: recovered"));
+                    }
+                }
+                Err(error) => {
+                    let text = error.to_string();
+                    let changed = failures
+                        .get(&id)
+                        .is_none_or(|failure| failure.logged_error != text);
+                    let failure = failures.entry(id.clone()).or_default();
+                    failure.backoff.fail(now, &launch.id);
+                    if changed {
+                        log(format!("dogsled job refusal {id}: {text}"));
+                        failure.logged_error = text;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Capture intent and result at the origin before the RPC. Retry the identical
 /// certificate after a lost reply; no custody/items lock crosses transport.
-pub(crate) fn release_owned(fleet: &crate::hosts::Fleet) -> Result<()> {
+pub(crate) fn release_owned(
+    fleet: &crate::hosts::Fleet,
+    retries: &ReleaseRetries,
+    now: u64,
+) -> Result<()> {
     crate::work::settle_failed_jobs(fleet.ledger)?;
     crate::work::release_unstarted_jobs(fleet)?;
-    for attempt in crate::admissions::all(fleet.ledger)? {
-        if attempt.unit.is_none()
-            && attempt.placement.is_none()
-            && let Some(launch) = &attempt.launch
-            && matches!(launch.action, Action::Job { .. })
-            && attempt.result.is_none()
-            && let Err(error) = release_refused_job(fleet, launch)
-        {
-            eprintln!("dogsled job refusal {}: {error}", launch.id);
-        }
-    }
+    retries.release(fleet, now, |line| eprintln!("{line}"))?;
     for job in crate::jobs::list(fleet.ledger)?
         .iter()
         .filter(|job| crate::jobs::terminal(job))
@@ -2675,6 +2735,249 @@ pub(crate) fn terminal(shell: &dyn Shell, pane: &str) -> Result<String> {
             Error::Invalid(format!("{pane}: cannot establish launch terminal identity"))
                 .because(Cause::PaneUnavailable)
         })
+}
+
+#[cfg(test)]
+mod release_retry_tests {
+    use super::*;
+    use crate::hosts::{Fleet, Host};
+    use crate::shell::{Fake, Output};
+
+    struct Rig {
+        ledger: Ledger,
+        shell: Fake,
+        policy: crate::config::Policy,
+        peer: Host,
+        certificate: OrdinaryRelease,
+        command: String,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+            let shell = Fake::new();
+            let policy = crate::config::Policy::default();
+            let peer = Host {
+                id: "peer".into(),
+                label: "peer".into(),
+                target: Some("peer-ssh".into()),
+            };
+            let launch: Launch = serde_json::from_value(json!({
+                "id":"refused", "action":{"type":"job", "cmd":["true"]},
+                "host":"peer", "cwd":"/", "owner":"owner",
+                "owner_host":crate::inbox::hostname()
+            }))
+            .unwrap();
+            crate::admissions::put_value(
+                &ledger,
+                &launch.id,
+                &json!({
+                    "request":{"id":launch.id, "action":launch.action, "cwd":"/",
+                        "owner":"owner", "owner_host":launch.owner_host},
+                    "host":peer, "launch":launch, "error":"refused"
+                }),
+            )
+            .unwrap();
+            let evidence = OrdinaryEvidence {
+                launch: launch.clone(),
+                terminal_evidence: OrdinaryTerminal::Refused {
+                    failed: "job refused".into(),
+                    finished_ms: 50,
+                },
+            };
+            let certificate =
+                ordinary_certificate(&launch, evidence.terminal_evidence.clone(), 0).unwrap();
+            let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![peer.clone()]);
+            let remote =
+                |args: &[String]| format!("ssh {}", fleet.remote_argv(&peer, args).join(" "));
+            shell.on(
+                &remote(&["execution-evidence".into(), launch.id.clone()]),
+                &serde_json::to_string(&evidence).unwrap(),
+            );
+            let command = remote(&[
+                "release-references".into(),
+                "--input".into(),
+                serde_json::to_string(&certificate).unwrap(),
+            ]);
+            let rig = Self {
+                ledger,
+                shell,
+                policy,
+                peer,
+                certificate,
+                command,
+            };
+            rig.fail(1, "remote command failed");
+            rig
+        }
+
+        fn fleet(&self) -> Fleet<'_> {
+            Fleet::cold(
+                &self.shell,
+                &self.ledger,
+                &self.policy,
+                "/".into(),
+                vec![self.peer.clone()],
+            )
+        }
+
+        fn fail(&self, status: i32, stderr: &str) {
+            self.shell.on_output(
+                &self.command,
+                Output {
+                    status,
+                    stdout: String::new(),
+                    stderr: stderr.into(),
+                },
+            );
+        }
+
+        fn attempts(&self) -> usize {
+            self.shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == self.command)
+                .count()
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.ledger.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_release_waits_for_the_shared_backoff_and_logs_identical_errors_once() {
+        let rig = Rig::new();
+        let retries = ReleaseRetries::default();
+        let mut logs = Vec::new();
+        let mut now = 100;
+        for attempt in 1..=8 {
+            retries
+                .release(&rig.fleet(), now, |line| logs.push(line))
+                .unwrap();
+            assert_eq!(rig.attempts(), attempt as usize);
+            let next = now + crate::backoff::delay(attempt, "refused");
+            for skipped in [now, now + 1, next - 1] {
+                retries
+                    .release(&rig.fleet(), skipped, |line| logs.push(line))
+                    .unwrap();
+            }
+            assert_eq!(rig.attempts(), attempt as usize);
+            assert_eq!(logs.len(), 1);
+            assert_eq!(
+                retries.failures.lock().unwrap()["refused"].backoff.next_ms,
+                next
+            );
+            now = next;
+        }
+        // An explicit command or a new serve process gets an immediate attempt.
+        release_owned(&rig.fleet(), &ReleaseRetries::default(), 100).unwrap();
+        assert_eq!(rig.attempts(), 9);
+    }
+
+    #[test]
+    fn changed_errors_log_again_and_success_clears_the_failure_with_one_recovery() {
+        let rig = Rig::new();
+        let retries = ReleaseRetries::default();
+        let mut logs = Vec::new();
+        retries
+            .release(&rig.fleet(), 100, |line| logs.push(line))
+            .unwrap();
+        rig.fail(255, "Connection refused");
+        let changed_at = 100 + crate::backoff::delay(1, "refused");
+        retries
+            .release(&rig.fleet(), changed_at, |line| logs.push(line))
+            .unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_ne!(logs[0], logs[1]);
+        let acknowledgement = OrdinaryReleaseAck {
+            certificate: rig.certificate.clone(),
+            accepted_ms: 75,
+        };
+        rig.shell.on(
+            &rig.command,
+            &serde_json::to_string(&acknowledgement).unwrap(),
+        );
+        let recovered_at = changed_at + crate::backoff::delay(2, "refused");
+        retries
+            .release(&rig.fleet(), recovered_at, |line| logs.push(line))
+            .unwrap();
+        assert!(retries.failures.lock().unwrap().is_empty());
+        assert_eq!(logs[2], "dogsled job refusal refused: recovered");
+        let attempt = crate::admissions::get(&rig.ledger, "refused")
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.finished_ms, Some(50));
+        assert_eq!(
+            attempt.ordinary_release.unwrap().acknowledgement,
+            Some(acknowledgement)
+        );
+        retries
+            .release(&rig.fleet(), recovered_at + 1, |line| logs.push(line))
+            .unwrap();
+        assert_eq!(logs.len(), 3);
+        assert_eq!(rig.attempts(), 3);
+    }
+
+    #[test]
+    fn retries_drop_admissions_that_no_longer_qualify() {
+        let rig = Rig::new();
+        let retries = ReleaseRetries::default();
+        let mut logs = Vec::new();
+        retries
+            .release(&rig.fleet(), 100, |line| logs.push(line))
+            .unwrap();
+        let original = crate::admissions::value(&rig.ledger, "refused")
+            .unwrap()
+            .unwrap();
+        for (field, value) in [("result", json!({})), ("launch", Value::Null)] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            crate::admissions::put_value(&rig.ledger, "refused", &changed).unwrap();
+            retries
+                .release(&rig.fleet(), 100, |line| logs.push(line))
+                .unwrap();
+            assert!(retries.failures.lock().unwrap().is_empty());
+            crate::admissions::put_value(&rig.ledger, "refused", &original).unwrap();
+            retries
+                .release(&rig.fleet(), 100, |line| logs.push(line))
+                .unwrap();
+        }
+        crate::admissions::remove(&rig.ledger, "refused").unwrap();
+        retries
+            .release(&rig.fleet(), 100, |line| logs.push(line))
+            .unwrap();
+        assert!(retries.failures.lock().unwrap().is_empty());
+        assert_eq!(rig.attempts(), 3);
+        assert_eq!(logs.len(), 3, "pruning does not claim recovery");
+    }
+
+    #[test]
+    fn admission_and_retention_share_one_release_schedule() {
+        let rig = Rig::new();
+        let retries = std::sync::Arc::new(ReleaseRetries::default());
+        let fleet = rig.fleet();
+        let admission = crate::observation::captured_actions(&fleet, 100).unwrap();
+        let retention = std::sync::Arc::clone(&retries);
+        work::tick(&admission, &retries, 100).unwrap();
+        assert_eq!(rig.attempts(), 1);
+        release_owned(&fleet, &retention, 100).unwrap();
+        release_owned(
+            &fleet,
+            &retention,
+            100 + crate::backoff::delay(1, "refused") - 1,
+        )
+        .unwrap();
+        assert_eq!(rig.attempts(), 1);
+        let next = 100 + crate::backoff::delay(1, "refused");
+        release_owned(&fleet, &retention, next).unwrap();
+        work::tick(&admission, &retries, next).unwrap();
+        assert_eq!(rig.attempts(), 2);
+    }
 }
 
 #[cfg(test)]

@@ -286,7 +286,12 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
             ..Policy::default()
         };
         let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
-        work::tick(&actions(&fleet, 100), 100).unwrap();
+        work::tick(
+            &actions(&fleet, 100),
+            &crate::launch::ReleaseRetries::default(),
+            100,
+        )
+        .unwrap();
         assert_eq!(work::queue(&ledger).unwrap()[0].state, "admitted");
         if pending {
             let saved = cancellation_value(&ledger, "missing-cancel");
@@ -333,7 +338,12 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
             .collect::<Vec<_>>()
     };
 
-    work::tick(&actions(&fleet, 100), 100).unwrap();
+    work::tick(
+        &actions(&fleet, 100),
+        &crate::launch::ReleaseRetries::default(),
+        100,
+    )
+    .unwrap();
     let unrelated = work::queue(&ledger)
         .unwrap()
         .into_iter()
@@ -350,11 +360,21 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     );
 
     for _ in 0..HELD.div_ceil(work::REPAIR_BATCH) {
-        work::tick(&actions(&fleet, 100), 100).unwrap();
+        work::tick(
+            &actions(&fleet, 100),
+            &crate::launch::ReleaseRetries::default(),
+            100,
+        )
+        .unwrap();
     }
     assert_eq!(held(), HELD);
     let settled = written();
-    work::tick(&actions(&fleet, 100), 100).unwrap();
+    work::tick(
+        &actions(&fleet, 100),
+        &crate::launch::ReleaseRetries::default(),
+        100,
+    )
+    .unwrap();
     assert_eq!(written(), settled, "unchanged evidence is not retried");
     let holds = crate::holds::local(&ledger, "local", 100, 0).unwrap();
     let reported = holds
@@ -366,7 +386,12 @@ fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     let mut changed = crate::admissions::get(&ledger, "held-0").unwrap().unwrap();
     changed.error = Some("changed evidence".into());
     crate::admissions::put(&ledger, "held-0", &changed).unwrap();
-    work::tick(&actions(&fleet, 100), 100).unwrap();
+    work::tick(
+        &actions(&fleet, 100),
+        &crate::launch::ReleaseRetries::default(),
+        100,
+    )
+    .unwrap();
     let after = written();
     assert_ne!(after[0], settled[0], "changed evidence is retried");
     assert_eq!(after[1..], settled[1..]);
@@ -457,7 +482,12 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     for id in ["first", "second"] {
         work::enqueue(&ledger, place_request(&ledger, id), false, 100).unwrap();
     }
-    work::tick(&actions(&fleet, 100), 100).unwrap();
+    work::tick(
+        &actions(&fleet, 100),
+        &crate::launch::ReleaseRetries::default(),
+        100,
+    )
+    .unwrap();
     let tickets = work::queue(&ledger).unwrap();
     assert_eq!(tickets[0].state, "admitted");
     assert_eq!(tickets[1].state, "pending");
@@ -476,7 +506,12 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     .unwrap();
     // A working owner hears too: its reader delivers at the next step.
     shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"owner","agent":"claude","agent_status":"working","terminal_id":"term_owner"}]}}"#);
-    work::tick(&actions(&fleet, 101), 101).unwrap();
+    work::tick(
+        &actions(&fleet, 101),
+        &crate::launch::ReleaseRetries::default(),
+        101,
+    )
+    .unwrap();
     assert!(work::queue(&ledger).unwrap()[0].notified);
     let told = crate::inbox::received(&ledger, "term_owner").unwrap();
     assert_eq!(told.len(), 1);
@@ -488,7 +523,12 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
             tickets[0].id
         )
     );
-    work::tick(&actions(&fleet, 102), 102).unwrap();
+    work::tick(
+        &actions(&fleet, 102),
+        &crate::launch::ReleaseRetries::default(),
+        102,
+    )
+    .unwrap();
     assert_eq!(
         crate::inbox::received(&ledger, "term_owner").unwrap().len(),
         1
@@ -498,7 +538,12 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     let mut refreshed = snapshot(90_100);
     refreshed.probe.agent_panes[0].state = "working".into();
     crate::host_store::put_snapshot(&ledger, &refreshed).unwrap();
-    work::tick(&actions(&fleet, 90_100), 90_100).unwrap();
+    work::tick(
+        &actions(&fleet, 90_100),
+        &crate::launch::ReleaseRetries::default(),
+        90_100,
+    )
+    .unwrap();
     assert_eq!(work::queue(&ledger).unwrap()[1].state, "admitted");
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
@@ -572,7 +617,12 @@ fn released_completion_time_is_kept_when_the_item_closes_later() {
         },
     )
     .unwrap();
-    work::tick(&actions(&fleet, 600), 600).unwrap();
+    work::tick(
+        &actions(&fleet, 600),
+        &crate::launch::ReleaseRetries::default(),
+        600,
+    )
+    .unwrap();
     let attempt = crate::admissions::get(&ledger, "released")
         .unwrap()
         .unwrap();
@@ -791,7 +841,12 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
         .is_none(),
         "a pending ticket for the same host is still ahead of it"
     );
-    work::tick(&actions(&fleet, 100), 100).unwrap();
+    work::tick(
+        &actions(&fleet, 100),
+        &crate::launch::ReleaseRetries::default(),
+        100,
+    )
+    .unwrap();
     let states: Vec<_> = work::queue(&ledger)
         .unwrap()
         .into_iter()
