@@ -173,6 +173,8 @@ pub(crate) fn NewLead() -> Element {
                         selection_removed.set(false);
                     }
                 }
+            }
+            div { class: "new-lead-body",
                 if let Some(message) = catalogue.observation_error {
                     if catalogue.list.is_some() {
                         Alert { "Last-known repository choices: {message}" }
@@ -193,7 +195,6 @@ pub(crate) fn NewLead() -> Element {
                     Status { "{slug} was removed from the catalogue. Select a repository before sending." }
                 }
             }
-            div { class: "new-lead-body" }
             if let Some(message) = error() { Alert { "{message}" } }
             Composer { draft, images, uploading, disabled: !valid(), busy: busy(),
                 on_error: move |message| error.set(Some(message)), on_send: send }

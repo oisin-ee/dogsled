@@ -355,6 +355,69 @@ fn catalogue_recovers_in_one_mounted_new_lead_and_preserves_draft_search_and_sel
 }
 
 #[test]
+fn catalogue_notices_render_in_the_body_instead_of_crowding_the_header() {
+    let handle = PortalHandle::default();
+    let mut dom =
+        VirtualDom::new_with_props(catalogue_root, (handle.clone(), DraftHandle::default()));
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let assert_notices = |dom: &VirtualDom, notices: &[&str]| {
+        let html = dioxus_ssr::render(dom);
+        let (header, body) = html
+            .split_once("</header>")
+            .expect("New conversation header");
+        assert!(header.contains("New conversation"), "{html}");
+        assert!(header.contains(r#"role="combobox""#), "{html}");
+        assert!(!header.contains(r#"role="alert""#), "{html}");
+        assert!(!header.contains(r#"role="status""#), "{html}");
+        assert!(body.starts_with(r#"<div class="new-lead-body">"#), "{html}");
+        for notice in notices {
+            assert!(body.contains(notice), "{notice}: {html}");
+            assert!(!header.contains(notice), "{notice}: {html}");
+        }
+    };
+    assert_notices(&dom, &["Loading projects"]);
+    let mut publication = handle.get().unwrap();
+    dom.in_runtime(|| publication.write().update(Err("offline".into()), 1));
+    settle_catalogue(&mut dom);
+    assert_notices(&dom, &["Projects unavailable: offline"]);
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(
+                &["owner/beta"],
+                Some("GitHub catalogue: gh exited 1"),
+                2,
+            )),
+            2,
+        );
+    });
+    settle_catalogue(&mut dom);
+    assert_notices(&dom, &["GitHub catalogue: gh exited 1"]);
+    dom.in_runtime(|| publication.write().update(Err("offline".into()), 3));
+    settle_catalogue(&mut dom);
+    assert_notices(
+        &dom,
+        &[
+            "Last-known repository choices: offline",
+            "GitHub catalogue: gh exited 1",
+        ],
+    );
+    dom.in_runtime(|| {
+        publication
+            .write()
+            .update(Ok(catalogue_snapshot(&[], None, 4)), 4)
+    });
+    settle_catalogue(&mut dom);
+    assert_notices(
+        &dom,
+        &[
+            "No GitHub repositories found",
+            "owner/beta was removed from the catalogue",
+        ],
+    );
+}
+
+#[test]
 fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selection() {
     let handle = PortalHandle::default();
     let draft_handle = DraftHandle::default();
