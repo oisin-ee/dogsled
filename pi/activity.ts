@@ -1,5 +1,6 @@
 // Session-scoped telemetry. Hooks reduce compact facts; only the publisher performs I/O.
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PortalClient } from "./portal-client.ts";
 
@@ -187,24 +188,45 @@ export class ActivityPublisher {
   private lastAttempt = -Infinity;
   private retryAt = -Infinity;
   private retryDelay = 500;
-  private lastBackoff: string | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
-  private heartbeat: ReturnType<typeof setInterval>;
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
   private controller: AbortController | undefined;
   private flight: Promise<void> | undefined;
   private readonly client: Client;
   private readonly pane: string;
   private readonly evidence: Evidence;
+  private readonly exists: (path: string) => boolean;
+  private readonly report: (message: string) => void;
 
-  constructor(client: Client, pane: string, evidence: Evidence, idle: boolean) {
+  constructor(
+    client: Client,
+    pane: string,
+    evidence: Evidence,
+    idle: boolean,
+    report: (message: string) => void,
+    exists: (path: string) => boolean = existsSync,
+  ) {
     this.client = client;
     this.pane = pane;
     this.evidence = { ...evidence };
+    this.exists = exists;
+    this.report = report;
     this.path = `/api/agents/local/${encodeURIComponent(pane)}/activity`;
     this.reducer = new ActivityReducer(idle);
     this.pending = this.reducer.snapshot();
+    this.evidenceReady();
+  }
+
+  evidenceReady(): void {
+    if (
+      this.disposed ||
+      this.stopped ||
+      this.request ||
+      this.stamp ||
+      !this.exists(this.evidence.session_file)
+    )
+      return;
     this.request = this.registration(null, 0);
-    this.diagnostic("POST", 0, "start", "bootstrap");
     this.heartbeat = setInterval(() => {
       if (this.disposed || this.stopped) return;
       this.pending = this.reducer.snapshot();
@@ -221,7 +243,14 @@ export class ActivityPublisher {
   }
 
   private schedule(): void {
-    if (this.disposed || this.stopped || this.busy || this.timer) return;
+    if (
+      this.disposed ||
+      this.stopped ||
+      this.busy ||
+      this.timer ||
+      (!this.request && !this.stamp)
+    )
+      return;
     this.timer = setTimeout(
       () => {
         if (this.disposed) return;
@@ -314,7 +343,7 @@ export class ActivityPublisher {
           code === "sequence_conflict" ||
           (status === 404 && code !== "agent_missing")
         ) {
-          this.stop(request.method, status, code);
+          this.stop(status, code);
           return;
         }
         // A 5xx may follow a committed mutation, even with a typed error body.
@@ -332,7 +361,7 @@ export class ActivityPublisher {
               code === "upstream_unavailable")
           )
             this.request = this.registration(null, 0);
-          this.backoff(request.method, status, "retry", code);
+          this.backoff();
           return;
         }
         if (
@@ -347,10 +376,10 @@ export class ActivityPublisher {
           this.sequence = 0;
           this.pending = this.reducer.snapshot();
           this.request = { method: "GET", path: this.path };
-          this.backoff(request.method, status, "discover", code);
+          this.backoff();
           return;
         }
-        this.stop(request.method, status, code);
+        this.stop(status, code);
         return;
       }
       if (request.method === "GET") {
@@ -363,7 +392,7 @@ export class ActivityPublisher {
           !counter(body["producer"]["generation"]) ||
           (body["producer"]["id"] !== null && !text(body["producer"]["id"], 256))
         ) {
-          this.stop(request.method, status);
+          this.stop(status);
           return;
         }
         const detail = body["detail"];
@@ -374,7 +403,7 @@ export class ActivityPublisher {
         if (body["producer"]["id"] !== null && !retired) {
           // Generation-0 probes renew sampling interest by design without claiming the live generation.
           this.request = this.registration(null, 0);
-          this.backoff(request.method, status, "wait_owner");
+          this.backoff();
           return;
         }
         this.request = this.registration(body["epoch"], body["producer"]["generation"]);
@@ -392,10 +421,9 @@ export class ActivityPublisher {
               body.generation !== this.stamp.generation ||
               body.session !== this.stamp.session))
         ) {
-          this.stop(request.method, status);
+          this.stop(status);
           return;
         }
-        if (request.method === "POST") this.diagnostic("POST", status, "ack", "publishing");
         this.stamp = {
           epoch: body.epoch,
           generation: body.generation,
@@ -403,14 +431,13 @@ export class ActivityPublisher {
           session: body.session,
         };
         this.request = undefined;
-        this.lastBackoff = undefined;
         this.retryDelay = 500;
         this.retryAt = -Infinity;
       }
     } catch {
       // Offline and ambiguous outcomes are telemetry gaps, never hook failures.
       if (this.disposed) return;
-      this.backoff(request.method, 0, "retry_transport", "transport");
+      this.backoff();
     } finally {
       if (!this.disposed) {
         this.busy = false;
@@ -434,34 +461,22 @@ export class ActivityPublisher {
     };
   }
 
-  private diagnostic(method: string, status: number, code: string, decision: string): void {
-    // Match the extension's console reporting; never log response text or native evidence.
-    console.error(
-      `[dogsled activity] pane=${encodeURIComponent(this.pane).slice(0, 384)} method=${method} status=${status} code=${code} decision=${decision}`,
-    );
-  }
-
-  private backoff(method: string, status: number, decision: string, code = "recovery"): void {
-    const key = `${method}:${code}:${decision}`;
-    if (this.lastBackoff !== key) {
-      this.diagnostic(method, status, code, decision);
-      this.lastBackoff = key;
-    }
+  private backoff(): void {
     this.retryAt = performance.now() + this.retryDelay;
     this.retryDelay = Math.min(5000, this.retryDelay * 2);
   }
 
-  private stop(method: string, status: number, code = "invalid_response"): void {
-    this.diagnostic(method, status, code, "stop");
+  private stop(status: number, code = "invalid_response"): void {
+    if (this.stopped) return;
     this.stopped = true;
     clearInterval(this.heartbeat);
     if (this.timer) clearTimeout(this.timer);
+    this.report(`Dogsled live activity stopped: ${code} (HTTP ${status})`);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.diagnostic(this.request?.method ?? "PUT", 0, "dispose", "stop");
     clearInterval(this.heartbeat);
     if (this.timer) clearTimeout(this.timer);
     this.controller?.abort();
@@ -500,7 +515,19 @@ export function registerActivity(pi: ExtensionAPI, client: Client, pane: string 
       const session_id = ctx.sessionManager.getSessionId();
       if (!session_file || !text(session_file, 4096) || !text(session_id, 1024) || !text(pane, 128))
         return;
-      runtime = new ActivityPublisher(client, pane, { session_file, session_id }, ctx.isIdle());
+      runtime = new ActivityPublisher(
+        client,
+        pane,
+        { session_file, session_id },
+        ctx.isIdle(),
+        (message) => {
+          try {
+            ctx.ui.notify(message, "warning");
+          } catch {
+            /* A notification failure must not escape telemetry. */
+          }
+        },
+      );
     } catch {
       /* Missing native evidence leaves detail unavailable. */
     }
@@ -517,6 +544,13 @@ export function registerActivity(pi: ExtensionAPI, client: Client, pane: string 
   });
   pi.on("agent_settled", () => {
     runtime?.event({ type: "settled" });
+    runtime?.evidenceReady();
+  });
+  pi.on("turn_end", () => {
+    runtime?.evidenceReady();
+  });
+  pi.on("message_start", () => {
+    runtime?.evidenceReady();
   });
   pi.on("message_update", (event) => {
     if (event.message.role !== "assistant") return;
@@ -540,6 +574,7 @@ export function registerActivity(pi: ExtensionAPI, client: Client, pane: string 
   });
   pi.on("message_end", (event) => {
     if (event.message.role === "assistant") runtime?.event({ type: "message_end" });
+    runtime?.evidenceReady();
   });
   pi.on("tool_execution_start", (event) => {
     runtime?.event({

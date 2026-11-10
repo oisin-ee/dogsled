@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -160,10 +161,19 @@ function ack(call: Call) {
   };
 }
 
-function rig(t: TestContext, respond?: (call: Call) => Promise<Response> | Response) {
+function rig(
+  t: TestContext,
+  respond?: (call: Call) => Promise<Response> | Response,
+  fileExists = true,
+) {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
-  const diagnostics: string[] = [];
-  t.mock.method(console, "error", (line: string) => diagnostics.push(line));
+  const consoleError = t.mock.method(console, "error", () => {});
+  const stderrWrite = t.mock.method(process.stderr, "write", () => true);
+  const reports: string[] = [];
+  const exists = t.mock.fn((path: string) => {
+    assert.equal(path, evidence.session_file);
+    return fileExists;
+  });
   let now = 0;
   t.mock.method(performance, "now", () => now);
   const calls: Call[] = [];
@@ -178,8 +188,9 @@ function rig(t: TestContext, respond?: (call: Call) => Promise<Response> | Respo
       return respond ? respond(call) : response(method === "GET" ? view : ack(call));
     },
   };
-  const publisher = new ActivityPublisher(client, "pane", evidence, true);
-  t.after(() => publisher.dispose());
+  const publisher = new ActivityPublisher(client, "pane", evidence, true, (message) => {
+    reports.push(message);
+  }, exists);
   const step = async (milliseconds = 250) => {
     now += milliseconds;
     t.mock.timers.tick(milliseconds);
@@ -190,10 +201,44 @@ function rig(t: TestContext, respond?: (call: Call) => Promise<Response> | Respo
     await step();
     await step();
   };
-  return { client, publisher, calls, diagnostics, step, ready };
+  t.after(async () => {
+    publisher.dispose();
+    await step(0);
+    assert.equal(consoleError.mock.callCount(), 0);
+    assert.equal(stderrWrite.mock.callCount(), 0);
+  });
+  return {
+    client, publisher, calls, reports, exists, step, ready,
+    fileExists: (value: boolean) => { fileExists = value; },
+  };
 }
 
-test("bootstrap freezes evidence and accepts an assigned epoch without discovery", async (t) => {
+test("missing evidence waits without polling or requests until a boundary arms registration", async (t) => {
+  const r = rig(t, undefined, false);
+  r.publisher.event({ type: "agent_start" });
+  r.publisher.event({ ...block(0, "thinking"), delta: "before registration" });
+  await r.step(30000);
+  assert.equal(r.calls.length, 0);
+  assert.equal(r.exists.mock.callCount(), 1);
+  r.publisher.evidenceReady();
+  assert.equal(r.calls.length, 0);
+  r.fileExists(true);
+  await r.step(5000);
+  assert.equal(r.calls.length, 0);
+  r.publisher.evidenceReady();
+  await r.ready();
+  assert.deepEqual(r.calls.map((call) => call.method), ["POST", "PUT"]);
+  assert.equal(r.calls[1]?.body.payload.state.phase, "thinking");
+  assert.equal(r.calls[1]?.body.payload.state.reasoning, "before registration");
+  const checks = r.exists.mock.callCount();
+  r.publisher.evidenceReady();
+  await r.step(0);
+  assert.equal(r.exists.mock.callCount(), checks);
+  assert.equal(r.calls.length, 2);
+  assert.deepEqual(r.reports, []);
+});
+
+test("existing evidence registers at construction, freezes evidence, and accepts an assigned epoch", async (t) => {
   const r = rig(t);
   evidence.session_id = "changed-after-start";
   await r.ready();
@@ -241,6 +286,7 @@ for (const method of ["GET", "POST"]) {
         }
         return response(call.method === "GET" ? view : ack(call));
       });
+      r.publisher.evidenceReady();
       await r.step(0);
       const original = r.calls[0]?.body;
       await r.step(500);
@@ -250,6 +296,7 @@ for (const method of ["GET", "POST"]) {
       const registrations = r.calls.filter((call) => call.method === "POST");
       assert.equal(registrations.length, 2);
       assert.deepEqual(registrations[1]?.body, original);
+      assert.deepEqual(r.reports, []);
     });
   }
 }
@@ -488,7 +535,7 @@ test("six-second deadline aborts and replays identical registration with backoff
   assert.equal(r.calls.length, 2);
 });
 
-test("identical backoffs log once and changed codes log again", async (t) => {
+test("identical and changed recovery codes stay silent", async (t) => {
   let code = "upstream_unavailable";
   let status = 503;
   const r = rig(t, () => response({ code, error: "not ready" }, status));
@@ -497,20 +544,16 @@ test("identical backoffs log once and changed codes log again", async (t) => {
   status = 502;
   await r.step(1000);
   assert.equal(r.calls.length, 3);
-  const retries = () => r.diagnostics.filter((line) => line.includes("decision=retry"));
-  assert.equal(retries().length, 1);
-  assert.ok(retries()[0]?.includes("code=upstream_unavailable"));
+  assert.deepEqual(r.reports, []);
   code = "session_unverified";
   status = 503;
   await r.step(2000);
-  assert.equal(retries().length, 2);
-  assert.ok(retries()[1]?.includes("code=session_unverified"));
+  assert.equal(r.calls.length, 4);
   r.publisher.dispose();
-  assert.equal(r.diagnostics.filter((line) => line.includes("decision=bootstrap")).length, 1);
-  assert.equal(r.diagnostics.filter((line) => line.includes("decision=stop")).length, 1);
+  assert.deepEqual(r.reports, []);
 });
 
-test("successful ACK resets backoff diagnostic memory", async (t) => {
+test("successful ACK resets backoff delay without reporting recovery", async (t) => {
   let fail = true;
   const r = rig(t, (call) => {
     if (call.method === "PUT" && fail)
@@ -518,16 +561,21 @@ test("successful ACK resets backoff diagnostic memory", async (t) => {
     return response(ack(call));
   });
   await r.ready();
-  const retries = () => r.diagnostics.filter((line) => line.includes("decision=retry"));
-  assert.equal(retries().length, 1);
+  assert.equal(r.calls.length, 2);
   await r.step(250);
-  assert.equal(retries().length, 1);
+  assert.equal(r.calls.length, 3);
   fail = false;
   await r.step(1000);
+  assert.equal(r.calls.length, 4);
   fail = true;
   r.publisher.event({ type: "settled" });
   await r.step(250);
-  assert.equal(retries().length, 2);
+  assert.equal(r.calls.length, 5);
+  await r.step(499);
+  assert.equal(r.calls.length, 5);
+  await r.step(1);
+  assert.equal(r.calls.length, 6);
+  assert.deepEqual(r.reports, []);
 });
 
 test("registration backoff doubles to five seconds despite hooks and heartbeats", async (t) => {
@@ -545,6 +593,24 @@ test("registration backoff doubles to five seconds despite hooks and heartbeats"
 });
 
 for (const method of ["GET", "POST", "PUT"]) {
+  test(method + " invalid acknowledgement reports once and stops", async (t) => {
+    const r = rig(t, (call) => {
+      if (call.method === method) return response({ version: 999 });
+      if (method === "GET" && call.method === "POST")
+        return response({ code: "stale_generation", error: "discover" }, 409);
+      return response(ack(call));
+    });
+    await r.ready();
+    const count = r.calls.length;
+    r.publisher.event({ type: "settled" });
+    r.publisher.evidenceReady();
+    await r.step(30000);
+    assert.equal(r.calls.length, count);
+    assert.deepEqual(r.reports, ["Dogsled live activity stopped: invalid_response (HTTP 200)"]);
+    r.publisher.dispose();
+    assert.equal(r.reports.length, 1);
+  });
+
   for (const [code, status] of [
     ["invalid_request", 400],
     ["unsupported_version", 400],
@@ -564,10 +630,10 @@ for (const method of ["GET", "POST", "PUT"]) {
       r.publisher.event({ type: "settled" });
       await r.step(20000);
       assert.equal(r.calls.length, count);
-      assert.ok(r.diagnostics.some((line) => line.includes("decision=stop")));
-      assert.ok(
-        r.diagnostics.every((line) => line.length < 600 && !line.includes(evidence.session_file)),
-      );
+      assert.deepEqual(r.reports, [`Dogsled live activity stopped: ${code} (HTTP ${status})`]);
+      r.publisher.evidenceReady();
+      r.publisher.dispose();
+      assert.equal(r.reports.length, 1);
     });
   }
 }
@@ -606,6 +672,8 @@ test("reload rejects late registration callbacks; only the replacement runtime p
     "pane",
     evidence,
     false,
+    (message) => r.reports.push(message),
+    () => true,
   );
   t.after(() => replacement.dispose());
   resolve(response(ack(old)));
@@ -644,35 +712,109 @@ test("shutdown aborts a pending publication, then attempts only its own terminal
   assert.equal(r.calls.length, 4);
 });
 
+function sessionHooks(
+  t: TestContext,
+  r: ReturnType<typeof rig>,
+  notify: (message: string, level: string) => void = () => {},
+) {
+  r.publisher.dispose();
+  const directory = mkdtempSync(join(tmpdir(), "dogsled-activity-"));
+  const sessionFile = join(directory, "session.jsonl");
+  const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+  const ctx = {
+    sessionManager: {
+      getSessionFile: () => sessionFile,
+      getSessionId: () => "native",
+    },
+    isIdle: () => true,
+    ui: { notify },
+  };
+  registerActivity({
+    on: (type: string, fn: (event: any, ctx: any) => unknown) => {
+      handlers.set(type, fn);
+    },
+  } as unknown as ExtensionAPI, r.client, "pane");
+  const invoke = (type: string, event = {}, context = ctx) => {
+    const handler = handlers.get(type);
+    assert.ok(handler, type);
+    assert.equal(handler(event, context), undefined);
+  };
+  t.after(() => {
+    invoke("session_shutdown");
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return {
+    ctx, invoke,
+    persist: () => writeFileSync(sessionFile, '{"type":"session","id":"native"}\n'),
+  };
+}
+
+for (const [boundary, role] of [
+  ["message_start", "user"],
+  ["message_start", "assistant"],
+  ["message_start", "toolResult"],
+  ["message_end", "user"],
+  ["message_end", "assistant"],
+  ["message_end", "toolResult"],
+  ["turn_end", "assistant"],
+  ["agent_settled", "assistant"],
+]) {
+  test(boundary + " " + role + " arms evidence but streaming deltas do not", async (t) => {
+    const r = rig(t);
+    const hooks = sessionHooks(t, r);
+    hooks.invoke("session_start");
+    hooks.invoke("message_end", { message: { role: "user" } });
+    await r.step(30000);
+    assert.equal(r.calls.length, 0);
+    hooks.persist();
+    hooks.invoke("agent_start");
+    hooks.invoke("message_update", {
+      message: { role: "assistant" },
+      assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "observed" },
+    });
+    await r.step(5000);
+    assert.equal(r.calls.length, 0);
+    hooks.invoke(boundary!, { message: { role } });
+    await r.ready();
+    assert.deepEqual(r.calls.map((call) => call.method), ["POST", "PUT"]);
+    assert.equal(r.calls[1]?.body.payload.state.phase,
+      boundary === "agent_settled" ? "idle" :
+        boundary === "message_end" && role === "assistant" ? "working" : "thinking");
+    hooks.invoke("session_shutdown");
+    assert.deepEqual(r.reports, []);
+  });
+}
+
+for (const throws of [false, true]) {
+  test("terminal notification uses the starting context and stays safe when notify throws: " + throws, async (t) => {
+    const r = rig(t, () => response({ code: "unauthorized", error: "private response" }, 403));
+    const notices: [string, string][] = [];
+    const hooks = sessionHooks(t, r, (message, level) => {
+      notices.push([message, level]);
+      if (throws) throw new Error("notification unavailable");
+    });
+    hooks.persist();
+    hooks.invoke("session_start");
+    hooks.invoke("message_start", { message: { role: "assistant" } }, {
+      ...hooks.ctx,
+      ui: { notify: () => assert.fail("must use the session_start context") },
+    });
+    await r.ready();
+    hooks.invoke("agent_settled");
+    await r.step(30000);
+    assert.equal(r.calls.length, 1);
+    hooks.invoke("session_shutdown");
+    assert.deepEqual(notices, [["Dogsled live activity stopped: unauthorized (HTTP 403)", "warning"]]);
+  });
+}
+
 test("notification hooks are synchronous offline and preparation never claims execution", async (t) => {
   const r = rig(t, async () => {
     throw new Error("offline");
   });
-  r.publisher.dispose();
-  const handlers = new Map<string, (event: any, ctx: any) => unknown>();
-  registerActivity(
-    {
-      on: (type: string, fn: (event: any, ctx: any) => unknown) => {
-        handlers.set(type, fn);
-      },
-    } as unknown as ExtensionAPI,
-    r.client,
-    "pane",
-  );
-  const invoke = (type: string, event = {}) => {
-    const fn = handlers.get(type);
-    assert.ok(fn);
-    assert.equal(
-      fn(event, {
-        sessionManager: {
-          getSessionFile: () => evidence.session_file,
-          getSessionId: () => evidence.session_id,
-        },
-        isIdle: () => true,
-      }),
-      undefined,
-    );
-  };
+  const hooks = sessionHooks(t, r);
+  const { invoke } = hooks;
+  hooks.persist();
   invoke("session_start");
   await r.step(0);
   invoke("agent_start");
@@ -683,6 +825,8 @@ test("notification hooks are synchronous offline and preparation never claims ex
   invoke("agent_end");
   invoke("agent_settled");
   invoke("session_shutdown");
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.reports, []);
   const count = r.calls.length;
   await r.step(10000);
   assert.equal(r.calls.length, count);

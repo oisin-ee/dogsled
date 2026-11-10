@@ -154,6 +154,8 @@ function rig() {
 test("the extension publishes real activity through PortalClient with bearer auth and native evidence", async t => {
 	withPane(t);
 	const state = mkdtempSync(join(tmpdir(), "dogsled-activity-token-"));
+	const sessionFile = join(state, "session.jsonl");
+	writeFileSync(sessionFile, '{"type":"session","id":"session"}\n');
 	mkdirSync(join(state, "web"));
 	writeFileSync(join(state, "web", "token"), "fixture-token\n");
 	const previous = process.env["DOGSLED_STATE"];
@@ -176,7 +178,7 @@ test("the extension publishes real activity through PortalClient with bearer aut
 		assert.equal((init.headers as Record<string, string>)["authorization"], "Bearer fixture-token");
 		if (init.method === "GET") return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", producer: { generation: 0 } });
 		const body = JSON.parse(String(init.body));
-		if (init.method === "POST") assert.deepEqual(body.evidence, { session_file: "/native/session.jsonl", session_id: "session" });
+		if (init.method === "POST") assert.deepEqual(body.evidence, { session_file: sessionFile, session_id: "session" });
 		else {
 			publications.push(body.payload);
 			if (body.payload.state?.phase === "idle") first();
@@ -188,7 +190,7 @@ test("the extension publishes real activity through PortalClient with bearer aut
 			producer_id: body.producer_id, session: "native-key", sequence: body.sequence ?? 0, heartbeat_ms: 5000, ttl_ms: 15000 });
 	});
 	const r = rig();
-	t.mock.method(r.ctx.sessionManager, "getSessionFile", () => "/native/session.jsonl");
+	t.mock.method(r.ctx.sessionManager, "getSessionFile", () => sessionFile);
 	await r.invoke("session_start");
 	await firstPublication;
 	await r.invoke("agent_start");
