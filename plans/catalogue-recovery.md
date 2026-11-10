@@ -1,6 +1,6 @@
 # Live recovery for the repository catalogue
 
-Status: proposed, not approved for implementation.
+Status: approved in Dogsled plan review `f085da93e6777084126562623044e474`. Implementation is authorized. Release and rollout are not authorized.
 
 Reviewed source: `9b0e914b5412483fdec4ce8e27c2c74abc96ff5a` on `main`.
 The browser reproduction used installed Dogsled `0.34.2`.
@@ -48,7 +48,7 @@ Current source confirms this boundary in `src/observation/collect.rs`, `src/obse
 
 Current source and `README.md:610-622` confirm the hourly policy.
 `Catalogue::refresh` records the attempt time before the request, so failures also consume the interval.
-The schema proposal below is a new, explicit decision for approval, not a recovered historical requirement.
+The schema design below is an explicitly approved decision, not a recovered historical requirement.
 
 ## Alternatives considered
 
@@ -152,7 +152,7 @@ Show the backend refresh message once, without adding another `GitHub catalogue:
 Use the current Alert and Status components and existing layout.
 There is no visual redesign, new control, palette change, or new wireframe in this repair.
 
-The selection-removal behavior is a proposed safety rule for approval with this plan.
+The selection-removal behavior is an approved safety rule for this implementation.
 It prevents a background update from silently changing where the first message goes.
 
 ## Verification design
