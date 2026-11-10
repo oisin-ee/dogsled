@@ -126,6 +126,14 @@ pub fn repo_open(
             slug,
         )?)?);
     }
+    // An older peer has no `host repo-open`. Refuse before the call, with a clear reason.
+    let capability: crate::node::SnapshotReport = fleet.remote(host, &["snapshot".into()])?;
+    if capability.repo_open != Some(crate::checkout::OPEN_VERSION) {
+        return Err(Error::Invalid(format!(
+            "{} runs a dogsled without `repo open`; nothing was changed there",
+            host.label
+        )));
+    }
     let mut opened: crate::checkout::Opened =
         fleet.remote_setup(host, &["repo-open".into(), "--repo".into(), slug.into()])?;
     opened.host.clone_from(&host.label);

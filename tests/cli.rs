@@ -2534,7 +2534,7 @@ fn repository(path: &Path) {
 }
 
 #[test]
-fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
+fn remote_prepare_uses_remote_command_and_standard_checkout() {
     let rig = Rig::new("remote-prepare");
     let repo = rig.dir.join("home/repo space");
     repository(&repo);
@@ -2598,7 +2598,7 @@ fn remote_prepare_uses_remote_command_and_home_relative_checkout() {
     let created = grant["envelope"]["request"]["validity"]["created_ms"]
         .as_u64()
         .unwrap();
-    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-envelope-version 2 --request-created-ms {created} --preparation-protocol 1 --repo 'repo space' --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
+    assert!(prepares[0].ends_with(&format!("custom dogsled host prepare --preparation-envelope-version 2 --request-created-ms {created} --preparation-protocol 1 --repo dev/repo --branch feature --request-id {id} --base main --placement-replay '{replay}' --budget-ms 600000 --json")), "{ssh}");
     let releases: Vec<_> = ssh
         .lines()
         .filter(|line| line.contains("host prepared "))

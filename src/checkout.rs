@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub struct Repository {
     pub path: String,
     pub origin: String,
+    /// Where a peer host keeps this repository, relative to its home: see `peer_relative`.
     pub relative: String,
     pub working_root: String,
 }
@@ -206,11 +207,14 @@ pub fn discover(
     let home = Path::new(home)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(home));
-    let relative = path
-        .strip_prefix(home)
-        .unwrap_or(&path)
-        .display()
-        .to_string();
+    let relative = peer_relative(
+        &origin,
+        &path
+            .strip_prefix(home)
+            .unwrap_or(&path)
+            .display()
+            .to_string(),
+    );
     let working_root = shell
         .run_ok(
             "git",
@@ -271,6 +275,27 @@ pub fn ensure(
             host.label.clone(),
         ],
     )
+}
+
+/// The protocol of `host repo-open`. A peer without it cannot open a repository for a caller.
+pub const OPEN_VERSION: u32 = 1;
+
+/// Where a peer host keeps a repository, relative to its home. A repository with a remote
+/// identity lives at the standard `dev/<name>`, so the caller's own layout never decides
+/// it. A repository without one keeps `fallback`, its path relative to the caller's home.
+pub fn peer_relative(origin: &str, fallback: &str) -> String {
+    parts(origin)
+        .and_then(|(_, path)| {
+            let name = path.rsplit('/').next()?;
+            let plain = !name.is_empty()
+                && name != "."
+                && name != ".."
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            plain.then(|| format!("dev/{name}"))
+        })
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 /// Host and repository path that a git remote URL names. The ssh, scp-like, and
@@ -454,7 +479,36 @@ fn trust_new_checkout(shell: &dyn Shell, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{identity, same_repository};
+    use super::{identity, peer_relative, same_repository};
+
+    #[test]
+    fn a_peer_keeps_an_identified_repository_at_the_standard_path() {
+        for origin in [
+            "git@github.com:owner/repo.git",
+            "https://github.com/owner/repo",
+            "ssh://git@gitlab.example/group/sub/repo.git",
+        ] {
+            assert_eq!(
+                peer_relative(origin, "work/elsewhere"),
+                "dev/repo",
+                "{origin}"
+            );
+        }
+        // No remote identity, or a name that is not one plain path component: the caller's
+        // own path relative to home stays.
+        for origin in [
+            "/srv/git/repo.git",
+            "file:///srv/git/repo.git",
+            "https://github.com/owner/..",
+            "https://github.com/owner/re po.git",
+        ] {
+            assert_eq!(
+                peer_relative(origin, "work/else where"),
+                "work/else where",
+                "{origin}"
+            );
+        }
+    }
 
     #[test]
     fn identity_matches_the_shared_fixture() {

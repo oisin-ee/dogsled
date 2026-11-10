@@ -140,6 +140,9 @@ pub struct SnapshotReport {
     /// Host-owned results survive the child pane and checkout.
     #[serde(default)]
     pub handoffs: Vec<crate::done::Mark>,
+    /// The `host repo-open` protocol this host speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_open: Option<u32>,
     /// The job validity protocol this host speaks. A peer without it cannot run a job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_validity: Option<u32>,

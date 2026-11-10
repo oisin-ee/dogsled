@@ -85,6 +85,7 @@
         "panes": [],
         "reservations": []
       },
+      "repo_open": 1,
       "request_validity": 1,
       "running": true,
       "sampled_ms": 10000,

@@ -2823,7 +2823,7 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
             preparation: crate::prepare::envelope(
                 fleet,
                 host,
-                &repo.path,
+                repo,
                 branch,
                 request.base.as_deref(),
                 &request.id,
@@ -2843,7 +2843,7 @@ fn prepare_launch(fleet: &Fleet, request: &Request, host: &Host) -> Result<Launc
         crate::prepare::run(
             fleet,
             host,
-            &repo.path,
+            repo,
             branch,
             request.base.as_deref(),
             &request.id,

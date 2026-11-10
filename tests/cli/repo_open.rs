@@ -137,6 +137,9 @@ fn explicit_host_sends_one_repo_open_and_never_clones_locally() {
     clone_source(&rig);
     let _observer = remote_publication(&rig);
     peer_transport(&rig, false);
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!((code, &snapshot["repo_open"]), (0, &json!(1)), "{snapshot}");
+    rig.put("peer-snapshot.json", &snapshot);
     let herdr_before = rig.log("herdr.log");
     let (code, opened) = command(&rig, &["--json", "repo", "open", SLUG, "--host", "netcup"]);
     assert_eq!(code, 0, "{opened}");
@@ -152,12 +155,44 @@ fn explicit_host_sends_one_repo_open_and_never_clones_locally() {
     );
     let ssh = rig.log("ssh.log");
     let calls: Vec<_> = ssh.lines().collect();
-    assert_eq!(calls.len(), 1, "{ssh}");
+    // One capability read, then one open.
+    assert_eq!(calls.len(), 2, "{ssh}");
     assert!(
-        calls[0].ends_with("peer-host host repo-open --repo owner/repo --json"),
+        calls[0].ends_with("peer-host host snapshot --json"),
+        "{ssh}"
+    );
+    assert!(
+        calls[1].ends_with("peer-host host repo-open --repo owner/repo --json"),
         "{ssh}"
     );
     assert_eq!(rig.log("herdr.log"), herdr_before);
+}
+
+#[test]
+fn a_peer_without_repo_open_is_refused_before_any_effect() {
+    let rig = Rig::short("repo-open-old-peer");
+    clone_source(&rig);
+    let _observer = remote_publication(&rig);
+    peer_transport(&rig, false);
+    let (_, mut snapshot) = rig.json(&["host", "snapshot"]);
+    snapshot.as_object_mut().unwrap().remove("repo_open");
+    rig.put("peer-snapshot.json", &snapshot);
+    let (code, refused) = command(&rig, &["--json", "repo", "open", SLUG, "--host", "netcup"]);
+    assert_eq!(code, 2, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("netcup runs a dogsled without `repo open`"),
+        "{refused}"
+    );
+    assert!(
+        !rig.log("ssh.log").contains("repo-open"),
+        "{}",
+        rig.log("ssh.log")
+    );
+    assert_eq!(clones(&rig), Vec::<String>::new());
+    assert!(!rig.dir.join("peer-home/dev/repo").exists());
 }
 
 #[test]

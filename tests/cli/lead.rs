@@ -423,6 +423,7 @@ case "$remote" in
     tee "$RIG/lead-delivery.json" | HOME="$RIG/peer-home" DOGSLED_STATE="$RIG/peer-state" sh -c '"$DOGSLED_BIN" '"$remote" > "$RIG/lead-reply.json"
     {}
     cat "$RIG/lead-reply.json" ;;
+  *'host snapshot'*) cat "$RIG/peer-snapshot.json" ;;
   *'host repo-open --repo '*)
     HOME="$RIG/peer-home" DOGSLED_STATE="$RIG/peer-state" sh -c '"$DOGSLED_BIN" '"$remote" ;;
   *) exit 97 ;;

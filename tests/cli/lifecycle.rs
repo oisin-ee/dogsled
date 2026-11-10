@@ -139,6 +139,11 @@ fn remote_repository_clone_precedes_prepare_and_failures_do_not_fall_back() {
     let log = rig.log("ssh.log");
     assert!(log.find("host checkout").unwrap() < log.find("host prepare").unwrap());
     assert!(log.contains("--origin https://example.invalid/repo.git"));
+    // The caller keeps this repository at ~/repo. The peer gets the standard path for its
+    // identity, for the checkout and for the worktree preparation alike.
+    let line = |command: &str| log.lines().find(|line| line.contains(command)).unwrap();
+    assert!(line("host checkout").contains("--path dev/repo "), "{log}");
+    assert!(line("host prepare").contains("--repo dev/repo "), "{log}");
     rig.script("ssh", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/ssh.log"
 case "$*" in
