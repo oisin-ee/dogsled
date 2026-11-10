@@ -1006,6 +1006,9 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     let rig = Rig::new("run-wait");
     rig.snapshot("state", now(), 0.0, 8);
     let observer = super::place::placement_observer(&rig);
+    drop(observer);
+    // Keep placement facts available without a live sampler issuing calls after close.
+    let publisher = super::observation::seeded(&rig);
     let output = rig.run(&[
         "run",
         "--wait",
@@ -1014,7 +1017,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
         "-c",
         "echo hi; echo err >&2; exit 3",
     ]);
-    drop(observer);
+    drop(publisher);
     assert_eq!(
         output.status.code(),
         Some(3),
