@@ -11,6 +11,8 @@ use sha2::{Digest as _, Sha256};
 use crate::ledger::Ledger;
 use crate::shell::{Output, Shell};
 
+pub(crate) mod delivery;
+
 pub(crate) type Result<T> = std::result::Result<T, Refusal>;
 
 /// Fixed diagnostics: Git stderr and remote URLs never cross this boundary.
@@ -46,6 +48,12 @@ pub(crate) enum Refusal {
     Git,
     #[error("transfer storage operation failed")]
     Storage,
+}
+
+impl From<Refusal> for crate::error::Error {
+    fn from(refusal: Refusal) -> Self {
+        Self::Invalid(refusal.to_string())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -484,6 +492,7 @@ fn verify_objects(shell: &dyn Shell, checkout: &Path, manifest: &Manifest) -> Re
     Ok(())
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "called by transfer apply"))]
 pub(crate) fn import(
     shell: &dyn Shell,
     ledger: &Ledger,

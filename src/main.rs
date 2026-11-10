@@ -67,7 +67,6 @@ mod tables;
 #[cfg(test)]
 mod test_support;
 mod transcript;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by T2"))]
 mod transfer;
 mod unit_reply;
 mod unit_request;
@@ -290,6 +289,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         Command::Unit(command) => return unit_request::run(&fleet, command),
         Command::Mcp => mcp::serve(policy, ledger, home, config_path)?,
 
+        Command::Transfer(command) => transfer_command(&fleet, command, cli.json)?,
         Command::Drop { id, host } => {
             let dropped = drop::drop(&fleet, &id, host.as_deref())?;
             print(cli.json, &dropped, || dropped.line())?;
@@ -455,6 +455,70 @@ impl Ask {
             kind,
             message,
             message_file,
+        }
+    }
+}
+
+/// The transfer commands: they store files or changes for another agent and read what is stored.
+fn transfer_command(
+    fleet: &hosts::Fleet<'_>,
+    command: cli::TransferCommand,
+    json: bool,
+) -> Result<()> {
+    use transfer::delivery;
+    let cwd = std::env::current_dir()?;
+    match command {
+        cli::TransferCommand::Send {
+            target,
+            host,
+            files,
+            changes: _,
+            since,
+            include_worktree,
+        } => {
+            let content = if files.is_empty() {
+                delivery::Content::Changes {
+                    since,
+                    include_worktree,
+                }
+            } else {
+                delivery::Content::Files(files)
+            };
+            let sent = delivery::send(fleet, &cwd, &target, host.as_deref(), &content, now_ms())?;
+            print(json, &sent, || sent.line())
+        }
+        cli::TransferCommand::List => {
+            let lines = delivery::list(fleet.ledger, &inbox::caller(fleet.shell))?;
+            print(json, &lines, || {
+                lines.iter().fold(String::new(), |mut out, line| {
+                    let _ = writeln!(
+                        out,
+                        "{}\t{}\t{}\t{} -> {}",
+                        line.id,
+                        line.direction,
+                        rows::name(&line.kind).unwrap_or_default(),
+                        line.from,
+                        line.to
+                    );
+                    out
+                })
+            })
+        }
+        cli::TransferCommand::Show { id } => {
+            let shown = delivery::show(fleet.ledger, &id)?;
+            print(json, &shown, || shown.text())
+        }
+        cli::TransferCommand::Drop { id } => {
+            let removed = delivery::remove(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &inbox::caller(fleet.shell),
+                &id,
+            )?;
+            print(json, &removed, || {
+                format!("Dropped transfer {}.\n", removed.id)
+            })
         }
     }
 }

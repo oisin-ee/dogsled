@@ -1022,6 +1022,12 @@ pub fn send_to(
     text: String,
     now: u64,
 ) -> Result<Sent> {
+    let to = self::target(fleet, target, host)?;
+    send(fleet, &to, caller(fleet.shell), kind, text, now)
+}
+
+/// The agent that `target` names: an open local item's pane, else the one match in the fleet.
+pub fn target(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Target> {
     let to = if host.is_none_or(|host| fleet.find(host).is_ok_and(crate::hosts::Host::is_local))
         && crate::items::list(fleet.ledger)?.iter().any(|item| {
             item.host == crate::hosts::LOCAL && item.pane == target && item.closed_ms.is_none()
@@ -1034,7 +1040,7 @@ pub fn send_to(
         let actions = crate::hosts::ActionFleet::from_fleet(fleet)?;
         resolve(&actions, target, host)?
     };
-    send(fleet, &to, caller(fleet.shell), kind, text, now)
+    Ok(to)
 }
 
 impl Sent {

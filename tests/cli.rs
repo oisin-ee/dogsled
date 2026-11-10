@@ -67,6 +67,8 @@ mod sweep;
 mod sweep_ownership;
 #[path = "cli/transcripts.rs"]
 mod transcripts;
+#[path = "cli/transfer.rs"]
+mod transfer;
 #[path = "cli/unit_requests.rs"]
 mod unit_requests;
 #[path = "cli/unit_seeded.rs"]
