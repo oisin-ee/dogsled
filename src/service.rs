@@ -553,10 +553,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);
     loop {
         let scheduled = Instant::now() >= next;
-        let baseline_due = baseline.is_some_and(|at| Instant::now() >= at);
-        if baseline_due {
-            baseline = None;
-        }
+        let baseline_due = baseline.take_if(|at| Instant::now() >= *at).is_some();
         let domains = dirty.take();
         observation.timed_refresh(
             node,
@@ -565,6 +562,9 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             (domains, once),
             scheduled || baseline_due,
         )?;
+        if baseline_due {
+            eprintln!("dogsled service: baseline sample published");
+        }
         if scheduled {
             workers.start(node, policy, once, &send, &observation.publisher)?;
             next += interval;

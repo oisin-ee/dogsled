@@ -11,7 +11,7 @@ use crate::shell::System;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Clone, Default)]
 struct State {
@@ -61,20 +61,21 @@ impl Drop for Worker {
 pub(crate) struct Observers {
     hosts: Vec<Host>,
     workers: BTreeMap<String, Worker>,
-    discovered: Option<Instant>,
+    discovered_ms: Option<u64>,
     projector: super::project::Projector,
 }
 
 impl Observers {
     /// Discovery belongs to the peer cadence, never to local evidence invalidation.
     pub fn discover(&mut self, fleet: &Fleet<'_>, dirty: &Dirty, once: bool) -> Result<()> {
+        let now = now_ms();
         if self
-            .discovered
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+            .discovered_ms
+            .is_some_and(|at| now.checked_sub(at).is_some_and(|elapsed| elapsed < 10_000))
         {
             return Ok(());
         }
-        self.discovered = Some(Instant::now());
+        self.discovered_ms = Some(now);
         let discovered = crate::hosts::ObserverFleet::discover(
             fleet.shell,
             fleet.ledger,

@@ -748,7 +748,8 @@ mod boundary {
     /// serve's collections.
     #[test]
     fn readers_and_subscriptions_add_no_observation_work() {
-        let mut observer = Observer::start("boundary-scale", "3600");
+        // Hold peer discovery's clock still across both measured collections.
+        let mut observer = Observer::start_at("boundary-scale", "3600", now() + 1_000);
         count_git(&observer.rig);
         let path = reader_path(&observer.rig);
         let (mut herdr, alone) = collect(&mut observer, "alone");
