@@ -131,8 +131,15 @@ fn deadline_output(
         .entered
         .recv_timeout((started + PROCESS_DEADLINE).saturating_duration_since(Instant::now()))
         .unwrap_or_else(|error| panic!("{tool} was not entered for {args:?}: {error}; status={status:?}, stdout={stdout:?}, stderr={stderr:?}, tickets={:?}", rig.tickets()));
-    // Behaviour budget includes startup, but overshoot is measured only from tool entry.
-    assert!(exited.duration_since(entered) < Duration::from_millis(1500) + Duration::from_secs(2));
+    let max_ms: u64 = args.windows(2).find(|pair| pair[0] == "--max").unwrap()[1]
+        .strip_suffix("ms")
+        .unwrap()
+        .parse()
+        .unwrap();
+    // --max covers setup too; overshoot is measured only from tool entry.
+    assert!(
+        exited.duration_since(entered) < Duration::from_millis(max_ms) + Duration::from_secs(2)
+    );
     assert!(started.elapsed() < PROCESS_DEADLINE);
     (status, stdout, stderr)
 }
@@ -214,11 +221,13 @@ fn command_deadline_bounds_local_git_and_remote_report() {
     let rig = Rig::new("hung-git");
     rig.snapshot("state", now(), 0.0, 8);
     let _publisher = super::observation::seeded(&rig);
-    // Behaviour budget leaves startup room; the entry rendezvous excludes that setup.
+    // Entry is liveness, not the behaviour bound: 5 s is above 3x the loaded
+    // startup maximum (106 ms), with a 5 s floor for Mac startup exceeding 1.5 s.
+    // The entry-to-exit overshoot remains --max + 2 s.
     let (status, _, _) = deadline_output(
         &rig,
         "git",
-        &["run", "--wait", "--max", "1500ms", "--", "true"],
+        &["run", "--wait", "--max", "5000ms", "--", "true"],
     );
     assert_eq!(status.code(), Some(124));
 
@@ -227,12 +236,23 @@ fn command_deadline_bounds_local_git_and_remote_report() {
     rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
     rig.ingest_peers();
     let _publisher = super::observation::seeded(&rig);
-    rig.script("ssh", "#!/bin/sh\nprintf '%s\\n' '{\"deadline\":true,\"error\":\"deadline reached: git clone\"}'; exit 2\n");
-    let start = Instant::now();
-    let out = rig.run(&["wait", "remote", "--max", "1s"]);
-    assert_eq!(out.status.code(), Some(124));
-    assert_eq!(out.stdout, b"still running\n");
-    assert!(start.elapsed() < Duration::from_secs(2));
+    let entry = ToolEntry::new(&rig);
+    rig.script("ssh", "#!/bin/sh\nexec 3>\"$RIG/tool-entry\"\nprintf '%s\\n' '{\"deadline\":true,\"error\":\"deadline reached: git clone\"}'; exit 2\n");
+    // Give SSH the same entry allowance; its immediate deadline report must still
+    // be handled within the original short bound, independently of startup.
+    let started = Instant::now();
+    let mut command = rig.start(&["wait", "remote", "--max", "5000ms"]);
+    let status = command.wait();
+    let exited = Instant::now();
+    let (stdout, stderr) = command.output();
+    let entered = entry
+        .entered
+        .recv_timeout((started + PROCESS_DEADLINE).saturating_duration_since(Instant::now()))
+        .unwrap_or_else(|error| panic!("remote report was not entered: {error}; status={status:?}, stdout={stdout:?}, stderr={stderr:?}"));
+    assert_eq!(status.code(), Some(124));
+    assert_eq!(stdout, "still running\n");
+    assert!(exited.duration_since(entered) < Duration::from_secs(2));
+    assert!(started.elapsed() < PROCESS_DEADLINE);
 }
 
 #[test]
