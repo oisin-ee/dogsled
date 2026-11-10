@@ -8,9 +8,10 @@ import type {
   UnitRef,
 } from "./wasm.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { STATE_ENTRY, branchSnapshot } from "./state.ts";
 import type { TodoParams, TodoResult, TodoSession } from "./tool.ts";
 import { active, claim, importUnit, imported, inspect, parse, protect, settle } from "./wasm.ts";
+import { branchList, branchSnapshot, stateChange } from "./state.ts";
+import type { TodoDelta } from "./state.ts";
 import { ownsTodo } from "./lifecycle.ts";
 import { repositoryIdentity } from "./repository.ts";
 import { runTodo } from "./tool.ts";
@@ -145,14 +146,11 @@ class TaskProvider {
     this.context(ctx);
     this.#mutation(() => {
       const session = this.#session(),
-        change = importUnit(
-          branchSnapshot(session.branch()),
-          source,
-          session.sessionId,
-          repositoryIdentity(origin),
-        );
+        before = branchSnapshot(session.branch()),
+        change = importUnit(before, source, session.sessionId, repositoryIdentity(origin));
       if (change.persist) {
-        session.append(STATE_ENTRY, change.list);
+        const stored = stateChange(before, change.list);
+        session.append(stored.customType, stored.data, change.list);
       }
     });
   }
@@ -175,13 +173,11 @@ class TaskProvider {
         respond(() =>
           this.#mutation(() => {
             const session = this.#session(),
-              change = claim(
-                branchSnapshot(session.branch()),
-                JSON.stringify(input),
-                session.sessionId,
-              );
+              before = branchSnapshot(session.branch()),
+              change = claim(before, JSON.stringify(input), session.sessionId);
             if (change.persist) {
-              session.append(STATE_ENTRY, change.list);
+              const stored = stateChange(before, change.list);
+              session.append(stored.customType, stored.data, change.list);
             }
             return change.value;
           }),
@@ -192,13 +188,11 @@ class TaskProvider {
         respond(() =>
           this.#mutation(() => {
             const session = this.#session(),
-              change = settle(
-                branchSnapshot(session.branch()),
-                JSON.stringify(input),
-                session.sessionId,
-              );
+              before = branchSnapshot(session.branch()),
+              change = settle(before, JSON.stringify(input), session.sessionId);
             if (change.persist) {
-              session.append(STATE_ENTRY, change.list);
+              const stored = stateChange(before, change.list);
+              session.append(stored.customType, stored.data, change.list);
             }
             return change.value;
           }),
@@ -243,17 +237,26 @@ class TaskProvider {
   static #importScope(ctx: ExtensionContext, branch: TodoList): void {
     const sessionId = ctx.sessionManager.getSessionId(),
       receipt = imported(branch, sessionId);
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
-        const recorded = imported(parse(entry.data), sessionId);
-        if (
-          recorded !== undefined &&
-          (receipt === undefined ||
-            JSON.stringify(recorded.execution) !== JSON.stringify(receipt.execution) ||
-            recorded.digest !== receipt.digest ||
-            (recorded.seal !== undefined && receipt.seal === undefined))
-        ) {
-          throw new Error("SEEDED_SCOPE_LOCKED: branch cannot discard imported scope or its seal");
+    // Only changed records carry new receipts. Do not materialize lists here:
+    // Unrelated branches also appear in getEntries; never combine their orders.
+    for (const frame of branchList(ctx.sessionManager.getEntries())) {
+      for (const task of frame.changed) {
+        if (task.unit?.imported !== undefined) {
+          const recorded = imported(
+            parse({ tasks: [Object.assign({}, task, { subtasks: [] })] }),
+            sessionId,
+          );
+          if (
+            recorded !== undefined &&
+            (receipt === undefined ||
+              JSON.stringify(recorded.execution) !== JSON.stringify(receipt.execution) ||
+              recorded.digest !== receipt.digest ||
+              (recorded.seal !== undefined && receipt.seal === undefined))
+          ) {
+            throw new Error(
+              "SEEDED_SCOPE_LOCKED: branch cannot discard imported scope or its seal",
+            );
+          }
         }
       }
     }
@@ -269,7 +272,7 @@ class TaskProvider {
       before = branchSnapshot(ctx.sessionManager.getBranch());
     TaskProvider.#importScope(ctx, before);
     return {
-      append: (customType: string, list: TodoList): void => {
+      append: (customType: string, data: TodoList | TodoDelta, list: TodoList): void => {
         if (
           ctx.sessionManager.getSessionId() !== sessionId ||
           ctx.sessionManager.getLeafId() !== leaf
@@ -277,7 +280,7 @@ class TaskProvider {
           throw new Error("STALE_ORIGIN: session branch changed during task mutation");
         }
         protect(before, list, [...this.#leases.values()]);
-        this.#host.appendEntry(customType, list);
+        this.#host.appendEntry(customType, data);
       },
       branch: () => ctx.sessionManager.getBranch(),
       sessionId,

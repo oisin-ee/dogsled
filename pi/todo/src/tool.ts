@@ -1,7 +1,8 @@
-import { STATE_ENTRY, branchSnapshot } from "./state.ts";
 import { apply, view } from "./wasm.ts";
+import { branchSnapshot, stateChange } from "./state.ts";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Static } from "typebox";
+import type { TodoDelta } from "./state.ts";
 import type { TodoList } from "./wasm.ts";
 import type { parameters } from "./schema.ts";
 import { workUnitGuidance } from "./guidance.ts";
@@ -13,7 +14,7 @@ type TodoParams = Static<typeof parameters>;
 interface TodoSession {
   readonly sessionId: string;
   readonly branch: () => readonly SessionEntry[];
-  readonly append: (customType: string, list: TodoList) => void;
+  readonly append: (customType: string, data: TodoList | TodoDelta, list: TodoList) => void;
 }
 
 /** The tool result: the summary for the model and the list for rendering. */
@@ -48,7 +49,8 @@ const result = (list: TodoList, creation: boolean): TodoResult => ({
         sessionId: session.sessionId,
       });
     if (persist) {
-      session.append(STATE_ENTRY, list);
+      const change = stateChange(current, list);
+      session.append(change.customType, change.data, list);
     }
     return result(
       persist ? branchSnapshot(session.branch()) : list,

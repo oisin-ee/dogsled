@@ -81,8 +81,7 @@ async function todo(session: Session, input: any): Promise<any> {
 	return tool.execute("fixture-setup", input, undefined, undefined, session.extensionRunner.createToolContext("fixture-setup", new AbortController().signal));
 }
 function snapshot(manager: SessionManager): any {
-	const entry = manager.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "todo-state");
-	assert.ok(entry && entry.type === "custom"); return entry.data;
+	return branchSnapshot(manager.getBranch());
 }
 
 test("actual extension loader and startup guard: merged extension", async () => {

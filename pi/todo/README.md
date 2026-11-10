@@ -74,9 +74,19 @@ An active unit stays required for the sessions that implement code.
 
 ## State
 
-Each task change is saved as a `todo-state` entry on the session branch. A resumed session, a `/tree` move,
-and calls made from inside codemode all see the list of the current branch.
+Task changes use `todo-delta` entries when they are smaller than a full `todo-state` snapshot.
+Version 1 deltas contain changed roots or subtasks by unit ID, removed IDs, and order changes.
+Each order change places one ID after another ID under a parent, or at the start when `after` is null.
+A null parent identifies the root list. Changing one child does not copy its siblings.
+Full snapshots remain valid and replace the preceding list. Lists without stable IDs use full snapshots.
+
+All readers replay the entries on the current branch. A resumed session, a `/tree` move,
+and calls made from inside codemode see that branch's list.
+Contract revisions and seals keep the identity of the entry that first introduced them.
+A delta applies to the preceding list with those origins resolved, as each task mutation does.
 Old flat snapshots retain their recorded statuses and read with empty subtasks.
+Older extensions ignore `todo-delta` entries and see only the last full `todo-state` snapshot.
+They do not see changes saved as deltas. Use the updated extension to read the current list.
 
 ## Widget
 
