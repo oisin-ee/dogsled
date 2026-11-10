@@ -515,7 +515,9 @@ fn lost_placement_reply(marker: &str) {
     let (rig, repo) = place_rig(marker);
     real_preparation_peer(&rig);
     fs::write(rig.dir.join(marker), "").unwrap();
-    let _observer = peer_observer(&rig);
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -589,7 +591,9 @@ fn review_verified_absent_preparation_resends_original_delivery() {
     real_preparation_peer(&rig);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replacen("  *'host prepare '*|*'host prepared '*)", "  *'host prepare '*|*'host prepared '*)\n    case \"$*\" in *'host prepare '*) if test ! -f \"$RIG/failed-before-receipt\"; then touch \"$RIG/failed-before-receipt\"; exit 255; fi ;; esac", 1));
-    let _observer = peer_observer(&rig);
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -705,7 +709,9 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
         &script.replace("DOGSLED_STATE=", "HOME=\"$RIG/alias-home\" DOGSLED_STATE="),
     );
     fs::write(rig.dir.join("lose-preparation"), "").unwrap();
-    let _observer = peer_observer(&rig);
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -1045,6 +1051,8 @@ fn lost_reply_replay(after_ttl: bool) {
     real_reservation_peer(&rig, false);
     fs::write(rig.dir.join("lose-reply"), "").unwrap();
     let observer = peer_observer(&rig);
+    drop(observer);
+    let publisher = super::observation::seeded(&rig);
     let (code, queued) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 1, "{queued}");
     let ticket = rig.tickets()[0].clone();
@@ -1055,7 +1063,7 @@ fn lost_reply_replay(after_ttl: bool) {
     assert_eq!(original["reservation"], hold[0]);
     let retry = ticket["retry"]["next_ms"].as_u64().unwrap();
     let later = if after_ttl { retry + 100_000 } else { retry };
-    drop(observer);
+    drop(publisher);
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
     rig.snapshot("peer-state", later, 1000.0, 16);
     let output = rig.run(&["serve", "--once"]);
@@ -1094,7 +1102,10 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
     repository(&repo);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
-    let _observer = peer_observer(&rig);
+    // Keep the publication, but stop admission lanes before a pending ticket exists.
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, queued) = rig.json(&[
         "place",
         "--host",
@@ -1194,6 +1205,8 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     real_preparation_peer(&rig);
     fs::write(rig.dir.join("lose-release"), "").unwrap();
     let observer = peer_observer(&rig);
+    drop(observer);
+    let publisher = super::observation::seeded(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -1212,7 +1225,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (code, cancellation) = rig.json(&["cancel", &ticket]);
     assert_eq!(code, 2, "{cancellation}");
     assert_eq!(cancellation["status"], "too_late");
-    drop(observer);
+    drop(publisher);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["state"], "admitted");
