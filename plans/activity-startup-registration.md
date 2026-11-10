@@ -64,16 +64,22 @@ Tests: a pane that Herdr lists after the last sample registers in one apply. A s
 
 1. Register at `session_start` only if the session file exists (resume, fork, reload with a conversation). Otherwise, check for the file on boundary events (`message_start`, `message_end`, `turn_end`, `agent_settled`) until it exists. Never check on streaming deltas. The first user `message_end` handler runs before Pi writes the file, so the assistant `message_start` is normally the first event that finds it. That registers before the first reasoning streams. Do not use a timer before the file exists.
 2. Delete `diagnostic()` and every `console.error`. Inject a reporter from `registerActivity`, as `TodoPublisher` does in `pi/index.ts`. Use `ctx.ui.notify(…, "warning")` once per publisher, only for actionable terminal failures: `unauthorized`, `unsupported_version`, `invalid_request`, `sequence_conflict`, and `invalid_response`. Keep expected states silent.
-3. After U1, `agent_missing` and `session_unverified` are definitive for that attempt. Retry them at the next boundary event, not on a timer. Keep the PR #317 behavior for transport and 5xx outcomes: bounded backoff and exact-request replay.
+3. Keep the PR #317 bounded backoff and exact-request replay for `agent_missing`, `session_unverified`, `upstream_unavailable`, transport, and 5xx outcomes, but silently. After U1 these outcomes should be rare. A boundary-only retry would leave a resumed idle session without a producer if Herdr's session report ever lagged, because I deduced the load order from source and did not observe it.
 
 Tests: a new session sends no activity request before the file exists. It registers at the first boundary event after the file exists. No failure code writes to `console.error` or `process.stderr`. A terminal failure gives exactly one notification. Rewrite the PR #317 test "POST startup agent_missing recovers through registration" to cover boundary-event retry.
 
-### U3. Decouple authority latency from the observation loop (decision required)
+### U3. Decouple authority latency from the observation loop
+
+Decision on 10 November 2026: do both, U3a first and then U3b. Write the U3b brief from U3a's findings.
 
 U1 and U2 remove the symptom, but commands still wait for a full loop iteration. Two options:
 
 - **U3a, diagnose the saturated loop first.** This is recommended because the cause affects all of serve. Symbolize a profile of v0.34.2 or reproduce with a debug build, find the work that keeps the main thread busy, and fix that owner.
 - **U3b, isolate the authority.** Give it its own thread, its own cheap binding sampler (`herdr agent list` takes about 25 ms), and its own activity watch channel, separate from `Frame`. Commands then finish in milliseconds whatever the publication load. This changes `Publisher` and the IPC activity readers.
+
+## Briefs
+
+`plans/briefs/activity-startup/u1-serve-post-receipt-sample.md`, `u2-pi-deferred-silent-producer.md`, `u3a-serve-loop-saturation.md`.
 
 ## Order and acceptance
 
