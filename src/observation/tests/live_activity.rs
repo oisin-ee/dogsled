@@ -944,6 +944,26 @@ fn post_receipt_sample_confirms_agent_missing_before_refusing_registration() {
         );
     }
     assert_eq!(*shell.calls.lock().unwrap(), vec!["herdr agent list"; 2]);
+    // Once registration interest lapses, the unbound pane's refusal is forgotten.
+    let lapsed = Instant::now() + Duration::from_secs(16);
+    authority
+        .refresh_at(&shell, &empty_publication(), lapsed, 1003)
+        .unwrap();
+    assert!(authority.registration_refusals.is_empty());
+    // An invalid pane name is refused without being recorded or logged.
+    let mut response = enqueue(
+        &authority,
+        "w1:p1\nforged log line",
+        Command::Register(native.register("startup", 0)),
+    );
+    authority
+        .refresh_at(&shell, &empty_publication(), lapsed, 1004)
+        .unwrap();
+    assert_eq!(
+        response.try_recv().unwrap().unwrap_err().code,
+        ActivityCode::InvalidRequest
+    );
+    assert!(authority.registration_refusals.is_empty());
 }
 
 #[test]

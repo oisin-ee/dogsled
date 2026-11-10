@@ -245,6 +245,16 @@ impl Authority {
             let result = self.apply(&pending.pane, pending.command, now, now_ms);
             let _ = pending.reply.send(result);
         }
+        // A refusal for an unbound pane is remembered only while registration interest
+        // lasts, so panes that never appear cannot accumulate for the life of serve.
+        if self
+            .registration_interest
+            .is_none_or(|received| now.saturating_duration_since(received) >= LEASE)
+        {
+            let bindings = &self.bindings;
+            self.registration_refusals
+                .retain(|pane, _| bindings.contains_key(pane));
+        }
         Ok(())
     }
 
@@ -298,10 +308,11 @@ impl Authority {
     }
 
     fn apply(&mut self, pane: &str, command: Command, now: Instant, now_ms: u64) -> Outcome {
+        // An invalid pane name is never recorded or logged.
+        validate_pane(pane)?;
         match command {
             Command::Register(body) => {
-                let result =
-                    validate_pane(pane).and_then(|()| self.register(pane, body, now, now_ms));
+                let result = self.register(pane, body, now, now_ms);
                 match &result {
                     Ok(_) => {
                         self.registration_refusals.remove(pane);
@@ -315,10 +326,7 @@ impl Authority {
                 }
                 result
             }
-            Command::Publish(body) => {
-                validate_pane(pane)?;
-                self.publish(pane, body, now, now_ms)
-            }
+            Command::Publish(body) => self.publish(pane, body, now, now_ms),
         }
     }
 
