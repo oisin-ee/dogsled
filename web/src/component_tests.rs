@@ -354,6 +354,53 @@ fn catalogue_recovers_in_one_mounted_new_lead_and_preserves_draft_search_and_sel
     assert!(empty.contains("owner/beta was removed from the catalogue"));
 }
 
+#[test]
+fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selection() {
+    let handle = PortalHandle::default();
+    let draft_handle = DraftHandle::default();
+    let mut dom =
+        VirtualDom::new_with_props(catalogue_root, (handle.clone(), draft_handle.clone()));
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let mut publication = handle.get().unwrap();
+    let mut draft = draft_handle.get().unwrap();
+    dom.in_runtime(|| {
+        draft.set("Keep this draft".into());
+        publication.write().update(
+            Ok(catalogue_snapshot(&["owner/alpha", "owner/beta"], None, 1)),
+            1,
+        );
+    });
+    settle_catalogue(&mut dom);
+    let healthy = dioxus_ssr::render(&dom);
+    assert!(healthy.contains("value=\"owner/beta\""), "{healthy}");
+    assert!(!healthy.contains("disabled=true"), "{healthy}");
+    let before = catalogue_scopes(&dom);
+    // A serve restarted during a GitHub outage publishes its failure with no repositories.
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(
+                &[],
+                Some("GitHub catalogue: connection failed"),
+                2,
+            )),
+            2,
+        );
+    });
+    settle_catalogue(&mut dom);
+    let failed = dioxus_ssr::render(&dom);
+    assert_eq!(failed.matches("GitHub catalogue:").count(), 1, "{failed}");
+    assert!(failed.contains("value=\"owner/beta\""), "{failed}");
+    assert!(
+        !failed.contains("was removed from the catalogue"),
+        "{failed}"
+    );
+    assert!(!failed.contains("No GitHub repositories found"), "{failed}");
+    assert!(!failed.contains("disabled=true"), "{failed}");
+    assert_eq!(catalogue_scopes(&dom), before);
+    assert_eq!(draft(), "Keep this draft");
+}
+
 type SessionHandle =
     std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::agents::DetailSession>>>>>;
 

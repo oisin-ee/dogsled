@@ -287,6 +287,17 @@ impl PortalState {
                 }
                 match snapshot.repos {
                     Some(list) => {
+                        // A failed fetch without repositories (serve restarted during a GitHub
+                        // outage) carries no catalogue facts: keep the retained choices.
+                        let list = match self.catalogue.list.take() {
+                            Some(retained) if list.error.is_some() && list.repos.is_empty() => {
+                                portal_types::agents::RepoList {
+                                    repos: retained.repos,
+                                    error: list.error,
+                                }
+                            }
+                            _ => list,
+                        };
                         self.catalogue.list = Some(list);
                         self.catalogue.observation_error = None;
                     }
