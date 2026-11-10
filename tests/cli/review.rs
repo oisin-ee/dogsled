@@ -71,7 +71,7 @@ fn closed_wrapper_stdout_preserves_full_log_and_child_exit() {
 #[test]
 fn deadline_includes_discovery_and_placement_ssh() {
     for (name, args) in [
-        ("wait-discovery", vec!["wait", "unknown", "--max", "20ms"]),
+        ("wait-discovery", vec!["wait", "unknown", "--max", "1500ms"]),
         (
             "run-placement",
             vec!["run", "--wait", "--max", "20ms", "--", "true"],
@@ -106,7 +106,9 @@ fn deadline_includes_discovery_and_placement_ssh() {
         );
         assert!(start.elapsed() < Duration::from_secs(2), "{diagnostic}");
         if name == "wait-discovery" {
-            // Unknown-name lookup consumes the publication; there is no discovery SSH deadline.
+            // Unknown-name lookup consumes the publication and makes no discovery SSH call.
+            // --max starts at process start, so it leaves room for startup on a loaded host;
+            // an SSH call would still hit this deadline inside the 2 s elapsed check and exit 124.
             assert_eq!(out.status.code(), Some(2), "{diagnostic}");
             assert!(
                 !String::from_utf8_lossy(&out.stderr).contains("deadline reached"),

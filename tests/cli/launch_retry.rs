@@ -269,6 +269,7 @@ fn remote_preparation_release_requires_correlated_ack() {
         ("exact", "cat"),
     ] {
         let rig = Rig::short(&format!("ack-{case}"));
+        rig.placement_capacity();
         let repo = rig.dir.join("home/repo");
         repository(&repo);
         rig.peer();
@@ -290,7 +291,9 @@ fn remote_preparation_release_requires_correlated_ack() {
             &format!("{}{}{}", &script[..start], handler, &script[end..]),
         );
         rig.ingest_peers();
-        let observer = super::place::peer_observer(&rig);
+        // Only this place call may send a disposition. A live service also retries
+        // pending placement acknowledgments, so it races the single-call assertion.
+        let _publisher = super::observation::resolved(&rig);
         let (code, result) = rig.json(&[
             "place",
             "--host",
@@ -302,12 +305,15 @@ fn remote_preparation_release_requires_correlated_ack() {
             "--base",
             "main",
         ]);
-        drop(observer);
         assert_eq!(code == 0, case == "exact", "{case}: {result}");
         assert_eq!(rig.preparations(), other);
         assert!(!rig.dir.join("state/unit-requests").exists());
         let log = rig.log("ssh.log");
-        assert_eq!(log.matches("host prepared ").count(), 1, "{log}");
+        assert_eq!(
+            log.matches("host prepared ").count(),
+            1,
+            "{case}: {result}\n{log}"
+        );
         assert!(!log.contains("host launch "), "{log}");
     }
 }
