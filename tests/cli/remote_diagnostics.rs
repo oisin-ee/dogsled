@@ -37,8 +37,13 @@ fn assert_remote_launch_cause(cause: &str) {
     assert!(text.contains(cause) && text.contains("netcup"), "{error}");
     assert!(!text.contains("ssh "), "{error}");
     let plain = rig.run(&args);
-    assert_eq!(plain.status.code(), Some(2));
     let stderr = String::from_utf8(plain.stderr).unwrap();
+    assert_eq!(
+        plain.status.code(),
+        Some(2),
+        "stderr: {stderr}\nstdout: {}",
+        String::from_utf8_lossy(&plain.stdout)
+    );
     assert!(
         stderr.contains(cause) && stderr.contains("netcup"),
         "{stderr}"
