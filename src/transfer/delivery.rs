@@ -14,7 +14,7 @@ use crate::ledger::Ledger;
 use crate::shell::Shell;
 
 /// The largest single attachment.
-pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
+pub(super) const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 /// The inbox notice stays far below the inbox text limit, whatever the size of the change.
 const SUMMARY_LINES: usize = 40;
 const FILE: &str = "delivery.json";
@@ -101,7 +101,7 @@ fn root(ledger: &Ledger) -> PathBuf {
     ledger.dir.join("transfers")
 }
 
-fn write(dir: &Path, delivery: &Delivery) -> Result<()> {
+pub(super) fn write(dir: &Path, delivery: &Delivery) -> Result<()> {
     let temporary = dir.join(format!("{FILE}.tmp"));
     fs::write(&temporary, serde_json::to_vec_pretty(delivery)?)?;
     fs::rename(temporary, dir.join(FILE))?;
@@ -208,7 +208,7 @@ fn discard(shell: &dyn Shell, ledger: &Ledger, checkout: &Path, id: &str) {
     }
 }
 
-fn notice(delivery: &Delivery, dir: &Path) -> String {
+pub(super) fn notice(delivery: &Delivery, dir: &Path) -> String {
     let (what, how) = match delivery.kind {
         Kind::Files => (
             "files",
@@ -306,12 +306,6 @@ pub(crate) fn send(
     now: u64,
 ) -> Result<Sent> {
     let to = crate::inbox::target(fleet, target, host)?;
-    if !to.host.is_local() {
-        return Err(invalid(format!(
-            "{} is on {}; a transfer to another host is not available yet",
-            to.agent.pane, to.host.label
-        )));
-    }
     let terminal = to
         .agent
         .terminal_id
@@ -350,15 +344,34 @@ pub(crate) fn send(
             delivery,
         )?,
     };
-    let dir = super::directory(fleet.ledger, &delivery.id)?;
-    let text = notice(&delivery, &dir);
-    match crate::inbox::send(fleet, &to, from, "transfer", text, now) {
-        Ok(record) => Ok(Sent {
+    let announced = if to.host.is_local() {
+        let dir = super::directory(fleet.ledger, &delivery.id)?;
+        crate::inbox::send(fleet, &to, from, "transfer", notice(&delivery, &dir), now)
+            .map(|record| record.id)
+    } else {
+        // The peer stores its own copy and writes the notice with its own paths.
+        match super::peer::push(fleet, &to.host, &delivery.id) {
+            Ok(super::peer::Pushed::Stored(notice)) => Ok(notice),
+            Ok(super::peer::Pushed::Refused(reason)) => Err(invalid(format!(
+                "{} refused the transfer: {reason}",
+                to.host.label
+            ))),
+            Ok(super::peer::Pushed::Uncertain) => {
+                return Err(invalid(format!(
+                    "delivery to {} is uncertain; transfer {} is kept here; drop it with `dogsled transfer drop {}`",
+                    to.host.label, delivery.id, delivery.id
+                )));
+            }
+            Err(error) => Err(error),
+        }
+    };
+    match announced {
+        Ok(notice) => Ok(Sent {
             id: delivery.id,
             kind: delivery.kind,
             to: delivery.to,
             summary: delivery.summary,
-            notice: record.id,
+            notice,
         }),
         Err(error) => {
             discard(fleet.shell, fleet.ledger, checkout, &delivery.id);

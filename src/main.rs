@@ -344,6 +344,17 @@ fn lead_command(
     })
 }
 
+/// The peer side of a transfer: the envelope arrives on stdin, and the reply is one JSON value.
+fn host_transfer_put(node: &Node<'_>) -> Result<()> {
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut input)?;
+    print(
+        true,
+        &transfer::peer::receive(node.shell, node.ledger, &input),
+        String::new,
+    )
+}
+
 fn host_lead(node: &Node<'_>, config_path: &std::path::Path) -> Result<()> {
     let mut input = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input)?;
@@ -1064,6 +1075,22 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     Ok(())
 }
 
+fn host_jobs(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
+    match cmd {
+        HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
+        HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
+        HostCommand::Logs { id, offset } => {
+            print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
+        }
+        HostCommand::Stop { id } => {
+            jobs::stop(node.ledger, &id)?;
+            print(true, &serde_json::json!({"stopped":true}), String::new)?;
+        }
+        _ => return Err(Error::Invalid("not a job command".into())),
+    }
+    Ok(())
+}
+
 fn host_reserve(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     let HostCommand::Reserve {
         id,
@@ -1507,6 +1534,7 @@ fn state_jobs(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
+        HostCommand::TransferPut { .. } => host_transfer_put(node)?,
         HostCommand::Lead { .. } | HostCommand::AgentDetail { .. } => {
             return Err(Error::Invalid(
                 "this host command is dispatched before host routing".into(),
@@ -1528,16 +1556,11 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             request_validity,
         )?,
         HostCommand::RepoOpen { repo } => print_host_repo_open(node, &repo)?,
-        HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
         HostCommand::Recovery { command } => print_host_recovery(node, &command)?,
-        HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
-        HostCommand::Logs { id, offset } => {
-            print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
-        }
-        HostCommand::Stop { id } => {
-            jobs::stop(node.ledger, &id)?;
-            print(true, &serde_json::json!({"stopped":true}), String::new)?;
-        }
+        cmd @ (HostCommand::Job { .. }
+        | HostCommand::Jobs
+        | HostCommand::Logs { .. }
+        | HostCommand::Stop { .. }) => host_jobs(cmd, node)?,
         HostCommand::Checkout {
             path,
             origin,

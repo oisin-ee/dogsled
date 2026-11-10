@@ -30,6 +30,7 @@ pub(crate) fn host(
         job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
         request_validity: Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION),
         placement_replay: Some(crate::node::PLACEMENT_VERSION),
+        transfer: Some(crate::node::TRANSFER_VERSION),
         holds: crate::holds::local(
             node.ledger,
             crate::hosts::LOCAL,

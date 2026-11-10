@@ -88,7 +88,8 @@
       "request_validity": 1,
       "running": true,
       "sampled_ms": 10000,
-      "service_lanes": []
+      "service_lanes": [],
+      "transfer": 1
     },
     "repos": {
       "error": "gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate: exit fake: no scripted response for `gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate`",

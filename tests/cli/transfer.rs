@@ -753,3 +753,260 @@ fn an_unfinished_apply_stays_unresolved_and_is_never_repeated() {
     assert_eq!(git(&to, &["status", "--porcelain"]), "");
     assert_eq!(recovery_refs(&to), "");
 }
+
+/// Add a second host, "netcup", with one agent, and an ssh that runs the peer's commands
+/// against the peer's own state directory. While `lose-reply` exists, one reply is lost.
+fn peer(rig: &Rig, local: super::observation::Supplied) -> super::observation::Supplied {
+    let (code, snapshot) = rig.json(&["host", "snapshot"]);
+    assert_eq!(code, 0, "{snapshot}");
+    assert_eq!(snapshot["transfer"], 1, "{snapshot}");
+    rig.put("peer-snapshot.json", &snapshot);
+    let (_, mut frame) = rig.json(&["observation", "current"]);
+    drop(local);
+    let here = frame["views"]["hosts"]["data"][0].clone();
+    let mut there = here.clone();
+    there["id"] = json!("8103");
+    there["label"] = json!("netcup");
+    there["target"] = json!("peer-host");
+    there["headroom"]["host"] = json!("8103");
+    there["probe"]["agent_panes"] = json!([{"pane":"w9:p1","agent":"pi","state":"idle","name":"remote",
+        "transcript":null,"transcript_modified":null,"terminal_id":"term_peer"}]);
+    frame["views"]["hosts"]["data"] = json!([here, there]);
+    let publisher = super::observation::Supplied::start(rig, frame);
+    // Herdr is shared by both fixture hosts, so the peer's agent is listed there too.
+    let mut panes = PANES.to_vec();
+    panes.push(("w9:p1", "term_peer", "remote"));
+    let listed: Vec<Value> = panes
+        .iter()
+        .map(|(pane, terminal, name)| {
+            json!({"pane_id":pane,"agent":"pi","agent_status":"idle","name":name,"terminal_id":terminal})
+        })
+        .collect();
+    rig.put("agents.json", &json!({"result":{"agents":listed}}));
+    rig.script(
+        "ssh",
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RIG/ssh.log"
+for remote do :; done
+case "$remote" in
+  *'host snapshot'*) cat "$RIG/peer-snapshot.json" ;;
+  *'host transfer-put --input -'*)
+    env -u HERDR_PANE_ID HOME="$RIG/peer-home" DOGSLED_STATE="$RIG/peer-state" sh -c '"$DOGSLED_BIN" '"$remote" > "$RIG/transfer-reply.json" 2>> "$RIG/peer-stderr.log" || exit
+    if test -e "$RIG/lose-always"; then exit 255; fi
+    if test -e "$RIG/lose-reply"; then rm "$RIG/lose-reply"; exit 255; fi
+    cat "$RIG/transfer-reply.json" ;;
+  *) exit 97 ;;
+esac
+"#,
+    );
+    fs::create_dir_all(rig.dir.join("peer-home")).unwrap();
+    // The peer's own snapshot lists its agent, as its `serve` would publish it.
+    fs::create_dir_all(rig.dir.join("peer-state")).unwrap();
+    rig.put_host_at(
+        "peer-state",
+        &json!({"sampled_ms":now(),"probe":{"host":"local","label":"local","load1":0.0,"cores":8,
+            "memory":{"used_bytes":0,"total_bytes":1},"disk_free_percent":50.0,
+            "agents":{"total":1,"by_status":{}},"agent_panes":[{"pane":"w9:p1","agent":"pi",
+            "state":"idle","name":"remote","transcript":null,"transcript_modified":null,
+            "terminal_id":"term_peer"}],"reservations":[],"panes":[]}}),
+    );
+    rig.config("remote_command = []\n");
+    publisher
+}
+
+/// Run on the peer host, as its agent.
+fn on_peer(rig: &Rig, cwd: Option<&Path>, args: &[&str]) -> (i32, Value) {
+    let mut command = rig.cmd(args);
+    command
+        .arg("--json")
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("DOGSLED_STATE", rig.dir.join("peer-state"))
+        .env("HOME", rig.dir.join("peer-home"));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let out = command.output().unwrap();
+    let value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}: {} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    (out.status.code().unwrap(), value)
+}
+
+fn peer_stored(rig: &Rig) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(rig.dir.join("peer-state/transfers")) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect()
+}
+
+fn puts(rig: &Rig) -> usize {
+    rig.log("ssh.log")
+        .lines()
+        .filter(|line| line.contains("host transfer-put --input -"))
+        .count()
+}
+
+#[test]
+fn a_transfer_reaches_an_agent_on_another_host_once() {
+    let (rig, local) = rig("transfer-peer");
+    let _publisher = peer(&rig, local);
+    let (code, claimed) = on_peer(&rig, None, &["inbox", "claim", "--harness", "pi"]);
+    assert_eq!((code, claimed), (0, json!([])));
+
+    let notes = rig.dir.join("notes.md");
+    fs::write(&notes, "read this\n").unwrap();
+    let (code, sent) = as_pane(
+        &rig,
+        "w1:p1",
+        None,
+        &[
+            "transfer",
+            "send",
+            "remote",
+            "--files",
+            notes.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{sent}");
+    let id = sent["id"].as_str().unwrap().to_owned();
+    assert_eq!(sent["notice"], format!("transfer-{id}"));
+    assert_eq!(peer_stored(&rig), std::slice::from_ref(&id));
+    let there = rig.dir.join("peer-state/transfers").join(&id);
+    assert_eq!(
+        fs::read_to_string(there.join("files/notes.md")).unwrap(),
+        "read this\n"
+    );
+    let inbox = rig.state_at("peer-state", &["inbox", "term_peer"]);
+    assert_eq!(inbox.as_array().unwrap().len(), 1, "{inbox}");
+    assert_eq!(inbox[0]["kind"], "transfer");
+    // The notice names the peer's own copy, and nothing reached the local worker.
+    let text = inbox[0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(there.join("files").to_str().unwrap()),
+        "{text}"
+    );
+    assert_eq!(rig.inbox("term_work"), json!([]));
+    assert_eq!(puts(&rig), 1, "{}", rig.log("ssh.log"));
+    let (code, shown) = on_peer(&rig, None, &["transfer", "show", &id]);
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(shown["paths"][0], json!(there.join("files/notes.md")));
+
+    // Changes: the peer applies them in its own checkout from its own copy.
+    let (repo, _base, _head) = checkout(&rig);
+    let to = recipient(&rig, &repo);
+    fs::create_dir(repo.join("sub")).unwrap();
+    fs::write(repo.join("sub/new.txt"), "new\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "more"]);
+    let (code, sent) = as_pane(
+        &rig,
+        "w1:p1",
+        Some(&repo),
+        &["transfer", "send", "remote", "--changes"],
+    );
+    assert_eq!(code, 0, "{sent}");
+    let (code, applied) = on_peer(
+        &rig,
+        Some(&to),
+        &["transfer", "apply", sent["id"].as_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{applied}");
+    assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "changed\n");
+    assert_eq!(fs::read_to_string(to.join("sub/new.txt")).unwrap(), "new\n");
+    assert_eq!(
+        rig.state_at("peer-state", &["inbox", "term_peer"])
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn a_lost_reply_stores_and_announces_once() {
+    let (rig, local) = rig("transfer-peer-lost");
+    let _publisher = peer(&rig, local);
+    on_peer(&rig, None, &["inbox", "claim", "--harness", "pi"]);
+    let notes = rig.dir.join("notes.md");
+    fs::write(&notes, "read this\n").unwrap();
+    fs::write(rig.dir.join("lose-reply"), "").unwrap();
+    let args = [
+        "transfer",
+        "send",
+        "remote",
+        "--files",
+        notes.to_str().unwrap(),
+    ];
+    let (code, sent) = as_pane(&rig, "w1:p1", None, &args);
+    assert_eq!(code, 0, "{sent} {}", rig.log("peer-stderr.log"));
+    assert_eq!(puts(&rig), 2, "{}", rig.log("ssh.log"));
+    assert_eq!(peer_stored(&rig), [sent["id"].as_str().unwrap().to_owned()]);
+    assert_eq!(
+        rig.state_at("peer-state", &["inbox", "term_peer"])
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // No reply at all: the sender keeps its copy and says that the outcome is unknown.
+    fs::write(rig.dir.join("lose-always"), "").unwrap();
+    let (code, refused) = as_pane(&rig, "w1:p1", None, &args);
+    assert_eq!(code, 2, "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(
+        error.contains("uncertain") && error.contains("is kept here"),
+        "{error}"
+    );
+    assert_eq!(stored(&rig).len(), 2);
+    assert_eq!(peer_stored(&rig).len(), 2);
+}
+
+#[test]
+fn a_peer_that_cannot_take_a_transfer_leaves_nothing_behind() {
+    let (rig, local) = rig("transfer-peer-refused");
+    let _publisher = peer(&rig, local);
+    let notes = rig.dir.join("notes.md");
+    fs::write(&notes, "read this\n").unwrap();
+    let args = [
+        "transfer",
+        "send",
+        "remote",
+        "--files",
+        notes.to_str().unwrap(),
+    ];
+
+    // The recipient on the peer reads no inbox: stored nowhere, announced nowhere.
+    let (code, refused) = as_pane(&rig, "w1:p1", None, &args);
+    assert_eq!(code, 2, "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(
+        error.contains("netcup refused") && error.contains("has no dogsled inbox reader"),
+        "{error}"
+    );
+    assert_eq!(peer_stored(&rig), Vec::<String>::new());
+    assert_eq!(stored(&rig), Vec::<String>::new());
+
+    // A peer on a release without the transfer ingress is never sent an envelope.
+    let mut old = rig.read("peer-snapshot.json");
+    old.as_object_mut().unwrap().remove("transfer");
+    rig.put("peer-snapshot.json", &old);
+    let before = puts(&rig);
+    let (code, refused) = as_pane(&rig, "w1:p1", None, &args);
+    assert_eq!(code, 2, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("without transfer support"),
+        "{refused}"
+    );
+    assert_eq!(puts(&rig), before);
+    assert_eq!(stored(&rig), Vec::<String>::new());
+}

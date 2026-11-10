@@ -291,6 +291,15 @@ fn put_checked(
     )
 }
 
+/// Put a record that a peer host built for an agent on this host.
+pub(crate) fn deliver(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    record: Record,
+) -> Result<Record> {
+    put_checked(ledger, shell, record, None)
+}
+
 fn put(ledger: &Ledger, record: Record) -> Result<Record> {
     deliverable(ledger, &record)?;
     update(ledger, &record.terminal.clone(), |all| {

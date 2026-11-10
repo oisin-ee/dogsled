@@ -777,6 +777,12 @@ pub enum HostCommand {
         #[arg(long)]
         repo: String,
     },
+    /// Store one transfer envelope read from stdin and announce it to its recipient here.
+    #[command(hide = true)]
+    TransferPut {
+        #[arg(long, value_parser = ["-"])]
+        input: String,
+    },
     /// Start a lead on this host only, using a versioned delivery read from stdin.
     #[command(hide = true)]
     Lead {

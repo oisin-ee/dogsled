@@ -13,6 +13,7 @@ use crate::shell::{Output, Shell};
 
 pub(crate) mod apply;
 pub(crate) mod delivery;
+pub(crate) mod peer;
 
 pub(crate) type Result<T> = std::result::Result<T, Refusal>;
 
