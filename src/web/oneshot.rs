@@ -254,8 +254,16 @@ mod tests {
             &[],
             7,
         );
-        let initial =
-            super::super::test_support::publish(&mut publisher, &ledger, board.clone(), vec![])?;
+        let agents: Vec<portal_types::agents::AgentView> =
+            serde_json::from_value(serde_json::json!([
+                {"host": "local", "pane": "pane", "state": "idle"}
+            ]))?;
+        let initial = super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board.clone(),
+            agents.clone(),
+        )?;
         let mut ipc = crate::observation::ipc::Server::new(&ledger.dir)?;
         ipc.bind(publisher.subscribe())?;
         let file = ledger.dir.join("interview.json");
@@ -305,7 +313,7 @@ mod tests {
             assert_eq!(Some(first), initial.snapshot);
             board.generated_ms = 8;
             let changed =
-                super::super::test_support::publish(&mut publisher, &ledger, board, vec![])?;
+                super::super::test_support::publish(&mut publisher, &ledger, board, agents)?;
             let second = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, snapshots.recv())
                 .await
                 .expect("replacement publication")

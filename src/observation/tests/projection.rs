@@ -359,6 +359,110 @@ fn all_views_share_one_capture_and_published_revision() {
 }
 
 #[test]
+fn closed_owner_requests_leave_publication_but_keep_durable_history() {
+    let mut fixture = Fixture::new();
+    let question: crate::web::store::Entry = serde_json::from_value(json!({
+        "pending": {
+            "id":"question-one","pane":"local-worker","session":"local-session",
+            "cwd":"/repo","created_ms":1,
+            "questions":{"questions":[{"id":"q","type":"text","question":"Which?"}]}
+        }
+    }))
+    .unwrap();
+    let review: crate::web::reviews::Record = serde_json::from_value(json!({
+        "review": {
+            "id":"review-one","pane":"local-worker","session":"local-session",
+            "cwd":"/repo","path":"plans/change.md",
+            "revisions":[{"n":1,"content":"# Plan","submitted_ms":1}],
+            "annotations":[],"general":"","decision":null
+        },
+        "delivered":false
+    }))
+    .unwrap();
+    crate::store::write(&fixture.ledger, |tx| {
+        crate::web_store::questions::put(tx, &question)?;
+        crate::web_store::reviews::put(tx, &review)
+    })
+    .unwrap();
+    let mut projector = project::Projector::default();
+    let mut publisher = Publisher::new().unwrap();
+    let mut input = fixture.input();
+    let local = projector.inputs(&fixture.fleet(), &input);
+    project::derive(
+        &local,
+        vec![fixture.local.clone()],
+        &(&fixture.policy).into(),
+        &mut input,
+    )
+    .unwrap();
+    let first = publisher.replace(input).unwrap();
+    assert_eq!(first.views["inbox"]["data"]["count"], 2);
+    let requests = &first.views["inbox"]["data"]["items"];
+    assert_eq!(requests[0]["id"], review.review.id);
+    assert_eq!(requests[1]["id"], question.pending.id);
+
+    let mut items = crate::items::list(&fixture.ledger).unwrap();
+    let closed = items
+        .iter_mut()
+        .find(|item| item.id == "local-child")
+        .unwrap();
+    closed.closed_ms = Some(NOW - 1);
+    closed.branch = Some(crate::done::Branch {
+        repo: "/execution-only/repo".into(),
+        name: "feat/retained".into(),
+        ahead: 2,
+        landed: false,
+    });
+    crate::store::put_items(&fixture.ledger, &items).unwrap();
+    fixture.local.probe.as_mut().unwrap().agent_panes.clear();
+    let mut peer = host("peer", "idle");
+    peer.probe.as_mut().unwrap().agent_panes[0].pane = "local-worker".into();
+    let mut input = fixture.input();
+    let local = projector.inputs(&fixture.fleet(), &input);
+    project::derive(
+        &local,
+        vec![fixture.local.clone(), peer],
+        &(&fixture.policy).into(),
+        &mut input,
+    )
+    .unwrap();
+    let changed = publisher.replace(input).unwrap();
+    assert_eq!(changed.epoch, first.epoch);
+    assert!(changed.revision > first.revision);
+    let portal = &changed.views["portal"]["data"];
+    assert_eq!(portal["inbox"], json!({"count":0,"items":[]}));
+    assert_eq!(portal["inbox"], changed.views["inbox"]["data"]);
+    let agents = portal["agents"].as_array().unwrap();
+    assert!(agents.iter().all(|agent| agent["host"] != "local"));
+    assert!(
+        agents
+            .iter()
+            .any(|agent| agent["host"] == "peer" && agent["pane"] == "local-worker")
+    );
+    let row = portal["board"]["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|repo| repo["rows"].as_array().unwrap())
+        .find(|row| row["id"] == "local-child")
+        .unwrap();
+    assert_eq!(row["pane"], "local-worker");
+    assert_eq!(row["state"], "closed");
+    assert_eq!(
+        serde_json::to_value(crate::items::list(&fixture.ledger).unwrap()).unwrap(),
+        serde_json::to_value(items).unwrap(),
+    );
+    let retained = crate::store::read(&fixture.ledger, |tx| {
+        Ok((
+            crate::web_store::questions::get(tx, "question-one")?,
+            crate::web_store::reviews::get(tx, "review-one")?,
+        ))
+    })
+    .unwrap();
+    assert_eq!(json!(retained), json!((question, review)));
+}
+
+#[test]
 fn fleet_agent_projection_keeps_same_pane_on_distinct_hosts() {
     let fixture = Fixture::new();
     let mut input = fixture.input();
@@ -649,7 +753,9 @@ fn failed_terminal_capture_gaps_agents_and_owner_findings() {
         &mut input,
     )
     .unwrap();
-    for key in ["agents", "findings"] {
+    assert!(input.views["inbox"]["data"].is_null());
+    assert!(input.views["portal"]["data"]["inbox"].is_null());
+    for key in ["agents", "findings", "inbox"] {
         assert!(input.views[key]["data"].is_null(), "{key}");
         assert!(
             input.views[key]["gaps"]

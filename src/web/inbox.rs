@@ -42,8 +42,16 @@ pub(crate) fn view(
                 .or_else(|| agent.and_then(|agent| agent.repository.clone())),
         )
     };
+    let present = |pane: &str| {
+        agents
+            .iter()
+            .any(|agent| agent.host == "local" && agent.pane == pane)
+    };
     let mut items = Vec::new();
-    for review in reviews.iter().filter(|review| review.decision.is_none()) {
+    for review in reviews
+        .iter()
+        .filter(|review| review.decision.is_none() && present(&review.pane))
+    {
         let (agent_title, repository) = metadata(&review.pane);
         items.push(InboxItem {
             kind: InboxKind::Review,
@@ -61,7 +69,7 @@ pub(crate) fn view(
             ),
         });
     }
-    for question in questions {
+    for question in questions.iter().filter(|question| present(&question.pane)) {
         let (agent_title, repository) = metadata(&question.pane);
         items.push(InboxItem {
             kind: InboxKind::Question,
@@ -176,6 +184,68 @@ mod tests {
         }
     }
 
+    fn agent(host: &str, pane: &str, state: &str) -> AgentView {
+        AgentView {
+            host: host.into(),
+            pane: pane.into(),
+            name: Some("worker".into()),
+            title: None,
+            agent: None,
+            state: state.into(),
+            cwd: None,
+            repository: None,
+            blocked: None,
+        }
+    }
+
+    fn question() -> Result<Pending> {
+        Ok(serde_json::from_value(json!({
+            "id": "question-one", "pane": "worker-pane", "session": "session",
+            "cwd": "/repo", "created_ms": 5,
+            "questions": {"questions": [{"id": "q", "type": "text", "question": "Which?"}]}
+        }))?)
+    }
+
+    #[test]
+    fn requests_require_a_present_local_owner_not_a_retained_row_or_peer() -> Result<()> {
+        let mut board = board()?;
+        let row = &mut board.repos[0].rows[0];
+        row.state = "closed".into();
+        row.unseen = false;
+        for agents in [vec![], vec![agent("peer", "worker-pane", "idle")]] {
+            let inbox = view(&board, &[review()], &[question()?], &agents, 20);
+            assert_eq!(inbox.count, 0);
+            assert_eq!(inbox.items, []);
+        }
+        // Leads have no retained worker row to remove.
+        board.repos.clear();
+        let mut review = review();
+        review.pane = "lead-pane".into();
+        let mut question = question()?;
+        question.pane = "lead-pane".into();
+        assert_eq!(view(&board, &[review], &[question], &[], 20).count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn present_owners_keep_requests_regardless_of_state() -> Result<()> {
+        let mut board = board()?;
+        board.repos.clear();
+        for state in ["idle", "stopped", "blocked", "waiting", "asking", "done"] {
+            let inbox = view(
+                &board,
+                &[review()],
+                &[question()?],
+                &[agent("local", "worker-pane", state)],
+                20,
+            );
+            assert_eq!(inbox.count, 2, "{state}");
+            assert_eq!(inbox.items[0].kind, InboxKind::Review);
+            assert_eq!(inbox.items[1].kind, InboxKind::Question);
+        }
+        Ok(())
+    }
+
     #[test]
     fn inbox_revision_counts_submitted_reviews_and_is_zero_for_questions() -> Result<()> {
         let mut review = review();
@@ -189,7 +259,13 @@ mod tests {
             "cwd": "/repo", "created_ms": 5,
             "questions": {"questions": [{"id": "q", "type": "text", "question": "Which?"}]}
         }))?;
-        let inbox = view(&board()?, &[review], &[question], &[], 20);
+        let inbox = view(
+            &board()?,
+            &[review],
+            &[question],
+            &[agent("local", "worker-pane", "idle")],
+            20,
+        );
         assert_eq!(inbox.items[0].kind, InboxKind::Review);
         assert_eq!(inbox.items[0].revision, 2);
         assert_eq!(inbox.items[1].kind, InboxKind::Question);
@@ -220,7 +296,13 @@ mod tests {
                 .last_mut()
                 .ok_or_else(|| Error::Invalid("missing test revision".to_owned()))?
                 .content = content.to_owned();
-            let inbox = view(&board()?, &[review.clone()], &[], &[], 20);
+            let inbox = view(
+                &board()?,
+                &[review.clone()],
+                &[],
+                &[agent("local", "worker-pane", "idle")],
+                20,
+            );
             let item = inbox
                 .items
                 .iter()
@@ -287,7 +369,7 @@ mod tests {
             &mut publisher,
             &ledger,
             board.clone(),
-            vec![],
+            vec![agent("local", "worker-pane", "idle")],
         )?);
         let (changed, remaining) = next_inbox(stream).await;
         assert!(changed.contains("\"count\":1"));
@@ -298,7 +380,7 @@ mod tests {
             &mut publisher,
             &ledger,
             board,
-            vec![],
+            vec![agent("local", "worker-pane", "idle")],
         )?);
         let (answered, mut stream) = next_inbox(stream).await;
         assert!(answered.contains("\"count\":0"));
@@ -309,6 +391,115 @@ mod tests {
                 .expect("shutdown deadline")
                 .is_none()
         );
+        std::fs::remove_dir_all(ledger.dir)?;
+        Ok(())
+    }
+
+    async fn next_snapshot(
+        stream: &mut axum::body::BodyDataStream,
+    ) -> Result<portal_types::PortalSnapshot> {
+        use futures_util::StreamExt as _;
+        loop {
+            let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
+                .await
+                .expect("SSE event deadline")
+                .expect("SSE stays open")
+                .expect("SSE bytes");
+            let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 event");
+            if text.contains("event: portal\n") {
+                let data = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .expect("portal event data");
+                let portal_types::PortalEvent::Snapshot(snapshot) = serde_json::from_str(data)?
+                else {
+                    panic!("expected a complete portal snapshot");
+                };
+                return Ok(*snapshot);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_owner_publication_removes_requests_from_get_and_open_stream() -> Result<()> {
+        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let review = review();
+        crate::store::write(&ledger, |tx| {
+            crate::web_store::reviews::put(
+                tx,
+                &super::super::reviews::Record {
+                    review: review.clone(),
+                    delivered: false,
+                },
+            )
+        })?;
+        let mut publisher = crate::observation::Publisher::new()?;
+        let (sender, receiver) = tokio::sync::watch::channel(super::super::PortalState::default());
+        let state = AppState::new(
+            receiver,
+            7465,
+            None,
+            super::super::guard::Token::new("token".into()),
+            ledger.clone(),
+        );
+        let id = state.questions.create(serde_json::from_value(json!({
+            "pane": "worker-pane", "session": "session", "cwd": "/repo",
+            "questions": {"title": "Choose", "questions": [{"id": "q", "type": "text", "question": "Which?"}]}
+        }))?).await?;
+        let pending = state.questions.list().await?;
+        let mut board = board()?;
+        board.repos[0].rows[0].unseen = false;
+        sender.send_replace(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board.clone(),
+            vec![agent("local", "worker-pane", "stopped")],
+        )?);
+        let initial = served_inbox(&state).await?;
+        assert_eq!(initial.count, 2);
+        assert_eq!(initial.items[0].id, review.id);
+        assert_eq!(initial.items[1].id, id);
+        let response = super::super::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stream")
+                    .header(header::HOST, "localhost:7465")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+        let first = next_snapshot(&mut stream).await?;
+        assert_eq!(first.inbox, Some(initial));
+
+        // Keep the historical board row and a same-pane peer, but remove the local owner.
+        board.repos[0].rows[0].state = "closed".into();
+        sender.send_replace(super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board,
+            vec![agent("peer", "worker-pane", "idle")],
+        )?);
+        let changed = next_snapshot(&mut stream).await?;
+        assert_eq!(changed.epoch, first.epoch);
+        assert!(changed.revision > first.revision);
+        let served = served_inbox(&state).await?;
+        assert_eq!(served.count, 0);
+        assert_eq!(served.items, []);
+        assert_eq!(changed.inbox, Some(served));
+        let row = &changed.board.expect("published board").repos[0].rows[0];
+        assert_eq!(row.pane.as_deref(), Some("worker-pane"));
+        assert_eq!(row.state, "closed");
+        assert_eq!(state.questions.list().await?, pending);
+        let retained =
+            crate::store::read(&ledger, |tx| crate::web_store::reviews::get(tx, &review.id))?
+                .expect("retained review");
+        assert_eq!(retained.review, review);
+        assert!(!retained.delivered);
+        state.stop.cancel();
+        drop(stream);
         std::fs::remove_dir_all(ledger.dir)?;
         Ok(())
     }
@@ -362,7 +553,7 @@ mod tests {
         }))?;
         let id = state.questions.create(body).await?;
         let pending = state.questions.list().await?;
-        let agent = AgentView {
+        let blocked_agent = AgentView {
             host: "local".into(),
             pane: "worker-pane".into(),
             name: Some("worker".into()),
@@ -376,7 +567,7 @@ mod tests {
                 options: vec![],
             }),
         };
-        let view = view(&board()?, &[review.clone()], &pending, &[agent], 20);
+        let view = view(&board()?, &[review.clone()], &pending, &[blocked_agent], 20);
         assert_eq!(view.count, 4);
         assert_eq!(
             view.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
@@ -396,7 +587,7 @@ mod tests {
             &mut publisher,
             &ledger,
             board()?,
-            vec![],
+            vec![agent("local", "worker-pane", "idle")],
         )?);
         let served = served_inbox(&state).await?;
         assert_eq!(served.count, 3);
@@ -408,7 +599,7 @@ mod tests {
             &mut publisher,
             &ledger,
             board()?,
-            vec![],
+            vec![agent("local", "worker-pane", "idle")],
         )?);
         let served = served_inbox(&state).await?;
         assert_eq!(served.count, 1);
