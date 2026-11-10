@@ -791,6 +791,30 @@ fn observe(shell: &dyn Shell, checkout: &Path) -> Result<Observation> {
     })
 }
 
+/// Raw trees captured without creating a ref or changing the live index.
+#[derive(Debug)]
+pub(crate) struct Trees {
+    pub(crate) head: Head,
+    pub(crate) index_tree: String,
+    pub(crate) worktree_tree: String,
+}
+
+pub(crate) fn trees(shell: &dyn Shell, checkout: &Path) -> Result<Trees> {
+    preflight(shell, checkout)?;
+    let before = observe(shell, checkout)?;
+    let scratch = Scratch::new()?;
+    let index_tree = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
+    let worktree_tree = worktree_tree(shell, checkout, &scratch, &index_tree)?;
+    if before != observe(shell, checkout)? {
+        return Err(Refusal::CheckoutChanged.into());
+    }
+    Ok(Trees {
+        head: before.head,
+        index_tree,
+        worktree_tree,
+    })
+}
+
 fn index_tree(
     shell: &dyn Shell,
     checkout: &Path,
@@ -1130,7 +1154,7 @@ fn walk(root: &Path, dir: &Path, submodules: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn commit_tree(
+pub(crate) fn commit_tree(
     shell: &dyn Shell,
     checkout: &Path,
     tree: &str,
