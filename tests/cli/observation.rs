@@ -227,6 +227,92 @@ pub(super) fn publication(revision: u64) -> Value {
             "empty_job_history":view(json!({"jobs":[],"hosts":[]}))},"gaps":[]})
 }
 
+#[test]
+fn serve_logs_an_observation_connection_error_once_with_its_operation() {
+    let observer = super::service_lanes::Observer::start("observation-error-log", "3600");
+    let path = observer.rig.dir.join("state/observation.sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
+    stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    writeln!(stream, "{{\"version\":1,\"operation\":\"subscribe\"}}").unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let frame: Value = serde_json::from_str(&line).unwrap();
+    assert!(frame["revision"].is_number(), "{frame}");
+
+    // Extra subscriber input is a deterministic connection error, not a clean EOF.
+    reader.get_mut().write_all(b"x").unwrap();
+    line.clear();
+    assert_eq!(reader.read_line(&mut line).unwrap(), 0, "{line}");
+    let expected = "dogsled observation subscribe: unexpected observation subscriber data";
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let journal = observer.rig.log("journal");
+        if journal.lines().any(|line| line == expected) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing connection diagnostic: {journal}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // A normal current request succeeds, and a normal subscriber EOF stays silent.
+    let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+    stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    writeln!(stream, "{{\"version\":1,\"operation\":\"subscribe\"}}").unwrap();
+    let mut reader = BufReader::new(stream);
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    drop(reader);
+    assert!(observer.current()["revision"].is_number());
+    observer.quiet();
+    let journal = observer.rig.log("journal");
+    assert_eq!(
+        journal
+            .lines()
+            .filter(|line| line.starts_with("dogsled observation "))
+            .collect::<Vec<_>>(),
+        vec![expected],
+        "{journal}"
+    );
+}
+
+#[test]
+fn serve_logs_when_the_observation_client_limit_refuses_a_connection() {
+    let observer = super::service_lanes::Observer::start("observation-limit-log", "3600");
+    let path = observer.rig.dir.join("state/observation.sock");
+    let mut clients = Vec::new();
+    for _ in 0..64 {
+        let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+        stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
+        writeln!(stream, "{{\"version\":1,\"operation\":\"subscribe\"}}").unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert!(frame["revision"].is_number(), "{frame}");
+        clients.push(reader);
+    }
+    let mut refused = std::os::unix::net::UnixStream::connect(path).unwrap();
+    refused.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    let mut byte = [0];
+    assert_eq!(refused.read(&mut byte).unwrap(), 0);
+    // EOF follows the refusal diagnostic. No request or publication data is logged.
+    let journal = observer.rig.log("journal");
+    assert_eq!(
+        journal
+            .lines()
+            .filter(|line| line.starts_with("dogsled observation "))
+            .collect::<Vec<_>>(),
+        vec!["dogsled observation accept: client refused: MAX_CLIENTS (64) reached"],
+        "{journal}"
+    );
+    drop(clients);
+}
+
 mod readers {
     use super::*;
 
