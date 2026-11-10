@@ -10,7 +10,7 @@ import type {
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TodoParams, TodoResult, TodoSession } from "./tool.ts";
 import { active, claim, importUnit, imported, inspect, parse, protect, settle } from "./wasm.ts";
-import { branchList, branchSnapshot, stateChange } from "./state.ts";
+import { branchSnapshot, entryTasks, saveState } from "./state.ts";
 import type { TodoDelta } from "./state.ts";
 import { ownsTodo } from "./lifecycle.ts";
 import { repositoryIdentity } from "./repository.ts";
@@ -149,8 +149,7 @@ class TaskProvider {
         before = branchSnapshot(session.branch()),
         change = importUnit(before, source, session.sessionId, repositoryIdentity(origin));
       if (change.persist) {
-        const stored = stateChange(before, change.list);
-        session.append(stored.customType, stored.data, change.list);
+        saveState(before, change.list, session);
       }
     });
   }
@@ -176,8 +175,7 @@ class TaskProvider {
               before = branchSnapshot(session.branch()),
               change = claim(before, JSON.stringify(input), session.sessionId);
             if (change.persist) {
-              const stored = stateChange(before, change.list);
-              session.append(stored.customType, stored.data, change.list);
+              saveState(before, change.list, session);
             }
             return change.value;
           }),
@@ -191,8 +189,7 @@ class TaskProvider {
               before = branchSnapshot(session.branch()),
               change = settle(before, JSON.stringify(input), session.sessionId);
             if (change.persist) {
-              const stored = stateChange(before, change.list);
-              session.append(stored.customType, stored.data, change.list);
+              saveState(before, change.list, session);
             }
             return change.value;
           }),
@@ -239,8 +236,8 @@ class TaskProvider {
       receipt = imported(branch, sessionId);
     // Only changed records carry new receipts. Do not materialize lists here:
     // Unrelated branches also appear in getEntries; never combine their orders.
-    for (const frame of branchList(ctx.sessionManager.getEntries())) {
-      for (const task of frame.changed) {
+    for (const entry of ctx.sessionManager.getEntries()) {
+      for (const task of entryTasks(entry)) {
         if (task.unit?.imported !== undefined) {
           const recorded = imported(
             parse({ tasks: [Object.assign({}, task, { subtasks: [] })] }),
@@ -268,8 +265,8 @@ class TaskProvider {
       throw new Error("PROVIDER_UNAVAILABLE: pi-todo does not own an active session");
     }
     const sessionId = ctx.sessionManager.getSessionId(),
-      leaf = ctx.sessionManager.getLeafId(),
       before = branchSnapshot(ctx.sessionManager.getBranch());
+    let leaf = ctx.sessionManager.getLeafId();
     TaskProvider.#importScope(ctx, before);
     return {
       append: (customType: string, data: TodoList | TodoDelta, list: TodoList): void => {
@@ -281,6 +278,7 @@ class TaskProvider {
         }
         protect(before, list, [...this.#leases.values()]);
         this.#host.appendEntry(customType, data);
+        leaf = ctx.sessionManager.getLeafId();
       },
       branch: () => ctx.sessionManager.getBranch(),
       sessionId,

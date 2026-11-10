@@ -25,6 +25,7 @@ export {
   completion_reminder as completionReminder,
   init,
   parse,
+  validateTask,
   sections,
   view,
   widget,

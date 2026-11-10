@@ -1,10 +1,10 @@
-import { DELTA_ENTRY, STATE_ENTRY, indexed } from "./delta.ts";
+import { DELTA_ENTRY, STATE_ENTRY, indexed, leafTask } from "./delta.ts";
 import type { Immutable, ListIndex, TodoDelta } from "./delta.ts";
 import type { Subtask, TodoList } from "./wasm.ts";
+import { deltaData, snapshotData } from "./delta-validation.ts";
 import { History } from "./history.ts";
 import { OrderIndex } from "./order-index.ts";
 import { Provenance } from "./provenance.ts";
-import { deltaData } from "./delta-validation.ts";
 import { parse } from "./wasm.ts";
 
 interface BranchEntry {
@@ -16,6 +16,8 @@ interface BranchEntry {
 interface ListFrame {
   readonly changed: readonly Immutable<Subtask>[];
   readonly entry: BranchEntry;
+  readonly fenced: boolean;
+  readonly progress: boolean;
   readonly list: TodoList;
   readonly snapshot: TodoList;
 }
@@ -77,6 +79,8 @@ class BranchState {
   #known = new Set<string>();
   #revision = empty;
   #hasBase = false;
+  #fenced = false;
+  #latest: ListFrame | undefined = undefined;
 
   #record(task: Immutable<Subtask>, entry: BranchEntry): void {
     if (task.unit !== undefined) {
@@ -91,17 +95,13 @@ class BranchState {
     for (const [parent, ids] of index.orders) {
       let after: string | null = null;
       for (const unitId of ids) {
-        this.#orders.defer({ after, id: unitId, parent }, this.#revision);
+        this.#orders.apply({ after, id: unitId, parent }, this.#revision);
         after = unitId;
       }
     }
   }
 
-  #full(entry: BranchEntry, data: unknown): ListFrame {
-    const list = parse(data),
-      index = indexed(list),
-      changed = list.tasks.flatMap((root) => [root, ...(root.subtasks ?? [])]),
-      provenance = this.#provenance;
+  #replace(index: Readonly<ListIndex> | undefined): void {
     this.#hasBase = index !== undefined;
     this.#known = new Set(index?.tasks.keys());
     this.#tasks = new History();
@@ -109,46 +109,76 @@ class BranchState {
     if (index !== undefined) {
       this.#index(index);
     }
+  }
+
+  #full(entry: BranchEntry, data: unknown): ListFrame {
+    const { fenced, list } = snapshotData(data);
+    if (this.#fenced && !fenced) {
+      throw new Error("INVALID_TODO_DELTA: unfenced snapshot after delta history");
+    }
+    const progress = JSON.stringify(this.#latest?.list ?? { tasks: [] }) !== JSON.stringify(list),
+      index = indexed(list),
+      changed = list.tasks.flatMap((root) => [leafTask(root), ...(root.subtasks ?? [])]),
+      provenance = this.#provenance;
+    this.#fenced ||= fenced;
+    this.#replace(index);
     for (const task of changed) {
       this.#record(task, entry);
     }
     return {
       changed,
       entry,
+      fenced: this.#fenced,
       list,
+      progress,
       get snapshot(): TodoList {
         return provenance.list(list);
       },
     };
   }
 
-  #changed(delta: TodoDelta, entry: BranchEntry): void {
+  #changed(delta: TodoDelta, entry: BranchEntry): boolean {
+    let progress = false;
     for (const change of delta.changed) {
-      if (change.id !== change.task.unit?.reference.unitId) {
-        throw new Error("INVALID_TODO_DELTA: changed task identity differs");
-      }
+      progress ||=
+        JSON.stringify(this.#tasks.get(change.id, this.#revision)?.task) !==
+        JSON.stringify(change.task);
       this.#known.add(change.id);
       this.#tasks.set(change.id, this.#revision, { revision: this.#revision, task: change.task });
       this.#record(change.task, entry);
     }
+    return progress;
   }
 
-  #apply(delta: TodoDelta, entry: BranchEntry): void {
-    for (const unitId of delta.removed) {
-      this.#known.delete(unitId);
+  #removed(ids: readonly string[]): boolean {
+    let progress = false;
+    for (const unitId of ids) {
+      progress = this.#known.delete(unitId) || progress;
       this.#tasks.set(unitId, this.#revision, undefined);
-      this.#orders.defer(unitId, this.#revision);
+      this.#orders.apply(unitId, this.#revision);
     }
-    this.#changed(delta, entry);
+    return progress;
+  }
+
+  #apply(delta: TodoDelta, entry: BranchEntry): boolean {
+    const removed = this.#removed(delta.removed);
+    let progress = this.#changed(delta, entry) || removed;
     for (const order of delta.orders) {
-      this.#orders.defer(order, this.#revision);
+      if (!this.#known.has(order.id) || (order.parent !== null && !this.#known.has(order.parent))) {
+        throw new Error("INVALID_TODO_DELTA: order names a missing task");
+      }
+      progress = this.#orders.apply(order, this.#revision) || progress;
     }
+    return progress;
   }
 
   #delta(entry: BranchEntry, data: unknown): ListFrame {
     const delta = deltaData(data);
-    this.#apply(delta, entry);
-    const version: ListVersion = {
+    if (!this.#hasBase) {
+      throw new Error("INVALID_TODO_DELTA: no stable-ID base snapshot");
+    }
+    const progress = this.#apply(delta, entry),
+      version: ListVersion = {
         hasBase: this.#hasBase,
         orders: this.#orders,
         revision: this.#revision,
@@ -160,10 +190,12 @@ class BranchState {
     return {
       changed: delta.changed.map((change) => change.task),
       entry,
+      fenced: this.#fenced,
       get list(): TodoList {
         list ??= materialize(version, provenance);
         return list;
       },
+      progress,
       get snapshot(): TodoList {
         return provenance.list(this.list);
       },
@@ -177,9 +209,11 @@ class BranchState {
     }
     if (entry.customType === STATE_ENTRY || entry.customType === DELTA_ENTRY) {
       this.#revision += step;
-      return entry.customType === STATE_ENTRY
-        ? this.#full(entry, entry.data)
-        : this.#delta(entry, entry.data);
+      this.#latest =
+        entry.customType === STATE_ENTRY
+          ? this.#full(entry, entry.data)
+          : this.#delta(entry, entry.data);
+      return this.#latest;
     }
     return undefined;
   }

@@ -1,5 +1,5 @@
 import { DELTA_ENTRY, STATE_ENTRY, branchSnapshot } from "./state.ts";
-import { apply, importUnit, imported } from "./wasm.ts";
+import { apply, completionReminder, importUnit, imported } from "./wasm.ts";
 import { entry, taskAt } from "./delta-fixture.ts";
 import { referenceFacts, referenceSnapshot } from "./snapshot-reference-fixture.ts";
 import { firstId } from "./contract-fixture.ts";
@@ -40,12 +40,12 @@ const sealReference = async (): Promise<{ actual: unknown; expected: unknown; se
     full.push(entry("seal", STATE_ENTRY, sealed), entry("repeat", STATE_ENTRY, sealed));
     return {
       actual: {
-        facts: reminderFacts(branch, []),
+        facts: completionReminder({ facts: reminderFacts(branch, []) }),
         list: branchSnapshot(branch),
         reference: taskAt(branchSnapshot(branch)).unit?.reference,
       },
       expected: {
-        facts: referenceFacts(full),
+        facts: completionReminder({ facts: referenceFacts(full) }),
         list: referenceSnapshot(full),
         reference: source.claimed.binding.contract,
       },

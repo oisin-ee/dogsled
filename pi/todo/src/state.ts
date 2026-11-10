@@ -1,6 +1,9 @@
 import type { BranchEntry, ListFrame } from "./branch-state.ts";
+import { DELTA_ENTRY, STATE_ENTRY, stateChange } from "./delta.ts";
+import type { Immutable, TodoDelta } from "./delta.ts";
+import type { Subtask, TodoList } from "./wasm.ts";
+import { deltaData, snapshotData } from "./delta-validation.ts";
 import { BranchState } from "./branch-state.ts";
-import type { TodoList } from "./wasm.ts";
 
 /**
  * Replays full snapshots and deltas in branch order, in O(entries + changed tasks).
@@ -42,8 +45,57 @@ const branchList = function* branchList(branch: readonly BranchEntry[]): Generat
    * @returns {TodoList} Resolved list.
    */
   branchSnapshot = (branch: readonly BranchEntry[]): TodoList =>
-    latestFrame(branch)?.snapshot ?? { tasks: [] };
+    latestFrame(branch)?.snapshot ?? { tasks: [] },
+  /**
+   * Reads records across the session tree without combining unrelated branches.
+   * @param {BranchEntry} entry One persisted entry.
+   * @returns {readonly Immutable<Subtask>[]} Validated changed records.
+   */
+  entryTasks = (entry: BranchEntry): readonly Immutable<Subtask>[] => {
+    if (entry.type !== "custom") {
+      return [];
+    }
+    if (entry.customType === DELTA_ENTRY) {
+      return deltaData(entry.data).changed.map((change) => change.task);
+    }
+    const tasks: Immutable<Subtask>[] = [];
+    if (entry.customType === STATE_ENTRY) {
+      for (const root of snapshotData(entry.data).list.tasks) {
+        tasks.push(root, ...(root.subtasks ?? []));
+      }
+    }
+    return tasks;
+  },
+  /**
+   * Appends the downgrade fence before the first delta and marks later snapshots.
+   * @param {TodoList} before Current list.
+   * @param {TodoList} after Changed list.
+   * @param {object} session Branch reader and entry writer.
+   */
+  saveState = (
+    before: TodoList,
+    after: TodoList,
+    session: {
+      readonly branch: () => readonly BranchEntry[];
+      readonly append: (customType: string, data: TodoList | TodoDelta, list: TodoList) => void;
+    },
+  ): void => {
+    const change = stateChange(before, after),
+      fenced = latestFrame(session.branch())?.fenced === true,
+      format = "todo-delta/1";
+    if (change.customType === DELTA_ENTRY && !fenced) {
+      // Authorize the intended mutation before appending even its fence.
+      session.append(STATE_ENTRY, Object.assign({}, before, { format }), after);
+    }
+    session.append(
+      change.customType,
+      change.customType === STATE_ENTRY && fenced
+        ? Object.assign({}, change.data, { format })
+        : change.data,
+      after,
+    );
+  };
 
-export { branchList, branchSnapshot, latestSnapshot };
+export { branchList, branchSnapshot, latestSnapshot, entryTasks, saveState };
 export { DELTA_ENTRY, STATE_ENTRY, stateChange } from "./delta.ts";
 export type { TodoDelta } from "./delta.ts";

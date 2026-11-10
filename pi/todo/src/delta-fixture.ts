@@ -118,7 +118,7 @@ class Replay {
     return {
       actual: {
         derived: branchSnapshot(this.branch),
-        facts: reminderFacts(this.branch, []),
+        facts: completionReminder({ facts: reminderFacts(this.branch, []) }),
         frames: [...branchList(this.branch)].map((frame) => frame.list),
         full: branchSnapshot(this.full),
         latest: latestSnapshot(this.branch),
@@ -127,7 +127,7 @@ class Replay {
       },
       expected: {
         derived: referenceSnapshot(this.full),
-        facts,
+        facts: completionReminder({ facts }),
         frames: snapshotLists(facts),
         full: referenceSnapshot(this.full),
         latest: parse(referenceLatest(this.full)),

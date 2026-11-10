@@ -1,6 +1,8 @@
+import type { Task, TodoList } from "./wasm.ts";
 import type { TaskChange, TodoDelta } from "./delta.ts";
+import { deltaVersion, leafTask } from "./delta.ts";
+import { parse, validateTask } from "./wasm.ts";
 import type { OrderChange } from "./order-index.ts";
-import { deltaVersion } from "./delta.ts";
 
 const record = (data: unknown): data is Readonly<Record<string, unknown>> =>
     typeof data === "object" && data !== null,
@@ -27,6 +29,14 @@ const record = (data: unknown): data is Readonly<Record<string, unknown>> =>
     data["removed"].every((unitId: unknown) => typeof unitId === "string") &&
     Array.isArray(data["orders"]) &&
     data["orders"].every((order: unknown) => orderChange(order)),
+  changedTask = (data: unknown): Task => {
+    try {
+      return validateTask(data);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`INVALID_TODO_DELTA: ${message}`, { cause: error });
+    }
+  },
   deltaData = (data: unknown): TodoDelta => {
     if (!envelope(data)) {
       throw new Error("INVALID_TODO_DELTA: unsupported or malformed delta");
@@ -39,7 +49,30 @@ const record = (data: unknown): data is Readonly<Record<string, unknown>> =>
     ) {
       throw new Error("INVALID_TODO_DELTA: repeated or conflicting task changes");
     }
-    return data;
+    const changed = data.changed.map((change): TaskChange => {
+      const task = changedTask(change.task);
+      if (change.id !== task.unit?.reference.unitId) {
+        throw new Error("INVALID_TODO_DELTA: changed task identity differs");
+      }
+      return { id: change.id, task: leafTask(task) };
+    });
+    return Object.assign({}, data, { changed });
+  },
+  snapshotData = (data: unknown): { readonly fenced: boolean; readonly list: TodoList } => {
+    const fenced = record(data) && "format" in data;
+    if (fenced && data["format"] !== "todo-delta/1") {
+      throw new Error("INVALID_TODO_DELTA: unsupported snapshot format");
+    }
+    return {
+      fenced,
+      list: parse(
+        fenced
+          ? Object.fromEntries(
+              Object.entries(data).filter(([key]: readonly [string, unknown]) => key !== "format"),
+            )
+          : data,
+      ),
+    };
   };
 
-export { deltaData };
+export { deltaData, snapshotData };

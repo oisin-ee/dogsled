@@ -1,5 +1,5 @@
 import { apply, view } from "./wasm.ts";
-import { branchSnapshot, stateChange } from "./state.ts";
+import { branchSnapshot, saveState } from "./state.ts";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Static } from "typebox";
 import type { TodoDelta } from "./state.ts";
@@ -49,8 +49,7 @@ const result = (list: TodoList, creation: boolean): TodoResult => ({
         sessionId: session.sessionId,
       });
     if (persist) {
-      const change = stateChange(current, list);
-      session.append(change.customType, change.data, list);
+      saveState(current, list, session);
     }
     return result(
       persist ? branchSnapshot(session.branch()) : list,
