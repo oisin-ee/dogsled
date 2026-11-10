@@ -67,6 +67,8 @@ mod tables;
 #[cfg(test)]
 mod test_support;
 mod transcript;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired by T2"))]
+mod transfer;
 mod unit_reply;
 mod unit_request;
 mod unit_transport;
