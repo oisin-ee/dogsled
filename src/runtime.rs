@@ -214,7 +214,9 @@ fn wait_ticket(fleet: &Fleet, id: &str) -> Result<Value> {
 
 pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
     let host = work::job_host(fleet, id)?;
-    loop {
+    // A durable job/item or a published job resolved this target. Later failures
+    // cannot turn that positive resolution back into an unknown target.
+    (|| loop {
         let job: Job = if host.is_local() {
             jobs::get(fleet.ledger, id)?
         } else {
@@ -224,7 +226,10 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
             return Ok(job.exit.unwrap_or(2));
         }
         fleet.ledger.budget.pause()?;
-    }
+    })()
+    .map_err(|source| Error::WaitResolved {
+        source: Box::new(source),
+    })
 }
 
 /// Start `request` now, or queue it; never waits. A queued result is

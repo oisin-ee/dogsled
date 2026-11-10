@@ -107,6 +107,10 @@ fn main() -> ExitCode {
         }
         _ => (None, false),
     };
+    let wait_target = match &cli.command {
+        Command::Wait { id, .. } => Some(id.clone()),
+        _ => None,
+    };
     let max = cli.budget_ms.or(max);
     let max = if hook {
         Some(max.unwrap_or(5_000).min(5_000))
@@ -121,7 +125,19 @@ fn main() -> ExitCode {
         // Prompt context is optional: unavailable state must not block a turn.
         Err(_) if hook => ExitCode::SUCCESS,
         Err(ref error) if waiting && matches!(error.root(), Error::Deadline(_)) => {
-            println!("still running");
+            if let Some(id) = wait_target.filter(|_| !error.wait_resolved()) {
+                let message = format!("dogsled wait: deadline reached before {id} was resolved");
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"error":message,"deadline":true,"resolved":false})
+                    );
+                } else {
+                    eprintln!("{message}");
+                }
+            } else {
+                println!("still running");
+            }
             ExitCode::from(124)
         }
         Err(error) => {

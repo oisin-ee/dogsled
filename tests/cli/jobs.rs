@@ -1232,12 +1232,53 @@ fn wait_max_and_stop_use_durable_local_job_state() {
     job["ended_ms"] = Value::Null;
     job["exit"] = Value::Null;
     rig.put_job("running", &job);
-    let out = rig.run(&["wait", "running", "--max", "0ms"]);
+    // --max counts from process start; leave room for startup so the job resolves before the deadline.
+    let out = rig.run(&["wait", "running", "--max", "1500ms"]);
     assert_eq!(out.status.code(), Some(124));
     assert_eq!(out.stdout, b"still running\n");
     assert!(rig.run(&["stop", "running"]).status.success());
     assert_eq!(rig.stop_requested("running"), true);
     assert_eq!(rig.run(&["stop", "../escape"]).status.code(), Some(2));
+}
+
+#[test]
+fn wait_deadline_before_resolution_reports_unresolved() {
+    let rig = Rig::new("wait-unresolved");
+    let mut job = complete("running");
+    job["ended_ms"] = Value::Null;
+    job["exit"] = Value::Null;
+    rig.put_job("running", &job);
+    for id in ["running", "unknown"] {
+        let message = format!("dogsled wait: deadline reached before {id} was resolved");
+        let mut child = rig.start(&["wait", id, "--max", "0ms"]);
+        assert_eq!(child.wait().code(), Some(124));
+        let (stdout, stderr) = child.output();
+        assert!(stdout.is_empty(), "{stdout}");
+        assert_eq!(stderr, format!("{message}\n"));
+
+        let mut child = rig.start(&["wait", id, "--max", "0ms", "--json"]);
+        assert_eq!(child.wait().code(), Some(124));
+        let (stdout, stderr) = child.output();
+        let report: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            report,
+            json!({"error":message,"deadline":true,"resolved":false})
+        );
+        assert!(stderr.is_empty(), "{stderr}");
+    }
+}
+
+#[test]
+fn wait_unknown_target_resolved_in_time_is_an_error() {
+    let rig = Rig::new("wait-unknown");
+    rig.put_items(&json!([]));
+    let _publisher = super::observation::seeded(&rig);
+    let mut child = rig.start(&["wait", "unknown", "--max", "1500ms"]);
+    assert_eq!(child.wait().code(), Some(2));
+    let (stdout, stderr) = child.output();
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(!stderr.contains("deadline reached"), "{stderr}");
+    assert!(stderr.contains("result unavailable"), "{stderr}");
 }
 
 #[test]
