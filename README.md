@@ -338,6 +338,22 @@ These reports do not change release decisions.
 
 See [Agent lifecycle and recovery](docs/lifecycle.md) for command limits, custody, origin release certificates, and migration.
 
+## Transfers
+
+```sh
+dogsled transfer send worker --files notes.md
+dogsled transfer send worker --changes --include-worktree
+dogsled transfer list
+dogsled transfer show TRANSFER_ID
+dogsled transfer apply TRANSFER_ID --check
+dogsled transfer apply TRANSFER_ID
+dogsled transfer drop TRANSFER_ID
+```
+
+A transfer stores files or changes for another agent and puts one notice in its inbox.
+Nothing is applied until the recipient runs `apply`, which writes working files only.
+See [Send files and changes to another agent](docs/transfer.md).
+
 ## Inbox
 
 Every message to an agent goes through one inbox on the agent's host: a child's final reply, a blocked report, an admitted ticket, a launch failure, and a message from another agent.

@@ -48,6 +48,24 @@ dogsled inbox list
 
 `send` writes to the target's inbox on its host. Its reader injects the message: Pi as a steer or a new turn. A target without a reader fails at once and you hear so. Delivery retries with backoff until acknowledged.
 
+## Pass files and changes
+
+```sh
+dogsled transfer send NAME_OR_PANE --files notes.md report.png
+dogsled transfer send NAME_OR_PANE --changes [--since REV] [--include-worktree]
+dogsled transfer list
+dogsled transfer show ID
+dogsled transfer apply ID --check
+dogsled transfer apply ID
+dogsled transfer drop ID
+```
+
+Use `transfer` to give another agent files, unpushed commits, or uncommitted work. Do not copy files by hand, and do not push a branch only to share it.
+`send` stores the transfer and puts one notice in the recipient's inbox. It changes no checkout.
+`--changes` sends your commits since `--since` (default: where your checkout left the default branch). Add `--include-worktree` for staged, unstaged, and untracked files.
+When you receive a notice, run `show`, then `apply ID --check`, then `apply ID` in your checkout. `apply` writes working files only and refuses the whole transfer if a touched path differs.
+A transfer does not complete a task. Commit and report as usual.
+
 ## Closing
 
 `done` means your work is finished: hand it back, release your resources, and end your agent. Call it during the final working turn, after committing changes. The child host captures your reply and closes your pane and agent worktree when the turn ends. Your branch stays for the owner to land. Closed children remain under TO LAND until integration or branch deletion.
