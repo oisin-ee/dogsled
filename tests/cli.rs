@@ -897,7 +897,19 @@ esac
     fn script(&self, name: &str, text: &str) {
         let path = self.dir.join("bin").join(name);
         let temporary = path.with_extension("next");
-        fs::write(&temporary, text).unwrap();
+        // Open the executable for writing only in a child, never in this test
+        // process: another test's fork could inherit our write fd until its exec,
+        // keeping even a renamed inode ETXTBSY. Reap the writer before publishing.
+        let mut writer = isolated("tee")
+            .arg(&temporary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut writer.stdin.take().unwrap(), text.as_bytes()).unwrap();
+        let output = writer.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).unwrap();
         fs::rename(temporary, path).unwrap();
     }
