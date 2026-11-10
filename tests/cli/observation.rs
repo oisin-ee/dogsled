@@ -279,8 +279,10 @@ fn serve_logs_an_observation_connection_error_once_with_its_operation() {
     );
 }
 
-#[test]
-fn serve_logs_when_the_observation_client_limit_refuses_a_connection() {
+#[tokio::test]
+async fn serve_logs_when_the_observation_client_limit_refuses_a_connection() {
+    use tokio::io::AsyncReadExt as _;
+
     let observer = super::service_lanes::Observer::start("observation-limit-log", "3600");
     let path = observer.rig.dir.join("state/observation.sock");
     let mut clients = Vec::new();
@@ -296,10 +298,17 @@ fn serve_logs_when_the_observation_client_limit_refuses_a_connection() {
         assert!(frame["revision"].is_number(), "{frame}");
         clients.push(reader);
     }
-    let mut refused = std::os::unix::net::UnixStream::connect(path).unwrap();
-    refused.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    let mut refused = tokio::net::UnixStream::connect(path).await.unwrap();
+    // Darwin rejects SO_RCVTIMEO after peer closure. Bound the read without changing
+    // socket options: serve may already have refused this connection before connect returns.
     let mut byte = [0];
-    assert_eq!(refused.read(&mut byte).unwrap(), 0);
+    assert_eq!(
+        tokio::time::timeout(PROCESS_DEADLINE, refused.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
     // EOF follows the refusal diagnostic. No request or publication data is logged.
     let journal = observer.rig.log("journal");
     assert_eq!(
