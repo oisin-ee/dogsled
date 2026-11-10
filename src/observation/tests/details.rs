@@ -681,9 +681,18 @@ fn a_slow_detail_capture_does_not_delay_portal_publication() {
     let fixture = Fixture::new(socket.client());
     let _viewer = fixture.client.detail("w1:p1").unwrap();
     started.recv_timeout(WAIT_DEADLINE).unwrap();
-    let previous = fixture.client.current().unwrap().revision;
     fixture.rename_agent("renamed while capture is blocked");
-    let frame = fixture.wait(|frame| frame.revision > previous);
+    // Wait for the rename itself: the viewer's own publication can land after any revision read here.
+    let renamed = |frame: &Published| {
+        read::view::<portal_types::PortalSnapshot>(frame, "portal")
+            .ok()
+            .and_then(|portal| portal.agents)
+            .and_then(|agents| agents.into_iter().next())
+            .and_then(|agent| agent.name)
+            .as_deref()
+            == Some("renamed while capture is blocked")
+    };
+    let frame = fixture.wait(renamed);
     let portal: portal_types::PortalSnapshot = read::view(&frame, "portal").unwrap();
     assert!(portal.board.is_some());
     assert_eq!(
