@@ -1,18 +1,19 @@
 use super::*;
 
 /// Native `script` supplies a PTY to the real sidebar command. The process guard owns
-/// the recorder and its terminal; no alternate sidebar or observation implementation runs.
+/// the recorder and sidebar separately; no alternate sidebar or observation implementation runs.
 struct Sidebar {
     process: Owned,
+    sidebar: Option<Owned>,
     output: mpsc::Receiver<Vec<u8>>,
     reader: Option<std::thread::JoinHandle<()>>,
     text: String,
 }
 
 impl Sidebar {
-    fn start(rig: &Rig) -> Self {
+    fn start(rig: &Rig, number: usize, ignore_hup: bool) -> Self {
         let mut command = isolated("script");
-        let run = "stty rows 40 cols 180; exec \"$DOGSLED_BIN\" sidebar --owner w1:p1";
+        let run = "stty rows 40 cols 180; if test \"$IGNORE_HUP\" = 1; then trap '' HUP; fi; echo $$ > \"$RIG/sidebar-$SIDEBAR_NUMBER.pid\"; exec \"$DOGSLED_BIN\" sidebar --owner w1:p1";
         if cfg!(target_os = "macos") {
             command.args(["-q", "/dev/null", "sh", "-c", run]);
         } else {
@@ -21,6 +22,8 @@ impl Sidebar {
         rig.rig_env(&mut command);
         command
             .env("DOGSLED_BIN", env!("CARGO_BIN_EXE_dogsled"))
+            .env("SIDEBAR_NUMBER", number.to_string())
+            .env("IGNORE_HUP", if ignore_hup { "1" } else { "0" })
             .env("TERM", "xterm-256color")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -36,12 +39,19 @@ impl Sidebar {
                 }
             }
         });
-        Self {
+        let mut sidebar = Self {
             process,
+            sidebar: None,
             output,
             reader: Some(reader),
             text: String::new(),
-        }
+        };
+        let pid = read_pid(
+            &rig.dir.join(format!("sidebar-{number}.pid")),
+            "the sidebar",
+        );
+        sidebar.sidebar = Some(Owned::adopt(pid));
+        sidebar
     }
 
     fn until(&mut self, expected: &str) {
@@ -66,6 +76,9 @@ impl Sidebar {
 
 impl Drop for Sidebar {
     fn drop(&mut self) {
+        if let Some(sidebar) = &mut self.sidebar {
+            sidebar.terminate();
+        }
         self.process.terminate();
         if let Some(reader) = self.reader.take() {
             reader.join().unwrap();
@@ -148,7 +161,13 @@ fn sidebar_readers_render_supplied_state_project_revisions_without_observation()
     second["revision"] = json!(2);
     let supplied = Supplied::start(&rig, first);
     let _locks = isolate(&rig);
-    let mut sidebars: Vec<_> = (0..4).map(|_| Sidebar::start(&rig)).collect();
+    let mut sidebars: Vec<_> = (0..4)
+        .map(|number| Sidebar::start(&rig, number, false))
+        .collect();
+    let pids: Vec<_> = sidebars
+        .iter()
+        .map(|sidebar| sidebar.sidebar.as_ref().unwrap().pid)
+        .collect();
     for sidebar in &mut sidebars {
         supplied.requested("subscribe");
         sidebar.until("AAAAAAA");
@@ -172,6 +191,32 @@ fn sidebar_readers_render_supplied_state_project_revisions_without_observation()
         sidebar.until("observation disconnected/stale");
     }
     assert_eq!(rig.log("sidebar-access.log"), "");
+    drop(sidebars);
+    for pid in pids {
+        assert!(process_gone(pid), "sidebar {pid} outlived its test");
+    }
+}
+
+#[test]
+fn sidebar_exits_within_two_seconds_after_terminal_loss_with_sighup_ignored() {
+    let rig = Rig::short("sidebar-hangup");
+    rig.snapshot("state", now(), 0.0, 8);
+    let _locks = isolate(&rig);
+    let mut sidebar = Sidebar::start(&rig, 0, true);
+    sidebar.until("observation unavailable");
+    let pid = sidebar.sidebar.as_ref().unwrap().pid;
+    assert!(!process_gone(pid), "sidebar exited before terminal loss");
+    // Kill only the recorder, not its group or the separately adopted sidebar.
+    let lost_at = Instant::now();
+    sidebar.process.child_mut().kill().unwrap();
+    assert!(
+        wait_gone(
+            pid,
+            Duration::from_secs(2).saturating_sub(lost_at.elapsed())
+        ),
+        "sidebar {pid} did not exit within 2 s after terminal loss with SIGHUP ignored"
+    );
+    sidebar.process.wait();
 }
 
 #[test]
@@ -179,7 +224,7 @@ fn sidebar_cold_unavailable_does_not_read_the_database_or_discover_hosts() {
     let rig = Rig::short("sidebar-cold");
     rig.snapshot("state", now(), 0.0, 8);
     let _locks = isolate(&rig);
-    let mut sidebar = Sidebar::start(&rig);
+    let mut sidebar = Sidebar::start(&rig, 0, false);
     sidebar.until("observation unavailable");
     assert_eq!(rig.log("sidebar-access.log"), "");
     assert!(rig.dir.join("state/state.db").is_dir());
