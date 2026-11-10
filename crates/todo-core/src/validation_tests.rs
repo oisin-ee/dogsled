@@ -101,6 +101,6 @@ fn deserialization_checks_status_description_and_shape() {
         serde_json::json!({"content":"Build", "status":"pending", "description":17}),
         serde_json::json!({"content":"Build", "status":"pending", "unknown":true}),
     ] {
-        assert!(serde_json::from_value::<Task>(value).is_err());
+        serde_json::from_value::<Task>(value).unwrap_err();
     }
 }
