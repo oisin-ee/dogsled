@@ -28,9 +28,9 @@ The loop is in crossterm 0.29.0, `src/event/source/unix/mio.rs:68–115`. When t
 
 **Owned paths:** `src/sidebar/mod.rs`, `tests/cli/observation_sidebar.rs`, `Cargo.toml` (feature change only), `Cargo.lock`. Read everything else.
 
-**Acceptance:** `cargo test --test cli observation_sidebar` passes, including (b). Before your edit to `src/sidebar/mod.rs`, test (b) fails. Show that failure in your reply.
+**Acceptance:** `cargo test --test cli observation::sidebar` passes with a non-zero test count, including (b). Before your edit to `src/sidebar/mod.rs`, test (b) fails. Show that failure in your reply.
 
-**Checks (only these):** `cargo test --test cli observation_sidebar`, `cargo test --bin dogsled sidebar`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`. `web/public` must exist. If it is missing, ask the lead and do not build it. Commit hooks run as configured. Do not bypass them.
+**Checks (only these):** `cargo test --test cli observation::sidebar` (the file is registered as `mod sidebar` in `tests/cli/observation.rs:8–9`), `cargo test --bin dogsled sidebar`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`. `web/public` must exist. If it is missing, ask the lead and do not build it. Commit hooks run as configured. Do not bypass them.
 
 **Publication:** use the commit message `fix(sidebar): exit when the terminal is lost and reap test sidebars`. Push your branch. Do not open a PR, merge, release, or install.
 
