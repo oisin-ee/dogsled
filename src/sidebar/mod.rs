@@ -283,9 +283,10 @@ fn restore() {
 
 /// Observe terminal loss without reading input or waiting for crossterm's input poll.
 /// Only hangup is requested: key presses and resizes cannot trigger shutdown.
-fn terminal_lifetime(tty: &std::fs::File, stop: &AtomicBool) -> Result<()> {
+/// `tty` is the terminal device itself: Darwin's poll reports POLLNVAL for `/dev/tty`.
+fn terminal_lifetime(tty: std::os::fd::BorrowedFd<'_>, stop: &AtomicBool) -> Result<()> {
     // Darwin registers its read filter only with an explicit event, including POLLHUP.
-    let mut fd = PollFd::new(tty.as_fd(), PollFlags::POLLHUP);
+    let mut fd = PollFd::new(tty, PollFlags::POLLHUP);
     while !stop.load(Ordering::Relaxed) {
         match poll(std::slice::from_mut(&mut fd), 100_u16) {
             Ok(_) => {}
@@ -395,12 +396,17 @@ pub fn command(
     let pal = palette::Palette::load_default();
     let (tx, rx) = mpsc::sync_channel(1);
     let stop = AtomicBool::new(false);
-    let tty = std::fs::File::open("/dev/tty")?;
+    let tty = std::io::stdin();
+    if !std::io::IsTerminal::is_terminal(&tty) {
+        return Err(Error::Invalid(
+            "the sidebar needs a terminal on stdin".into(),
+        ));
+    }
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let client = ipc::Client::at(&ledger.dir);
     std::thread::scope(|scope| {
-        let lifetime = scope.spawn(|| terminal_lifetime(&tty, &stop));
+        let lifetime = scope.spawn(|| terminal_lifetime(tty.as_fd(), &stop));
         scope.spawn(|| reader(&client, &tx, &stop));
         let outcome = (|| -> Result<()> {
             loop {
