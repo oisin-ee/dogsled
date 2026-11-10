@@ -97,6 +97,41 @@ pub fn recovery(
     })
 }
 
+pub fn repo_open(
+    shell: &dyn crate::shell::Shell,
+    ledger: &crate::ledger::Ledger,
+    policy: &crate::config::Policy,
+    home: &str,
+    host: Option<&str>,
+    slug: &str,
+) -> Result<Value> {
+    crate::checkout::slug_origin(slug)?;
+    let Some(host) = host.filter(|host| *host != crate::hosts::LOCAL) else {
+        return Ok(serde_json::to_value(crate::checkout::open(
+            shell,
+            ledger,
+            home,
+            crate::hosts::LOCAL,
+            slug,
+        )?)?);
+    };
+    let fleet = ActionFleet::current(shell, ledger, policy, home.into())?;
+    let host = fleet.find(host)?;
+    if host.is_local() {
+        return Ok(serde_json::to_value(crate::checkout::open(
+            shell,
+            ledger,
+            home,
+            &host.label,
+            slug,
+        )?)?);
+    }
+    let mut opened: crate::checkout::Opened =
+        fleet.remote_setup(host, &["repo-open".into(), "--repo".into(), slug.into()])?;
+    opened.host.clone_from(&host.label);
+    Ok(serde_json::to_value(opened)?)
+}
+
 fn caller() -> Result<String> {
     std::env::var("HERDR_PANE_ID").map_err(|_| Error::Invalid("HERDR_PANE_ID is required".into()))
 }

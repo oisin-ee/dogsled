@@ -45,6 +45,8 @@ mod preservation;
 mod profiles;
 #[path = "cli/remote_diagnostics.rs"]
 mod remote_diagnostics;
+#[path = "cli/repo_open.rs"]
+mod repo_open;
 #[path = "cli/request_validity.rs"]
 mod request_validity;
 #[path = "cli/retention.rs"]

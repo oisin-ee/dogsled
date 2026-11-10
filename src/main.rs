@@ -676,13 +676,14 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         state(cmd, &ledger)?;
         return Ok(ExitCode::SUCCESS);
     }
-    let Command::Recovery {
-        ref command,
-        ref host,
-    } = cli.command
-    else {
+    if !matches!(
+        cli.command,
+        Command::Recovery { .. }
+            | Command::Repo(cli::RepoCommand::Open { .. })
+            | Command::Host(HostCommand::RepoOpen { .. })
+    ) {
         return run(cli, budget);
-    };
+    }
     let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
     let shell = System { budget };
     let ledger = Ledger {
@@ -690,7 +691,23 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         ..Ledger::new(ledger::default_dir())
     };
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    let value = runtime::recovery(&shell, &ledger, &policy, &home, host.as_deref(), command)?;
+    let value = match &cli.command {
+        Command::Recovery { command, host } => {
+            runtime::recovery(&shell, &ledger, &policy, &home, host.as_deref(), command)?
+        }
+        Command::Repo(cli::RepoCommand::Open { repo, host }) => {
+            runtime::repo_open(&shell, &ledger, &policy, &home, host.as_deref(), repo)?
+        }
+        Command::Host(HostCommand::RepoOpen { repo }) => {
+            let node = Node::new(&shell, &ledger, &policy, &home);
+            return host(HostCommand::RepoOpen { repo: repo.clone() }, &node);
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "not a recovery or repository command".into(),
+            ));
+        }
+    };
     print(cli.json, &value, || format!("{value}\n"))?;
     Ok(ExitCode::SUCCESS)
 }
@@ -1081,6 +1098,11 @@ fn print_tail(node: &Node<'_>, kind: &str, id: &str) -> Result<()> {
     print(true, &tail, String::new)
 }
 
+fn print_host_repo_open(node: &Node<'_>, repo: &str) -> Result<()> {
+    let opened = checkout::open(node.shell, node.ledger, node.home, hosts::LOCAL, repo)?;
+    print(true, &opened, String::new)
+}
+
 fn print_host_recovery(node: &Node<'_>, command: &cli::RecoveryCommand) -> Result<()> {
     print(
         true,
@@ -1429,6 +1451,7 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             preparation_protocol,
             request_validity,
         )?,
+        HostCommand::RepoOpen { repo } => print_host_repo_open(node, &repo)?,
         HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
         HostCommand::Recovery { command } => print_host_recovery(node, &command)?,
         HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,

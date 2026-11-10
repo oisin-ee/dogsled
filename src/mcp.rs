@@ -160,6 +160,15 @@ pub struct Target {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct RepoOpenArgs {
+    /// The GitHub repository slug: owner/name.
+    pub repo: String,
+    /// Explicit host; local by default.
+    pub host: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LeadArgs {
     /// The GitHub repository slug: owner/name.
     pub repo: String,
@@ -297,6 +306,26 @@ impl Server {
 
 #[tool_router]
 impl Server {
+    #[tool(
+        description = "Return the main checkout of a GitHub repository on an explicit host (local by default), cloning only when missing. Never changes an existing checkout."
+    )]
+    async fn repo_open(
+        &self,
+        Parameters(args): Parameters<RepoOpenArgs>,
+    ) -> Result<String, String> {
+        self.call_bounded(crate::budget::SETUP_LIMIT, move |fleet| {
+            crate::runtime::repo_open(
+                fleet.shell,
+                fleet.ledger,
+                fleet.policy,
+                &fleet.home,
+                args.host.as_deref(),
+                &args.repo,
+            )
+        })
+        .await
+    }
+
     #[tool(
         description = "List pinned recovery snapshots on the explicit host (local by default).",
         annotations(read_only_hint = true)

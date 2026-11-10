@@ -357,6 +357,7 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("recovery_list", &["repo"]),
             expect("recovery_restore", &["id", "repo", "to"]),
             expect("recovery_show", &["id", "repo"]),
+            expect("repo_open", &["repo"]),
             expect("retire_preparation", &["reason", "request_id"]),
             expect("run", &["cmd"]),
             expect("send", &["message", "target"]),

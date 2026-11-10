@@ -619,6 +619,12 @@ pub enum UnitCommand {
 pub enum RepoCommand {
     /// Show accessible GitHub repositories, newest first.
     List,
+    /// Open the main checkout on the selected host (local by default).
+    Open {
+        repo: String,
+        #[arg(long)]
+        host: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -726,6 +732,11 @@ pub enum HookCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
+    #[command(hide = true)]
+    RepoOpen {
+        #[arg(long)]
+        repo: String,
+    },
     /// Start a lead on this host only, using a versioned delivery read from stdin.
     #[command(hide = true)]
     Lead {

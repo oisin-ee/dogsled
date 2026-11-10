@@ -16,6 +16,151 @@ pub struct Repository {
     pub working_root: String,
 }
 
+/// Validate a GitHub slug before any repository or transport effect.
+pub fn slug_origin(slug: &str) -> Result<String> {
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    };
+    if !matches!(slug.split_once('/'), Some((owner, name)) if valid_part(owner) && valid_part(name))
+    {
+        return Err(Error::Invalid(
+            "repository must be a GitHub slug owner/name".into(),
+        ));
+    }
+    Ok(format!("git@github.com:{slug}.git"))
+}
+
+fn matching(
+    shell: &dyn Shell,
+    home: &str,
+    path: &Path,
+    origin: &str,
+) -> Result<Option<Repository>> {
+    // Linked worktrees and repositories without origins are not candidates.
+    if !path.join(".git").is_dir() {
+        return Ok(None);
+    }
+    let url = shell.run(
+        "git",
+        &[
+            "-C".into(),
+            path.display().to_string(),
+            "remote".into(),
+            "get-url".into(),
+            "origin".into(),
+        ],
+    )?;
+    if !url.ok() || !crate::repos::same_origin(url.stdout.trim(), origin) {
+        return Ok(None);
+    }
+    let found = discover(shell, &path.display().to_string(), home, true)
+        .map_err(|_| Error::Invalid("repository checkout discovery failed".into()))?;
+    Ok(found.filter(|repo| std::fs::canonicalize(&repo.path).ok() == path.canonicalize().ok()))
+}
+
+/// Resolve a main checkout without changing any existing checkout.
+pub fn resolve(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    origin: &str,
+) -> Result<(Repository, bool)> {
+    let repository =
+        identity(origin).ok_or_else(|| Error::Invalid("invalid repository origin".into()))?;
+    let (_, slug) = repository
+        .split_once('/')
+        .ok_or_else(|| Error::Invalid("invalid repository identity".into()))?;
+    let (owner, name) = slug
+        .rsplit_once('/')
+        .ok_or_else(|| Error::Invalid("invalid repository identity".into()))?;
+    let dev = Path::new(home).join("dev");
+    // Keep the existing lock shared with leads across destination choice and clone.
+    ledger.with_lock("lead-checkout", || {
+        std::fs::create_dir_all(&dev)?;
+        let mut paths = std::fs::read_dir(&dev)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+        for path in paths {
+            if let Some(repo) = matching(shell, home, &path, origin)? {
+                return Ok((repo, false));
+            }
+        }
+        let preferred = dev.join(name);
+        let path = if preferred.try_exists()? || preferred.symlink_metadata().is_ok() {
+            dev.join(format!("{owner}-{name}"))
+        } else {
+            preferred
+        };
+        if path.try_exists()? || path.symlink_metadata().is_ok() {
+            return Err(Error::Invalid(
+                "repository clone destination is already occupied".into(),
+            ));
+        }
+        let cloned = shell.run_setup(
+            "git",
+            &["clone".into(), origin.into(), path.display().to_string()],
+        )?;
+        if !cloned.ok() {
+            // Git stderr can contain credentials. Never return it to callers.
+            return Err(Error::Invalid("repository clone failed".into()));
+        }
+        let repo = matching(shell, home, &path, origin)?.ok_or_else(|| {
+            Error::Invalid("cloned checkout does not match its repository".into())
+        })?;
+        Ok((repo, true))
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Opened {
+    pub repository: String,
+    pub host: String,
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    pub dirty: usize,
+    pub cloned: bool,
+}
+
+pub fn open(
+    shell: &dyn Shell,
+    ledger: &crate::ledger::Ledger,
+    home: &str,
+    host_label: &str,
+    slug: &str,
+) -> Result<Opened> {
+    let origin = slug_origin(slug)?;
+    let repository =
+        identity(&origin).ok_or_else(|| Error::Invalid("invalid repository origin".into()))?;
+    let (repo, cloned) = resolve(shell, ledger, home, &origin)?;
+    let read = |args: &[&str]| {
+        let mut argv = vec!["--no-optional-locks".into(), "-C".into(), repo.path.clone()];
+        argv.extend(args.iter().map(|arg| (*arg).into()));
+        shell.run("git", &argv)
+    };
+    let branch = read(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let head = read(&["rev-parse", "--verify", "HEAD"])?;
+    let status = read(&["status", "--porcelain"])?;
+    if !status.ok() {
+        return Err(Error::Invalid("repository status failed".into()));
+    }
+    Ok(Opened {
+        repository,
+        host: host_label.into(),
+        path: repo.path,
+        branch: branch.ok().then(|| branch.stdout.trim().to_owned()),
+        head: head.ok().then(|| head.stdout.trim().to_owned()),
+        dirty: status.stdout.lines().count(),
+        cloned,
+    })
+}
+
 pub fn discover(
     shell: &dyn Shell,
     cwd: &str,
