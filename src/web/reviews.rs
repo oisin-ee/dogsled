@@ -1076,10 +1076,10 @@ mod tests {
     ///
     /// The stream of a decision never ends, so the test reads the frames that
     /// arrive and stops.
-    async fn stream_events(response: Response) -> String {
+    async fn stream_events(response: Response, bound: std::time::Duration) -> String {
         let mut body = response.into_body().into_data_stream();
         let mut text = String::new();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + bound;
         while tokio::time::Instant::now() < deadline {
             let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, body.next()).await else {
                 break;
@@ -1569,7 +1569,7 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let text = stream_events(response).await;
+        let text = stream_events(response, crate::test_support::WAIT_DEADLINE).await;
         assert!(text.contains("event: decision"), "{text}");
         assert!(text.contains("looks good"), "{text}");
 
@@ -1600,7 +1600,8 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let text = stream_events(response).await;
+        // Negative check: delivery was acknowledged before this stream opened.
+        let text = stream_events(response, std::time::Duration::from_secs(2)).await;
         assert!(!text.contains("event: decision"), "{text}");
     }
 
@@ -1624,7 +1625,8 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        let text = stream_events(response).await;
+        // Negative check: the accepted stream belongs to a different session.
+        let text = stream_events(response, std::time::Duration::from_secs(2)).await;
         assert!(!text.contains("event: decision"), "{text}");
     }
 

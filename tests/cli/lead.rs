@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 const SLUG: &str = "owner/repo";
 const ORIGIN: &str = "git@github.com:owner/repo.git";
 
-fn checkout(rig: &Rig, name: &str, origin: &str) -> PathBuf {
+pub(super) fn checkout(rig: &Rig, name: &str, origin: &str) -> PathBuf {
     let repo = rig.dir.join("home/dev").join(name);
     fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -313,7 +313,7 @@ fn mcp_lead_uses_the_same_slug_creator_without_stdin_prompts() {
 }
 
 /// An offline source plus a POSIX git fixture exercises the real clone operation without GitHub.
-fn clone_source(rig: &Rig) {
+pub(super) fn clone_source(rig: &Rig) {
     let source = checkout(rig, "source", "git@github.com:other/source.git");
     let real_git = String::from_utf8(
         isolated("sh")
@@ -381,7 +381,7 @@ fn lead_clones_missing_checkout_and_uses_owner_prefix_for_a_name_clash() {
     }
 }
 
-fn remote_publication(rig: &Rig) -> super::observation::Supplied {
+pub(super) fn remote_publication(rig: &Rig) -> super::observation::Supplied {
     let local_observer = observer(rig);
     let (_, mut frame) = rig.json(&["observation", "current"]);
     drop(local_observer);
@@ -404,7 +404,7 @@ fn remote_publication(rig: &Rig) -> super::observation::Supplied {
     super::observation::Supplied::start(rig, frame)
 }
 
-fn peer_transport(rig: &Rig, lose_reply: bool) {
+pub(super) fn peer_transport(rig: &Rig, lose_reply: bool) {
     rig.script(
         "herdr",
         &HERDR_SCRIPT
@@ -423,6 +423,9 @@ case "$remote" in
     tee "$RIG/lead-delivery.json" | HOME="$RIG/peer-home" DOGSLED_STATE="$RIG/peer-state" sh -c '"$DOGSLED_BIN" '"$remote" > "$RIG/lead-reply.json"
     {}
     cat "$RIG/lead-reply.json" ;;
+  *'host snapshot'*) cat "$RIG/peer-snapshot.json" ;;
+  *'host repo-open --repo '*)
+    HOME="$RIG/peer-home" DOGSLED_STATE="$RIG/peer-state" sh -c '"$DOGSLED_BIN" '"$remote" ;;
   *) exit 97 ;;
 esac
 "#, if lose_reply { "exit 255" } else { ":" }));

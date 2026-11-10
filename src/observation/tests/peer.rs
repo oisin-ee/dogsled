@@ -164,7 +164,10 @@ fn bounded_peer_long_poll_ignores_fleet_only_publications() {
     publisher.replace(peer_only).unwrap();
     assert!(recv.recv_timeout(Duration::from_millis(100)).is_err());
     let next = publisher.replace(input(200)).unwrap();
-    let export = recv.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+    let export = recv
+        .recv_timeout(crate::test_support::WAIT_DEADLINE)
+        .unwrap()
+        .unwrap();
     assert_eq!(export.local_revision, next.local_revision);
     assert_eq!(export.measured["host"], 200);
     worker.join().unwrap();
@@ -425,7 +428,9 @@ fn gated_refresh(
     std::thread::scope(|scope| {
         let pending =
             scope.spawn(|| ingestion.refresh(&fleet, &fixture.host, now, Vec::new(), wait));
-        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        receive
+            .recv_timeout(crate::test_support::WAIT_DEADLINE)
+            .unwrap();
         during();
         resume.send(()).unwrap();
         pending.join().unwrap().unwrap();

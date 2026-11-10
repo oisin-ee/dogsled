@@ -319,6 +319,9 @@ pub enum Command {
     /// Read the published GitHub repository catalogue.
     #[command(subcommand)]
     Repo(RepoCommand),
+    /// Send files or changes to another agent, and read what you were sent.
+    #[command(subcommand)]
+    Transfer(TransferCommand),
     /// Send a message to an agent on any host, through its inbox. Nothing types into its
     /// terminal; an agent without an inbox reader gets nothing, and you hear so at once.
     Send {
@@ -616,9 +619,52 @@ pub enum UnitCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum TransferCommand {
+    /// Store files or changes and put one notice in the recipient's inbox. Nothing is applied.
+    Send {
+        /// The agent's name or Herdr pane.
+        target: String,
+        #[arg(long)]
+        host: Option<String>,
+        /// Regular files to attach, each at most 10 MiB.
+        #[arg(long, num_args = 1.., value_name = "PATH", conflicts_with_all = ["changes", "since", "include_worktree"])]
+        files: Vec<PathBuf>,
+        /// Send this checkout's commits since `--since`.
+        #[arg(long, required_unless_present = "files")]
+        changes: bool,
+        /// The commit to compare with. Default: where this checkout left the default branch.
+        #[arg(long, requires = "changes")]
+        since: Option<String>,
+        /// Also send staged, unstaged, and untracked files that Git does not ignore.
+        #[arg(long, requires = "changes")]
+        include_worktree: bool,
+    },
+    /// The transfers you sent or received on this host.
+    List,
+    /// One transfer: its summary, its file paths, and its pinned source.
+    Show { id: String },
+    /// Apply received changes to working files in this checkout. The index and HEAD stay.
+    /// A path that differs from the transfer's `since` commit refuses the whole transfer.
+    Apply {
+        id: String,
+        /// Report whether it applies, and write no file.
+        #[arg(long)]
+        check: bool,
+    },
+    /// End a transfer you sent or received.
+    Drop { id: String },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum RepoCommand {
     /// Show accessible GitHub repositories, newest first.
     List,
+    /// Open the main checkout on the selected host (local by default).
+    Open {
+        repo: String,
+        #[arg(long)]
+        host: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -726,6 +772,17 @@ pub enum HookCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum HostCommand {
+    #[command(hide = true)]
+    RepoOpen {
+        #[arg(long)]
+        repo: String,
+    },
+    /// Store one transfer envelope read from stdin and announce it to its recipient here.
+    #[command(hide = true)]
+    TransferPut {
+        #[arg(long, value_parser = ["-"])]
+        input: String,
+    },
     /// Start a lead on this host only, using a versioned delivery read from stdin.
     #[command(hide = true)]
     Lead {

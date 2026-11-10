@@ -6,7 +6,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 use std::sync::Arc;
 
-const WAIT: Duration = Duration::from_secs(5);
+use crate::test_support::WAIT_DEADLINE as WAIT;
 const OWNER: &str = "owner";
 
 struct Fixture {

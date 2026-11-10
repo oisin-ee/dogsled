@@ -277,8 +277,19 @@ pub(super) struct Observer {
 
 impl Observer {
     pub(super) fn start(name: &str, interval: &str) -> Self {
+        Self::start_rig(Rig::short(name), interval)
+    }
+
+    /// Pin the host clock while leaving the real-time CPU baseline and waits intact.
+    pub(super) fn start_at(name: &str, interval: &str, now: u64) -> Self {
+        let mut rig = Rig::short(name);
+        rig.origin_ms = now - 1_000;
+        fs::write(rig.dir.join("clock"), now.to_string()).unwrap();
+        Self::start_rig(rig, interval)
+    }
+
+    fn start_rig(rig: Rig, interval: &str) -> Self {
         use std::io::{BufRead as _, BufReader, Write as _};
-        let rig = Rig::short(name);
         rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
         let path = rig.dir.join("herdr.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -319,6 +330,15 @@ impl Observer {
             events,
             subscriptions,
         };
+        // Reconciliation samples can satisfy the pinned timestamp below before the
+        // one-second baseline. Wait for that scheduled publication, not a quiet window.
+        observer.wait(|_| {
+            observer
+                .rig
+                .log("journal")
+                .lines()
+                .any(|line| line == "dogsled service: baseline sample published")
+        });
         observer.wait(|_| {
             let db = observer.rig.database();
             db.query_row::<i64, _, _>("SELECT count(*) FROM service_lanes", [], |row| row.get(0))
@@ -413,7 +433,6 @@ fn cold_serve_samples_cpu_before_long_interval_without_local_events() {
     rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
     let mut command = rig.cmd(&["serve", "--interval", "3600"]);
     command.env("HERDR_SOCKET_PATH", rig.dir.join("no-herdr-events.sock"));
-    let began = Instant::now();
     let _observer = Rig::background(command);
     let frame = wait_publication(&rig, |frame| {
         frame["local"]["host"]["probe"]["busy"].is_number()
@@ -421,7 +440,6 @@ fn cold_serve_samples_cpu_before_long_interval_without_local_events() {
                 .as_u64()
                 .is_some_and(|at| at >= rig.origin_ms + 1_000)
     });
-    assert!(began.elapsed() < Duration::from_secs(5), "{frame}");
     let probe = &frame["local"]["host"]["probe"];
     let cores = probe["cores"].as_f64().unwrap();
     let busy = probe["busy"].as_f64().unwrap();
@@ -438,7 +456,38 @@ fn cold_serve_samples_cpu_before_long_interval_without_local_events() {
     assert_eq!(frame["local"]["headroom"]["eligible"], expected, "{frame}");
     assert_ne!(frame["local"]["headroom"]["reason"], "no CPU sample yet");
     assert!(frame["local"]["host"]["probe"]["busy"].is_number());
-    assert_eq!(rig.state(&["samples"]).as_array().unwrap().len(), 2);
+    let samples = rig.state(&["samples"]);
+    let samples = samples.as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    let first = samples[0]["ts_ms"].as_u64().unwrap();
+    let second = samples[1]["ts_ms"].as_u64().unwrap();
+    // service::BASELINE_SAMPLE_DELAY is 1 s. Keep the 5 s behaviour bound,
+    // including collection headroom, but exclude startup before the first sample.
+    assert!(second - first < 5_000, "{samples:?}");
+}
+
+#[test]
+fn baseline_publication_is_logged_once_and_never_for_once() {
+    let mut observer = Observer::start("observe-baseline-log", "3600");
+    let before = observer.samples();
+    observer.event("pane.updated");
+    observer.wait(|_| observer.samples() > before);
+    observer.quiet();
+    assert_eq!(
+        observer
+            .rig
+            .log("journal")
+            .lines()
+            .filter(|line| *line == "dogsled service: baseline sample published")
+            .count(),
+        1
+    );
+    let once = Rig::short("observe-once-baseline-log");
+    assert!(
+        !serve(&once)
+            .lines()
+            .any(|line| line == "dogsled service: baseline sample published")
+    );
 }
 
 #[test]

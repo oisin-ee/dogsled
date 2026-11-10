@@ -224,7 +224,7 @@ mod tests {
         let body = body.to_owned();
         tokio::task::spawn_blocking(move || -> Result<String> {
             let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
-            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))?;
             write!(stream, "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
             let mut response = String::new();
             stream.read_to_string(&mut response)?;
@@ -254,8 +254,16 @@ mod tests {
             &[],
             7,
         );
-        let initial =
-            super::super::test_support::publish(&mut publisher, &ledger, board.clone(), vec![])?;
+        let agents: Vec<portal_types::agents::AgentView> =
+            serde_json::from_value(serde_json::json!([
+                {"host": "local", "pane": "pane", "state": "idle"}
+            ]))?;
+        let initial = super::super::test_support::publish(
+            &mut publisher,
+            &ledger,
+            board.clone(),
+            agents.clone(),
+        )?;
         let mut ipc = crate::observation::ipc::Server::new(&ledger.dir)?;
         ipc.bind(publisher.subscribe())?;
         let file = ledger.dir.join("interview.json");
@@ -285,7 +293,7 @@ mod tests {
                 let mut socket =
                     std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
                 socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
                     .expect("timeout");
                 write!(socket, "GET /api/stream HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").expect("request SSE");
                 for line in std::io::BufReader::new(socket).lines() {
@@ -298,15 +306,15 @@ mod tests {
                     }
                 }
             });
-            let first = tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+            let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, snapshots.recv())
                 .await
                 .expect("initial publication")
                 .expect("stream open");
             assert_eq!(Some(first), initial.snapshot);
             board.generated_ms = 8;
             let changed =
-                super::super::test_support::publish(&mut publisher, &ledger, board, vec![])?;
-            let second = tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+                super::super::test_support::publish(&mut publisher, &ledger, board, agents)?;
+            let second = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, snapshots.recv())
                 .await
                 .expect("replacement publication")
                 .expect("stream open");
@@ -339,7 +347,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let (send, mut opened) = mpsc::unbounded_channel();
         let browser = Browser(send);
-        let work = interview(&state, &browser, ask()?, Duration::from_secs(5));
+        let work = interview(&state, &browser, ask()?, crate::test_support::WAIT_DEADLINE);
         let answer = async {
             let url = opened
                 .recv()

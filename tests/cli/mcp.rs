@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 /// The time the server gets to end on its own after its stdin closes. A server that
 /// outlives this window is killed, so a test never hangs on it.
-const EXIT_GRACE: Duration = Duration::from_secs(5);
+const EXIT_GRACE: Duration = PROCESS_DEADLINE;
 
 /// The time a receive may wait for the deadline, or nothing when the deadline has
 /// passed. A receive with no time left can still return a queued line, so a server
@@ -357,12 +357,18 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("recovery_list", &["repo"]),
             expect("recovery_restore", &["id", "repo", "to"]),
             expect("recovery_show", &["id", "repo"]),
+            expect("repo_open", &["repo"]),
             expect("retire_preparation", &["reason", "request_id"]),
             expect("run", &["cmd"]),
             expect("send", &["message", "target"]),
             expect("spawn", &[]),
             expect("status", &[]),
             expect("stop", &["id"]),
+            expect("transfer_apply", &["id"]),
+            expect("transfer_drop", &["id"]),
+            expect("transfer_list", &[]),
+            expect("transfer_send", &["target"]),
+            expect("transfer_show", &["id"]),
         ]
     );
     let spawn = tools["tools"]

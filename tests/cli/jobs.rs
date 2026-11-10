@@ -1006,6 +1006,9 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     let rig = Rig::new("run-wait");
     rig.snapshot("state", now(), 0.0, 8);
     let observer = super::place::placement_observer(&rig);
+    drop(observer);
+    // Keep placement facts available without a live sampler issuing calls after close.
+    let publisher = super::observation::seeded(&rig);
     let output = rig.run(&[
         "run",
         "--wait",
@@ -1014,7 +1017,7 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
         "-c",
         "echo hi; echo err >&2; exit 3",
     ]);
-    drop(observer);
+    drop(publisher);
     assert_eq!(
         output.status.code(),
         Some(3),
@@ -1050,7 +1053,14 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert!(job["ended_ms"].is_number());
     assert!(herdr.ends_with("pane close w2:p1\n"));
     assert_eq!(
-        rig.run(&["wait", id, "--max", "30s"]).status.code(),
+        rig.run(&[
+            "wait",
+            id,
+            "--max",
+            &format!("{}ms", PROCESS_DEADLINE.as_millis())
+        ])
+        .status
+        .code(),
         Some(3)
     );
     assert_eq!(rig.run(&["logs", id, "--follow"]).stdout, log.as_bytes());
@@ -1232,12 +1242,53 @@ fn wait_max_and_stop_use_durable_local_job_state() {
     job["ended_ms"] = Value::Null;
     job["exit"] = Value::Null;
     rig.put_job("running", &job);
-    let out = rig.run(&["wait", "running", "--max", "0ms"]);
+    // --max counts from process start; leave room for startup so the job resolves before the deadline.
+    let out = rig.run(&["wait", "running", "--max", "1500ms"]);
     assert_eq!(out.status.code(), Some(124));
     assert_eq!(out.stdout, b"still running\n");
     assert!(rig.run(&["stop", "running"]).status.success());
     assert_eq!(rig.stop_requested("running"), true);
     assert_eq!(rig.run(&["stop", "../escape"]).status.code(), Some(2));
+}
+
+#[test]
+fn wait_deadline_before_resolution_reports_unresolved() {
+    let rig = Rig::new("wait-unresolved");
+    let mut job = complete("running");
+    job["ended_ms"] = Value::Null;
+    job["exit"] = Value::Null;
+    rig.put_job("running", &job);
+    for id in ["running", "unknown"] {
+        let message = format!("dogsled wait: deadline reached before {id} was resolved");
+        let mut child = rig.start(&["wait", id, "--max", "0ms"]);
+        assert_eq!(child.wait().code(), Some(124));
+        let (stdout, stderr) = child.output();
+        assert!(stdout.is_empty(), "{stdout}");
+        assert_eq!(stderr, format!("{message}\n"));
+
+        let mut child = rig.start(&["wait", id, "--max", "0ms", "--json"]);
+        assert_eq!(child.wait().code(), Some(124));
+        let (stdout, stderr) = child.output();
+        let report: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            report,
+            json!({"error":message,"deadline":true,"resolved":false})
+        );
+        assert!(stderr.is_empty(), "{stderr}");
+    }
+}
+
+#[test]
+fn wait_unknown_target_resolved_in_time_is_an_error() {
+    let rig = Rig::new("wait-unknown");
+    rig.put_items(&json!([]));
+    let _publisher = super::observation::seeded(&rig);
+    let mut child = rig.start(&["wait", "unknown", "--max", "1500ms"]);
+    assert_eq!(child.wait().code(), Some(2));
+    let (stdout, stderr) = child.output();
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(!stderr.contains("deadline reached"), "{stderr}");
+    assert!(stderr.contains("result unavailable"), "{stderr}");
 }
 
 #[test]
@@ -1432,9 +1483,14 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     rig.ingest_peers();
     let observer = super::place::peer_observer(&rig);
     assert_eq!(
-        rig.run(&["wait", "remote-job", "--max", "30s"])
-            .status
-            .code(),
+        rig.run(&[
+            "wait",
+            "remote-job",
+            "--max",
+            &format!("{}ms", PROCESS_DEADLINE.as_millis())
+        ])
+        .status
+        .code(),
         Some(3)
     );
     assert!(rig.run(&["stop", "remote-job"]).status.success());
@@ -2203,7 +2259,7 @@ fn settled_remote_job_releases_holds_on_both_hosts() {
         "netcup",
         "--wait",
         "--max",
-        "10s",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
         "--",
         "sh",
         "-c",
@@ -2271,7 +2327,7 @@ fn peer_refused_job_reports_once_and_releases_holds() {
         "--cwd",
         missing.to_str().unwrap(),
         "--max",
-        "10s",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
         "--",
         "true",
     ]);
@@ -2564,7 +2620,12 @@ fn stopped_job_releases_holds_after_terminal_capture() {
     );
     assert!(rig.job(id)["ended_ms"].is_null());
     assert!(rig.run(&["stop", id]).status.success());
-    let mut command = rig.start(&["wait", id, "--max", "10s"]);
+    let mut command = rig.start(&[
+        "wait",
+        id,
+        "--max",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
+    ]);
     assert!(!command.wait().success(), "{:?}", command.output());
     assert_eq!(rig.job(id)["reason"], "stopped");
     assert!(!wrapper.wait().success());

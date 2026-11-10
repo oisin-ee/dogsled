@@ -162,6 +162,7 @@ fn actions(
     home: String,
     lane: Lane,
     published: Arc<crate::observation::Published>,
+    release_retries: &crate::launch::ReleaseRetries,
 ) -> Result<()> {
     let shell = System::default();
     if lane == Lane::Handoff {
@@ -173,7 +174,7 @@ fn actions(
     }
     if lane == Lane::Retention {
         // Retention owns its synchronization too; no other service lane is required.
-        crate::launch::release_owned(&fleet)?;
+        crate::launch::release_owned(&fleet, release_retries, now_ms())?;
         return crate::jobs::expire(ledger, now_ms());
     }
     match lane {
@@ -183,7 +184,7 @@ fn actions(
             crate::watchdog::tick(&fleet, &reports, now)?;
             items::reconcile(ledger, &reports, now)
         }
-        Lane::Admission => work::tick(&fleet, now_ms()),
+        Lane::Admission => work::tick(&fleet, release_retries, now_ms()),
         Lane::Children => crate::sweep::children(&fleet, now_ms()),
         Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
         Lane::Quota | Lane::Handoff | Lane::Retention => Ok(()),
@@ -205,13 +206,21 @@ fn ready(lane: Lane, completed: [bool; LANES.len()]) -> bool {
             .any(|(other, done)| *other == Lane::Handoff && done)
 }
 
-#[derive(Default)]
 struct Workers {
+    release_retries: Arc<crate::launch::ReleaseRetries>,
     handles: [Option<std::thread::JoinHandle<()>>; LANES.len()],
     completed: [bool; LANES.len()],
 }
 
 impl Workers {
+    fn new(release_retries: Arc<crate::launch::ReleaseRetries>) -> Self {
+        Self {
+            release_retries,
+            handles: Default::default(),
+            completed: [false; LANES.len()],
+        }
+    }
+
     /// Start eligible lanes without coupling their scheduling to publication or input.
     fn start(
         &mut self,
@@ -270,10 +279,18 @@ impl Workers {
         let home = node.home.to_owned();
         let send = send.clone();
         let published = Arc::clone(published);
+        let release_retries = Arc::clone(&self.release_retries);
         self.handles[lane] = Some(std::thread::spawn(move || {
             let _ = send.send(Event::Finished(
                 lane,
-                actions(&ledger, &policy, home, LANES[lane], published),
+                actions(
+                    &ledger,
+                    &policy,
+                    home,
+                    LANES[lane],
+                    published,
+                    &release_retries,
+                ),
             ));
         }));
     }
@@ -295,7 +312,7 @@ struct Exchange {
     interests: crate::observation::peers::Interests,
     diagnostics: crate::observation::diagnostics::Diagnostics,
     details: crate::observation::details::Collector,
-    activity: crate::observation::live_activity::Authority,
+    activity: crate::observation::live_activity::Handle,
     dirty: wake::Dirty,
     timings: crate::observation::timing::PassTimings,
 }
@@ -364,19 +381,13 @@ fn publish(
         let result = peers.compose(fleet, &mut collection.input, now, collector.reports());
         timings.phase("peers.compose", started.elapsed());
         result?;
-        let started = Instant::now();
-        let result = activity.refresh(node.shell, &collection.input);
-        timings.phase("activity.refresh", started.elapsed());
-        result?;
+        activity.observe(&collection.input)?;
         let started = Instant::now();
         let result = details.refresh(&mut collection.input, dirty);
         timings.phase("details.refresh", started.elapsed());
         result?;
         Ok(collection)
     })?;
-    let started = Instant::now();
-    publisher.activity(activity.views(Instant::now(), now_ms()));
-    timings.phase("activity.views", started.elapsed());
     let started = Instant::now();
     herdr.interests(collector.panes());
     timings.phase("herdr.interests", started.elapsed());
@@ -406,8 +417,11 @@ impl Observation {
         let interests = crate::observation::peers::Interests::default();
         server.branches(interests.clone(), dirty.clone());
         let details = crate::observation::details::Collector::default();
-        let activity = crate::observation::live_activity::Authority::new(publisher.epoch().into());
-        server.activity(activity.commands());
+        let (commands, feed, activity) = crate::observation::live_activity::Authority::spawn(
+            publisher.epoch().into(),
+            System::default(),
+        )?;
+        server.activity(commands, feed);
         server.details(details.interests.clone());
         publisher.details(details.payloads.clone());
         if let Err(error) = server.bind(publisher.subscribe()) {
@@ -439,13 +453,9 @@ impl Observation {
         })
     }
 
-    /// The earliest of the schedule, the first baseline sample, and live activity sampling.
-    fn due(&self, next: Instant, baseline: Option<Instant>) -> Instant {
-        let due = baseline.map_or(next, |at| next.min(at));
-        self.exchange
-            .activity
-            .next_wake()
-            .map_or(due, |at| due.min(at))
+    /// The earliest of the schedule and the first baseline sample.
+    fn due(next: Instant, baseline: Option<Instant>) -> Instant {
+        baseline.map_or(next, |at| next.min(at))
     }
 
     fn timed_refresh(
@@ -510,13 +520,6 @@ impl Observation {
         if let Err(error) = discovery {
             eprintln!("dogsled peer discovery: {error}");
         }
-        if self.exchange.activity.sample_due() {
-            let started = Instant::now();
-            self.exchange.activity.sample(node.shell, now_ms());
-            self.exchange
-                .timings
-                .phase("activity.sample", started.elapsed());
-        }
         publish(
             node,
             &mut self.collector,
@@ -544,16 +547,13 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     };
     let mut sweep: Option<std::thread::JoinHandle<()>> = None;
     let mut requested = false;
-    let mut workers = Workers::default();
+    let mut workers = Workers::new(Arc::new(crate::launch::ReleaseRetries::default()));
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
     let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);
     loop {
         let scheduled = Instant::now() >= next;
-        let baseline_due = baseline.is_some_and(|at| Instant::now() >= at);
-        if baseline_due {
-            baseline = None;
-        }
+        let baseline_due = baseline.take_if(|at| Instant::now() >= *at).is_some();
         let domains = dirty.take();
         observation.timed_refresh(
             node,
@@ -562,6 +562,9 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             (domains, once),
             scheduled || baseline_due,
         )?;
+        if baseline_due {
+            eprintln!("dogsled service: baseline sample published");
+        }
         if scheduled {
             workers.start(node, policy, once, &send, &observation.publisher)?;
             next += interval;
@@ -586,7 +589,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
             if once && workers.completed.iter().all(|done| *done) && sweep.is_none() {
                 return Ok(());
             }
-            let observation_due = observation.due(next, baseline);
+            let observation_due = Observation::due(next, baseline);
             match recv.recv_timeout(observation_due.saturating_duration_since(Instant::now())) {
                 Ok(Event::Wake) => {
                     requested |=

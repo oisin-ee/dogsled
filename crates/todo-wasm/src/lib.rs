@@ -38,6 +38,19 @@ pub fn parse(
     Ok(list.into_ts()?)
 }
 
+/// Validates one changed task without whole-list dependency checks.
+///
+/// # Errors
+/// Throws for malformed shape, status, content, unit or binding fields.
+#[wasm_bindgen(js_name = validateTask)]
+pub fn validate_task(
+    #[wasm_bindgen(unchecked_param_type = "unknown")] task: JsValue,
+) -> Result<Ts<todo_core::Task>, JsError> {
+    let task = Ts::<todo_core::Task>::new_unchecked(task).to_rust()?;
+    todo_core::validate_task(&task)?;
+    Ok(task.into_ts()?)
+}
+
 /// Applies one validated operation.
 ///
 /// # Errors

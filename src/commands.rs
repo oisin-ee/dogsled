@@ -58,7 +58,7 @@ pub(crate) fn prune(
     if !resources.is_empty() {
         crate::work::settle_failed_jobs(fleet.ledger)?;
         crate::work::repair_cancellations(fleet)?;
-        crate::launch::release_owned(fleet)?;
+        crate::launch::release_owned(fleet, &crate::launch::ReleaseRetries::default(), now)?;
         crate::jobs::expire(fleet.ledger, now)?;
     }
     let mut applied: crate::cleanup::Applied = if host.is_local() {

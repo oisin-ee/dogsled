@@ -162,15 +162,6 @@ pub async fn send_prompt(
     post(&agent_url(address, "prompt"), &body).await
 }
 
-/// The repositories a lead can start in.
-pub async fn fetch_repos() -> Result<portal_types::agents::RepoList, String> {
-    let response = Request::get(&format!("{BASE}/api/repos"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    read_json::<portal_types::agents::RepoList>(response).await
-}
-
 /// Start a lead in `repo` with its first prompt. The result is the lead's pane.
 pub async fn create_lead(
     repo: &str,
@@ -277,21 +268,74 @@ pub async fn watch(
             }
         };
         if let Some(text) = message.data().as_string() {
-            let event = serde_json::from_str::<PortalEvent>(&text)
-                .map_err(|error| format!("the portal stream sent invalid data: {error}"))?;
-            if let PortalEvent::Snapshot(snapshot) = &event {
-                if snapshot.version != 1 || snapshot.epoch.is_empty() || snapshot.revision == 0 {
-                    return Err("invalid observation revision".to_owned());
-                }
-                if stamp.as_ref().is_some_and(|(epoch, revision)| {
-                    *epoch == snapshot.epoch && *revision > snapshot.revision
-                }) {
-                    return Err("observation publication is out of order".to_owned());
-                }
-                stamp = Some((snapshot.epoch.clone(), snapshot.revision));
-            }
+            let event = decode_portal(&text, &mut stamp)?;
             on_publication(Ok(event));
         }
     }
     Err("the portal stream ended".to_owned())
+}
+
+/// Validate the portal payload independently of the observation IPC version.
+fn decode_portal(text: &str, stamp: &mut Option<(String, u64)>) -> Result<PortalEvent, String> {
+    let event = serde_json::from_str::<PortalEvent>(text)
+        .map_err(|error| format!("the portal stream sent invalid data: {error}"))?;
+    if let PortalEvent::Snapshot(snapshot) = &event {
+        if snapshot.version != portal_types::PORTAL_VERSION {
+            return Err(format!(
+                "unsupported portal snapshot version: {}",
+                snapshot.version
+            ));
+        }
+        if snapshot.epoch.is_empty() || snapshot.revision == 0 {
+            return Err("invalid observation revision".to_owned());
+        }
+        if stamp.as_ref().is_some_and(|(epoch, revision)| {
+            *epoch == snapshot.epoch && *revision > snapshot.revision
+        }) {
+            return Err("observation publication is out of order".to_owned());
+        }
+        *stamp = Some((snapshot.epoch.clone(), snapshot.revision));
+    }
+    Ok(event)
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::decode_portal;
+    use serde_json::json;
+
+    #[test]
+    fn portal_decoder_requires_version_two_and_strict_ordered_shapes() {
+        let mut stamp = None;
+        let mut value = json!({"version":portal_types::PORTAL_VERSION,"epoch":"serve","revision":2,
+            "published_ms":1,"board":null,"agents":null,"inbox":null,"repos":null,"gaps":[]});
+        assert!(decode_portal(&value.to_string(), &mut stamp).is_ok());
+        for version in [0, 1, 3] {
+            value["version"] = json!(version);
+            assert_eq!(
+                decode_portal(&value.to_string(), &mut stamp).unwrap_err(),
+                format!("unsupported portal snapshot version: {version}")
+            );
+        }
+        value["version"] = json!(portal_types::PORTAL_VERSION);
+        value["revision"] = json!(1);
+        assert!(
+            decode_portal(&value.to_string(), &mut stamp)
+                .unwrap_err()
+                .contains("out of order")
+        );
+        value["epoch"] = json!("restarted");
+        assert!(decode_portal(&value.to_string(), &mut stamp).is_ok());
+        value["observation"] = json!("disconnected");
+        value["error"] = json!("offline");
+        assert!(decode_portal(&value.to_string(), &mut stamp).is_err());
+        assert!(
+            decode_portal(
+                r#"{"observation":"disconnected","error":"offline"}"#,
+                &mut stamp
+            )
+            .is_ok()
+        );
+        assert_eq!(stamp, Some(("restarted".into(), 1)));
+    }
 }

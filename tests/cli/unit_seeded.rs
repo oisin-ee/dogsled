@@ -486,7 +486,9 @@ fn over_budget_prepared_unit_releases_only_its_claim_and_settles_idempotently() 
         assert_eq!(code, 0, "{execution}");
         let input = commit_input(&execution, 0);
         drop(original.service.lock().unwrap().take());
-        let observer = super::place::placement_observer(&rig);
+        // Finish startup before commit; its refusal writes no sweep or quota request,
+        // so no recovery lane releases the claim before the explicit settlements below.
+        let observer = quiet_observer(&rig);
         let mut cmd = rig.cmd(&["unit", "commit", "--input", &input.to_string()]);
         if point == "preflight-refusal-persisted" {
             cmd.env("DOGSLED_TEST_UNIT_CRASH", point);

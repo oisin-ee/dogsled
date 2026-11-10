@@ -20,6 +20,8 @@ mod provider_tests;
 mod reminder;
 mod selection;
 mod validation;
+#[cfg(test)]
+mod validation_tests;
 mod widget;
 
 pub use binding::{
@@ -154,10 +156,7 @@ impl std::error::Error for TodoError {}
 pub fn validate(list: &TodoList) -> Result<(), TodoError> {
     validate_labels(list.tasks.iter().map(|task| task.content.as_str()))?;
     for task in &list.tasks {
-        validate_labels(task.subtasks.iter().map(|child| child.content.as_str()))?;
-        if !task.status.is_open() && task.subtasks.iter().any(|child| child.status.is_open()) {
-            return Err(TodoError::OpenChildren(task.content.clone()));
-        }
+        validate_task(task)?;
     }
     let imported = validation::units(list)
         .iter()
@@ -173,23 +172,35 @@ pub fn validate(list: &TodoList) -> Result<(), TodoError> {
             "SEEDED_SCOPE_LOCKED: worker owns exactly one leaf",
         ));
     }
-    for task in &list.tasks {
-        if let Some(unit) = &task.unit {
-            import::validate_import(unit, &task.content, task.status, task.subtasks.is_empty())?;
-        }
-        for child in &task.subtasks {
-            if child
-                .unit
-                .as_ref()
-                .is_some_and(|unit| unit.imported.is_some())
-            {
+    validation::validate_units(list)
+}
+
+/// Validates one task without requiring other tasks or its dependency graph.
+/// Shape and status are checked during deserialization at the caller boundary.
+///
+/// # Errors
+/// Rejects invalid labels, unit fields, imports, bindings and local activation.
+pub fn validate_task(task: &Task) -> Result<(), TodoError> {
+    validate_labels(std::iter::once(task.content.as_str()))?;
+    validate_labels(task.subtasks.iter().map(|child| child.content.as_str()))?;
+    if !task.status.is_open() && task.subtasks.iter().any(|child| child.status.is_open()) {
+        return Err(TodoError::OpenChildren(task.content.clone()));
+    }
+    if let Some(unit) = &task.unit {
+        import::validate_import(unit, &task.content, task.status, task.subtasks.is_empty())?;
+        validation::unit_fields(unit, task.status, task.subtasks.is_empty())?;
+    }
+    for child in &task.subtasks {
+        if let Some(unit) = &child.unit {
+            if unit.imported.is_some() {
                 return Err(validation::error(
                     "SEEDED_SCOPE_LOCKED: worker import must be a standalone leaf",
                 ));
             }
+            validation::unit_fields(unit, child.status, true)?;
         }
     }
-    validation::validate_units(list)
+    Ok(())
 }
 
 fn validate_labels<'a>(labels: impl Iterator<Item = &'a str>) -> Result<(), TodoError> {

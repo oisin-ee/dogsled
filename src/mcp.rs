@@ -160,6 +160,15 @@ pub struct Target {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct RepoOpenArgs {
+    /// The GitHub repository slug: owner/name.
+    pub repo: String,
+    /// Explicit host; local by default.
+    pub host: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LeadArgs {
     /// The GitHub repository slug: owner/name.
     pub repo: String,
@@ -232,6 +241,43 @@ pub struct Id {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransferSendArgs {
+    /// The agent's name or Herdr pane.
+    pub target: String,
+    /// The target's host, when the name or pane is ambiguous.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Regular files to attach, each at most 10 MiB. Give `files` or `changes`, not both.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Send the commits of the checkout at `cwd` since `since`.
+    #[serde(default)]
+    pub changes: bool,
+    /// The commit to compare with. Default: where the checkout left the default branch.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Also send staged, unstaged, and untracked files that Git does not ignore.
+    #[serde(default, rename = "includeWorktree")]
+    pub include_worktree: bool,
+    /// The checkout to send changes from. Default: the server's working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransferApplyArgs {
+    pub id: String,
+    /// Report whether it applies, and write no file.
+    #[serde(default)]
+    pub check: bool,
+    /// The checkout that receives the changes. Default: the server's working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct PlaceArgs {
     #[serde(default)]
     pub resume: Option<String>,
@@ -297,6 +343,26 @@ impl Server {
 
 #[tool_router]
 impl Server {
+    #[tool(
+        description = "Return the main checkout of a GitHub repository on an explicit host (local by default), cloning only when missing. Never changes an existing checkout."
+    )]
+    async fn repo_open(
+        &self,
+        Parameters(args): Parameters<RepoOpenArgs>,
+    ) -> Result<String, String> {
+        self.call_bounded(crate::budget::SETUP_LIMIT, move |fleet| {
+            crate::runtime::repo_open(
+                fleet.shell,
+                fleet.ledger,
+                fleet.policy,
+                &fleet.home,
+                args.host.as_deref(),
+                &args.repo,
+            )
+        })
+        .await
+    }
+
     #[tool(
         description = "List pinned recovery snapshots on the explicit host (local by default).",
         annotations(read_only_hint = true)
@@ -617,6 +683,120 @@ impl Server {
                 crate::lifecycle::Signal::Blocked,
                 &args.reason,
                 now_ms(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Send files or changes to another agent on this host. Dogsled stores the transfer and puts one notice in the recipient's inbox. Nothing is applied to the recipient's checkout. Fails at once when the agent has no inbox reader."
+    )]
+    async fn transfer_send(
+        &self,
+        Parameters(args): Parameters<TransferSendArgs>,
+    ) -> Result<String, String> {
+        use crate::transfer::delivery;
+        self.call(move |fleet| {
+            let content = match (args.files.is_empty(), args.changes) {
+                (false, false) if args.since.is_none() && !args.include_worktree => {
+                    delivery::Content::Files(args.files.iter().map(Into::into).collect())
+                }
+                (true, true) => delivery::Content::Changes {
+                    since: args.since,
+                    include_worktree: args.include_worktree,
+                },
+                _ => {
+                    return Err(Error::Invalid(
+                        "give files, or changes with optional since and includeWorktree".into(),
+                    ));
+                }
+            };
+            let cwd = match args.cwd {
+                Some(cwd) => cwd.into(),
+                None => std::env::current_dir()?,
+            };
+            let sent = delivery::send(
+                fleet,
+                &cwd,
+                &args.target,
+                args.host.as_deref(),
+                &content,
+                now_ms(),
+            )?;
+            Ok(serde_json::to_value(sent)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "The transfers you sent or received on this host.",
+        annotations(read_only_hint = true)
+    )]
+    async fn transfer_list(&self) -> Result<String, String> {
+        self.call(move |fleet| {
+            let caller = crate::inbox::caller(fleet.shell);
+            Ok(serde_json::to_value(crate::transfer::delivery::list(
+                fleet.ledger,
+                &caller,
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "One transfer: its summary, the paths of its files, and its pinned source. Refuses a stored file whose bytes changed.",
+        annotations(read_only_hint = true)
+    )]
+    async fn transfer_show(&self, Parameters(args): Parameters<Id>) -> Result<String, String> {
+        self.call(move |fleet| {
+            Ok(serde_json::to_value(crate::transfer::delivery::show(
+                fleet.ledger,
+                &args.id,
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Apply a received change transfer to working files in your checkout. The index, HEAD, and branches stay as they are. If any touched path differs from the transfer's `since` commit, nothing is written and the paths are named. A recovery snapshot of the checkout is taken before the first write. A second apply writes nothing."
+    )]
+    async fn transfer_apply(
+        &self,
+        Parameters(args): Parameters<TransferApplyArgs>,
+    ) -> Result<String, String> {
+        self.call(move |fleet| {
+            let caller = crate::inbox::caller(fleet.shell);
+            let cwd = match args.cwd {
+                Some(cwd) => cwd.into(),
+                None => std::env::current_dir()?,
+            };
+            Ok(serde_json::to_value(crate::transfer::apply::apply(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &caller,
+                &args.id,
+                args.check,
+                now_ms(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "End a transfer you sent or received. Removes its stored files; other transfers are untouched.",
+        annotations(destructive_hint = true)
+    )]
+    async fn transfer_drop(&self, Parameters(args): Parameters<Id>) -> Result<String, String> {
+        self.call(move |fleet| {
+            let caller = crate::inbox::caller(fleet.shell);
+            let cwd = std::env::current_dir()?;
+            Ok(serde_json::to_value(crate::transfer::delivery::remove(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &caller,
+                &args.id,
             )?)?)
         })
         .await

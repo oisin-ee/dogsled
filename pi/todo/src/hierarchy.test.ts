@@ -3,6 +3,7 @@ import { apply, parse, view, widget } from "./wasm.ts";
 import { childId, contract, first, firstId, fixture, second } from "./contract-fixture.ts";
 import { describe, expect, it } from "vitest";
 import type { Fixture } from "./contract-fixture.ts";
+import type { TodoParams } from "./tool.ts";
 import { TodoView } from "./embedded.ts";
 import { display } from "./display.ts";
 import { runTodo } from "./tool.ts";
@@ -92,20 +93,24 @@ describe("strict operation input", () => {
   it.each([
     { op: "view", unexpected: true },
     { items: [{ content: "Root", subtasks: [], unexpected: true }], op: "init" },
-  ] as const)("rejects unknown fields without persisting %j", { timeout: 5000 }, (params) => {
-    expect.hasAssertions();
-    const stored: TodoList[] = [];
-    expect(() =>
-      runTodo(params, {
-        append: (_kind, list) => {
-          stored.push(list);
-        },
-        branch: () => [],
-        sessionId: "test-session",
-      }),
-    ).toThrow(/unknown field|untagged enum Item/u);
-    expect(stored).toStrictEqual([]);
-  });
+  ] as const)(
+    "rejects unknown fields without persisting %j",
+    { timeout: 5000 },
+    (params: TodoParams) => {
+      expect.hasAssertions();
+      const stored: unknown[] = [];
+      expect(() =>
+        runTodo(params, {
+          append: (_kind, list) => {
+            stored.push(list);
+          },
+          branch: () => [],
+          sessionId: "test-session",
+        }),
+      ).toThrow(/unknown field|untagged enum Item/u);
+      expect(stored).toStrictEqual([]);
+    },
+  );
 });
 
 describe("strict WASM operation input", () => {

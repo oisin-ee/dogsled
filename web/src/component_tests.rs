@@ -5,6 +5,402 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+type PortalHandle = std::rc::Rc<std::cell::Cell<Option<Signal<crate::app::PortalState>>>>;
+type DraftHandle = std::rc::Rc<std::cell::Cell<Option<Signal<String>>>>;
+
+fn catalogue_root(props: (PortalHandle, DraftHandle)) -> Element {
+    let publication = use_signal(crate::app::PortalState::default);
+    props.0.set(Some(publication));
+    let catalogue = use_memo(move || publication.read().catalogue.clone());
+    use_context_provider(|| crate::app::CataloguePortal(catalogue));
+    use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
+    use_context_provider(|| crate::new_lead::NewConversation {
+        open: Signal::new(true),
+        repository: Signal::new(Some("github.com/owner/beta".into())),
+    });
+    let draft = use_context_provider(|| crate::agent_view::Draft(Signal::new(String::new()))).0;
+    props.1.set(Some(draft));
+    rsx! { crate::new_lead::NewLead {} }
+}
+
+fn catalogue_snapshot(
+    slugs: &[&str],
+    error: Option<&str>,
+    revision: u64,
+) -> portal_types::PortalEvent {
+    let repos: Vec<_> = slugs.iter().map(|slug| serde_json::json!({
+        "slug":slug,"description":format!("Description of {slug}"),"pushed_at":null,"private":false
+    })).collect();
+    serde_json::from_value(serde_json::json!({
+        "version":portal_types::PORTAL_VERSION,"epoch":"serve","revision":revision,
+        "published_ms":revision,"board":null,"agents":null,"inbox":null,
+        "repos":{"repos":repos,"error":error},"gaps":[]
+    }))
+    .unwrap()
+}
+
+fn catalogue_component_scopes(
+    dom: &VirtualDom,
+    node: &VNode,
+    scopes: &mut std::collections::BTreeMap<String, ScopeId>,
+) {
+    for (index, dynamic) in node.dynamic_nodes.iter().enumerate() {
+        match dynamic {
+            DynamicNode::Component(component) => {
+                if let Some(scope) = component.mounted_scope_id(index, node, dom) {
+                    if component.name.ends_with("::NewLead")
+                        || component.name.ends_with("::Composer")
+                        || component.name.ends_with("::RepositoryPicker")
+                        || component.name.ends_with("::ComboboxInput")
+                        || component.name.ends_with("::Input")
+                        || component.name.contains("::ComboboxOption")
+                    {
+                        scopes.insert(format!("{}:{:?}", component.name, node.key), scope);
+                    }
+                    if let Some(state) = dom.get_scope(scope) {
+                        catalogue_component_scopes(dom, state.root_node(), scopes);
+                    }
+                }
+            }
+            DynamicNode::Fragment(children) => {
+                for child in children {
+                    catalogue_component_scopes(dom, child, scopes);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn catalogue_scopes(dom: &VirtualDom) -> std::collections::BTreeMap<String, ScopeId> {
+    let mut scopes = std::collections::BTreeMap::new();
+    catalogue_component_scopes(dom, dom.base_scope().root_node(), &mut scopes);
+    scopes
+}
+
+struct CatalogueEventConverter;
+
+macro_rules! catalogue_event_converter {
+    (enum Event { $(
+        #[convert = $converter:ident]
+        #[events = [$($(#[$attr:meta])* $name:ident => $raw:ident,)*]]
+        $(#[raw = [$($raw_only:ident),* $(,)?]])?
+        $group:ident($data:ident),
+    )* }) => {
+        impl dioxus::html::HtmlEventConverter for CatalogueEventConverter {
+            $(fn $converter(&self, event: &dioxus::html::PlatformEventData) -> dioxus::html::$data {
+                event.downcast::<Box<dyn Fn() -> dioxus::html::$data>>().expect("native event factory")()
+            })*
+        }
+    };
+}
+
+dioxus::html::with_html_event_groups!(catalogue_event_converter);
+
+fn catalogue_input_event<T: 'static>(dom: &VirtualDom, name: &str, data: impl Fn() -> T + 'static) {
+    let scope = catalogue_scopes(dom)
+        .into_iter()
+        .find(|(name, _)| name.contains("::ComboboxInput"))
+        .map(|(_, scope)| scope)
+        .expect("mounted combobox input");
+    let listener = dom
+        .get_scope(scope)
+        .unwrap()
+        .root_node()
+        .dynamic_attrs
+        .iter()
+        .flatten()
+        .find_map(|attr| match &attr.value {
+            dioxus::core::AttributeValue::Listener(listener) if attr.name == name => {
+                Some(listener.clone())
+            }
+            _ => None,
+        })
+        .expect("combobox input event");
+    let factory: Box<dyn Fn() -> T> = Box::new(data);
+    let platform = dioxus::html::PlatformEventData::new(Box::new(factory));
+    dioxus::html::set_event_converter(Box::new(CatalogueEventConverter));
+    dom.in_runtime(|| listener.call(dioxus::core::Event::new(std::rc::Rc::new(platform), true)));
+}
+
+struct CatalogueInput(String);
+
+impl dioxus::html::HasFileData for CatalogueInput {
+    fn files(&self) -> Vec<dioxus::html::FileData> {
+        vec![]
+    }
+}
+
+impl dioxus::html::HasFormData for CatalogueInput {
+    fn value(&self) -> String {
+        self.0.clone()
+    }
+    fn valid(&self) -> bool {
+        true
+    }
+    fn values(&self) -> Vec<(String, dioxus::html::FormValue)> {
+        vec![]
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+struct CatalogueKey(Key);
+
+impl dioxus::html::ModifiersInteraction for CatalogueKey {
+    fn modifiers(&self) -> Modifiers {
+        Modifiers::empty()
+    }
+}
+
+impl dioxus::html::HasKeyboardData for CatalogueKey {
+    fn key(&self) -> Key {
+        self.0.clone()
+    }
+    fn code(&self) -> dioxus::html::Code {
+        dioxus::html::Code::Unidentified
+    }
+    fn location(&self) -> dioxus::html::Location {
+        dioxus::html::Location::Standard
+    }
+    fn is_auto_repeating(&self) -> bool {
+        false
+    }
+    fn is_composing(&self) -> bool {
+        false
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn settle_catalogue(dom: &mut VirtualDom) -> usize {
+    use futures_util::FutureExt as _;
+    let mut edits = 0;
+    for _ in 0..64 {
+        edits += dom.render_immediate_to_vec().edits.len();
+        if dom.wait_for_work().now_or_never().is_none() {
+            return edits;
+        }
+    }
+    panic!("catalogue did not settle");
+}
+
+fn catalogue_query(dom: &mut VirtualDom, value: &str) {
+    let value = value.to_owned();
+    catalogue_input_event(dom, "oninput", move || {
+        FormData::from(CatalogueInput(value.clone()))
+    });
+    settle_catalogue(dom);
+}
+
+fn catalogue_key(dom: &mut VirtualDom, key: Key) {
+    catalogue_input_event(dom, "onkeydown", move || {
+        KeyboardData::from(CatalogueKey(key.clone()))
+    });
+    settle_catalogue(dom);
+}
+
+#[test]
+fn catalogue_recovers_in_one_mounted_new_lead_and_preserves_draft_search_and_selection() {
+    let handle = PortalHandle::default();
+    let draft_handle = DraftHandle::default();
+    let mut dom =
+        VirtualDom::new_with_props(catalogue_root, (handle.clone(), draft_handle.clone()));
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let initial_scopes = catalogue_scopes(&dom);
+    assert!(
+        initial_scopes
+            .keys()
+            .any(|name| name.contains("::Composer"))
+    );
+    let mut publication = handle.get().unwrap();
+    let mut draft = draft_handle.get().unwrap();
+    assert!(dioxus_ssr::render(&dom).contains("Loading projects"));
+    dom.in_runtime(|| {
+        draft.set("Keep this draft".into());
+        publication.write().update(
+            Ok(catalogue_snapshot(
+                &[],
+                Some("GitHub catalogue: connection failed"),
+                1,
+            )),
+            1,
+        );
+    });
+    settle_catalogue(&mut dom);
+    let failed = dioxus_ssr::render(&dom);
+    assert!(
+        failed.contains("GitHub catalogue: connection failed"),
+        "{failed}"
+    );
+    assert_eq!(failed.matches("GitHub catalogue:").count(), 1);
+    assert!(!failed.contains("No GitHub repositories found"));
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(&["owner/alpha", "owner/beta"], None, 2)),
+            2,
+        )
+    });
+    settle_catalogue(&mut dom);
+    let recovered = dioxus_ssr::render(&dom);
+    assert!(!recovered.contains("connection failed"), "{recovered}");
+    assert!(
+        recovered.contains("owner/beta"),
+        "initial hint not selected: {recovered}"
+    );
+    assert!(recovered.contains("Keep this draft"));
+    for (name, scope) in &initial_scopes {
+        assert_eq!(
+            catalogue_scopes(&dom).get(name),
+            Some(scope),
+            "remounted {name}"
+        );
+    }
+    catalogue_query(&mut dom, "alpha");
+    assert!(dioxus_ssr::render(&dom).contains("value=\"alpha\""));
+    let before = catalogue_scopes(&dom);
+    // Reordering and a refresh failure must not reset the open query or selected slug.
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(
+                &["owner/beta", "owner/alpha"],
+                Some("GitHub catalogue: retry next hour"),
+                3,
+            )),
+            3,
+        )
+    });
+    settle_catalogue(&mut dom);
+    let failed = dioxus_ssr::render(&dom);
+    assert!(failed.contains("value=\"alpha\""), "{failed}");
+    assert!(failed.contains("retry next hour"));
+    assert_eq!(catalogue_scopes(&dom), before);
+    catalogue_key(&mut dom, Key::ArrowDown);
+    catalogue_key(&mut dom, Key::Enter);
+    let selected = dioxus_ssr::render(&dom);
+    assert!(selected.contains("value=\"owner/alpha\""), "{selected}");
+    dom.in_runtime(|| {
+        publication
+            .write()
+            .update(Err("stream disconnected".into()), 4)
+    });
+    settle_catalogue(&mut dom);
+    assert!(
+        dioxus_ssr::render(&dom).contains("Last-known repository choices: stream disconnected")
+    );
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(&["owner/beta", "owner/alpha"], None, 5)),
+            5,
+        )
+    });
+    settle_catalogue(&mut dom);
+    let recovered = dioxus_ssr::render(&dom);
+    assert!(recovered.contains("value=\"owner/alpha\""), "{recovered}");
+    assert!(!recovered.contains("retry next hour") && !recovered.contains("disconnected"));
+    assert_eq!(draft(), "Keep this draft");
+    let before = catalogue_scopes(&dom);
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(&["owner/beta", "owner/alpha"], None, 6)),
+            6,
+        )
+    });
+    assert_eq!(
+        settle_catalogue(&mut dom),
+        0,
+        "unrelated snapshot invalidated the picker"
+    );
+    assert_eq!(catalogue_scopes(&dom), before);
+    dom.in_runtime(|| {
+        publication
+            .write()
+            .update(Ok(catalogue_snapshot(&["owner/beta"], None, 7)), 7)
+    });
+    settle_catalogue(&mut dom);
+    let removed = dioxus_ssr::render(&dom);
+    assert!(
+        removed.contains("owner/alpha was removed from the catalogue"),
+        "{removed}"
+    );
+    assert!(removed.contains("disabled=true"));
+    assert_eq!(draft(), "Keep this draft");
+    // Returning to the list cannot silently re-enable a removed target.
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(&["owner/alpha", "owner/beta"], None, 8)),
+            8,
+        )
+    });
+    settle_catalogue(&mut dom);
+    assert!(dioxus_ssr::render(&dom).contains("owner/alpha was removed from the catalogue"));
+    catalogue_query(&mut dom, "beta");
+    catalogue_key(&mut dom, Key::ArrowDown);
+    catalogue_key(&mut dom, Key::Enter);
+    let reselected = dioxus_ssr::render(&dom);
+    assert!(reselected.contains("value=\"owner/beta\""), "{reselected}");
+    assert!(!reselected.contains("was removed from the catalogue"));
+    dom.in_runtime(|| {
+        publication
+            .write()
+            .update(Ok(catalogue_snapshot(&[], None, 9)), 9)
+    });
+    settle_catalogue(&mut dom);
+    let empty = dioxus_ssr::render(&dom);
+    assert!(empty.contains("No GitHub repositories found"));
+    assert!(empty.contains("owner/beta was removed from the catalogue"));
+}
+
+#[test]
+fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selection() {
+    let handle = PortalHandle::default();
+    let draft_handle = DraftHandle::default();
+    let mut dom =
+        VirtualDom::new_with_props(catalogue_root, (handle.clone(), draft_handle.clone()));
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let mut publication = handle.get().unwrap();
+    let mut draft = draft_handle.get().unwrap();
+    dom.in_runtime(|| {
+        draft.set("Keep this draft".into());
+        publication.write().update(
+            Ok(catalogue_snapshot(&["owner/alpha", "owner/beta"], None, 1)),
+            1,
+        );
+    });
+    settle_catalogue(&mut dom);
+    let healthy = dioxus_ssr::render(&dom);
+    assert!(healthy.contains("value=\"owner/beta\""), "{healthy}");
+    assert!(!healthy.contains("disabled=true"), "{healthy}");
+    let before = catalogue_scopes(&dom);
+    // A serve restarted during a GitHub outage publishes its failure with no repositories.
+    dom.in_runtime(|| {
+        publication.write().update(
+            Ok(catalogue_snapshot(
+                &[],
+                Some("GitHub catalogue: connection failed"),
+                2,
+            )),
+            2,
+        );
+    });
+    settle_catalogue(&mut dom);
+    let failed = dioxus_ssr::render(&dom);
+    assert_eq!(failed.matches("GitHub catalogue:").count(), 1, "{failed}");
+    assert!(failed.contains("value=\"owner/beta\""), "{failed}");
+    assert!(
+        !failed.contains("was removed from the catalogue"),
+        "{failed}"
+    );
+    assert!(!failed.contains("No GitHub repositories found"), "{failed}");
+    assert!(!failed.contains("disabled=true"), "{failed}");
+    assert_eq!(catalogue_scopes(&dom), before);
+    assert_eq!(draft(), "Keep this draft");
+}
+
 type SessionHandle =
     std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::agents::DetailSession>>>>>;
 

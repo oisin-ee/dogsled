@@ -2,7 +2,7 @@ use super::*;
 
 fn snapshot() -> PortalSnapshot {
     PortalSnapshot {
-        version: 1,
+        version: PORTAL_VERSION,
         epoch: "service".to_owned(),
         revision: 3,
         published_ms: 7,
@@ -13,6 +13,7 @@ fn snapshot() -> PortalSnapshot {
         }),
         agents: Some(vec![]),
         inbox: Some(inbox::InboxView::default()),
+        repos: Some(agents::RepoList::default()),
         gaps: vec![],
     }
 }
@@ -28,6 +29,41 @@ fn portal_snapshot_round_trips_only_as_snapshot() -> Result<(), serde_json::Erro
     );
     assert!(serde_json::from_slice::<PortalStatus>(&bytes).is_err());
     Ok(())
+}
+
+#[test]
+fn catalogue_snapshot_version_two_preserves_absent_empty_and_failed_results() {
+    assert_eq!(PORTAL_VERSION, 2);
+    let choice = agents::RepoChoice {
+        slug: "owner/repo".into(),
+        description: Some("Retained".into()),
+        pushed_at: None,
+        private: false,
+    };
+    for repos in [
+        None,
+        Some(agents::RepoList::default()),
+        Some(agents::RepoList {
+            repos: vec![],
+            error: Some("GitHub catalogue: failed".into()),
+        }),
+        Some(agents::RepoList {
+            repos: vec![choice],
+            error: Some("GitHub catalogue: failed".into()),
+        }),
+    ] {
+        let mut snapshot = snapshot();
+        snapshot.repos = repos;
+        let frame = PortalEvent::Snapshot(Box::new(snapshot));
+        let bytes = serde_json::to_vec(&frame).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<PortalEvent>(&bytes).unwrap(),
+            frame
+        );
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["repos"] = serde_json::json!({"repos":"malformed","error":null});
+        assert!(serde_json::from_value::<PortalEvent>(value).is_err());
+    }
 }
 
 #[test]

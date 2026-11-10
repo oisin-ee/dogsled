@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use crate::test_support::WAIT_DEADLINE;
+
 pub(crate) struct Fixture {
     pub ledger: Ledger,
     pub client: ipc::Client,
@@ -94,7 +96,7 @@ impl Fixture {
                 }
             }
         });
-        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        started.recv_timeout(WAIT_DEADLINE).unwrap();
         Self {
             ledger,
             client,
@@ -114,7 +116,7 @@ impl Fixture {
         predicate: impl Fn(&crate::observation::Published) -> bool,
     ) -> Arc<crate::observation::Published> {
         let mut subscription = self.client.subscribe().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + WAIT_DEADLINE;
         loop {
             let connection = subscription.current();
             assert_eq!(connection.status, ipc::Status::Connected);
@@ -264,7 +266,7 @@ impl crate::shell::Shell for GitShell {
         if let Some((entered, released)) = hold {
             entered.send(()).unwrap();
             released
-                .recv_timeout(Duration::from_secs(6))
+                .recv_timeout(WAIT_DEADLINE)
                 .expect("release Git read");
         }
         result
@@ -303,13 +305,14 @@ fn input(socket: &Client, ledger: &Ledger) -> Publication {
         7,
     );
     let snapshot = portal_types::PortalSnapshot {
-        version: crate::observation::VERSION,
+        version: portal_types::PORTAL_VERSION,
         epoch: String::new(),
         revision: 0,
         published_ms: 7,
         board: Some(board),
         agents: Some(agents),
         inbox: Some(inbox),
+        repos: None,
         gaps: vec![],
     };
     Publication {

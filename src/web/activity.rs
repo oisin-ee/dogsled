@@ -403,7 +403,7 @@ mod tests {
         let published: ActivityAck = serde_json::from_value(json(response).await).unwrap();
         assert_eq!(published.sequence, 1);
         // The command acknowledgment can precede its immutable publication.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
         loop {
             let response = app
                 .clone()
@@ -488,7 +488,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         // The command acknowledgment can precede its immutable publication.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
         loop {
             let response = app
                 .clone()

@@ -392,11 +392,7 @@ fn retirement_barrier_keeps_release_before_reader_opens() {
     // Closing the temporary writer must not discard the release in that interval.
     writeln!(go.hold(), "go").unwrap();
     assert_eq!(
-        read_fifo_within(
-            go.path(),
-            "early retirement release",
-            Duration::from_millis(50)
-        ),
+        read_fifo_within(go.path(), "early retirement release", PROCESS_DEADLINE),
         Some("go\n".into())
     );
 }

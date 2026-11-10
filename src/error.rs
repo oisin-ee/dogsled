@@ -57,6 +57,12 @@ pub enum Error {
     Invalid(String),
     #[error("deadline reached: {0}")]
     Deadline(String),
+    /// The wait target was resolved before polling its completion failed.
+    #[error("{source}")]
+    WaitResolved {
+        #[source]
+        source: Box<Error>,
+    },
     #[error("stdout limit reached: {operation} ({limit} bytes)")]
     OutputLimit { operation: String, limit: usize },
     /// Terminal diagnostics retain the original error classification and payload.
@@ -190,8 +196,19 @@ impl Error {
         match self {
             Self::Startup { source, .. }
             | Self::Diagnostic { source, .. }
-            | Self::CloseRecording { source, .. } => source.root(),
+            | Self::CloseRecording { source, .. }
+            | Self::WaitResolved { source } => source.root(),
             error => error,
+        }
+    }
+
+    pub fn wait_resolved(&self) -> bool {
+        match self {
+            Self::WaitResolved { .. } => true,
+            Self::Startup { source, .. }
+            | Self::Diagnostic { source, .. }
+            | Self::CloseRecording { source, .. } => source.wait_resolved(),
+            _ => false,
         }
     }
 
@@ -240,9 +257,9 @@ impl Error {
     pub fn diagnostic(&self) -> Option<&crate::diagnostic::Diagnostic> {
         match self {
             Self::Diagnostic { diagnostic, .. } => Some(diagnostic),
-            Self::Startup { source, .. } | Self::CloseRecording { source, .. } => {
-                source.diagnostic()
-            }
+            Self::Startup { source, .. }
+            | Self::CloseRecording { source, .. }
+            | Self::WaitResolved { source } => source.diagnostic(),
             _ => None,
         }
     }

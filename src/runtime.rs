@@ -97,6 +97,49 @@ pub fn recovery(
     })
 }
 
+pub fn repo_open(
+    shell: &dyn crate::shell::Shell,
+    ledger: &crate::ledger::Ledger,
+    policy: &crate::config::Policy,
+    home: &str,
+    host: Option<&str>,
+    slug: &str,
+) -> Result<Value> {
+    crate::checkout::slug_origin(slug)?;
+    let Some(host) = host.filter(|host| *host != crate::hosts::LOCAL) else {
+        return Ok(serde_json::to_value(crate::checkout::open(
+            shell,
+            ledger,
+            home,
+            crate::hosts::LOCAL,
+            slug,
+        )?)?);
+    };
+    let fleet = ActionFleet::current(shell, ledger, policy, home.into())?;
+    let host = fleet.find(host)?;
+    if host.is_local() {
+        return Ok(serde_json::to_value(crate::checkout::open(
+            shell,
+            ledger,
+            home,
+            &host.label,
+            slug,
+        )?)?);
+    }
+    // An older peer has no `host repo-open`. Refuse before the call, with a clear reason.
+    let capability: crate::node::SnapshotReport = fleet.remote(host, &["snapshot".into()])?;
+    if capability.repo_open != Some(crate::checkout::OPEN_VERSION) {
+        return Err(Error::Invalid(format!(
+            "{} runs a dogsled without `repo open`; nothing was changed there",
+            host.label
+        )));
+    }
+    let mut opened: crate::checkout::Opened =
+        fleet.remote_setup(host, &["repo-open".into(), "--repo".into(), slug.into()])?;
+    opened.host.clone_from(&host.label);
+    Ok(serde_json::to_value(opened)?)
+}
+
 fn caller() -> Result<String> {
     std::env::var("HERDR_PANE_ID").map_err(|_| Error::Invalid("HERDR_PANE_ID is required".into()))
 }
@@ -214,7 +257,9 @@ fn wait_ticket(fleet: &Fleet, id: &str) -> Result<Value> {
 
 pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
     let host = work::job_host(fleet, id)?;
-    loop {
+    // A durable job/item or a published job resolved this target. Later failures
+    // cannot turn that positive resolution back into an unknown target.
+    (|| loop {
         let job: Job = if host.is_local() {
             jobs::get(fleet.ledger, id)?
         } else {
@@ -224,7 +269,10 @@ pub fn wait_job(fleet: &Fleet, id: &str) -> Result<i32> {
             return Ok(job.exit.unwrap_or(2));
         }
         fleet.ledger.budget.pause()?;
-    }
+    })()
+    .map_err(|source| Error::WaitResolved {
+        source: Box::new(source),
+    })
 }
 
 /// Start `request` now, or queue it; never waits. A queued result is

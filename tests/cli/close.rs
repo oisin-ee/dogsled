@@ -55,8 +55,10 @@ case "$*" in
   'worktree list --cwd'*) cat "$RIG/herdr-worktrees" ;;
   'workspace list') cat "$RIG/workspaces.json" ;;
   'workspace close w2')
-    if test -f "$RIG/panes-after.json"; then cp "$RIG/panes-after.json" "$RIG/panes.json"
-    else printf '%s\n' '{"result":{"panes":[]}}' > "$RIG/panes.json"; fi
+    # Collection can overlap close: publish complete lists, like Herdr's responses.
+    if test -f "$RIG/panes-after.json"; then cp "$RIG/panes-after.json" "$RIG/panes.next"
+    else printf '%s\n' '{"result":{"panes":[]}}' > "$RIG/panes.next"; fi
+    mv "$RIG/panes.next" "$RIG/panes.json"
     sed 's/"w2"/null/' "$RIG/herdr-worktrees" > "$RIG/worktrees.next" && mv "$RIG/worktrees.next" "$RIG/herdr-worktrees"
     printf '{}\n' ;;
   'workspace close'*|'pane close'*) printf '{}\n' ;;

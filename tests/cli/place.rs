@@ -83,8 +83,11 @@ fn cancellation_rejects_another_requests_saved_disposition() {
 
 #[test]
 fn cancellation_after_resume_completion_is_too_late_with_pending_ticket() {
-    let (rig, _, id, _observer) = interrupted_placement("placement-result-saved");
+    let (rig, _, id, observer) = interrupted_placement("placement-result-saved");
+    // Resume needs a publication, but no live lane may admit the pending ticket.
+    drop(observer);
     queue_interrupted(&rig, &id);
+    let _publisher = super::observation::seeded(&rig);
     let (code, result) = rig.json(&["place", "--resume", &id]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(rig.tickets()[0]["state"], "pending");
@@ -338,7 +341,7 @@ fn queued_placement_accepts_symlinked_repository_root() {
     rig.put_tickets(&json!([{
             "id":"alias-ticket","request":{"id":"alias-request","validity":request_authority(&rig,"alias-request"),"action":{"type":"place"},
                 "host":"local","branch":"alias-branch","base":"main","cwd":aliased_repo,
-                "repository":{"path":aliased_repo,"origin":"https://example.invalid/repo.git","relative":"repo space","working_root":aliased_repo},
+                "repository":{"path":aliased_repo,"origin":"file:///srv/git/repo.git","relative":"repo space","working_root":aliased_repo},
                 "workspace":null,"workspace_name":null,"owner":"w1:p1","owner_host":"local"},
             "created_ms":1,"state":"pending","waiting":false,"waiting_until_ms":null,
             "notified":false,"result":null,"error":null,"retry":{"attempts":0,"next_ms":1}
@@ -512,7 +515,9 @@ fn lost_placement_reply(marker: &str) {
     let (rig, repo) = place_rig(marker);
     real_preparation_peer(&rig);
     fs::write(rig.dir.join(marker), "").unwrap();
-    let _observer = peer_observer(&rig);
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -586,7 +591,9 @@ fn review_verified_absent_preparation_resends_original_delivery() {
     real_preparation_peer(&rig);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replacen("  *'host prepare '*|*'host prepared '*)", "  *'host prepare '*|*'host prepared '*)\n    case \"$*\" in *'host prepare '*) if test ! -f \"$RIG/failed-before-receipt\"; then touch \"$RIG/failed-before-receipt\"; exit 255; fi ;; esac", 1));
-    let _observer = peer_observer(&rig);
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -702,7 +709,9 @@ fn review_symlinked_host_home_recovers_lost_preparation_reply() {
         &script.replace("DOGSLED_STATE=", "HOME=\"$RIG/alias-home\" DOGSLED_STATE="),
     );
     fs::write(rig.dir.join("lose-preparation"), "").unwrap();
-    let _observer = peer_observer(&rig);
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, first) = rig.json(&[
         "place",
         "--host",
@@ -1042,6 +1051,8 @@ fn lost_reply_replay(after_ttl: bool) {
     real_reservation_peer(&rig, false);
     fs::write(rig.dir.join("lose-reply"), "").unwrap();
     let observer = peer_observer(&rig);
+    drop(observer);
+    let publisher = super::observation::seeded(&rig);
     let (code, queued) = rig.json(&["place", "--host", "netcup"]);
     assert_eq!(code, 1, "{queued}");
     let ticket = rig.tickets()[0].clone();
@@ -1052,7 +1063,7 @@ fn lost_reply_replay(after_ttl: bool) {
     assert_eq!(original["reservation"], hold[0]);
     let retry = ticket["retry"]["next_ms"].as_u64().unwrap();
     let later = if after_ttl { retry + 100_000 } else { retry };
-    drop(observer);
+    drop(publisher);
     fs::write(rig.dir.join("clock"), later.to_string()).unwrap();
     rig.snapshot("peer-state", later, 1000.0, 16);
     let output = rig.run(&["serve", "--once"]);
@@ -1091,7 +1102,10 @@ fn acknowledged_remote_placement(name: &str) -> (Rig, String) {
     repository(&repo);
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replace("  *'host checkout'*)", "  *'host checkout'*) if ! test -f \"$RIG/failed-once\"; then touch \"$RIG/failed-once\"; echo reset >&2; exit 255; fi;"));
-    let _observer = peer_observer(&rig);
+    // Keep the publication, but stop admission lanes before a pending ticket exists.
+    let observer = peer_observer(&rig);
+    drop(observer);
+    let _publisher = super::observation::seeded(&rig);
     let (code, queued) = rig.json(&[
         "place",
         "--host",
@@ -1191,6 +1205,8 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     real_preparation_peer(&rig);
     fs::write(rig.dir.join("lose-release"), "").unwrap();
     let observer = peer_observer(&rig);
+    drop(observer);
+    let publisher = super::observation::seeded(&rig);
     let (code, result) = rig.json(&[
         "place",
         "--host",
@@ -1209,7 +1225,7 @@ fn cancellation_of_saved_pending_release_is_too_late_and_preserves_result() {
     let (code, cancellation) = rig.json(&["cancel", &ticket]);
     assert_eq!(code, 2, "{cancellation}");
     assert_eq!(cancellation["status"], "too_late");
-    drop(observer);
+    drop(publisher);
     rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["state"], "admitted");
@@ -1233,7 +1249,7 @@ fn result_is_durable_before_host_release() {
     let request = json!({"id":"durable-placement","validity":request_authority(&rig,"durable-placement"),"action":{"type":"place"},"host":"local",
         "branch":"durable","base":"main","cwd":repo,"owner":"w1:p1","owner_host":"local",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
-            "origin":"https://example.invalid/repo.git"}});
+            "origin":"file:///srv/git/repo.git"}});
     rig.put_tickets(&json!([{"id":"durable-ticket","request":request,
         "created_ms":rig.origin_ms,"state":"pending","waiting":false,"notified":false,
         "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
@@ -1282,7 +1298,7 @@ fn placement_crash_boundaries_replay_one_result() {
         let request = json!({"id":"queued-placement", "validity":request_authority(&rig,"queued-placement"), "action":{"type":"place"}, "host":"local",
         "branch":"recover-placement", "base":"main", "cwd":repo, "owner":"w1:p1","owner_host":"local",
         "repository":{"path":repo,"working_root":repo,"relative":"repo space",
-            "origin":"https://example.invalid/repo.git"}});
+            "origin":"file:///srv/git/repo.git"}});
         rig.put_tickets(&json!([{"id":"placement-ticket", "request":request,
         "created_ms":rig.origin_ms, "state":"pending", "waiting":false, "notified":false,
         "retry":{"attempts":0,"next_ms":rig.origin_ms}}]));
@@ -1697,7 +1713,8 @@ pub(super) fn place_rig_with(name: &str, config: &str) -> (Rig, PathBuf) {
             "remote",
             "add",
             "origin",
-            "https://example.invalid/repo.git",
+            // No remote identity: the peer path stays the caller's path relative to home.
+            "file:///srv/git/repo.git",
         ],
     );
     fs::write(repo.join("dogsled.toml"), config).unwrap();

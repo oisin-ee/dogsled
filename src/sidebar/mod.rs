@@ -20,7 +20,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use model::{Data, Effect, Model};
+use nix::poll::{PollFd, PollFlags, poll};
 use ratatui::{Terminal, backend::CrosstermBackend};
+use std::os::fd::AsFd as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -279,6 +281,29 @@ fn restore() {
     let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }
 
+/// Observe terminal loss without reading input or waiting for crossterm's input poll.
+/// Only hangup is requested: key presses and resizes cannot trigger shutdown.
+/// `tty` is the terminal device itself: Darwin's poll reports POLLNVAL for `/dev/tty`.
+fn terminal_lifetime(tty: std::os::fd::BorrowedFd<'_>, stop: &AtomicBool) -> Result<()> {
+    // Darwin registers its read filter only with an explicit event, including POLLHUP.
+    let mut fd = PollFd::new(tty, PollFlags::POLLHUP);
+    while !stop.load(Ordering::Relaxed) {
+        match poll(std::slice::from_mut(&mut fd), 100_u16) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+        if fd.revents().is_some_and(|events| {
+            events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
+        }) {
+            // The input poll can spin forever on EOF/EIO. There is no terminal
+            // left to restore, so do not wait for that thread or its destructors.
+            std::process::exit(i32::from(crate::error::EXIT_ERROR));
+        }
+    }
+    Ok(())
+}
+
 struct Display {
     model: Model,
     preferences: Preferences,
@@ -371,10 +396,17 @@ pub fn command(
     let pal = palette::Palette::load_default();
     let (tx, rx) = mpsc::sync_channel(1);
     let stop = AtomicBool::new(false);
+    let tty = std::io::stdin();
+    if !std::io::IsTerminal::is_terminal(&tty) {
+        return Err(Error::Invalid(
+            "the sidebar needs a terminal on stdin".into(),
+        ));
+    }
     let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let client = ipc::Client::at(&ledger.dir);
     std::thread::scope(|scope| {
+        let lifetime = scope.spawn(|| terminal_lifetime(tty.as_fd(), &stop));
         scope.spawn(|| reader(&client, &tx, &stop));
         let outcome = (|| -> Result<()> {
             loop {
@@ -416,7 +448,10 @@ pub fn command(
             }
         })();
         stop.store(true, Ordering::Relaxed);
-        outcome
+        match lifetime.join() {
+            Ok(result) => outcome.and(result),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     })
 }
 

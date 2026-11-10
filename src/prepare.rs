@@ -372,7 +372,7 @@ pub fn main_checkout(shell: &dyn Shell, repo: &str) -> Result<PathBuf> {
 pub fn run(
     fleet: &Fleet,
     host: &Host,
-    repo: &str,
+    repo: &crate::checkout::Repository,
     branch: &str,
     base: Option<&str>,
     request_id: &str,
@@ -402,17 +402,19 @@ pub struct Envelope {
     pub base: Option<String>,
 }
 
+/// A local envelope names the main checkout. A remote one names the path the request froze
+/// for peers, `Repository::relative`, so every record of one request agrees on it.
 pub fn envelope(
     fleet: &Fleet,
     host: &Host,
-    repo: &str,
+    repo: &crate::checkout::Repository,
     branch: &str,
     base: Option<&str>,
     request_id: &str,
 ) -> Result<Envelope> {
     crate::jobs::validate_id(request_id)?;
-    let checkout = main_checkout(fleet.shell, repo)?;
     if host.is_local() {
+        let checkout = main_checkout(fleet.shell, &repo.path)?;
         return Ok(Envelope {
             version: ENVELOPE_VERSION,
             validity: crate::jobs::request_validity(fleet.ledger, request_id)?,
@@ -422,24 +424,11 @@ pub fn envelope(
             base: base.map(str::to_owned),
         });
     }
-    let home = Path::new(&fleet.home);
-    let canonical = home.canonicalize().ok();
-    let remote = checkout
-        .strip_prefix(home)
-        .ok()
-        .or_else(|| {
-            canonical
-                .as_deref()
-                .and_then(|home| checkout.strip_prefix(home).ok())
-        })
-        .unwrap_or(&checkout)
-        .display()
-        .to_string();
     Ok(Envelope {
         version: ENVELOPE_VERSION,
         validity: crate::jobs::request_validity(fleet.ledger, request_id)?,
         request_id: request_id.into(),
-        repo: remote,
+        repo: repo.relative.clone(),
         branch: branch.into(),
         base: base.map(str::to_owned),
     })

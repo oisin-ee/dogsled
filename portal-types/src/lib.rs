@@ -11,6 +11,9 @@ mod tests;
 
 use serde::{Deserialize, Serialize};
 
+/// Portal payload version; independent of the host observation IPC envelope.
+pub const PORTAL_VERSION: u32 = 2;
+
 /// One ordered portal stream carries either a coherent snapshot or connection status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -45,6 +48,7 @@ pub struct PortalSnapshot {
     pub board: Option<BoardView>,
     pub agents: Option<Vec<agents::AgentView>>,
     pub inbox: Option<inbox::InboxView>,
+    pub repos: Option<agents::RepoList>,
     pub gaps: Vec<ObservationGap>,
 }
 

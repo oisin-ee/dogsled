@@ -178,33 +178,41 @@ fn held_binding(unit: &Unit, status: Status, leaf: bool) -> Result<(), TodoError
     Ok(())
 }
 
+pub(crate) fn unit_fields(unit: &Unit, status: Status, leaf: bool) -> Result<(), TodoError> {
+    nonempty(&unit.reference.unit_id)?;
+    nonempty(&unit.reference.session_id)?;
+    if unit.reference.revision == 0 {
+        return Err(error("INVALID_IDENTITY: duplicate ID or zero revision"));
+    }
+    draft(&unit.draft)?;
+    held_binding(unit, status, leaf)?;
+    if let Some(session) = &unit.local_session_id {
+        nonempty(session)?;
+        if status != Status::InProgress
+            || !leaf
+            || (unit.draft.assignment != Some(Assignment::Self_) && unit.imported.is_none())
+        {
+            return Err(error(
+                "INVALID_ACTIVATION: local work must be an active self-assigned leaf",
+            ));
+        }
+        unit.contract("validation")?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_units(list: &TodoList) -> Result<(), TodoError> {
     let entries = units(list);
     let mut graph = HashMap::new();
     let mut local_active = false;
-    for (unit, status, leaf) in &entries {
-        nonempty(&unit.reference.unit_id)?;
-        nonempty(&unit.reference.session_id)?;
-        if unit.reference.revision == 0
-            || graph
-                .insert(unit.reference.unit_id.as_str(), *unit)
-                .is_some()
+    for (unit, _, _) in &entries {
+        if graph
+            .insert(unit.reference.unit_id.as_str(), *unit)
+            .is_some()
         {
             return Err(error("INVALID_IDENTITY: duplicate ID or zero revision"));
         }
-        draft(&unit.draft)?;
-        held_binding(unit, *status, *leaf)?;
-        if let Some(session) = &unit.local_session_id {
-            nonempty(session)?;
-            if *status != Status::InProgress
-                || !leaf
-                || (unit.draft.assignment != Some(Assignment::Self_) && unit.imported.is_none())
-            {
-                return Err(error(
-                    "INVALID_ACTIVATION: local work must be an active self-assigned leaf",
-                ));
-            }
-            unit.contract("validation")?;
+        if unit.local_session_id.is_some() {
             prerequisites(list, unit)?;
             if local_active {
                 return Err(error(

@@ -1,105 +1,101 @@
-import type { CustomEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { ExecutionRef, TodoList, UnitRef } from "./wasm.ts";
-import { parse } from "./wasm.ts";
-
-/** The snapshot of a branch with no list yet. */
-const EMPTY: unknown = { tasks: [] },
-  /** The custom entry that holds the list after every change. */
-  STATE_ENTRY = "todo-state",
-  /**
-   * Whether `entry` is a stored list.
-   * @param {SessionEntry} entry A branch entry.
-   * @returns {boolean} True for a `todo-state` custom entry.
-   */
-  isStateEntry = (entry: SessionEntry): entry is CustomEntry =>
-    entry.type === "custom" && entry.customType === STATE_ENTRY,
-  /**
-   * The latest stored snapshot on the branch, unvalidated: the core validates it.
-   * @param {readonly SessionEntry[]} branch The session branch, oldest entry first.
-   * @returns {unknown} The latest snapshot, or an empty list when there is none.
-   */
-  latestSnapshot = (branch: readonly SessionEntry[]): unknown => {
-    for (const entry of branch.toReversed()) {
-      if (isStateEntry(entry)) {
-        return entry.data;
-      }
-    }
-    return EMPTY;
-  },
-  /**
-   * Resolves the first branch entry for a contract revision.
-   * @param {Readonly<UnitRef>} reference Revision identity.
-   * @param {string} entryId Containing Pi entry.
-   * @param {Readonly<Map<string, string>>} origins Prior branch origins.
-   * @returns {string} The revision's originating entry.
-   */
-  originFor = (
-    reference: Readonly<UnitRef>,
-    entryId: string,
-    origins: Readonly<Map<string, string>>,
-  ): string => {
-    const key = JSON.stringify([reference.sessionId, reference.unitId, reference.revision]),
-      origin = origins.get(key) ?? entryId;
-    origins.set(key, origin);
-    return origin;
-  };
-
-/** Derives entry provenance without rewriting the imported lead reference. */
-class Provenance {
-  readonly #origins = new Map<string, string>();
-  readonly #seals = new Map<string, string>();
-
-  /**
-   * Resolves contract and seal provenance for one task snapshot.
-   * @param {Readonly<object>} unit Task provenance fields.
-   * @param {string} entryId Snapshot identity.
-   */
-  public resolve(
-    unit: {
-      readonly reference: Readonly<UnitRef>;
-      readonly imported:
-        | {
-            readonly seed: { readonly execution: Readonly<ExecutionRef> };
-            readonly seal: { readonly entryId: string } | undefined;
-          }
-        | undefined;
-    },
-    entryId: string,
-  ): void {
-    if (unit.imported === undefined) {
-      Object.assign(unit.reference, {
-        contractEntryId: originFor(unit.reference, entryId, this.#origins),
-      });
-    } else if (unit.imported.seal !== undefined) {
-      const key = JSON.stringify(unit.imported.seed.execution),
-        sealEntry = this.#seals.get(key) ?? entryId;
-      this.#seals.set(key, sealEntry);
-      Object.assign(unit.imported.seal, { entryId: sealEntry });
-    }
-  }
-}
+import type { BranchEntry, ListFrame } from "./branch-state.ts";
+import { DELTA_ENTRY, STATE_ENTRY, stateChange } from "./delta.ts";
+import type { Immutable, TodoDelta } from "./delta.ts";
+import type { Subtask, TodoList } from "./wasm.ts";
+import { deltaData, snapshotData } from "./delta-validation.ts";
+import { BranchState } from "./branch-state.ts";
 
 /**
- * Reads revision origins from the entries that first introduced them.
- * Status-only snapshots cannot move a revision's origin.
- * @param {readonly SessionEntry[]} branch Current branch in chronological order.
- * @returns {TodoList} Validated snapshot with derived provenance.
+ * Replays full snapshots and deltas in branch order, in O(entries + changed tasks).
+ * Full lists are materialized only on request; retained frames remain stable.
+ * @param {readonly BranchEntry[]} branch Entries in chronological order.
+ * @yields {ListFrame} State after each task entry, with changed records and lazy lists.
  */
-const branchSnapshot = (branch: readonly SessionEntry[]): TodoList => {
-  const provenance = new Provenance();
-  let current: TodoList = { tasks: [] };
-  for (const entry of branch.filter((candidate) => isStateEntry(candidate))) {
-    current = parse(entry.data);
-    for (const task of current.tasks.flatMap((root) => [root, ...(root.subtasks ?? [])])) {
-      if (task.unit !== undefined) {
-        provenance.resolve(
-          { imported: task.unit.imported, reference: task.unit.reference },
-          entry.id,
-        );
+const branchList = function* branchList(branch: readonly BranchEntry[]): Generator<ListFrame> {
+    const state = new BranchState();
+    for (const entry of branch) {
+      const frame = state.read(entry);
+      if (frame !== undefined) {
+        yield frame;
       }
     }
-  }
-  return current;
-};
+  },
+  /**
+   * Finds the final folded frame.
+   * @param {readonly BranchEntry[]} branch Current branch.
+   * @returns {ListFrame | undefined} Last frame.
+   */
+  latestFrame = (branch: readonly BranchEntry[]): ListFrame | undefined => {
+    let latest: ListFrame | undefined = undefined;
+    for (const frame of branchList(branch)) {
+      latest = frame;
+    }
+    return latest;
+  },
+  /**
+   * Reads the final stored list.
+   * @param {readonly BranchEntry[]} branch Current branch.
+   * @returns {TodoList} Stored list.
+   */
+  latestSnapshot = (branch: readonly BranchEntry[]): TodoList =>
+    latestFrame(branch)?.list ?? { tasks: [] },
+  /**
+   * Reads the final list with revision and seal origins.
+   * @param {readonly BranchEntry[]} branch Current branch.
+   * @returns {TodoList} Resolved list.
+   */
+  branchSnapshot = (branch: readonly BranchEntry[]): TodoList =>
+    latestFrame(branch)?.snapshot ?? { tasks: [] },
+  /**
+   * Reads records across the session tree without combining unrelated branches.
+   * @param {BranchEntry} entry One persisted entry.
+   * @returns {readonly Immutable<Subtask>[]} Validated changed records.
+   */
+  entryTasks = (entry: BranchEntry): readonly Immutable<Subtask>[] => {
+    if (entry.type !== "custom") {
+      return [];
+    }
+    if (entry.customType === DELTA_ENTRY) {
+      return deltaData(entry.data).changed.map((change) => change.task);
+    }
+    const tasks: Immutable<Subtask>[] = [];
+    if (entry.customType === STATE_ENTRY) {
+      for (const root of snapshotData(entry.data).list.tasks) {
+        tasks.push(root, ...(root.subtasks ?? []));
+      }
+    }
+    return tasks;
+  },
+  /**
+   * Appends the downgrade fence before the first delta and marks later snapshots.
+   * @param {TodoList} before Current list.
+   * @param {TodoList} after Changed list.
+   * @param {object} session Branch reader and entry writer.
+   */
+  saveState = (
+    before: TodoList,
+    after: TodoList,
+    session: {
+      readonly branch: () => readonly BranchEntry[];
+      readonly append: (customType: string, data: TodoList | TodoDelta, list: TodoList) => void;
+    },
+  ): void => {
+    const change = stateChange(before, after),
+      fenced = latestFrame(session.branch())?.fenced === true,
+      format = "todo-delta/1";
+    if (change.customType === DELTA_ENTRY && !fenced) {
+      // Authorize the intended mutation before appending even its fence.
+      session.append(STATE_ENTRY, Object.assign({}, before, { format }), after);
+    }
+    session.append(
+      change.customType,
+      change.customType === STATE_ENTRY && fenced
+        ? Object.assign({}, change.data, { format })
+        : change.data,
+      after,
+    );
+  };
 
-export { STATE_ENTRY, branchSnapshot, latestSnapshot };
+export { branchList, branchSnapshot, latestSnapshot, entryTasks, saveState };
+export { DELTA_ENTRY, STATE_ENTRY, stateChange } from "./delta.ts";
+export type { TodoDelta } from "./delta.ts";

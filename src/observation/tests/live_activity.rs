@@ -50,6 +50,211 @@ impl Drop for Native {
     }
 }
 
+fn native_shell(native: &Native) -> crate::shell::Fake {
+    let shell = crate::shell::Fake::new();
+    shell.on(
+        "herdr agent list",
+        &json!({"result":{"agents":[{
+            "pane_id":"w1:p1", "agent":"pi", "agent_status":"working", "terminal_id":"terminal-a",
+            "agent_session":{"kind":"path","value":native.agent.transcript}
+        }]}})
+        .to_string(),
+    );
+    shell
+}
+
+use crate::test_support::WAIT_DEADLINE as PROCESS_DEADLINE;
+
+#[test]
+fn live_activity_register_acknowledges_while_main_collection_is_blocked() {
+    let native = Native::new();
+    let (entered, started) = std::sync::mpsc::channel();
+    let (finished, collected) = std::sync::mpsc::channel();
+    let release = ReleaseSample(Arc::new((
+        std::sync::Mutex::new(false),
+        std::sync::Condvar::new(),
+    )));
+    let shell = HeldSample {
+        fake: crate::shell::Fake::new(),
+        entered,
+        release: release.0.clone(),
+    };
+    let ledger = crate::ledger::Ledger::new(native.directory.join("collection"));
+    let collection = std::thread::spawn(move || {
+        let policy = crate::config::Policy::default();
+        let node = crate::node::Node::new(&shell, &ledger, &policy, "/");
+        let _collection =
+            super::super::collect::Collector::default().collect(&node, crate::ledger::now_ms());
+        finished.send(()).unwrap();
+    });
+    started.recv_timeout(PROCESS_DEADLINE).unwrap();
+    let (commands, feed, _handle) =
+        Authority::spawn("epoch-a".into(), native_shell(&native)).unwrap();
+    let publisher = super::super::Publisher::new().unwrap();
+    let state = native.directory.join("ipc");
+    let mut server = super::super::ipc::Server::new(&state).unwrap();
+    server.activity(commands, feed);
+    server.bind(publisher.subscribe()).unwrap();
+    let ack = super::super::ipc::Client::at(&state)
+        .activity_command("w1:p1", Command::Register(native.register("producer", 0)))
+        .unwrap();
+    assert_eq!(ack.producer_id, "producer");
+    assert!(matches!(
+        collected.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(release);
+    collected.recv_timeout(PROCESS_DEADLINE).unwrap();
+    collection.join().unwrap();
+}
+
+#[tokio::test]
+async fn live_activity_publish_reaches_feed_without_a_main_publisher_and_revisions_increase() {
+    let deadline = tokio::time::Instant::now() + PROCESS_DEADLINE;
+    let native = Native::new();
+    let (commands, mut feed, _handle) =
+        Authority::spawn("epoch-a".into(), native_shell(&native)).unwrap();
+    let ack = commands
+        .send(
+            "w1:p1".into(),
+            Command::Register(native.register("producer", 0)),
+        )
+        .await
+        .unwrap();
+    let mut previous = 0;
+    for sequence in 1..=4 {
+        commands
+            .send("w1:p1".into(), Command::Publish(snapshot(&ack, sequence)))
+            .await
+            .unwrap();
+        let view = tokio::time::timeout_at(deadline, async {
+            loop {
+                let frame = feed.borrow_and_update().clone();
+                if let Some(bytes) = frame.views.get("w1:p1") {
+                    let view: ActivityView = serde_json::from_slice(bytes).unwrap();
+                    if matches!(view.detail, ActivityDetail::Available { sequence: current, .. } if current == sequence) { break view; }
+                }
+                feed.changed().await.unwrap();
+            }
+        }).await.unwrap();
+        assert_eq!(view.epoch, "epoch-a");
+        assert!(view.revision > previous);
+        previous = view.revision;
+    }
+    let mut close = snapshot(&ack, 5);
+    close.payload = ProducerPayload::Closed;
+    commands
+        .send("w1:p1".into(), Command::Publish(close))
+        .await
+        .unwrap();
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            let frame = feed.borrow_and_update().clone();
+            let view: ActivityView = serde_json::from_slice(&frame.views["w1:p1"]).unwrap();
+            if matches!(
+                view.detail,
+                ActivityDetail::Unavailable {
+                    reason: UnavailableReason::ProducerClosed
+                }
+            ) {
+                assert!(view.revision > previous);
+                break;
+            }
+            feed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[derive(Debug)]
+struct HeldSample {
+    fake: crate::shell::Fake,
+    entered: std::sync::mpsc::Sender<()>,
+    release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl crate::shell::Shell for HeldSample {
+    fn run(&self, program: &str, args: &[String]) -> crate::error::Result<crate::shell::Output> {
+        let _ = self.entered.send(());
+        let (lock, ready) = &*self.release;
+        let released = lock.lock().unwrap();
+        let _released = ready.wait_while(released, |released| !*released).unwrap();
+        self.fake.run(program, args)
+    }
+}
+
+struct ReleaseSample(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+impl Drop for ReleaseSample {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.0;
+        *lock.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_activity_shutdown_refuses_inflight_pending_and_new_commands() {
+    use std::future::Future as _;
+    let deadline = tokio::time::Instant::now() + PROCESS_DEADLINE;
+    let native = Native::new();
+    let (entered, started) = std::sync::mpsc::channel();
+    let release = ReleaseSample(Arc::new((
+        std::sync::Mutex::new(false),
+        std::sync::Condvar::new(),
+    )));
+    let shell = HeldSample {
+        fake: native_shell(&native),
+        entered,
+        release: release.0.clone(),
+    };
+    let (commands, _feed, handle) = Authority::spawn("epoch-a".into(), shell).unwrap();
+    let send = commands.clone();
+    let registration = native.register("producer", 0);
+    let first_registration = registration.clone();
+    let first = tokio::spawn(async move {
+        send.send("w1:p1".into(), Command::Register(first_registration))
+            .await
+    });
+    started.recv_timeout(PROCESS_DEADLINE).unwrap();
+    // Poll the public command future once to admit it while the first sample is held.
+    // Its reply must remain pending until shutdown, without inspecting the owner queue.
+    let mut queued =
+        std::pin::pin!(commands.send("w1:p1".into(), Command::Register(registration.clone())));
+    std::future::poll_fn(|context| {
+        assert!(queued.as_mut().poll(context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let (finished, stopped) = std::sync::mpsc::channel();
+    let joined = std::thread::spawn(move || {
+        drop(handle);
+        finished.send(()).unwrap();
+    });
+    let refusal = tokio::time::timeout_at(deadline, first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refusal.code, ActivityCode::UpstreamUnavailable);
+    let refusal = tokio::time::timeout_at(deadline, queued)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refusal.code, ActivityCode::UpstreamUnavailable);
+    let refusal = tokio::time::timeout_at(
+        deadline,
+        commands.send("w1:p1".into(), Command::Register(registration)),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(refusal.code, ActivityCode::UpstreamUnavailable);
+    drop(release);
+    stopped.recv_timeout(PROCESS_DEADLINE).unwrap();
+    joined.join().unwrap();
+}
+
 fn snapshot(ack: &ActivityAck, sequence: u64) -> PublishActivity {
     PublishActivity {
         version: 1,
@@ -252,11 +457,7 @@ async fn timed_out_queued_registration_commits_and_exact_replay_does_not_renew()
     registration.epoch = None;
     let refusal = tokio::time::timeout(
         Duration::from_secs(6),
-        commands.send(
-            "w1:p1".into(),
-            Command::Register(registration.clone()),
-            None,
-        ),
+        commands.send("w1:p1".into(), Command::Register(registration.clone())),
     )
     .await
     .unwrap()
@@ -618,16 +819,15 @@ fn reasoning_and_call_lines_accept_the_exact_byte_bounds_and_reject_overflow() {
     );
 }
 
-/// Real IPC command forwarding and immutable activity publication for HTTP contract tests.
+/// Real IPC forwarding with an independently running activity owner.
 #[derive(Debug)]
 pub(crate) struct Fixture {
     pub ledger: crate::ledger::Ledger,
     pub registration: RegisterProducer,
     pub client: super::super::ipc::Client,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    wake: std::sync::mpsc::Sender<crate::service::Event>,
-    thread: Option<std::thread::JoinHandle<()>>,
     server: Option<super::super::ipc::Server>,
+    authority: Option<Handle>,
+    _publisher: super::super::Publisher,
     native: Native,
 }
 
@@ -636,67 +836,43 @@ impl Fixture {
         let native = Native::new();
         let ledger = crate::ledger::Ledger::new(native.directory.join("state"));
         let mut publisher = super::super::Publisher::new().unwrap();
-        let mut authority = native.authority();
-        authority.epoch = publisher.epoch().into();
         let mut registration = native.register("producer", 0);
         registration.epoch = Some(publisher.epoch().into());
+        let shell = crate::shell::Fake::new();
+        shell.on("herdr agent list", &json!({"result":{"agents":[{
+            "pane_id":"w1:p1", "agent":"pi", "agent_status":"working", "terminal_id":"terminal-a",
+            "agent_session":{"kind":"path","value":native.agent.transcript}
+        }]}}).to_string());
+        let (commands, feed, authority) =
+            Authority::spawn(publisher.epoch().into(), shell).unwrap();
         let mut server = super::super::ipc::Server::new(&ledger.dir).unwrap();
-        let (wake, receive) = std::sync::mpsc::channel();
-        let dirty = crate::service::wake::Dirty::new(wake.clone());
-        server.branches(super::super::peers::Interests::default(), dirty.clone());
-        server.activity(authority.commands());
+        server.activity(commands, feed);
         let mut details = super::super::details::Collector::default();
         server.details(details.interests.clone());
         publisher.details(details.payloads.clone());
         server.bind(publisher.subscribe()).unwrap();
+        let (wake, _) = std::sync::mpsc::channel();
+        let dirty = crate::service::wake::Dirty::new(wake);
+        let mut input = empty_publication();
+        details.refresh(&mut input, &dirty).unwrap();
+        assert_eq!(
+            details.transcript_reads(),
+            0,
+            "producer interest must not start transcript workers"
+        );
+        publisher.replace(input).unwrap();
+        // Establish the binding before HTTP tests open a viewer. No service loop runs.
         let client = super::super::ipc::Client::at(&ledger.dir);
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stopped = std::sync::Arc::clone(&stop);
-        let (ready, started) = std::sync::mpsc::sync_channel(1);
-        let thread = std::thread::spawn(move || {
-            let mut ready = Some(ready);
-            loop {
-                let _ = dirty.take();
-                let mut input = super::super::Publication {
-                    published_ms: 1000,
-                    sources: super::super::Sources::default(),
-                    local: BTreeMap::new(),
-                    views: BTreeMap::from([(
-                        "portal".into(),
-                        json!({"data":{"agents":[{"pane":"w1:p1","state":"working"}]}}),
-                    )]),
-                    gaps: vec![],
-                };
-                authority
-                    .refresh_at(&crate::shell::Fake::new(), &input, Instant::now(), 1000)
-                    .unwrap();
-                details.refresh(&mut input, &dirty).unwrap();
-                assert_eq!(
-                    details.transcript_reads(),
-                    0,
-                    "producer interest must not start transcript workers"
-                );
-                publisher.activity(authority.views(Instant::now(), 1000));
-                // A minimal publication needs no portal projection; absence tests use a full fixture.
-                input.views.clear();
-                publisher.replace(input).unwrap();
-                if let Some(ready) = ready.take() {
-                    ready.send(()).unwrap();
-                }
-                if receive.recv().is_err() || stopped.load(std::sync::atomic::Ordering::Acquire) {
-                    break;
-                }
-            }
-        });
-        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        client
+            .activity_command("w1:p1", Command::Register(registration.clone()))
+            .unwrap();
         Self {
             ledger,
             registration,
             client,
-            stop,
-            wake,
-            thread: Some(thread),
             server: Some(server),
+            authority: Some(authority),
+            _publisher: publisher,
             native,
         }
     }
@@ -705,12 +881,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.server.take();
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-        let _ = self.wake.send(crate::service::Event::Observe);
-        if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
-        }
-        // Keep the native source alive until both the authority and its transport stop.
+        self.authority.take();
         assert!(self.native.directory.exists());
     }
 }
@@ -732,7 +903,7 @@ fn producer_commands_and_extra_activity_viewers_never_capture_transcripts() {
             .unwrap();
     }
     let mut viewer = fixture.client.activity_subscribe("w1:p1").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_support::WAIT_DEADLINE;
     loop {
         if matches!(
             viewer.current().publication.detail,
@@ -769,7 +940,6 @@ async fn bounded_command_queue_refuses_exhaustion_without_eviction() {
         .send(
             "w1:p1".into(),
             Command::Register(native.register("producer", 0)),
-            None,
         )
         .await
         .unwrap_err();

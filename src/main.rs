@@ -64,8 +64,9 @@ mod sidebar;
 mod store;
 mod sweep;
 mod tables;
+#[cfg(test)]
+mod test_support;
 mod transcript;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by T2"))]
 mod transfer;
 mod unit_reply;
 mod unit_request;
@@ -109,6 +110,10 @@ fn main() -> ExitCode {
         }
         _ => (None, false),
     };
+    let wait_target = match &cli.command {
+        Command::Wait { id, .. } => Some(id.clone()),
+        _ => None,
+    };
     let max = cli.budget_ms.or(max);
     let max = if hook {
         Some(max.unwrap_or(5_000).min(5_000))
@@ -123,7 +128,19 @@ fn main() -> ExitCode {
         // Prompt context is optional: unavailable state must not block a turn.
         Err(_) if hook => ExitCode::SUCCESS,
         Err(ref error) if waiting && matches!(error.root(), Error::Deadline(_)) => {
-            println!("still running");
+            if let Some(id) = wait_target.filter(|_| !error.wait_resolved()) {
+                let message = format!("dogsled wait: deadline reached before {id} was resolved");
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"error":message,"deadline":true,"resolved":false})
+                    );
+                } else {
+                    eprintln!("{message}");
+                }
+            } else {
+                println!("still running");
+            }
             ExitCode::from(124)
         }
         Err(error) => {
@@ -272,6 +289,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         Command::Unit(command) => return unit_request::run(&fleet, command),
         Command::Mcp => mcp::serve(policy, ledger, home, config_path)?,
 
+        Command::Transfer(command) => transfer_command(&fleet, command, cli.json)?,
         Command::Drop { id, host } => {
             let dropped = drop::drop(&fleet, &id, host.as_deref())?;
             print(cli.json, &dropped, || dropped.line())?;
@@ -324,6 +342,17 @@ fn lead_command(
     print(json, &started, || {
         format!("{}\t{}\t{}\n", started.host, started.name, started.pane)
     })
+}
+
+/// The peer side of a transfer: the envelope arrives on stdin, and the reply is one JSON value.
+fn host_transfer_put(node: &Node<'_>) -> Result<()> {
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut input)?;
+    print(
+        true,
+        &transfer::peer::receive(node.shell, node.ledger, &input),
+        String::new,
+    )
 }
 
 fn host_lead(node: &Node<'_>, config_path: &std::path::Path) -> Result<()> {
@@ -437,6 +466,82 @@ impl Ask {
             kind,
             message,
             message_file,
+        }
+    }
+}
+
+/// The transfer commands: they store files or changes for another agent and read what is stored.
+fn transfer_command(
+    fleet: &hosts::Fleet<'_>,
+    command: cli::TransferCommand,
+    json: bool,
+) -> Result<()> {
+    use transfer::delivery;
+    let cwd = std::env::current_dir()?;
+    match command {
+        cli::TransferCommand::Send {
+            target,
+            host,
+            files,
+            changes: _,
+            since,
+            include_worktree,
+        } => {
+            let content = if files.is_empty() {
+                delivery::Content::Changes {
+                    since,
+                    include_worktree,
+                }
+            } else {
+                delivery::Content::Files(files)
+            };
+            let sent = delivery::send(fleet, &cwd, &target, host.as_deref(), &content, now_ms())?;
+            print(json, &sent, || sent.line())
+        }
+        cli::TransferCommand::List => {
+            let lines = delivery::list(fleet.ledger, &inbox::caller(fleet.shell))?;
+            print(json, &lines, || {
+                lines.iter().fold(String::new(), |mut out, line| {
+                    let _ = writeln!(
+                        out,
+                        "{}\t{}\t{}\t{} -> {}",
+                        line.id,
+                        line.direction,
+                        rows::name(&line.kind).unwrap_or_default(),
+                        line.from,
+                        line.to
+                    );
+                    out
+                })
+            })
+        }
+        cli::TransferCommand::Show { id } => {
+            let shown = delivery::show(fleet.ledger, &id)?;
+            print(json, &shown, || shown.text())
+        }
+        cli::TransferCommand::Apply { id, check } => {
+            let applied = transfer::apply::apply(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &inbox::caller(fleet.shell),
+                &id,
+                check,
+                now_ms(),
+            )?;
+            print(json, &applied, || applied.text())
+        }
+        cli::TransferCommand::Drop { id } => {
+            let removed = delivery::remove(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &inbox::caller(fleet.shell),
+                &id,
+            )?;
+            print(json, &removed, || {
+                format!("Dropped transfer {}.\n", removed.id)
+            })
         }
     }
 }
@@ -658,13 +763,14 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         state(cmd, &ledger)?;
         return Ok(ExitCode::SUCCESS);
     }
-    let Command::Recovery {
-        ref command,
-        ref host,
-    } = cli.command
-    else {
+    if !matches!(
+        cli.command,
+        Command::Recovery { .. }
+            | Command::Repo(cli::RepoCommand::Open { .. })
+            | Command::Host(HostCommand::RepoOpen { .. })
+    ) {
         return run(cli, budget);
-    };
+    }
     let policy = config::load(&cli.config.unwrap_or_else(config::default_path))?;
     let shell = System { budget };
     let ledger = Ledger {
@@ -672,7 +778,23 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         ..Ledger::new(ledger::default_dir())
     };
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    let value = runtime::recovery(&shell, &ledger, &policy, &home, host.as_deref(), command)?;
+    let value = match &cli.command {
+        Command::Recovery { command, host } => {
+            runtime::recovery(&shell, &ledger, &policy, &home, host.as_deref(), command)?
+        }
+        Command::Repo(cli::RepoCommand::Open { repo, host }) => {
+            runtime::repo_open(&shell, &ledger, &policy, &home, host.as_deref(), repo)?
+        }
+        Command::Host(HostCommand::RepoOpen { repo }) => {
+            let node = Node::new(&shell, &ledger, &policy, &home);
+            return host(HostCommand::RepoOpen { repo: repo.clone() }, &node);
+        }
+        _ => {
+            return Err(Error::Invalid(
+                "not a recovery or repository command".into(),
+            ));
+        }
+    };
     print(cli.json, &value, || format!("{value}\n"))?;
     Ok(ExitCode::SUCCESS)
 }
@@ -953,6 +1075,22 @@ fn host_preparation(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
     Ok(())
 }
 
+fn host_jobs(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
+    match cmd {
+        HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
+        HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
+        HostCommand::Logs { id, offset } => {
+            print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
+        }
+        HostCommand::Stop { id } => {
+            jobs::stop(node.ledger, &id)?;
+            print(true, &serde_json::json!({"stopped":true}), String::new)?;
+        }
+        _ => return Err(Error::Invalid("not a job command".into())),
+    }
+    Ok(())
+}
+
 fn host_reserve(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     let HostCommand::Reserve {
         id,
@@ -1061,6 +1199,11 @@ fn print_tail(node: &Node<'_>, kind: &str, id: &str) -> Result<()> {
         watchdog::pane_tail(node.shell, id)?
     };
     print(true, &tail, String::new)
+}
+
+fn print_host_repo_open(node: &Node<'_>, repo: &str) -> Result<()> {
+    let opened = checkout::open(node.shell, node.ledger, node.home, hosts::LOCAL, repo)?;
+    print(true, &opened, String::new)
 }
 
 fn print_host_recovery(node: &Node<'_>, command: &cli::RecoveryCommand) -> Result<()> {
@@ -1391,6 +1534,7 @@ fn state_jobs(cmd: StateCommand, ledger: &ledger::Ledger) -> Result<()> {
 
 fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
     match cmd {
+        HostCommand::TransferPut { .. } => host_transfer_put(node)?,
         HostCommand::Lead { .. } | HostCommand::AgentDetail { .. } => {
             return Err(Error::Invalid(
                 "this host command is dispatched before host routing".into(),
@@ -1411,16 +1555,12 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
             preparation_protocol,
             request_validity,
         )?,
-        HostCommand::Job { id } => print(true, &jobs::get(node.ledger, &id)?, String::new)?,
+        HostCommand::RepoOpen { repo } => print_host_repo_open(node, &repo)?,
         HostCommand::Recovery { command } => print_host_recovery(node, &command)?,
-        HostCommand::Jobs => print(true, &jobs::list(node.ledger)?, String::new)?,
-        HostCommand::Logs { id, offset } => {
-            print(true, &jobs::logs(node.ledger, &id, offset)?, String::new)?;
-        }
-        HostCommand::Stop { id } => {
-            jobs::stop(node.ledger, &id)?;
-            print(true, &serde_json::json!({"stopped":true}), String::new)?;
-        }
+        cmd @ (HostCommand::Job { .. }
+        | HostCommand::Jobs
+        | HostCommand::Logs { .. }
+        | HostCommand::Stop { .. }) => host_jobs(cmd, node)?,
         HostCommand::Checkout {
             path,
             origin,

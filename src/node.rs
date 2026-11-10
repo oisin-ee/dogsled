@@ -140,6 +140,9 @@ pub struct SnapshotReport {
     /// Host-owned results survive the child pane and checkout.
     #[serde(default)]
     pub handoffs: Vec<crate::done::Mark>,
+    /// The `host repo-open` protocol this host speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_open: Option<u32>,
     /// The job validity protocol this host speaks. A peer without it cannot run a job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_validity: Option<u32>,
@@ -147,6 +150,9 @@ pub struct SnapshotReport {
     pub request_validity: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_replay: Option<u32>,
+    /// The transfer ingress this host speaks. A peer without it receives no transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<u32>,
     /// Read-only ownership reports from this host's stores.
     #[serde(default)]
     pub holds: Vec<crate::holds::Hold>,
@@ -167,6 +173,8 @@ pub struct ReserveOutcome {
 }
 
 pub const PLACEMENT_VERSION: u32 = 3;
+/// The envelope that `host transfer-put` accepts.
+pub const TRANSFER_VERSION: u32 = 1;
 
 /// Acknowledged replay carries the origin's immutable grant, not a fresh capacity request.
 #[derive(Debug, Clone, Serialize, Deserialize)]

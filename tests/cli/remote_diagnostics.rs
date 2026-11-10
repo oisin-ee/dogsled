@@ -1,13 +1,5 @@
 use super::*;
 
-fn launch_peer(rig: &Rig) {
-    rig.peer();
-    let mut snapshot = rig.read("remote.json");
-    snapshot["job_validity"] = json!(2);
-    rig.put("remote.json", &snapshot);
-    rig.ingest_peers();
-}
-
 fn run_json(rig: &Rig, args: &[&str]) -> (i32, Value) {
     let mut args = args.to_vec();
     args.insert(0, "--json");
@@ -17,7 +9,7 @@ fn run_json(rig: &Rig, args: &[&str]) -> (i32, Value) {
 // The caller accepts only typed envelopes and binds context to its own launch request.
 fn assert_remote_launch_cause(cause: &str) {
     let rig = Rig::new(&format!("diagnostic-launch-{cause}"));
-    launch_peer(&rig);
+    rig.launch_peer();
     fail_peer(
         &rig,
         "launch",
@@ -229,7 +221,7 @@ fn real_remote_missing_directory_names_the_path_and_host() {
     let missing = missing.to_str().unwrap();
     assert!(!Path::new(missing).exists());
     let expected = format!("execution directory {missing} does not exist on netcup");
-    launch_peer(&rig);
+    rig.launch_peer();
     real_peer_prepare(&rig);
     let _observer = super::place::peer_observer(&rig);
     let args = ["run", "--host", "netcup", "--cwd", missing, "--", "true"];
@@ -254,7 +246,7 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
     let missing = missing.to_str().unwrap();
     assert!(!Path::new(missing).exists());
     let expected = format!("execution directory {missing} does not exist on netcup");
-    launch_peer(&rig);
+    rig.launch_peer();
     real_peer_prepare(&rig);
     rig.put("agents.json", &json!({"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_owner","agent":"pi","agent_status":"idle"}]}}));
     assert_eq!(run_json(&rig, &["inbox", "claim", "--harness", "pi"]).0, 0);
@@ -303,7 +295,7 @@ fn real_remote_missing_directory_reaches_ticket_inbox_and_status() {
 #[test]
 fn launch_ssh_exit_255_stays_a_transport_failure_even_with_a_peer_envelope() {
     let rig = Rig::new("diagnostic-launch-transport");
-    launch_peer(&rig);
+    rig.launch_peer();
     let script = fs::read_to_string(rig.dir.join("bin/ssh")).unwrap();
     rig.script("ssh", &script.replace("  *'host launch'*)", "  *'host launch'*) echo 'Permission denied (publickey)' >&2; cat \"$RIG/transport-envelope.json\"; exit 255;"));
     rig.put("transport-envelope.json", &json!({"error":"PRIVATE_SENTINEL","deadline":true,"diagnostic":{"version":1,"operation":"launch","cause":"execution_directory_missing","context":{}}}));
@@ -340,15 +332,24 @@ fn waiting_remote_job_receives_the_real_missing_directory_diagnostic() {
     let missing = missing.to_str().unwrap();
     assert!(!Path::new(missing).exists());
     let expected = format!("execution directory {missing} does not exist on netcup");
-    launch_peer(&rig);
+    rig.launch_peer();
     real_peer_prepare(&rig);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     let observer = super::place::peer_observer(&rig);
     let mut command = rig.start(&[
-        "--json", "run", "--wait", "--max", "30s", "--host", "netcup", "--cwd", missing, "--",
+        "--json",
+        "run",
+        "--wait",
+        "--max",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
+        "--host",
+        "netcup",
+        "--cwd",
+        missing,
+        "--",
         "true",
     ]);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
     while rig.tickets().as_array().unwrap().is_empty() {
         assert!(Instant::now() < deadline, "waiting caller did not enqueue");
         std::thread::sleep(Duration::from_millis(10));
@@ -393,7 +394,7 @@ fn assert_repository_relative_remote_cwd_mapping(symlinked: bool) {
         } else {
             repo.join("nested")
         };
-        launch_peer(&rig);
+        rig.launch_peer();
         let mut args = vec![action, "--host", "netcup", "--cwd", cwd.to_str().unwrap()];
         if action == "run" {
             args.extend(["--", "true"]);
@@ -443,8 +444,10 @@ fn cli_preserves_known_causes_and_never_peer_text() {
         repository(&repo);
         rig.peer();
         fail_peer(&rig, "prepare", &envelope(cause));
+        // This refusal test owns capacity and time; no live sampler may age its peer.
+        rig.placement_capacity();
         rig.ingest_peers();
-        let observer = super::place::peer_observer(&rig);
+        let observer = super::observation::resolved(&rig);
         let (code, error) = rig.json(&[
             "agent",
             "--host",
@@ -1527,7 +1530,7 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
             "agent",
             "--wait",
             "--max",
-            "30s",
+            &format!("{}ms", PROCESS_DEADLINE.as_millis()),
             "--host",
             "netcup",
             "--cwd",
@@ -1546,7 +1549,7 @@ fn waiting_caller_receives_failed_ticket_diagnostic() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + PROCESS_DEADLINE;
     while rig.tickets().as_array().unwrap().is_empty() {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();

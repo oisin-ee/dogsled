@@ -355,7 +355,7 @@ fn prepare_selected(
             let preparation = prepare::envelope(
                 fleet,
                 host,
-                &repo.path,
+                repo,
                 branch,
                 request.base.as_deref(),
                 &request.id,

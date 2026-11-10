@@ -51,7 +51,8 @@ fn remote_wait_deadline_bounds_a_silent_ssh_process() {
     rig.put_items(&json!([{"id":"remote","kind":"job","host":"8103","pane":"w9:p1","owner_pane":"w1:p1","name":null,"created_ms":0,"closed_ms":null}]));
     let _publisher = super::observation::seeded(&rig);
     rig.script("ssh", "#!/bin/sh\nsleep 30\n");
-    let output = rig.run(&["wait", "remote", "--max", "20ms"]);
+    // --max counts from process start; leave room for startup so the job resolves before the deadline.
+    let output = rig.run(&["wait", "remote", "--max", "1500ms"]);
     assert_eq!(output.status.code(), Some(124));
     assert_eq!(output.stdout, b"still running\n");
 }
@@ -138,6 +139,11 @@ fn remote_repository_clone_precedes_prepare_and_failures_do_not_fall_back() {
     let log = rig.log("ssh.log");
     assert!(log.find("host checkout").unwrap() < log.find("host prepare").unwrap());
     assert!(log.contains("--origin https://example.invalid/repo.git"));
+    // The caller keeps this repository at ~/repo. The peer gets the standard path for its
+    // identity, for the checkout and for the worktree preparation alike.
+    let line = |command: &str| log.lines().find(|line| line.contains(command)).unwrap();
+    assert!(line("host checkout").contains("--path dev/repo "), "{log}");
+    assert!(line("host prepare").contains("--repo dev/repo "), "{log}");
     rig.script("ssh", r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/ssh.log"
 case "$*" in
