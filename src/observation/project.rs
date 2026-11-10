@@ -36,6 +36,7 @@ pub(crate) struct LocalInputs {
     agents: Option<Vec<AgentView>>,
     questions: Option<Vec<Pending>>,
     reviews: Option<Vec<Review>>,
+    repos: Option<portal_types::agents::RepoList>,
     gaps: Vec<Gap>,
 }
 
@@ -60,6 +61,29 @@ fn domain<T: serde::de::DeserializeOwned>(local: &Domains, name: &str) -> Result
     Ok(serde_json::from_value(value.clone())?)
 }
 
+fn capture_repos(local: &Domains, gaps: &mut Vec<Gap>) -> Option<portal_types::agents::RepoList> {
+    local.get("repos").and_then(|value| {
+        capture(
+            "repos",
+            serde_json::from_value(value.clone()).map_err(Into::into),
+            gaps,
+        )
+    })
+}
+
+fn capture_status(fleet: &Fleet<'_>, input: &Publication, gaps: &mut Vec<Gap>) -> Option<Status> {
+    let host_failed = input.gaps.iter().any(|gap| gap.domain == "host");
+    capture(
+        "status",
+        if host_failed {
+            super::collect::status(fleet.ledger, Vec::new(), input.published_ms)
+        } else {
+            domain::<Status>(&input.local, "status")
+        },
+        gaps,
+    )
+}
+
 impl LocalInputs {
     fn capture(
         fleet: &Fleet<'_>,
@@ -67,16 +91,7 @@ impl LocalInputs {
         titles: &mut crate::web::agents::Titles,
     ) -> Self {
         let mut gaps = Vec::new();
-        let host_failed = input.gaps.iter().any(|gap| gap.domain == "host");
-        let status = capture(
-            "status",
-            if host_failed {
-                super::collect::status(fleet.ledger, Vec::new(), input.published_ms)
-            } else {
-                domain::<Status>(&input.local, "status")
-            },
-            &mut gaps,
-        );
+        let status = capture_status(fleet, input, &mut gaps);
         // Ages use the collection time. A peer-only wake must not alter local-derived views.
         let now = input
             .sources
@@ -133,6 +148,7 @@ impl LocalInputs {
             crate::web::reviews::pending(fleet.ledger),
             &mut gaps,
         );
+        let repos = capture_repos(&input.local, &mut gaps);
         let findings = status.as_ref().and_then(|status| {
             capture(
                 "findings",
@@ -164,6 +180,7 @@ impl LocalInputs {
             agents,
             questions,
             reviews,
+            repos,
             gaps,
         }
     }
@@ -328,7 +345,7 @@ pub(crate) fn derive(
     }
     let views = &mut input.views;
     views.clear();
-    insert(views, "repos", input.local.get("repos"), &[])?;
+    repos_view(views, local.repos.as_ref(), &gaps)?;
     insert(views, "hosts", Some(&reports), &gaps)?;
     insert(views, "status", status.as_ref(), &gaps)?;
     insert(
@@ -386,6 +403,19 @@ pub(crate) fn derive(
     insert(views, "portal", Some(portal), &gaps)?;
     input.gaps = gaps;
     Ok(())
+}
+
+fn repos_view(
+    views: &mut Domains,
+    repos: Option<&portal_types::agents::RepoList>,
+    gaps: &[Gap],
+) -> Result<()> {
+    let repo_gaps: Vec<_> = gaps
+        .iter()
+        .filter(|gap| gap.domain == "repos")
+        .cloned()
+        .collect();
+    insert(views, "repos", repos, &repo_gaps)
 }
 
 fn sidebar_views(
@@ -576,13 +606,14 @@ fn portal(
         _ => None,
     };
     portal_types::PortalSnapshot {
-        version: super::VERSION,
+        version: portal_types::PORTAL_VERSION,
         epoch: String::new(),
         revision: 0,
         published_ms,
         board: portal_board,
         agents,
         inbox,
+        repos: local.repos.clone(),
         gaps: gaps.to_vec(),
     }
 }

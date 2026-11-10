@@ -222,15 +222,26 @@ impl DeepLink {
     }
 }
 
+/// The catalogue and its observation health share one equality-filtered projection.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct CatalogueState {
+    pub list: Option<portal_types::agents::RepoList>,
+    pub observation_error: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CataloguePortal(pub Memo<CatalogueState>);
+
 /// One reducer owns all browser projections and their connection status.
 #[derive(Clone, Default)]
-struct PortalState {
+pub(crate) struct PortalState {
     board: Option<BoardView>,
     board_error: Option<String>,
     agents: Vec<Agent>,
     agents_received: bool,
     agent_error: Option<String>,
     inbox: InboxState,
+    pub(crate) catalogue: CatalogueState,
     paused: bool,
 }
 
@@ -239,7 +250,7 @@ impl PortalState {
         self.agents_received.then_some(self.agents.as_slice())
     }
 
-    fn update(&mut self, result: Result<PortalEvent, String>, now: u64) {
+    pub(crate) fn update(&mut self, result: Result<PortalEvent, String>, now: u64) {
         let result = result.and_then(|event| match event {
             PortalEvent::Snapshot(snapshot) => Ok(snapshot),
             PortalEvent::Status(status) => Err(status.error),
@@ -274,6 +285,26 @@ impl PortalState {
                     }
                     None => self.agent_error = Some(missing()),
                 }
+                match snapshot.repos {
+                    Some(list) => {
+                        self.catalogue.list = Some(list);
+                        self.catalogue.observation_error = None;
+                    }
+                    None => {
+                        let detail = snapshot
+                            .gaps
+                            .iter()
+                            .filter(|gap| gap.domain == "repos")
+                            .map(|gap| gap.detail.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        self.catalogue.observation_error = Some(if detail.is_empty() {
+                            "catalogue observation unavailable".to_owned()
+                        } else {
+                            detail
+                        });
+                    }
+                }
                 self.inbox.update(snapshot.inbox.ok_or_else(missing), now);
                 self.paused = !snapshot.gaps.is_empty();
             }
@@ -281,6 +312,7 @@ impl PortalState {
                 self.paused = true;
                 self.board_error = Some(message.clone());
                 self.agent_error = Some(message.clone());
+                self.catalogue.observation_error = Some(message.clone());
                 self.inbox.update(Err(message), now);
             }
         }
@@ -293,6 +325,8 @@ pub fn App() -> Element {
     let board = use_memo(move || publication.read().board.clone());
     let board_error = use_memo(move || publication.read().board_error.clone());
     let stream_paused = use_memo(move || publication.read().paused);
+    let catalogue = use_memo(move || publication.read().catalogue.clone());
+    use_context_provider(|| CataloguePortal(catalogue));
     let mut panel = use_context_provider(|| Signal::new(LeadPanel::Chat));
     let mut detail = use_context_provider(|| LeadDetail(Signal::new(LeadPanel::Todos))).0;
     let mut width = use_context_provider(|| ConsoleWidth(Signal::new(1440))).0;
@@ -678,6 +712,70 @@ mod shell_tests {
     use serde_json::json;
 
     #[test]
+    fn catalogue_keeps_refresh_and_observation_failures_separate_until_recovery() {
+        let mut state = PortalState::default();
+        let event = |repos, gaps| {
+            serde_json::from_value(json!({
+                "version":portal_types::PORTAL_VERSION,"epoch":"serve","revision":1,
+                "published_ms":1,"board":null,"agents":null,"inbox":null,"repos":repos,"gaps":gaps
+            }))
+            .unwrap()
+        };
+        let failed = json!({"repos":[{"slug":"owner/repo","description":null,"pushed_at":null,"private":false}],"error":"GitHub catalogue: failed"});
+        state.update(Ok(event(failed.clone(), json!([]))), 1);
+        assert_eq!(state.catalogue.observation_error, None);
+        let list = state.catalogue.list.clone();
+        state.update(
+            Ok(event(
+                serde_json::Value::Null,
+                json!([{
+                    "domain":"repos","availability":"failed","detail":"malformed catalogue"
+                }]),
+            )),
+            2,
+        );
+        assert_eq!(state.catalogue.list, list);
+        assert_eq!(
+            state.catalogue.observation_error.as_deref(),
+            Some("malformed catalogue")
+        );
+        state.update(Ok(event(serde_json::Value::Null, json!([]))), 3);
+        assert_eq!(state.catalogue.list, list);
+        assert_eq!(
+            state.catalogue.observation_error.as_deref(),
+            Some("catalogue observation unavailable")
+        );
+        state.update(Err("stream lost".into()), 4);
+        assert_eq!(state.catalogue.list, list);
+        assert_eq!(
+            state.catalogue.observation_error.as_deref(),
+            Some("stream lost")
+        );
+        let mut good = failed;
+        good["error"] = serde_json::Value::Null;
+        state.update(
+            Ok(event(
+                good,
+                json!([{"domain":"board","availability":"failed","detail":"unrelated"}]),
+            )),
+            5,
+        );
+        assert_eq!(state.catalogue.observation_error, None);
+        assert_eq!(
+            state
+                .catalogue
+                .list
+                .as_ref()
+                .and_then(|list| list.error.as_ref()),
+            None
+        );
+        assert_eq!(
+            state.catalogue.list.as_ref().map(|list| &list.repos),
+            list.as_ref().map(|list| &list.repos)
+        );
+    }
+
+    #[test]
     fn portal_agents_wait_for_a_snapshot_and_survive_a_stream_error()
     -> Result<(), serde_json::Error> {
         let mut state = PortalState::default();
@@ -686,13 +784,14 @@ mod shell_tests {
             "host": "local", "pane": "pane", "state": "working"
         }]))?;
         let snapshot = portal_types::PortalSnapshot {
-            version: 1,
+            version: portal_types::PORTAL_VERSION,
             epoch: "serve".into(),
             revision: 1,
             published_ms: 1,
             board: None,
             agents: Some(agents.clone()),
             inbox: None,
+            repos: None,
             gaps: vec![],
         };
         state.update(Ok(PortalEvent::Snapshot(Box::new(snapshot))), 1);
@@ -710,7 +809,7 @@ mod shell_tests {
 
         let snapshot = |revision| {
             PortalEvent::Snapshot(Box::new(PortalSnapshot {
-                version: 1,
+                version: portal_types::PORTAL_VERSION,
                 epoch: "serve".to_owned(),
                 revision,
                 published_ms: revision,
@@ -721,6 +820,7 @@ mod shell_tests {
                 }),
                 agents: Some(vec![]),
                 inbox: Some(InboxView::default()),
+                repos: Some(portal_types::agents::RepoList::default()),
                 gaps: vec![],
             }))
         };

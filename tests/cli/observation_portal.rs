@@ -191,7 +191,7 @@ fn capture(rig: &Rig) -> Value {
 fn isolate(rig: &Rig) -> Vec<fs::File> {
     // Seeding the stored host holds a fake service lock; transfer it to the trap.
     rig.service.lock().unwrap().take();
-    for program in ["herdr", "git", "ssh"] {
+    for program in ["herdr", "git", "ssh", "gh"] {
         rig.script(
             program,
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIG/portal-access.log\"\nexit 97\n",
@@ -280,6 +280,109 @@ JSON
             .unwrap()
             .contains("unavailable")
     );
+}
+
+#[test]
+fn catalogue_recovery_streams_to_all_clients_without_reader_observation() {
+    let rig = Rig::short("catalogue-recovery-stream");
+    rig.snapshot("state", now(), 0.0, 8);
+    rig.script("gh", r#"#!/bin/sh
+printf 'call\n' >> "$RIG/catalogue-calls"
+if test -f "$RIG/catalogue-failure"; then
+  echo 'connection failed' >&2
+  exit 1
+fi
+printf '[{"full_name":"owner/repo","description":"Published choice","pushed_at":null,"private":false,"archived":false}]\n'
+"#);
+    let collect = || {
+        let observer = rig.serve();
+        let frame = wait_publication(&rig, |frame| frame["views"]["repos"]["data"].is_object());
+        drop(observer);
+        frame
+    };
+    let good = collect();
+    rig.put("catalogue-failure", &json!(true));
+    let mut failed = collect();
+    fs::remove_file(rig.dir.join("catalogue-failure")).unwrap();
+    let mut recovered = collect();
+    // Freeze unrelated producer views, supplying only the real catalogue projections
+    // from the later startups. Supplied transports catalogue-only changes in one epoch.
+    for (frame, revision) in [(&mut failed, 2), (&mut recovered, 3)] {
+        let catalogue = frame["views"]["repos"].clone();
+        let measured = frame["sources"]["local"]["repos"].clone();
+        *frame = good.clone();
+        frame["local"]["repos"] = catalogue["data"].clone();
+        frame["sources"]["local"]["repos"] = measured;
+        frame["views"]["repos"] = catalogue.clone();
+        frame["views"]["portal"]["data"]["repos"] = catalogue["data"].clone();
+        frame["revision"] = json!(revision);
+        frame["views"]["portal"]["data"]["revision"] = json!(revision);
+        for domain in ["board", "agents", "inbox"] {
+            assert_eq!(
+                frame["views"]["portal"]["data"][domain],
+                good["views"]["portal"]["data"][domain]
+            );
+        }
+    }
+    assert_eq!(good["version"], 1);
+    assert_eq!(
+        good["views"]["portal"]["data"]["version"],
+        portal_types::PORTAL_VERSION
+    );
+    assert_eq!(rig.log("catalogue-calls"), "call\ncall\ncall\n");
+    let supplied = Supplied::start(&rig, good.clone());
+    let _locks = isolate(&rig);
+    let portal = Portal::start(&rig);
+    let mut clients: Vec<_> = (0..4).map(|_| portal.stream()).collect();
+    for client in &mut clients {
+        assert_eq!(client.publication(), good["views"]["portal"]["data"]);
+    }
+    supplied.requested("subscribe");
+    for frame in [&failed, &recovered] {
+        supplied.replace(frame.clone());
+        for client in &mut clients {
+            assert_eq!(client.publication(), frame["views"]["portal"]["data"]);
+        }
+        let expected = &frame["views"]["repos"]["data"];
+        assert_eq!(frame["views"]["portal"]["data"]["repos"], *expected);
+        if frame["revision"] == 2 {
+            assert!(
+                expected["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("connection failed")
+            );
+        } else {
+            assert!(expected["error"].is_null());
+        }
+        let (status, headers, body) = portal.get("/api/repos");
+        assert_eq!(status, 200);
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(body, *expected);
+        // REST keeps its existing one-shot read; it must not add a subscription.
+        let request = supplied.requests.recv_timeout(PROCESS_DEADLINE).unwrap();
+        assert_eq!(request["operation"], "current");
+        assert!(
+            supplied.requests.try_recv().is_err(),
+            "REST added an IPC subscription"
+        );
+        // The independent CLI retains its current-publication operation and wire shape.
+        let mut list = rig.start(&["repo", "list", "--json"]);
+        assert!(list.wait().success());
+        let (stdout, stderr) = list.output();
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(serde_json::from_str::<Value>(&stdout).unwrap(), *expected);
+        let request = supplied.requests.recv_timeout(PROCESS_DEADLINE).unwrap();
+        assert_eq!(request["operation"], "current");
+    }
+    assert!(supplied.requests.try_recv().is_err());
+    assert_eq!(
+        rig.log("portal-access.log"),
+        "",
+        "zero reader gh, Git, Herdr or SSH calls"
+    );
+    assert_eq!(rig.log("catalogue-calls"), "call\ncall\ncall\n");
+    assert!(rig.dir.join("state/state.db").is_dir());
 }
 
 #[test]

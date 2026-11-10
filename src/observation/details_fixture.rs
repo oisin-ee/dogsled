@@ -305,13 +305,14 @@ fn input(socket: &Client, ledger: &Ledger) -> Publication {
         7,
     );
     let snapshot = portal_types::PortalSnapshot {
-        version: crate::observation::VERSION,
+        version: portal_types::PORTAL_VERSION,
         epoch: String::new(),
         revision: 0,
         published_ms: 7,
         board: Some(board),
         agents: Some(agents),
         inbox: Some(inbox),
+        repos: None,
         gaps: vec![],
     };
     Publication {

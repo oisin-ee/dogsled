@@ -163,6 +163,106 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn catalogue_projection_distinguishes_missing_malformed_empty_and_refresh_failure() {
+    let fixture = Fixture::new();
+    let mut projector = project::Projector::default();
+    for (value, expected, malformed) in [
+        (None, None, false),
+        (Some(json!({"repos":"broken"})), None, true),
+        (
+            Some(json!({"repos":[],"error":null})),
+            Some(json!({"repos":[],"error":null})),
+            false,
+        ),
+        (
+            Some(json!({"repos":[],"error":"GitHub catalogue: failed"})),
+            Some(json!({"repos":[],"error":"GitHub catalogue: failed"})),
+            false,
+        ),
+    ] {
+        let mut input = fixture.input();
+        if let Some(value) = value {
+            input.local.insert("repos".into(), value);
+        }
+        let local = projector.inputs(&fixture.fleet(), &input);
+        let calls = fixture.shell.calls.lock().unwrap().len();
+        project::derive(
+            &local,
+            vec![fixture.local.clone()],
+            &(&fixture.policy).into(),
+            &mut input,
+        )
+        .unwrap();
+        let expected = expected.unwrap_or(Value::Null);
+        assert_eq!(input.views["repos"]["data"], expected);
+        assert_eq!(input.views["portal"]["data"]["repos"], expected);
+        assert_eq!(
+            input.gaps.iter().any(|gap| gap.domain == "repos"),
+            malformed
+        );
+        assert_eq!(
+            input.views["repos"]["gaps"].as_array().unwrap().len(),
+            usize::from(malformed)
+        );
+        assert!(input.views["portal"]["data"]["board"].is_object());
+        assert!(input.views["portal"]["data"]["agents"].is_array());
+        assert!(input.views["portal"]["data"]["inbox"].is_object());
+        project::derive(
+            &local,
+            vec![fixture.local.clone(), host("peer", "working")],
+            &(&fixture.policy).into(),
+            &mut input,
+        )
+        .unwrap();
+        assert_eq!(input.views["portal"]["data"]["repos"], expected);
+        assert_eq!(
+            fixture.shell.calls.lock().unwrap().len(),
+            calls,
+            "peer composition performed observation"
+        );
+    }
+}
+
+#[test]
+fn catalogue_only_error_changes_publish_without_changing_ipc_version() {
+    let fixture = Fixture::new();
+    let mut projector = project::Projector::default();
+    let mut publisher = Publisher::new().unwrap();
+    let mut previous = 0;
+    for error in [None, Some("GitHub catalogue: failed"), None] {
+        let mut input = fixture.input();
+        input
+            .local
+            .insert("repos".into(), json!({"repos":[],"error":error}));
+        let local = projector.inputs(&fixture.fleet(), &input);
+        project::derive(
+            &local,
+            vec![fixture.local.clone()],
+            &(&fixture.policy).into(),
+            &mut input,
+        )
+        .unwrap();
+        let frame = publisher.replace(input.clone()).unwrap();
+        assert_eq!(frame.version, 1, "portal evolution must not bump fleet IPC");
+        assert_eq!(frame.revision, previous + 1);
+        assert_eq!(
+            frame.views["portal"]["data"]["version"],
+            portal_types::PORTAL_VERSION
+        );
+        assert_eq!(
+            frame.views["portal"]["data"]["repos"],
+            frame.views["repos"]["data"]
+        );
+        assert_eq!(
+            frame.views["portal"]["data"]["repos"]["error"],
+            json!(error)
+        );
+        assert!(Arc::ptr_eq(&frame, &publisher.replace(input).unwrap()));
+        previous = frame.revision;
+    }
+}
+
+#[test]
 fn status_display_derives_lifecycle_without_trusting_a_published_label() {
     let fixture = Fixture::new();
     for (terminal, expected) in [

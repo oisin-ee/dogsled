@@ -617,6 +617,12 @@ dogsled repo list --json
 ```
 
 The portal’s New picker searches repository names and descriptions, newest pushes first.
+It receives catalogue updates through the existing portal stream, without another subscription or polling.
+A successful hourly refresh clears the warning in the open picker without losing your draft or valid selection.
+If the selected repository disappears, select a repository before sending. The picker never switches targets silently.
+Portal snapshots use version 2; observation IPC remains version 1.
+After a coordinated release rollout, restart `serve` and `web`, then reload existing portal tabs.
+Older portal clients can report a decoding error until reloaded.
 `GET /api/repos` and `repo list --json` return `{repos, error}` from the published catalogue.
 Each repository contains `slug`, `description`, `pushed_at`, and `private`.
 Without a publication, readers report that the catalogue is unavailable.

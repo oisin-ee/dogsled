@@ -137,7 +137,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn catalogue_failed_refresh_publishes_previous_repos_and_error() {
+fn catalogue_failed_refresh_publishes_previous_repos_and_recovers_in_portal() {
     use super::super::{project, read};
     use crate::hosts::{Fleet, Host};
     let fixture = Fixture::new();
@@ -164,7 +164,13 @@ fn catalogue_failed_refresh_publishes_previous_repos_and_error() {
         )
         .unwrap();
         let frame = publisher.replace(input).unwrap();
-        read::view::<portal_types::agents::RepoList>(&frame, "repos").unwrap()
+        let list = read::view::<portal_types::agents::RepoList>(&frame, "repos").unwrap();
+        assert_eq!(
+            frame.views["portal"]["data"]["repos"],
+            serde_json::to_value(&list).unwrap(),
+            "the same publication must deliver the catalogue to the mounted portal"
+        );
+        list
     };
     let first = publish(&mut collector, 100);
     assert_eq!(first.repos[0].slug, "owner/repo");
@@ -185,6 +191,32 @@ fn catalogue_failed_refresh_publishes_previous_repos_and_error() {
             .unwrap()
             .contains("GitHub authentication failed")
     );
+    fixture.shell.on(command, r#"[{"full_name":"owner/recovered","description":null,"pushed_at":null,"private":false,"archived":false}]"#);
+    let retained = publish(&mut collector, 7_200_099);
+    assert_eq!(retained.repos, first.repos);
+    assert!(retained.error.is_some());
+    let recovered = publish(&mut collector, 7_200_100);
+    assert_eq!(recovered.repos[0].slug, "owner/recovered");
+    assert_eq!(recovered.error, None);
+    let calls = fixture.shell.calls.lock().unwrap().len();
+    let mut peer_only = collector.publication(10_800_101);
+    let local = projector.inputs(&fleet, &peer_only);
+    project::derive(
+        &local,
+        collector.reports(),
+        &fixture.node().thresholds,
+        &mut peer_only,
+    )
+    .unwrap();
+    assert_eq!(
+        peer_only.views["repos"]["data"],
+        serde_json::to_value(&recovered).unwrap()
+    );
+    assert_eq!(
+        fixture.shell.calls.lock().unwrap().len(),
+        calls,
+        "peer wake must not fetch after the hourly boundary"
+    );
     assert_eq!(
         fixture
             .shell
@@ -194,7 +226,7 @@ fn catalogue_failed_refresh_publishes_previous_repos_and_error() {
             .iter()
             .filter(|call| call.as_str() == command)
             .count(),
-        2
+        3
     );
 }
 

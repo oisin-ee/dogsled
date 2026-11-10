@@ -904,8 +904,12 @@
           "items": []
         },
         "published_ms": 10000,
+        "repos": {
+          "error": "gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate: exit fake: no scripted response for `gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate`",
+          "repos": []
+        },
         "revision": 1,
-        "version": 1
+        "version": 2
       },
       "gaps": []
     },

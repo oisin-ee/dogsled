@@ -116,8 +116,8 @@ mod publication {
         initial.views.insert(
             "portal".into(),
             serde_json::json!({"data": {
-                "version": 1, "epoch": "", "revision": 0, "published_ms": 0,
-                "board": null, "agents": null, "inbox": null, "gaps": []
+                "version": portal_types::PORTAL_VERSION, "epoch": "", "revision": 0, "published_ms": 0,
+                "board": null, "agents": null, "inbox": null, "repos": null, "gaps": []
             }, "gaps": []}),
         );
         let first = publisher.replace(initial.clone()).unwrap();

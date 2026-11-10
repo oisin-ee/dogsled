@@ -21,13 +21,14 @@ pub(super) fn publish(
         board.generated_ms,
     );
     let snapshot = portal_types::PortalSnapshot {
-        version: crate::observation::VERSION,
+        version: portal_types::PORTAL_VERSION,
         epoch: String::new(),
         revision: 0,
         published_ms: board.generated_ms,
         board: Some(board),
         agents: Some(agents),
         inbox: Some(inbox),
+        repos: None,
         gaps: vec![],
     };
     let frame = publisher.replace(Publication {

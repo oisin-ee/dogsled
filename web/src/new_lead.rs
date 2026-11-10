@@ -44,12 +44,16 @@ fn RepositoryPicker(
     choices: Vec<RepoChoice>,
     mut selected: Signal<Option<String>>,
     busy: bool,
+    #[props(default)] on_select: EventHandler<()>,
 ) -> Element {
     let searchable = choices.clone();
     rsx! {
         Combobox::<String> { class: "new-lead-repo", disabled: busy,
             value: Some(ReadSignal::from(selected)),
-            on_value_change: move |value: Option<String>| selected.set(value),
+            on_value_change: move |value: Option<String>| {
+                selected.set(value);
+                on_select.call(());
+            },
             filter: move |(query, slug): (String, String)| {
                 searchable.iter().find(|choice| choice.slug == slug)
                     .is_some_and(|choice| matches(choice, &query))
@@ -83,10 +87,12 @@ pub(crate) fn NewLead() -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut repo = use_signal(|| None::<String>);
-    let repos = use_resource(api::fetch_repos);
+    let mut initialized = use_signal(|| false);
+    let mut selection_removed = use_signal(|| false);
+    let repos = use_context::<crate::app::CataloguePortal>().0;
     use_effect(move || {
-        if let Some(Ok(list)) = &*repos.read()
-            && repo.peek().is_none()
+        if let Some(list) = &repos.read().list
+            && !*initialized.peek()
             && let Some(first) = list.repos.first()
         {
             let wanted = hint.peek().as_deref().map(repository);
@@ -99,10 +105,33 @@ pub(crate) fn NewLead() -> Element {
                 })
                 .unwrap_or(first);
             repo.set(Some(preferred.slug.clone()));
+            initialized.set(true);
         }
     });
+    use_effect(move || {
+        if let Some(list) = &repos.read().list
+            && list.error.is_none()
+            && let Some(slug) = repo()
+            && !list.repos.iter().any(|choice| choice.slug == slug)
+            && !*selection_removed.peek()
+        {
+            selection_removed.set(true);
+        }
+    });
+    let valid = use_memo(move || {
+        !selection_removed()
+            && repo().is_some_and(|slug| {
+                repos
+                    .read()
+                    .list
+                    .as_ref()
+                    .is_some_and(|list| list.repos.iter().any(|choice| choice.slug == slug))
+            })
+    });
     let send = move |()| {
-        let Some(target) = repo() else { return };
+        let Some(target) = repo().filter(|_| valid()) else {
+            return;
+        };
         let text = draft();
         let sent = images();
         let message = message_with_images(&text, &sent);
@@ -117,7 +146,9 @@ pub(crate) fn NewLead() -> Element {
                     if draft() == text {
                         draft.set(String::new());
                     }
-                    images.set(Vec::new());
+                    if images() == sent {
+                        images.set(Vec::new());
+                    }
                     composing.set(false);
                     selected.set(Some(pane));
                 }
@@ -126,27 +157,45 @@ pub(crate) fn NewLead() -> Element {
             busy.set(false);
         });
     };
-    let list = repos.read().clone();
+    let catalogue = repos();
+    let choices = catalogue
+        .list
+        .as_ref()
+        .map(|list| list.repos.clone())
+        .unwrap_or_default();
     rsx! {
         section { class: "new-lead", aria_label: "New conversation", aria_busy: busy(),
             header { class: "lead-header new-lead-header",
                 h1 { "New conversation" }
-                match list {
-                    Some(Ok(list)) if !list.repos.is_empty() => rsx! {
-                        RepositoryPicker { choices: list.repos, selected: repo, busy: busy() }
-                        if let Some(message) = list.error { Alert { "GitHub catalogue: {message}" } }
-                    },
-                    Some(Ok(list)) => rsx! {
+                RepositoryPicker { choices, selected: repo, busy: busy(),
+                    on_select: move |()| {
+                        initialized.set(true);
+                        selection_removed.set(false);
+                    }
+                }
+                if let Some(message) = catalogue.observation_error {
+                    if catalogue.list.is_some() {
+                        Alert { "Last-known repository choices: {message}" }
+                    } else {
+                        Alert { "Projects unavailable: {message}" }
+                    }
+                } else if catalogue.list.is_none() {
+                    Skeleton { role: "status", aria_label: "Loading projects" }
+                }
+                if let Some(list) = catalogue.list {
+                    if let Some(message) = list.error {
+                        Alert { "{message}" }
+                    } else if list.repos.is_empty() {
                         Status { "No GitHub repositories found" }
-                        if let Some(message) = list.error { Alert { "{message}" } }
-                    },
-                    Some(Err(message)) => rsx! { Alert { "Projects unavailable: {message}" } },
-                    None => rsx! { Skeleton { role: "status", aria_label: "Loading projects" } },
+                    }
+                }
+                if let Some(slug) = repo().filter(|_| !valid()) {
+                    Status { "{slug} was removed from the catalogue. Select a repository before sending." }
                 }
             }
             div { class: "new-lead-body" }
             if let Some(message) = error() { Alert { "{message}" } }
-            Composer { draft, images, uploading, disabled: repo().is_none(), busy: busy(),
+            Composer { draft, images, uploading, disabled: !valid(), busy: busy(),
                 on_error: move |message| error.set(Some(message)), on_send: send }
         }
     }
