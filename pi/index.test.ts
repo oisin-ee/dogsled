@@ -18,6 +18,7 @@ const publicationBinary = join(publicationDirectory, "dogsled");
 writeFileSync(publicationBinary, `#!/bin/sh
 if [ "$1" = board ] && [ "$2" = --watch ]; then
   printf '%s\\n' "$*" >> "$DOGSLED_FRAMES.log"
+  if [ -e "$DOGSLED_FRAMES.failure" ]; then cat "$DOGSLED_FRAMES" "$DOGSLED_FRAMES.failure"; exit 2; fi
   if [ -e "$DOGSLED_FRAMES.exit" ]; then cat "$DOGSLED_FRAMES"; echo "observation unavailable: publisher stopped" >&2; exit 3; fi
   exec tail -n +1 -f "$DOGSLED_FRAMES"
 fi
@@ -125,6 +126,10 @@ function rig() {
 		subscriptions: () => existsSync(`${frames}.log`) ? readFileSync(`${frames}.log`, "utf8").split("\n").filter(Boolean) : [],
 		/** Make the next subscriptions end after the frames so far, as a stopped serve does. */
 		publisherStops: (stopped: boolean) => { if (stopped) writeFileSync(`${frames}.exit`, ""); else rmSync(`${frames}.exit`, { force: true }); },
+		publisherFails: (error: string | undefined) => {
+			if (error === undefined) rmSync(`${frames}.failure`, { force: true });
+			else writeFileSync(`${frames}.failure`, `${JSON.stringify({ error, deadline: false })}\n`);
+		},
 		unavailable: (error: string) => frame({ revision: ++revision, error }),
 		showsBoard: () => typeof widgets.at(-1)?.[1] === "function",
 		widget() { return components.get("dogsled"); },
@@ -458,6 +463,45 @@ test("a stopped publisher keeps the last board, and the refresh timer subscribes
 	assert.equal(r.subscriptions().length, 2);
 	assert.equal(r.notices.filter(stopped).length, 1);
 	await r.invoke("session_shutdown");
+});
+
+test("repeated subscription failures do not alternate generic and specific notices", { timeout: 5_000 }, async (t) => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
+	const error = "observation unavailable: dogsled serve is not running";
+	r.publisherFails(error);
+	await r.invoke("session_start");
+	await r.until(() => r.notices.length > 0);
+	assert.deepEqual(r.notices, [[error, "error"]]);
+
+	t.mock.timers.tick(10_000);
+	await r.until(() => r.subscriptions().length === 2);
+	assert.deepEqual(r.notices, [[error, "error"]]);
+});
+
+test("a terminal CLI error is shown once, retains the board, and permits recovery", { timeout: 5_000 }, async (t) => {
+	withPane(t);
+	t.mock.timers.enable({ apis: ["setInterval"] });
+	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
+	const error = "observation disconnected: publisher stopped";
+	r.publisherFails(error);
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
+	await r.invoke("session_start");
+	await r.until(() => r.notices.length > 0);
+	assert.deepEqual(r.notices, [[error, "error"]]);
+	assert.match(r.widget().render(100).join("\n"), /tests/);
+	assert.match(r.widget().render(100).join("\n"), /publisher stopped/);
+
+	r.publisherFails(undefined);
+	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j2", name: "lints", what: "job", host: "local", state: "running", activity: "lints", age_ms: 0 }] });
+	t.mock.timers.tick(10_000);
+	await r.until(() => r.widget().render(100).join("\n").includes("lints"));
+	assert.equal(r.subscriptions().length, 2);
+	assert.doesNotMatch(r.widget().render(100).join("\n"), /publisher stopped/);
+	assert.deepEqual(r.notices, [[error, "error"]]);
 });
 
 test("the board widget steps aside while /dogsled is open, so no row shows twice", async (t) => {
