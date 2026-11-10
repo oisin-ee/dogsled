@@ -364,6 +364,7 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("spawn", &[]),
             expect("status", &[]),
             expect("stop", &["id"]),
+            expect("transfer_apply", &["id"]),
             expect("transfer_drop", &["id"]),
             expect("transfer_list", &[]),
             expect("transfer_send", &["target"]),

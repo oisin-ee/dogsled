@@ -108,7 +108,7 @@ fn write(dir: &Path, delivery: &Delivery) -> Result<()> {
     Ok(())
 }
 
-fn load(ledger: &Ledger, id: &str) -> Result<(PathBuf, Delivery)> {
+pub(super) fn load(ledger: &Ledger, id: &str) -> Result<(PathBuf, Delivery)> {
     let dir = super::directory(ledger, id)?;
     let bytes = fs::read(dir.join(FILE)).map_err(|_| invalid(format!("no transfer {id}")))?;
     let delivery: Delivery = serde_json::from_slice(&bytes)
@@ -216,7 +216,10 @@ fn notice(delivery: &Delivery, dir: &Path) -> String {
         ),
         Kind::Changes => (
             "changes",
-            "Nothing was applied to your checkout.".to_owned(),
+            format!(
+                "Nothing was applied to your checkout. Check it with `dogsled transfer apply {} --check`.",
+                delivery.id
+            ),
         ),
     };
     format!(

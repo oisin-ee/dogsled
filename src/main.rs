@@ -508,6 +508,18 @@ fn transfer_command(
             let shown = delivery::show(fleet.ledger, &id)?;
             print(json, &shown, || shown.text())
         }
+        cli::TransferCommand::Apply { id, check } => {
+            let applied = transfer::apply::apply(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &inbox::caller(fleet.shell),
+                &id,
+                check,
+                now_ms(),
+            )?;
+            print(json, &applied, || applied.text())
+        }
         cli::TransferCommand::Drop { id } => {
             let removed = delivery::remove(
                 fleet.shell,

@@ -678,7 +678,7 @@ pub(crate) fn git_words(
 /// reads are uncapped. The detail codec bound (`crate::shell::OUTPUT_LIMIT`) does not apply here.
 const READ_LIMIT: usize = usize::MAX;
 
-fn raw(shell: &dyn Shell, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
+pub(crate) fn raw(shell: &dyn Shell, repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
     raw_input(shell, repo, args, None)
 }
 

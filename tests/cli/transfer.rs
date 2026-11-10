@@ -86,6 +86,8 @@ fn checkout(rig: &Rig) -> (PathBuf, String, String) {
         &["remote", "add", "origin", "git@github.com:owner/repo.git"],
     );
     fs::write(repo.join("file"), "base\n").unwrap();
+    fs::write(repo.join("kept"), "kept\n").unwrap();
+    fs::write(repo.join("gone"), "gone\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "base"]);
     let base = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
@@ -460,4 +462,294 @@ fn a_large_change_keeps_the_notice_small_and_a_reused_pane_sees_nothing() {
     );
     assert_eq!(code, 2, "{refused}");
     assert_eq!(stored(&rig).len(), 1);
+}
+
+/// A second clone of the same repository, on main, without the sender's commits.
+fn recipient(rig: &Rig, repo: &Path) -> PathBuf {
+    git(
+        &rig.dir,
+        &[
+            "clone",
+            "-q",
+            "--branch",
+            "main",
+            "--single-branch",
+            repo.to_str().unwrap(),
+            "recipient",
+        ],
+    );
+    let to = rig.dir.join("recipient").canonicalize().unwrap();
+    git(
+        &to,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:owner/repo.git",
+        ],
+    );
+    to
+}
+
+/// The sender adds a file in a new directory and deletes one, then sends its branch.
+fn send_branch(rig: &Rig, repo: &Path) -> String {
+    fs::create_dir(repo.join("sub")).unwrap();
+    fs::write(repo.join("sub/new.txt"), "new\n").unwrap();
+    git(repo, &["rm", "-q", "gone"]);
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "more"]);
+    let (code, sent) = as_pane(
+        rig,
+        "w1:p1",
+        Some(repo),
+        &["transfer", "send", "worker", "--changes"],
+    );
+    assert_eq!(code, 0, "{sent}");
+    sent["id"].as_str().unwrap().to_owned()
+}
+
+fn recovery_refs(repo: &Path) -> String {
+    git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/dogsled/recovery/",
+        ],
+    )
+}
+
+#[test]
+fn apply_writes_working_files_only_and_a_second_apply_writes_nothing() {
+    let (rig, _publisher) = rig("transfer-apply");
+    let (repo, _base, _head) = checkout(&rig);
+    let to = recipient(&rig, &repo);
+    let id = send_branch(&rig, &repo);
+
+    // The recipient has staged, unstaged, and untracked work of its own.
+    fs::write(to.join("kept"), "staged\n").unwrap();
+    git(&to, &["add", "kept"]);
+    fs::write(to.join("kept"), "unstaged\n").unwrap();
+    fs::write(to.join("other"), "untracked\n").unwrap();
+    let head = git(&to, &["rev-parse", "HEAD"]);
+    let branch = git(&to, &["symbolic-ref", "HEAD"]);
+    let index = git(&to, &["diff", "--cached"]);
+
+    let (code, refused) = as_pane(&rig, "w1:p1", Some(&to), &["transfer", "apply", &id]);
+    assert_eq!(code, 2);
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("only its recipient"),
+        "{refused}"
+    );
+
+    let (code, checked) = as_pane(
+        &rig,
+        "w1:p2",
+        Some(&to),
+        &["transfer", "apply", &id, "--check"],
+    );
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(checked["applied"], false);
+    assert_eq!(checked["paths"], json!(["file", "gone", "sub/new.txt"]));
+    assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "base\n");
+    assert!(to.join("gone").exists() && !to.join("sub").exists());
+    assert_eq!(recovery_refs(&to), "");
+
+    let (code, applied) = as_pane(&rig, "w1:p2", Some(&to), &["transfer", "apply", &id]);
+    assert_eq!(code, 0, "{applied}");
+    assert_eq!(
+        (applied["applied"].clone(), applied["replayed"].clone()),
+        (json!(true), json!(false))
+    );
+    assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "changed\n");
+    assert_eq!(fs::read_to_string(to.join("sub/new.txt")).unwrap(), "new\n");
+    assert!(!to.join("gone").exists());
+    // Its own work, its index, HEAD, and branch are as they were.
+    assert_eq!(fs::read_to_string(to.join("kept")).unwrap(), "unstaged\n");
+    assert_eq!(fs::read_to_string(to.join("other")).unwrap(), "untracked\n");
+    assert_eq!(git(&to, &["diff", "--cached"]), index);
+    assert_eq!(git(&to, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&to, &["symbolic-ref", "HEAD"]), branch);
+    assert_eq!(
+        git(&to, &["status", "--porcelain"]),
+        " M file\n D gone\nMM kept\n?? other\n?? sub/\n"
+    );
+    // The state before the first write is recoverable.
+    let recovery = applied["recovery"].as_str().unwrap();
+    assert_eq!(
+        recovery_refs(&to).trim(),
+        format!("refs/dogsled/recovery/{recovery}")
+    );
+    assert_eq!(
+        git(
+            &to,
+            &["show", &format!("refs/dogsled/recovery/{recovery}:file")]
+        ),
+        "base\n"
+    );
+
+    // A second apply returns the saved result and leaves later edits alone.
+    fs::write(to.join("file"), "edited later\n").unwrap();
+    let (code, again) = as_pane(&rig, "w1:p2", Some(&to), &["transfer", "apply", &id]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["replayed"], true);
+    assert_eq!(again["recovery"], applied["recovery"]);
+    assert_eq!(
+        fs::read_to_string(to.join("file")).unwrap(),
+        "edited later\n"
+    );
+    assert_eq!(recovery_refs(&to).lines().count(), 1);
+}
+
+#[test]
+fn a_conflict_writes_nothing_and_names_the_paths() {
+    let (rig, _publisher) = rig("transfer-conflict");
+    let (repo, _base, _head) = checkout(&rig);
+    let to = recipient(&rig, &repo);
+    let id = send_branch(&rig, &repo);
+
+    // An ignored file already sits where the transfer adds one.
+    fs::write(to.join(".git/info/exclude"), "sub/\n").unwrap();
+    fs::create_dir(to.join("sub")).unwrap();
+    fs::write(to.join("sub/new.txt"), "mine\n").unwrap();
+    for check in [true, false] {
+        let mut args = vec!["transfer", "apply", id.as_str()];
+        if check {
+            args.push("--check");
+        }
+        let (code, refused) = as_pane(&rig, "w1:p2", Some(&to), &args);
+        assert_eq!(code, 2, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains("does not apply") && error.contains("sub/new.txt"),
+            "{error}"
+        );
+        assert!(error.contains("1 of its 3 paths"), "{error}");
+    }
+    assert_eq!(
+        fs::read_to_string(to.join("sub/new.txt")).unwrap(),
+        "mine\n"
+    );
+    assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "base\n");
+    assert!(to.join("gone").exists());
+
+    // A local edit of a touched file refuses too, and nothing else is written.
+    fs::remove_dir_all(to.join("sub")).unwrap();
+    fs::write(to.join("file"), "local\n").unwrap();
+    let (code, refused) = as_pane(&rig, "w1:p2", Some(&to), &["transfer", "apply", &id]);
+    assert_eq!(code, 2, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains(": file;"),
+        "{refused}"
+    );
+    assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "local\n");
+    assert!(to.join("gone").exists() && !to.join("sub").exists());
+    assert_eq!(recovery_refs(&to), "");
+    assert_eq!(git(&to, &["status", "--porcelain"]), " M file\n");
+    let kept: Vec<String> = fs::read_dir(rig.dir.join("state/transfers").join(&id))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("appl"))
+        .collect();
+    assert_eq!(kept, Vec::<String>::new());
+
+    // After the local edit is gone, the same transfer applies.
+    fs::write(to.join("file"), "base\n").unwrap();
+    let (code, applied) = as_pane(&rig, "w1:p2", Some(&to), &["transfer", "apply", &id]);
+    assert_eq!(code, 0, "{applied}");
+    assert_eq!(fs::read_to_string(to.join("file")).unwrap(), "changed\n");
+}
+
+#[test]
+fn files_are_never_applied_and_another_repository_refuses() {
+    let (rig, _publisher) = rig("transfer-apply-refused");
+    let notes = rig.dir.join("notes.md");
+    fs::write(&notes, "read this\n").unwrap();
+    let (code, sent) = as_pane(
+        &rig,
+        "w1:p1",
+        None,
+        &[
+            "transfer",
+            "send",
+            "worker",
+            "--files",
+            notes.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "{sent}");
+    let (repo, _base, _head) = checkout(&rig);
+    let (code, refused) = as_pane(
+        &rig,
+        "w1:p2",
+        Some(&repo),
+        &["transfer", "apply", sent["id"].as_str().unwrap()],
+    );
+    assert_eq!(code, 2);
+    assert!(
+        refused["error"].as_str().unwrap().contains("holds files"),
+        "{refused}"
+    );
+
+    let id = send_branch(&rig, &repo);
+    let elsewhere = rig.dir.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    git(&elsewhere, &["init", "-q", "-b", "main"]);
+    git(
+        &elsewhere,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:owner/another.git",
+        ],
+    );
+    git(&elsewhere, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let (code, refused) = as_pane(&rig, "w1:p2", Some(&elsewhere), &["transfer", "apply", &id]);
+    assert_eq!(code, 2);
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("repository identity does not match"),
+        "{refused}"
+    );
+    assert_eq!(git(&elsewhere, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn an_unfinished_apply_stays_unresolved_and_is_never_repeated() {
+    let (rig, _publisher) = rig("transfer-unfinished");
+    let (repo, _base, _head) = checkout(&rig);
+    let to = recipient(&rig, &repo);
+    let id = send_branch(&rig, &repo);
+    // An apply that stopped between its first write and its receipt left only its intent.
+    fs::write(
+        rig.dir
+            .join("state/transfers")
+            .join(&id)
+            .join("applying.json"),
+        json!({"version":1,"id":id,"checkout":to,"recovery":"0123456789abcdef0123456789abcdef",
+            "paths":["file"],"at_ms":1})
+        .to_string(),
+    )
+    .unwrap();
+    for check in [true, false] {
+        let mut args = vec!["transfer", "apply", id.as_str()];
+        if check {
+            args.push("--check");
+        }
+        let (code, refused) = as_pane(&rig, "w1:p2", Some(&to), &args);
+        assert_eq!(code, 2, "{refused}");
+        let error = refused["error"].as_str().unwrap();
+        assert!(
+            error.contains("did not finish") && error.contains("0123456789abcdef0123456789abcdef"),
+            "{error}"
+        );
+    }
+    assert_eq!(git(&to, &["status", "--porcelain"]), "");
+    assert_eq!(recovery_refs(&to), "");
 }

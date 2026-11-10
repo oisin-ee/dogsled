@@ -643,6 +643,14 @@ pub enum TransferCommand {
     List,
     /// One transfer: its summary, its file paths, and its pinned source.
     Show { id: String },
+    /// Apply received changes to working files in this checkout. The index and HEAD stay.
+    /// A path that differs from the transfer's `since` commit refuses the whole transfer.
+    Apply {
+        id: String,
+        /// Report whether it applies, and write no file.
+        #[arg(long)]
+        check: bool,
+    },
     /// End a transfer you sent or received.
     Drop { id: String },
 }

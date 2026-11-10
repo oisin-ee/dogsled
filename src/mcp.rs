@@ -266,6 +266,18 @@ pub struct TransferSendArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TransferApplyArgs {
+    pub id: String,
+    /// Report whether it applies, and write no file.
+    #[serde(default)]
+    pub check: bool,
+    /// The checkout that receives the changes. Default: the server's working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct PlaceArgs {
     #[serde(default)]
     pub resume: Option<String>,
@@ -740,6 +752,32 @@ impl Server {
             Ok(serde_json::to_value(crate::transfer::delivery::show(
                 fleet.ledger,
                 &args.id,
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Apply a received change transfer to working files in your checkout. The index, HEAD, and branches stay as they are. If any touched path differs from the transfer's `since` commit, nothing is written and the paths are named. A recovery snapshot of the checkout is taken before the first write. A second apply writes nothing."
+    )]
+    async fn transfer_apply(
+        &self,
+        Parameters(args): Parameters<TransferApplyArgs>,
+    ) -> Result<String, String> {
+        self.call(move |fleet| {
+            let caller = crate::inbox::caller(fleet.shell);
+            let cwd = match args.cwd {
+                Some(cwd) => cwd.into(),
+                None => std::env::current_dir()?,
+            };
+            Ok(serde_json::to_value(crate::transfer::apply::apply(
+                fleet.shell,
+                fleet.ledger,
+                &cwd,
+                &caller,
+                &args.id,
+                args.check,
+                now_ms(),
             )?)?)
         })
         .await
