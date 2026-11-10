@@ -205,7 +205,7 @@ Run the focused tests first:
 cargo test --locked -p portal-types
 cargo test --locked -p dogsled catalogue
 cargo test --locked -p dogsled observation::tests
-cargo test --locked -p dogsled --test cli observation_portal::
+cargo test --locked -p dogsled --test cli observation::portal::
 cargo test --locked -p web
 ```
 

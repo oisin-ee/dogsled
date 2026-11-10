@@ -29,7 +29,7 @@ Generated output: `web/public` only through `moon run dogsled:web-build` or mand
 Stop with evidence before changing another owner or patching a dependency. No retries, remounts, polling, or compatibility fallback to conceal a defect.
 
 ## Acceptance
-In the repository root, `cargo test --locked -p portal-types`, `cargo test --locked -p dogsled catalogue`, `cargo test --locked -p dogsled observation::tests`, `cargo test --locked -p dogsled --test cli observation_portal::`, and `cargo test --locked -p web` must pass with nonzero tests.
+In the repository root, `cargo test --locked -p portal-types`, `cargo test --locked -p dogsled catalogue`, `cargo test --locked -p dogsled observation::tests`, `cargo test --locked -p dogsled --test cli observation::portal::`, and `cargo test --locked -p web` must pass with nonzero tests.
 First show that the focused recovery regression detects the old behavior. Report the exact tested revision and distinguish the known browser reproduction from new automated evidence.
 The lead owns final managed-browser verification and `moon run dogsled:fmt-check dogsled:web-lint dogsled:web-build dogsled:lint dogsled:test` on the integrated revision.
 
