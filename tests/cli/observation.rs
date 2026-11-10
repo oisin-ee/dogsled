@@ -246,7 +246,7 @@ fn serve_logs_an_observation_connection_error_once_with_its_operation() {
     line.clear();
     assert_eq!(reader.read_line(&mut line).unwrap(), 0, "{line}");
     let expected = "dogsled observation subscribe: unexpected observation subscriber data";
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
     loop {
         let journal = observer.rig.log("journal");
         if journal.lines().any(|line| line == expected) {

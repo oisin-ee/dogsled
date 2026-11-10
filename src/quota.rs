@@ -1263,7 +1263,7 @@ mod tests {
                 "cat",
                 &[],
                 SECRET.as_bytes(),
-                std::time::Duration::from_secs(2),
+                crate::test_support::WAIT_DEADLINE,
             )
             .unwrap();
         assert_eq!(out.stdout, SECRET);

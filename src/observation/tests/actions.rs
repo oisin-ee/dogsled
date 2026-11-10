@@ -258,7 +258,7 @@ fn origin_validity_commit_wakes_an_observer_with_owned_holds_before_admission() 
     crate::jobs::clock(&ledger).unwrap();
     let notifications = UnixDatagram::bind(ledger.dir.join("observation-wake.sock")).unwrap();
     notifications
-        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
         .unwrap();
     let fleet = Fleet::cold(
         &shell,

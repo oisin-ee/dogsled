@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 /// The time the server gets to end on its own after its stdin closes. A server that
 /// outlives this window is killed, so a test never hangs on it.
-const EXIT_GRACE: Duration = Duration::from_secs(5);
+const EXIT_GRACE: Duration = PROCESS_DEADLINE;
 
 /// The time a receive may wait for the deadline, or nothing when the deadline has
 /// passed. A receive with no time left can still return a queued line, so a server

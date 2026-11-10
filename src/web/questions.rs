@@ -491,7 +491,7 @@ mod tests {
                 .is_err()
         );
         state.stop.cancel();
-        let response = tokio::time::timeout(Duration::from_secs(2), waiting)
+        let response = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, waiting)
             .await
             .expect("the long poll stops");
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

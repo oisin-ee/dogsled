@@ -344,7 +344,7 @@ mod tests {
     }
 
     async fn next(receiver: &mut watch::Receiver<Option<Line>>) -> Line {
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(crate::test_support::WAIT_DEADLINE, async {
             loop {
                 if let Some(line) = receiver.borrow_and_update().clone() {
                     return line;
@@ -357,7 +357,7 @@ mod tests {
     }
 
     async fn gone(pid: i32) {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + crate::test_support::WAIT_DEADLINE;
         while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok() {
             assert!(
                 Instant::now() < deadline,
@@ -381,11 +381,11 @@ mod tests {
         assert_eq!(one.body["value"], 1);
         assert_eq!(next(&mut second).await.unwrap().body, one.body);
         std::fs::write(&release, "release").unwrap();
-        tokio::time::timeout(Duration::from_secs(3), first.changed())
+        tokio::time::timeout(crate::test_support::WAIT_DEADLINE, first.changed())
             .await
             .unwrap()
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), second.changed())
+        tokio::time::timeout(crate::test_support::WAIT_DEADLINE, second.changed())
             .await
             .unwrap()
             .unwrap();
@@ -458,7 +458,7 @@ mod tests {
             let fixture = Fixture::new(script);
             let mut receiver = fixture.subscribe();
             assert_eq!(next(&mut receiver).await.unwrap_err(), expected);
-            tokio::time::timeout(Duration::from_secs(3), receiver.changed())
+            tokio::time::timeout(crate::test_support::WAIT_DEADLINE, receiver.changed())
                 .await
                 .unwrap()
                 .unwrap_err();

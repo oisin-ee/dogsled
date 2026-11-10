@@ -68,18 +68,91 @@ fn closed_wrapper_stdout_preserves_full_log_and_child_exit() {
     );
 }
 
+/// An entry rendezvous with no open descriptor until the fake tool connects.
+struct ToolEntry {
+    path: PathBuf,
+    entered: std::sync::mpsc::Receiver<Instant>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ToolEntry {
+    fn new(rig: &Rig) -> Self {
+        let path = rig.dir.join("tool-entry");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let fifo = path.clone();
+        let (send, entered) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let opened = fs::File::open(fifo).unwrap();
+            let _ = send.send(Instant::now());
+            drop(opened);
+        });
+        Self {
+            path,
+            entered,
+            reader: Some(reader),
+        }
+    }
+}
+
+impl Drop for ToolEntry {
+    fn drop(&mut self) {
+        // A failure before tool entry must also release and join the blocked reader.
+        let _release = open_fifo(&self.path);
+        if let Some(reader) = self.reader.take() {
+            reader.join().unwrap();
+        }
+        fs::remove_file(&self.path).unwrap();
+    }
+}
+
+fn deadline_output(
+    rig: &Rig,
+    tool: &str,
+    args: &[&str],
+) -> (std::process::ExitStatus, String, String) {
+    let entry = ToolEntry::new(rig);
+    rig.script(
+        tool,
+        "#!/bin/sh\nexec 3>\"$RIG/tool-entry\"\nexec sleep 30\n",
+    );
+    let started = Instant::now();
+    let mut command = rig.start(args);
+    let status = command.wait();
+    let exited = Instant::now();
+    let (stdout, stderr) = command.output();
+    // Liveness bounds startup; FIFO open proves the measured operation really began.
+    let entered = entry
+        .entered
+        .recv_timeout((started + PROCESS_DEADLINE).saturating_duration_since(Instant::now()))
+        .unwrap_or_else(|error| panic!("{tool} was not entered for {args:?}: {error}; status={status:?}, stdout={stdout:?}, stderr={stderr:?}, tickets={:?}", rig.tickets()));
+    // Behaviour budget includes startup, but overshoot is measured only from tool entry.
+    assert!(exited.duration_since(entered) < Duration::from_millis(1500) + Duration::from_secs(2));
+    assert!(started.elapsed() < PROCESS_DEADLINE);
+    (status, stdout, stderr)
+}
+
 #[test]
 fn deadline_includes_discovery_and_placement_ssh() {
     for (name, args) in [
         ("wait-discovery", vec!["wait", "unknown", "--max", "1500ms"]),
         (
             "run-placement",
-            vec!["run", "--wait", "--max", "20ms", "--", "true"],
+            vec![
+                "run", "--host", "netcup", "--wait", "--max", "1500ms", "--", "true",
+            ],
         ),
         (
             "agent-placement",
             vec![
                 "agent",
+                "--host",
+                "netcup",
                 "--kind",
                 "pi",
                 "--name",
@@ -87,45 +160,51 @@ fn deadline_includes_discovery_and_placement_ssh() {
                 "--message",
                 "hello",
                 "--max",
-                "20ms",
+                "1500ms",
             ],
         ),
     ] {
         let rig = Rig::new(name);
-        rig.peer();
-        rig.ingest_peers();
+        if name == "wait-discovery" {
+            rig.peer();
+            rig.ingest_peers();
+        } else {
+            rig.placement_capacity();
+            rig.launch_peer();
+        }
         let _publisher = super::observation::seeded(&rig);
-        rig.script("ssh", "#!/bin/sh\nexec sleep 30\n");
-        let start = Instant::now();
-        let out = rig.run(&args);
-        let diagnostic = format!(
-            "{name}: status={:?}, stdout={:?}, stderr={:?}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(start.elapsed() < Duration::from_secs(2), "{diagnostic}");
+        let (status, stdout, stderr) = if name == "wait-discovery" {
+            rig.script("ssh", "#!/bin/sh\nexec sleep 30\n");
+            let start = Instant::now();
+            let out = rig.run(&args);
+            assert!(start.elapsed() < Duration::from_secs(2));
+            (
+                out.status,
+                String::from_utf8(out.stdout).unwrap(),
+                String::from_utf8(out.stderr).unwrap(),
+            )
+        } else {
+            deadline_output(&rig, "ssh", &args)
+        };
+        let diagnostic = format!("{name}: status={status:?}, stdout={stdout:?}, stderr={stderr:?}");
         if name == "wait-discovery" {
             // Unknown-name lookup consumes the publication and makes no discovery SSH call.
             // --max starts at process start, so it leaves room for startup on a loaded host;
             // an SSH call would still hit this deadline inside the 2 s elapsed check and exit 124.
-            assert_eq!(out.status.code(), Some(2), "{diagnostic}");
-            assert!(
-                !String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
-                "{diagnostic}"
-            );
+            assert_eq!(status.code(), Some(2), "{diagnostic}");
+            assert!(!stderr.contains("deadline reached"), "{diagnostic}");
         } else if name == "agent-placement" {
-            assert_eq!(out.status.code(), Some(2), "{diagnostic}");
-            assert!(
-                String::from_utf8_lossy(&out.stderr).contains("deadline reached"),
-                "{diagnostic}"
-            );
-            let (code, report) = rig.json(&args);
-            assert_eq!(code, 2, "{report}");
+            assert_eq!(status.code(), Some(2), "{diagnostic}");
+            assert!(stderr.contains("deadline reached"), "{diagnostic}");
+            let mut json_args = args.clone();
+            json_args.push("--json");
+            let (status, stdout, _) = deadline_output(&rig, "ssh", &json_args);
+            let report: Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(status.code(), Some(2), "{report}");
             assert_eq!(report["deadline"], true, "{report}");
         } else {
-            assert_eq!(out.status.code(), Some(124), "{diagnostic}");
-            assert_eq!(out.stdout, b"still running\n", "{diagnostic}");
+            assert_eq!(status.code(), Some(124), "{diagnostic}");
+            assert_eq!(stdout, "still running\n", "{diagnostic}");
         }
     }
 }
@@ -135,11 +214,13 @@ fn command_deadline_bounds_local_git_and_remote_report() {
     let rig = Rig::new("hung-git");
     rig.snapshot("state", now(), 0.0, 8);
     let _publisher = super::observation::seeded(&rig);
-    rig.script("git", "#!/bin/sh\nexec sleep 30\n");
-    let start = Instant::now();
-    let out = rig.run(&["run", "--wait", "--max", "50ms", "--", "true"]);
-    assert_eq!(out.status.code(), Some(124));
-    assert!(start.elapsed() < Duration::from_secs(2));
+    // Behaviour budget leaves startup room; the entry rendezvous excludes that setup.
+    let (status, _, _) = deadline_output(
+        &rig,
+        "git",
+        &["run", "--wait", "--max", "1500ms", "--", "true"],
+    );
+    assert_eq!(status.code(), Some(124));
 
     let rig = Rig::new("remote-deadline-report");
     rig.peer();
@@ -171,7 +252,8 @@ fn command_deadline_bounds_host_lock_wait() {
     // its exit status come from bounded waits: a command that never ends fails the test
     // on the bound instead of hanging the suite, and a failed assertion kills the
     // command and its group.
-    let mut placement = rig.start(&["place", "--wait", "--max", "20ms"]);
+    // Behaviour budget includes startup before the already-held host lock.
+    let mut placement = rig.start(&["place", "--wait", "--max", "1500ms"]);
     let status = placement.wait();
     let (stdout, stderr) = placement.output();
     // The command's own deadline ends the wait for the held lock, so it reports the

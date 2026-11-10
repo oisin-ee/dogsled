@@ -265,7 +265,7 @@ mod tests {
         let mut stream = response.into_body().into_data_stream();
         let next_inbox = |mut stream: axum::body::BodyDataStream| async move {
             loop {
-                let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
                     .await
                     .expect("SSE event deadline")
                     .expect("SSE stays open")
@@ -304,7 +304,7 @@ mod tests {
         assert!(answered.contains("\"count\":0"));
         state.stop.cancel();
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
                 .await
                 .expect("shutdown deadline")
                 .is_none()

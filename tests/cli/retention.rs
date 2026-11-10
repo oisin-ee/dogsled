@@ -524,7 +524,7 @@ fn r1c_same_host_ordinary_job_captures_release_and_expires_without_owner_read() 
     let (code, result) = rig.json(&["run", "--host", "local", "--", "true"]);
     assert_eq!(code, 0, "{result}");
     let id = result["id"].as_str().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
     loop {
         if rig.job(id)["ended_ms"].is_number() {
             break;

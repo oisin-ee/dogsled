@@ -12,9 +12,9 @@ mod publication {
     use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
-    const WAIT: Duration = Duration::from_secs(3);
+    use crate::test_support::WAIT_DEADLINE as WAIT;
 
     struct Fixture {
         publisher: Publisher,
@@ -496,7 +496,8 @@ mod publication {
             fixture.publish(value);
         }
         assert!(
-            started.elapsed() < WAIT,
+            // Behaviour budget: only publication runs after backpressure is established.
+            started.elapsed() < std::time::Duration::from_secs(3),
             "backpressure blocked the publisher"
         );
         let mut reader = BufReader::new(socket);
@@ -611,7 +612,8 @@ mod publication {
         let _silent = UnixStream::connect(fixture.state.join("observation.sock")).unwrap();
         let started = Instant::now();
         fixture.server.take();
-        assert!(started.elapsed() < WAIT);
+        // Behaviour budget starts after the server and its silent client exist.
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
         assert!(!fixture.state.join("observation.sock").exists());
     }
 

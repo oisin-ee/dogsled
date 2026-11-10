@@ -346,12 +346,12 @@ mod tests {
         let first = {
             let store = store.clone();
             let id = id.clone();
-            tokio::spawn(async move { store.wait(&id, Duration::from_secs(5)).await })
+            tokio::spawn(async move { store.wait(&id, crate::test_support::WAIT_DEADLINE).await })
         };
         let second = {
             let store = store.clone();
             let id = id.clone();
-            tokio::spawn(async move { store.wait(&id, Duration::from_secs(5)).await })
+            tokio::spawn(async move { store.wait(&id, crate::test_support::WAIT_DEADLINE).await })
         };
         // The waiters are up before the answer comes.
         tokio::time::sleep(Duration::from_millis(100)).await;

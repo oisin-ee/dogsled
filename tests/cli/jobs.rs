@@ -1050,7 +1050,14 @@ fn run_wait_captures_exit_output_metadata_and_owner() {
     assert!(job["ended_ms"].is_number());
     assert!(herdr.ends_with("pane close w2:p1\n"));
     assert_eq!(
-        rig.run(&["wait", id, "--max", "30s"]).status.code(),
+        rig.run(&[
+            "wait",
+            id,
+            "--max",
+            &format!("{}ms", PROCESS_DEADLINE.as_millis())
+        ])
+        .status
+        .code(),
         Some(3)
     );
     assert_eq!(rig.run(&["logs", id, "--follow"]).stdout, log.as_bytes());
@@ -1473,9 +1480,14 @@ fn remote_job_controls_use_configured_transport_and_owner_records() {
     rig.ingest_peers();
     let observer = super::place::peer_observer(&rig);
     assert_eq!(
-        rig.run(&["wait", "remote-job", "--max", "30s"])
-            .status
-            .code(),
+        rig.run(&[
+            "wait",
+            "remote-job",
+            "--max",
+            &format!("{}ms", PROCESS_DEADLINE.as_millis())
+        ])
+        .status
+        .code(),
         Some(3)
     );
     assert!(rig.run(&["stop", "remote-job"]).status.success());
@@ -2244,7 +2256,7 @@ fn settled_remote_job_releases_holds_on_both_hosts() {
         "netcup",
         "--wait",
         "--max",
-        "10s",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
         "--",
         "sh",
         "-c",
@@ -2312,7 +2324,7 @@ fn peer_refused_job_reports_once_and_releases_holds() {
         "--cwd",
         missing.to_str().unwrap(),
         "--max",
-        "10s",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
         "--",
         "true",
     ]);
@@ -2605,7 +2617,12 @@ fn stopped_job_releases_holds_after_terminal_capture() {
     );
     assert!(rig.job(id)["ended_ms"].is_null());
     assert!(rig.run(&["stop", id]).status.success());
-    let mut command = rig.start(&["wait", id, "--max", "10s"]);
+    let mut command = rig.start(&[
+        "wait",
+        id,
+        "--max",
+        &format!("{}ms", PROCESS_DEADLINE.as_millis()),
+    ]);
     assert!(!command.wait().success(), "{:?}", command.output());
     assert_eq!(rig.job(id)["reason"], "stopped");
     assert!(!wrapper.wait().success());

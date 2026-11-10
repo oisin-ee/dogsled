@@ -5,6 +5,7 @@ use super::super::details::{
 use super::super::{Published, ipc, peers, read};
 use crate::herdr_socket::fake;
 use crate::probe::Agent;
+use crate::test_support::WAIT_DEADLINE;
 use portal_types::files::FilesState;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -97,7 +98,7 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
         "pane.read" => {
             if first.swap(false, Ordering::AcqRel) {
                 entered.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(3)).unwrap();
+                released.recv_timeout(WAIT_DEADLINE).unwrap();
             }
             json!({"result":{"read":screen.lock().unwrap().clone()}})
         }
@@ -106,7 +107,7 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
     let fixture = Fixture::paused(socket.client());
     let publication = fixture.client.current().unwrap();
     let mut viewer = fixture.client.detail("w1:p1").unwrap();
-    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    started.recv_timeout(WAIT_DEADLINE).unwrap();
     assert!(matches!(
         viewer.current().publication.detail.conversation,
         Content::Pending
@@ -114,7 +115,7 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
     let mut second = fixture.client.detail("w1:p1").unwrap();
     release.send(()).unwrap();
     for viewer in [&mut viewer, &mut second] {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + WAIT_DEADLINE;
         loop {
             let connection = viewer.current();
             assert_eq!(connection.status, ipc::Status::Connected);
@@ -130,7 +131,7 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
     assert_eq!(fixture.collector.lock().unwrap().transcript_reads(), 1);
     *native.screen.lock().unwrap() = json!({"text":"direct update", "revision":8});
     assert!(fixture.tick("w1:p1"));
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while !matches!(&viewer.current().publication.detail.screen, Content::Available(screen) if screen.revision == 8)
     {
         assert!(Instant::now() < deadline, "next capture was not delivered");
@@ -139,7 +140,7 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
     assert_eq!(fixture.client.current().unwrap(), publication);
     drop(second);
     drop(viewer);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while !fixture.no_viewers() {
         assert!(Instant::now() < deadline, "detail lease was not released");
         std::thread::yield_now();
@@ -239,7 +240,7 @@ fn file_edit_changes_only_files_and_unchanged_tree_does_not_publish() {
         available(frame) && detail(frame).is_some_and(|detail| detail.files == ReadState::Empty)
     });
     let original = detail(&first).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while !matches!(
         viewer.current().publication.detail.files,
         FilesState::Current(_)
@@ -276,12 +277,9 @@ fn slow_git_does_not_delay_transcript_or_screen_publication() {
     let (entered, release) = shell.hold();
     let fixture = Fixture::with_files_shell(native.server.client(), shell);
     let mut viewer = fixture.client.detail("w1:p1").unwrap();
-    entered.recv_timeout(Duration::from_secs(3)).unwrap();
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(3));
-        release.send(()).unwrap();
-    });
-    let deadline = Instant::now() + Duration::from_secs(1);
+    entered.recv_timeout(WAIT_DEADLINE).unwrap();
+    // Liveness setup: hold Git explicitly until the measured publication completes.
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while matches!(
         viewer.current().publication.detail.conversation,
         Content::Pending
@@ -296,6 +294,7 @@ fn slow_git_does_not_delay_transcript_or_screen_publication() {
     std::fs::write(native.agent().transcript.unwrap(),
         "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Git is still running\"}}\n").unwrap();
     *native.screen.lock().unwrap() = json!({"text":"updated while Git waits", "revision":8});
+    // Behaviour budget: only the requested capture runs here; Git remains held.
     let start = Instant::now();
     fixture.tick("w1:p1");
     loop {
@@ -315,7 +314,7 @@ fn slow_git_does_not_delay_transcript_or_screen_publication() {
         viewer.changed(Duration::from_millis(10));
     }
     assert!(start.elapsed() < Duration::from_secs(1));
-    releaser.join().unwrap();
+    release.send(()).unwrap();
 }
 
 #[test]
@@ -327,23 +326,28 @@ fn replaced_session_starts_pending_and_discards_the_old_git_result() {
     let (old_entered, old_release) = shell.hold();
     let fixture = Fixture::with_files_shell(native.server.client(), shell.clone());
     let mut viewer = fixture.client.detail("w1:p1").unwrap();
-    old_entered.recv_timeout(Duration::from_secs(3)).unwrap();
+    old_entered.recv_timeout(WAIT_DEADLINE).unwrap();
     let old_session = viewer.current().publication.detail.session.clone();
     let (new_entered, new_release) = shell.hold();
     std::fs::write(repo.0.join("new-session-only"), "new").unwrap();
     native.raw.lock().unwrap()["terminal_id"] = json!("replacement-terminal");
+    // Behaviour budget measures observable retirement, not new Git process startup.
     let start = Instant::now();
     fixture.wake();
-    new_entered.recv_timeout(Duration::from_secs(3)).unwrap();
+    while viewer.current().publication.detail.session == old_session {
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "retirement waited for old Git"
+        );
+        viewer.changed(Duration::from_millis(10));
+    }
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "retirement waited for old Git"
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while viewer.current().publication.detail.session == old_session {
-        assert!(Instant::now() < deadline);
-        viewer.changed(Duration::from_millis(10));
-    }
+    // New Git entering while old Git remains held proves retirement did not join it.
+    new_entered.recv_timeout(WAIT_DEADLINE).unwrap();
+    let deadline = Instant::now() + WAIT_DEADLINE;
     assert_eq!(
         viewer.current().publication.detail.files,
         FilesState::Pending
@@ -377,7 +381,7 @@ fn failed_git_keeps_only_a_snapshot_from_the_same_checkout() {
     let fixture = Fixture::with_files_shell(native.server.client(), shell.clone());
     let mut viewer = fixture.client.detail("w1:p1").unwrap();
     fixture.wait(available);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while !matches!(
         viewer.current().publication.detail.files,
         FilesState::Current(_)
@@ -446,7 +450,7 @@ fn too_many_replaces_the_previous_list_instead_of_retaining_stale_files() {
     fixture.wait(|frame| detail(frame).is_some_and(|detail| detail.files == ReadState::Empty));
     shell.too_many.store(true, Ordering::Release);
     fixture.files_tick("w1:p1");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while viewer.current().publication.detail.files != FilesState::TooMany {
         assert!(
             Instant::now() < deadline,
@@ -473,7 +477,7 @@ fn symlink_retarget_does_not_inherit_another_roots_stale_files() {
     std::fs::remove_file(&link).unwrap();
     symlink(&other.0, &link).unwrap();
     fixture.files_tick("w1:p1");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + WAIT_DEADLINE;
     while !matches!(
         viewer.current().publication.detail.files,
         FilesState::Unavailable(_)
@@ -658,7 +662,6 @@ async fn detail_codec_and_route_body_limit_accept_content_over_main_frame_limit(
 fn a_slow_detail_capture_does_not_delay_portal_publication() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
-    use std::time::Duration;
     let native = Native::new();
     let source = Arc::clone(&native.raw);
     let (entered, started) = mpsc::channel();
@@ -669,7 +672,7 @@ fn a_slow_detail_capture_does_not_delay_portal_publication() {
         "pane.read" => {
             if first.swap(false, Ordering::AcqRel) {
                 entered.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(3)).unwrap();
+                released.recv_timeout(WAIT_DEADLINE).unwrap();
             }
             json!({"result":{"read":{"text":"ready","revision":1}}})
         }
@@ -677,7 +680,7 @@ fn a_slow_detail_capture_does_not_delay_portal_publication() {
     });
     let fixture = Fixture::new(socket.client());
     let _viewer = fixture.client.detail("w1:p1").unwrap();
-    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    started.recv_timeout(WAIT_DEADLINE).unwrap();
     let previous = fixture.client.current().unwrap().revision;
     fixture.rename_agent("renamed while capture is blocked");
     let frame = fixture.wait(|frame| frame.revision > previous);

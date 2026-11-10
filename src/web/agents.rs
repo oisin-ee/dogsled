@@ -1694,7 +1694,7 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::OK);
             let mut stream = response.into_body().into_data_stream();
-            let bytes = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
                 .await
                 .unwrap()
                 .unwrap()
@@ -1794,14 +1794,14 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
         assert!(String::from_utf8_lossy(&first).contains("event: agent"));
         std::fs::write(&release, "release").unwrap();
-        let last = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        let last = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
             .await
             .unwrap()
             .unwrap()
@@ -1810,7 +1810,7 @@ mod tests {
         assert!(last.contains("event: error"), "{last}");
         assert!(last.contains("session changed"), "{last}");
         assert!(
-            tokio::time::timeout(Duration::from_secs(3), stream.next())
+            tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
                 .await
                 .unwrap()
                 .is_none()
@@ -1928,7 +1928,7 @@ mod tests {
         });
         state.stop.cancel();
         tokio::time::timeout(
-            Duration::from_secs(2),
+            crate::test_support::WAIT_DEADLINE,
             axum::body::to_bytes(response.into_body(), 1024),
         )
         .await
@@ -1937,7 +1937,7 @@ mod tests {
         // The body ends at once; the forwarding thread drops its subscription on its next
         // poll, and only then does serve release the lease. A frame with no details can
         // predate the first capture, so it proves nothing about the release.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
         while !fixture.no_viewers() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -2082,7 +2082,9 @@ mod tests {
         let (entered, release) = shell.hold();
         let fixture = Fixture::with_files_shell(server.client(), shell);
         let _viewer = fixture.client.detail("w1:p1").unwrap();
-        entered.recv_timeout(Duration::from_secs(3)).unwrap();
+        entered
+            .recv_timeout(crate::test_support::WAIT_DEADLINE)
+            .unwrap();
         let mut state = with_socket(&server);
         state.web = fixture.ledger.clone();
         let task_state = state.clone();
@@ -2144,7 +2146,7 @@ mod tests {
         )
         .await;
         let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
             .await
             .unwrap()
             .unwrap()
@@ -2152,7 +2154,7 @@ mod tests {
         let first = agent_sse_payload(&first).revisions.unwrap();
         std::fs::write(repo.0.join("file"), "edited\n").unwrap();
         assert!(fixture.files_tick("w1:p1"));
-        let second = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        let second = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
             .await
             .unwrap()
             .unwrap()
@@ -2579,7 +2581,7 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
             .await
             .unwrap()
             .unwrap()
@@ -2599,7 +2601,7 @@ mod tests {
         }
         *screen.lock().unwrap() = json!({"text":"second screen", "revision":8});
         assert!(fixture.tick("w1:p1"));
-        let second = tokio::time::timeout(Duration::from_secs(3), stream.next())
+        let second = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
             .await
             .unwrap()
             .unwrap()
@@ -2654,7 +2656,7 @@ mod tests {
         fixture.wait(|frame| frame.views["agent_details"]["data"]["w1:p1"]["screen_revision"] == 7);
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         reader
-            .set_read_timeout(Some(Duration::from_millis(250)))
+            .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
             .unwrap();
         let mut reader = std::io::BufReader::new(reader);
         let stop = tokio_util::sync::CancellationToken::new();
@@ -2679,6 +2681,11 @@ mod tests {
         raw.lock().unwrap()["name"] = json!("renamed");
         fixture.wake();
         fixture.wait(|frame| frame.revision > previous);
+        // Negative check starts only after the initial line proves the follower is live.
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
         let mut unchanged = String::new();
         assert!(
             reader.read_line(&mut unchanged).is_err(),
@@ -2688,7 +2695,7 @@ mod tests {
         assert!(fixture.tick("w1:p1"));
         reader
             .get_ref()
-            .set_read_timeout(Some(Duration::from_secs(3)))
+            .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
             .unwrap();
         let mut second = String::new();
         reader.read_line(&mut second).unwrap();
@@ -2731,7 +2738,7 @@ mod tests {
         let mut stream = response.into_body().into_data_stream();
         let mut text = String::new();
         while !text.contains("\"state\":\"blocked\"") {
-            let bytes = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
                 .await
                 .expect("published agent event")
                 .expect("stream open")

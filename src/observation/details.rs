@@ -549,7 +549,7 @@ impl Collector {
             .send(FilesTick::Manual(send))
             .unwrap();
         receive
-            .recv_timeout(Duration::from_secs(4))
+            .recv_timeout(crate::test_support::WAIT_DEADLINE)
             .expect("files tick completed");
         drop(registry);
         self.tick(pane)
@@ -572,7 +572,7 @@ impl Collector {
             .send(Tick::Manual(send))
             .expect("manual detail tick");
         receive
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(crate::test_support::WAIT_DEADLINE)
             .expect("tick completed");
         true
     }

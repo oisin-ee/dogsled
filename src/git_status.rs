@@ -276,7 +276,11 @@ mod tests {
         }
 
         fn files_at(path: &std::path::Path) -> Files {
-            let capture = read(&System::default(), path.to_str(), Duration::from_secs(10));
+            let capture = read(
+                &System::default(),
+                path.to_str(),
+                crate::test_support::WAIT_DEADLINE,
+            );
             match capture.state {
                 FilesState::Current(files) => files,
                 state => panic!("expected current Files: {state:?}"),
@@ -376,7 +380,7 @@ mod tests {
                 "env",
                 &words(repo.0.to_str().unwrap(), &["update-index", "--index-info"]),
                 input.as_bytes(),
-                Duration::from_secs(5),
+                crate::test_support::WAIT_DEADLINE,
             )
             .unwrap();
         assert!(out.ok(), "{}", out.stderr);
@@ -472,12 +476,17 @@ mod tests {
         let outside = std::env::temp_dir().join(crate::ledger::new_id());
         std::fs::create_dir_all(&outside).unwrap();
         assert_eq!(
-            read(&System::default(), outside.to_str(), Duration::from_secs(5)).state,
+            read(
+                &System::default(),
+                outside.to_str(),
+                crate::test_support::WAIT_DEADLINE
+            )
+            .state,
             FilesState::NotRepository
         );
         std::fs::remove_dir_all(outside).unwrap();
         assert!(matches!(
-            read(&System::default(), None, Duration::from_secs(5)).state,
+            read(&System::default(), None, crate::test_support::WAIT_DEADLINE).state,
             FilesState::Unavailable(_)
         ));
     }
@@ -489,7 +498,12 @@ mod tests {
             repo.write(&format!("{n:04}-{}", "x".repeat(220)), "");
         }
         assert_eq!(
-            read(&System::default(), repo.0.to_str(), Duration::from_secs(10)).state,
+            read(
+                &System::default(),
+                repo.0.to_str(),
+                crate::test_support::WAIT_DEADLINE
+            )
+            .state,
             FilesState::TooMany
         );
     }

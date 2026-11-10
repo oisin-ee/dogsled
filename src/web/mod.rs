@@ -724,7 +724,7 @@ mod tests {
             let mut client =
                 std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the portal");
             client
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
                 .expect("read timeout");
             write!(
                 client,
@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         state.stop.cancel();
         tokio::time::timeout(
-            Duration::from_secs(2),
+            crate::test_support::WAIT_DEADLINE,
             axum::body::to_bytes(response.into_body(), 1024),
         )
         .await

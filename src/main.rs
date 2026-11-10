@@ -64,6 +64,8 @@ mod sidebar;
 mod store;
 mod sweep;
 mod tables;
+#[cfg(test)]
+mod test_support;
 mod transcript;
 mod unit_reply;
 mod unit_request;

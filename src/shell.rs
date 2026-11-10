@@ -590,7 +590,7 @@ mod tests {
             "--nocapture".into(),
         ]);
         let output = System::default()
-            .run_bounded("env", &words, std::time::Duration::from_secs(30))
+            .run_bounded("env", &words, crate::test_support::WAIT_DEADLINE)
             .unwrap();
         assert!(output.ok(), "{}\n{}", output.stdout, output.stderr);
     }
@@ -618,7 +618,7 @@ mod tests {
                         .run_bytes_bounded(
                             "env",
                             &[],
-                            std::time::Duration::from_secs(2),
+                            crate::test_support::WAIT_DEADLINE,
                             OUTPUT_LIMIT,
                         )
                         .unwrap()
@@ -628,7 +628,7 @@ mod tests {
                             "sh",
                             &["-c".into(), "cat >/dev/null; env".into()],
                             b"input",
-                            std::time::Duration::from_secs(2),
+                            crate::test_support::WAIT_DEADLINE,
                         )
                         .unwrap()
                         .stdout
@@ -720,7 +720,7 @@ mod tests {
             .run_bytes_bounded(
                 "sh",
                 &["-c".into(), "printf '\\000\\377'".into()],
-                std::time::Duration::from_secs(2),
+                crate::test_support::WAIT_DEADLINE,
                 2,
             )
             .unwrap();
@@ -768,7 +768,7 @@ mod tests {
             .parse()
             .unwrap();
         let pid = nix::unistd::Pid::from_raw(pid);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
         while nix::sys::signal::kill(pid, None) != Err(nix::errno::Errno::ESRCH) {
             assert!(
                 std::time::Instant::now() < deadline,

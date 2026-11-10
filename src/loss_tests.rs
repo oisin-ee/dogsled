@@ -1830,7 +1830,7 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
                     })
                     .unwrap();
                 // The contender has captured its plan and reached repository mutex lookup.
-                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                 git(
                     &fixture.repo.tree,
                     &["commit", "-q", "--allow-empty", "-m", "concurrent work"],
@@ -1964,7 +1964,7 @@ fn close_refuses_pane_moved_while_waiting() {
                         .unwrap();
                     barrier.wait();
                     // Close has captured A and reached the held repository mutex.
-                    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                     *shell.cwd.lock().unwrap() = other.clone();
                     Ok(close)
                 },
@@ -2080,7 +2080,7 @@ fn unmarked_close_preserves_replacement_while_waiting() {
                         })
                         .unwrap();
                     barrier.wait();
-                    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                     // Real Git removes/recreates the checkout in another process while
                     // the contender waits; the administrative directory name is reused.
                     let replacement =
@@ -2270,7 +2270,7 @@ fn missing_initial_stat_refuses_a_checkout_reappearing_before_the_lock() {
                         )
                     })
                     .unwrap();
-                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                 // The initial stat saw ENOENT, but the original admin and generation remain.
                 std::fs::create_dir(&path).unwrap();
                 std::fs::copy(parked.join(".git"), path.join(".git")).unwrap();
@@ -2502,7 +2502,7 @@ fn unmarked_close_accepts_survey_generation_on_the_same_checkout() {
                         )
                     })
                     .unwrap();
-                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                 // Another discovery marks the exact checkout while close waits for the mutex.
                 guard
                     .discover(&System, fixture.repo.tree.to_str().unwrap())?
@@ -2577,7 +2577,7 @@ fn unmarked_subdir_cwd_cannot_adopt_a_replaced_checkout() {
                     })
                     .unwrap();
                 barrier.wait();
-                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                 // Keep the cwd inode but replace both the checkout root and its admin dir.
                 std::fs::rename(&subdir, &held).unwrap();
                 replace_checkout(&fixture.repo.repo, &fixture.repo.tree, false);
@@ -2663,7 +2663,7 @@ fn concurrent_close_and_prune_run_one_teardown() {
                     .name("lifecycle-contender".into())
                     .spawn_scoped(scope, move || run(!close_wins))
                     .unwrap();
-                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                 release.wait();
                 first.join().unwrap().unwrap();
                 second.join().unwrap().unwrap();
@@ -2721,7 +2721,7 @@ fn concurrent_closes_reconcile_an_item_closed_by_the_winner() {
             .name("lifecycle-contender".into())
             .spawn_scoped(scope, run)
             .unwrap();
-        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
         release.wait();
         first.join().unwrap().unwrap();
         second.join().unwrap().unwrap();
@@ -2771,7 +2771,7 @@ fn absent_close_refuses_deleted_or_reassigned_captured_items() {
                             )
                         })
                         .unwrap();
-                    rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                    rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                     external_remove(&fixture.repo);
                     shell.open.store(false, SeqCst);
                     let mut current = vec![item];
@@ -2871,7 +2871,7 @@ fn close_after_prior_removal_reconciles_without_teardown() {
                         )
                     })
                     .unwrap();
-                rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+                rx.recv_timeout(crate::test_support::WAIT_DEADLINE).unwrap();
                 external_remove(&fixture.repo);
                 shell.open.store(false, std::sync::atomic::Ordering::SeqCst);
                 Ok(close)

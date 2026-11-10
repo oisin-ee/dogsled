@@ -74,6 +74,9 @@ mod watchdog;
 #[path = "cli/web_state.rs"]
 mod web_state;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -90,7 +93,7 @@ pub(crate) fn outcome_identity(mut value: Value) -> Value {
     value
 }
 
-const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
+use test_support::WAIT_DEADLINE as PROCESS_DEADLINE;
 
 /// The state the guard and its fallback share. A finished process has released its pid,
 /// and the host may then hand that pid to another process. A signal sent after that can
@@ -1134,6 +1137,15 @@ esac
             &json!([{"id":"8103","label":"netcup","target":"netcup-dev"}]),
         );
         self.snapshot("remote.json", now(), 3.0, 16);
+    }
+
+    /// A peer that supports job startup ownership, projected before callers use it.
+    fn launch_peer(&self) {
+        self.peer();
+        let mut snapshot = self.read("remote.json");
+        snapshot["job_validity"] = json!(2);
+        self.put("remote.json", &snapshot);
+        self.ingest_peers();
     }
 
     /// The agent in `terminal` called `dogsled done`, and the turn that called it ended as
@@ -2218,9 +2230,7 @@ fn wait_publication_at(rig: &Rig, state: &Path, ready: impl Fn(&Value) -> bool) 
             std::os::unix::net::UnixStream::connect(state.join("observation.sock"))
         {
             use std::io::{BufRead as _, Write as _};
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            socket.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
             socket
                 .write_all(b"{\"version\":1,\"operation\":\"current\"}\n")
                 .unwrap();
@@ -2651,7 +2661,7 @@ fn watch_prints_a_frame_without_waiting_for_the_interval() {
         )
         .unwrap();
     });
-    let frame = recv.recv_timeout(std::time::Duration::from_secs(10));
+    let frame = recv.recv_timeout(PROCESS_DEADLINE);
     owned.child_mut().kill().unwrap();
     reader.join().unwrap();
     assert_eq!(frame.unwrap(), "local 1/2");
@@ -2674,7 +2684,7 @@ fn draining_background_stderr_does_not_wait_for_stdout_eof() {
         ])
         .arg(&ready);
     let mut background = Rig::background(command);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PROCESS_DEADLINE;
     while !ready.exists() {
         assert!(Instant::now() < deadline, "stderr pipe blocked the child");
         std::thread::yield_now();
@@ -2696,7 +2706,7 @@ fn dropping_a_background_command_kills_it_before_the_guard_joins_its_reader() {
         drop(background);
         let _ = send.send(());
     });
-    if recv.recv_timeout(Duration::from_secs(10)).is_err() {
+    if recv.recv_timeout(PROCESS_DEADLINE).is_err() {
         // The drop is still waiting on the reader. The test kills the command's group,
         // so no process outlives the test and the drop ends.
         killer.kill();

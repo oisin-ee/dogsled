@@ -63,7 +63,7 @@ fn native_shell(native: &Native) -> crate::shell::Fake {
     shell
 }
 
-const PROCESS_DEADLINE: Duration = Duration::from_secs(120);
+use crate::test_support::WAIT_DEADLINE as PROCESS_DEADLINE;
 
 #[test]
 fn live_activity_register_acknowledges_while_main_collection_is_blocked() {
@@ -903,7 +903,7 @@ fn producer_commands_and_extra_activity_viewers_never_capture_transcripts() {
             .unwrap();
     }
     let mut viewer = fixture.client.activity_subscribe("w1:p1").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::test_support::WAIT_DEADLINE;
     loop {
         if matches!(
             viewer.current().publication.detail,
