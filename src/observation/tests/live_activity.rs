@@ -271,7 +271,9 @@ async fn timed_out_queued_registration_commits_and_exact_replay_does_not_renew()
         views: BTreeMap::new(),
         gaps: vec![],
     };
-    authority.refresh_at(&input, now, 1000).unwrap();
+    authority
+        .refresh_at(&crate::shell::Fake::new(), &input, now, 1000)
+        .unwrap();
     let original = authority.producers["w1:p1"].ack.clone();
     assert_eq!(original.sequence, 0);
     authority
@@ -473,7 +475,7 @@ fn native_freshness_uses_source_time_not_publication_time() {
         gaps: vec![],
     };
     authority
-        .refresh_at(&input, now, input.published_ms)
+        .refresh_at(&crate::shell::Fake::new(), &input, now, input.published_ms)
         .unwrap();
     assert_eq!(
         reason(&authority, now, 11000),
@@ -665,7 +667,9 @@ impl Fixture {
                     )]),
                     gaps: vec![],
                 };
-                authority.refresh_at(&input, Instant::now(), 1000).unwrap();
+                authority
+                    .refresh_at(&crate::shell::Fake::new(), &input, Instant::now(), 1000)
+                    .unwrap();
                 details.refresh(&mut input, &dirty).unwrap();
                 assert_eq!(
                     details.transcript_reads(),
@@ -795,8 +799,300 @@ fn older_general_samples_cannot_undo_a_newer_producer_binding_sample() {
         views: BTreeMap::new(),
         gaps: vec![],
     };
-    authority.refresh_at(&input, Instant::now(), 3000).unwrap();
+    authority
+        .refresh_at(&crate::shell::Fake::new(), &input, Instant::now(), 3000)
+        .unwrap();
     assert_eq!(authority.bindings["w1:p1"].session, Session::of(&newer));
+}
+
+fn empty_publication() -> super::super::Publication {
+    super::super::Publication {
+        published_ms: 1000,
+        sources: super::super::Sources::default(),
+        local: BTreeMap::new(),
+        views: BTreeMap::new(),
+        gaps: vec![],
+    }
+}
+
+fn enqueue(authority: &Authority, pane: &str, command: Command) -> oneshot::Receiver<Outcome> {
+    let (reply, response) = oneshot::channel();
+    authority
+        .commands()
+        .0
+        .try_send(Pending {
+            pane: pane.into(),
+            command,
+            reply,
+        })
+        .unwrap();
+    response
+}
+
+#[test]
+fn post_receipt_sample_registers_new_pane_and_unverifiable_cached_bindings() {
+    for missing in ["cold", "pane", "stale", "session", "evidence"] {
+        let native = Native::new();
+        let shell = crate::shell::Fake::new();
+        shell.on(
+            "herdr agent list",
+            &json!({"result":{"agents":[{
+                "pane_id":"w1:p1","agent":"pi","agent_status":"working","terminal_id":"terminal-a",
+                "agent_session":{"kind":"path","value":native.agent.transcript}
+            }]}})
+            .to_string(),
+        );
+        let mut authority = native.authority();
+        match missing {
+            "cold" => authority.sampled_ms = None,
+            "pane" => authority.observe(&[], 1000, true),
+            "session" => authority.bindings.get_mut("w1:p1").unwrap().session = None,
+            "evidence" => {
+                authority.bindings.get_mut("w1:p1").unwrap().evidence = Some(ProducerEvidence {
+                    session_file: "old-session.jsonl".into(),
+                    session_id: "old-session".into(),
+                });
+            }
+            _ => {}
+        }
+        let now_ms = if missing == "stale" { 11000 } else { 1001 };
+        let mut response = enqueue(
+            &authority,
+            "w1:p1",
+            Command::Register(native.register(
+                "startup",
+                authority.generation + u64::from(missing == "session"),
+            )),
+        );
+        authority
+            .refresh_at(&shell, &empty_publication(), Instant::now(), now_ms)
+            .unwrap();
+        let ack = response.try_recv().unwrap().unwrap();
+        assert_eq!(ack.pane, "w1:p1", "{missing}");
+        assert_eq!(ack.sequence, 0, "{missing}");
+        assert_eq!(authority.sampled_ms, Some(now_ms), "{missing}");
+        assert_eq!(authority.bindings["w1:p1"].measured_ms, now_ms, "{missing}");
+        assert_eq!(
+            *shell.calls.lock().unwrap(),
+            vec!["herdr agent list"],
+            "{missing}"
+        );
+    }
+}
+
+#[test]
+fn post_receipt_sample_verifies_session_file_created_after_last_sample() {
+    let native = Native::new();
+    let path = native.agent.transcript.as_ref().unwrap();
+    std::fs::remove_file(path).unwrap();
+    let mut authority = native.authority();
+    assert!(authority.bindings["w1:p1"].evidence.is_none());
+    let shell = crate::shell::Fake::new();
+    shell.on(
+        "herdr agent list",
+        &json!({"result":{"agents":[{
+            "pane_id":"w1:p1","agent":"pi","agent_status":"working","terminal_id":"terminal-a",
+            "agent_session":{"kind":"path","value":path}
+        }]}})
+        .to_string(),
+    );
+    let mut response = enqueue(
+        &authority,
+        "w1:p1",
+        Command::Register(native.register("startup", 0)),
+    );
+    std::fs::write(path, "{\"type\":\"session\",\"id\":\"session-a\"}\n").unwrap();
+    authority
+        .refresh_at(&shell, &empty_publication(), Instant::now(), 1001)
+        .unwrap();
+    assert_eq!(response.try_recv().unwrap().unwrap().sequence, 0);
+    assert_eq!(
+        authority.bindings["w1:p1"].evidence,
+        Some(native.register("startup", 0).evidence)
+    );
+    assert_eq!(*shell.calls.lock().unwrap(), vec!["herdr agent list"]);
+}
+
+#[test]
+fn post_receipt_sample_confirms_agent_missing_before_refusing_registration() {
+    let native = Native::new();
+    let mut authority = Authority::new("epoch-a".into());
+    authority.observe(&[], 1000, true);
+    authority.sampled_ms = Some(1000);
+    let shell = crate::shell::Fake::new();
+    shell.on(
+        "herdr agent list",
+        &json!({"result":{"agents":[]}}).to_string(),
+    );
+    for now_ms in [1001, 1002] {
+        let mut response = enqueue(
+            &authority,
+            "w1:p1",
+            Command::Register(native.register("startup", 0)),
+        );
+        authority
+            .refresh_at(&shell, &empty_publication(), Instant::now(), now_ms)
+            .unwrap();
+        assert_eq!(
+            response.try_recv().unwrap().unwrap_err().code,
+            ActivityCode::AgentMissing
+        );
+        assert_eq!(authority.sampled_ms, Some(now_ms));
+        assert_eq!(
+            authority.registration_refusals["w1:p1"],
+            ActivityCode::AgentMissing
+        );
+    }
+    assert_eq!(*shell.calls.lock().unwrap(), vec!["herdr agent list"; 2]);
+    // Once registration interest lapses, the unbound pane's refusal is forgotten.
+    let lapsed = Instant::now() + Duration::from_secs(16);
+    authority
+        .refresh_at(&shell, &empty_publication(), lapsed, 1003)
+        .unwrap();
+    assert!(authority.registration_refusals.is_empty());
+    // An invalid pane name is refused without being recorded or logged.
+    let mut response = enqueue(
+        &authority,
+        "w1:p1\nforged log line",
+        Command::Register(native.register("startup", 0)),
+    );
+    authority
+        .refresh_at(&shell, &empty_publication(), lapsed, 1004)
+        .unwrap();
+    assert_eq!(
+        response.try_recv().unwrap().unwrap_err().code,
+        ActivityCode::InvalidRequest
+    );
+    assert!(authority.registration_refusals.is_empty());
+}
+
+#[test]
+fn queued_publish_heartbeats_and_views_never_force_native_samples() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let now = Instant::now();
+    let ack = authority
+        .register("w1:p1", native.register("producer", 0), now, 1000)
+        .unwrap();
+    let shell = crate::shell::Fake::new();
+    let input = empty_publication();
+    for now_ms in [1001, 11000] {
+        for sequence in 1..=3 {
+            let mut response = enqueue(
+                &authority,
+                "w1:p1",
+                Command::Publish(snapshot(&ack, sequence)),
+            );
+            authority.refresh_at(&shell, &input, now, now_ms).unwrap();
+            let result = response.try_recv().unwrap();
+            if now_ms == 1001 {
+                assert_eq!(result.unwrap().sequence, sequence);
+            } else {
+                assert_eq!(result.unwrap_err().code, ActivityCode::UpstreamUnavailable);
+            }
+            for _ in 0..8 {
+                assert_eq!(authority.views(now, now_ms).len(), 1);
+            }
+        }
+    }
+    assert!(shell.calls.lock().unwrap().is_empty());
+    assert_eq!(authority.sampled_ms, Some(1000));
+}
+
+#[test]
+fn three_pending_registrations_share_one_post_receipt_sample() {
+    let native = Native::new();
+    let mut authority = Authority::new("epoch-a".into());
+    let shell = crate::shell::Fake::new();
+    let panes = ["w1:p1", "w1:p2", "w1:p3"];
+    let agents: Vec<_> = panes
+        .iter()
+        .map(|pane| {
+            json!({
+                "pane_id":pane,"agent":"pi","agent_status":"working","terminal_id":"terminal-a",
+                "agent_session":{"kind":"path","value":native.agent.transcript}
+            })
+        })
+        .collect();
+    shell.on(
+        "herdr agent list",
+        &json!({"result":{"agents":agents}}).to_string(),
+    );
+    let mut responses: Vec<_> = panes
+        .iter()
+        .map(|pane| {
+            enqueue(
+                &authority,
+                pane,
+                Command::Register(native.register(pane, 0)),
+            )
+        })
+        .collect();
+    authority
+        .refresh_at(&shell, &empty_publication(), Instant::now(), 1001)
+        .unwrap();
+    for (pane, response) in panes.iter().zip(&mut responses) {
+        let ack = response.try_recv().unwrap().unwrap();
+        assert_eq!(&ack.pane, pane);
+        assert_eq!(ack.sequence, 0);
+    }
+    assert_eq!(authority.producers.len(), 3);
+    assert_eq!(*shell.calls.lock().unwrap(), vec!["herdr agent list"]);
+}
+
+#[test]
+fn registration_refusal_code_changes_clear_on_success_and_pane_departure() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let now = Instant::now();
+    let mut invalid = native.register("producer", 0);
+    invalid.version = 2;
+    for code in [
+        ActivityCode::UnsupportedVersion,
+        ActivityCode::UnsupportedVersion,
+    ] {
+        assert_eq!(
+            authority
+                .apply("w1:p1", Command::Register(invalid.clone()), now, 1000)
+                .unwrap_err()
+                .code,
+            code
+        );
+        assert_eq!(authority.registration_refusals["w1:p1"], code);
+    }
+    invalid.version = 1;
+    invalid.expected_generation = 1;
+    assert_eq!(
+        authority
+            .apply("w1:p1", Command::Register(invalid), now, 1000)
+            .unwrap_err()
+            .code,
+        ActivityCode::StaleGeneration
+    );
+    assert_eq!(
+        authority.registration_refusals["w1:p1"],
+        ActivityCode::StaleGeneration
+    );
+    authority
+        .apply(
+            "w1:p1",
+            Command::Register(native.register("producer", 0)),
+            now,
+            1000,
+        )
+        .unwrap();
+    assert!(authority.registration_refusals.is_empty());
+    authority
+        .apply(
+            "w1:p1",
+            Command::Register(native.register("other", 0)),
+            now,
+            1000,
+        )
+        .unwrap_err();
+    assert_eq!(authority.registration_refusals.len(), 1);
+    authority.observe(&[], 1001, true);
+    assert!(authority.registration_refusals.is_empty());
 }
 
 #[test]

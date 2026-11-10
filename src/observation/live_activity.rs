@@ -131,6 +131,7 @@ pub(crate) struct Authority {
     generation: u64,
     bindings: BTreeMap<String, Binding>,
     producers: BTreeMap<String, Producer>,
+    registration_refusals: BTreeMap<String, ActivityCode>,
     commands: Commands,
     pending: mpsc::Receiver<Pending>,
     next_sample: Instant,
@@ -146,6 +147,7 @@ impl Authority {
             generation: 0,
             bindings: BTreeMap::new(),
             producers: BTreeMap::new(),
+            registration_refusals: BTreeMap::new(),
             commands: Commands(sender),
             pending,
             next_sample: Instant::now(),
@@ -178,8 +180,8 @@ impl Authority {
         self.next_wake_at(now).is_some_and(|next| now >= next)
     }
 
-    /// Only producer interest enables this cheap native binding read. It never captures
-    /// conversation or screen bytes, and command receipt never triggers a read.
+    /// Producer interest and unverifiable registrations enable this cheap binding read.
+    /// It never captures conversation or screen bytes; publishes and viewers never trigger it.
     pub fn sample(&mut self, shell: &dyn crate::shell::Shell, now_ms: u64) {
         if let Ok(agents) = crate::probe::agent_list(shell) {
             self.observe(&agents, now_ms, true);
@@ -188,12 +190,17 @@ impl Authority {
         self.next_sample = Instant::now() + SAMPLE;
     }
 
-    pub fn refresh(&mut self, input: &super::Publication) -> crate::error::Result<()> {
-        self.refresh_at(input, Instant::now(), crate::ledger::now_ms())
+    pub fn refresh(
+        &mut self,
+        shell: &dyn crate::shell::Shell,
+        input: &super::Publication,
+    ) -> crate::error::Result<()> {
+        self.refresh_at(shell, input, Instant::now(), crate::ledger::now_ms())
     }
 
     fn refresh_at(
         &mut self,
+        shell: &dyn crate::shell::Shell,
         input: &super::Publication,
         now: Instant,
         now_ms: u64,
@@ -222,9 +229,31 @@ impl Authority {
                 self.sampled_ms = Some(measured);
             }
         }
+        if pending.iter().any(|pending| {
+            let Command::Register(body) = &pending.command else {
+                return false;
+            };
+            self.sampled_ms
+                .is_none_or(|measured| now_ms.saturating_sub(measured) >= NATIVE_TTL_MS)
+                || self.bindings.get(&pending.pane).is_none_or(|binding| {
+                    binding.session.is_none() || binding.evidence.as_ref() != Some(&body.evidence)
+                })
+        }) {
+            self.sample(shell, now_ms);
+        }
         for pending in pending {
             let result = self.apply(&pending.pane, pending.command, now, now_ms);
             let _ = pending.reply.send(result);
+        }
+        // A refusal for an unbound pane is remembered only while registration interest
+        // lasts, so panes that never appear cannot accumulate for the life of serve.
+        if self
+            .registration_interest
+            .is_none_or(|received| now.saturating_duration_since(received) >= LEASE)
+        {
+            let bindings = &self.bindings;
+            self.registration_refusals
+                .retain(|pane, _| bindings.contains_key(pane));
         }
         Ok(())
     }
@@ -273,13 +302,30 @@ impl Authority {
             self.generation = self.generation.saturating_add(1);
         }
         self.producers.retain(|pane, _| bindings.contains_key(pane));
+        self.registration_refusals
+            .retain(|pane, _| !self.bindings.contains_key(pane) || bindings.contains_key(pane));
         self.bindings = bindings;
     }
 
     fn apply(&mut self, pane: &str, command: Command, now: Instant, now_ms: u64) -> Outcome {
+        // An invalid pane name is never recorded or logged.
         validate_pane(pane)?;
         match command {
-            Command::Register(body) => self.register(pane, body, now, now_ms),
+            Command::Register(body) => {
+                let result = self.register(pane, body, now, now_ms);
+                match &result {
+                    Ok(_) => {
+                        self.registration_refusals.remove(pane);
+                    }
+                    Err(error) => {
+                        let code = error.code;
+                        if self.registration_refusals.insert(pane.into(), code) != Some(code) {
+                            eprintln!("dogsled activity: register {pane} refused: {code:?}");
+                        }
+                    }
+                }
+                result
+            }
             Command::Publish(body) => self.publish(pane, body, now, now_ms),
         }
     }
@@ -321,9 +367,9 @@ impl Authority {
         now_ms: u64,
     ) -> Outcome {
         validate_registration(&body)?;
-        // Every validated attempt arranges cheap binding recovery, including missing
-        // panes and session transitions. Receipt never moves the sampling deadline
-        // or starts detail capture.
+        // Every validated attempt retains cheap binding recovery interest. Refresh takes
+        // one post-receipt sample for unverifiable registrations before applying commands.
+        // Publishes, heartbeats, and viewers never force sampling or start detail capture.
         self.registration_interest = Some(now);
         let binding = self.binding(pane, now_ms)?;
         if binding.evidence.as_ref() != Some(&body.evidence)
