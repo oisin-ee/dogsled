@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.36.0](https://github.com/oisin-ee/dogsled/compare/v0.35.0...v0.36.0) (2026-11-11)
+
+
+### Features
+
+* **portal:** add session close controls ([9bd4eab](https://github.com/oisin-ee/dogsled/commit/9bd4eab5736311959e6abfa04d9b6098b0b31737))
+* **portal:** add terminal session close controls ([f609a58](https://github.com/oisin-ee/dogsled/commit/f609a587482e0c875b3f9ddf67870a624da6906b))
+* **portal:** integrate session close controls ([7a86706](https://github.com/oisin-ee/dogsled/commit/7a8670636349ff4f0dbefc85a9eb726932808ae1))
+
 ## [0.35.0](https://github.com/oisin-ee/dogsled/compare/v0.34.2...v0.35.0) (2026-11-11)
 
 
