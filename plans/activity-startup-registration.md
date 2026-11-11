@@ -90,3 +90,42 @@ Final acceptance needs all three:
 - Install the released version on all three hosts.
 - Open a new Pi session: it prints nothing.
 - After the first prompt, the portal shows live detail within one boundary event. A resumed session shows live detail at startup.
+
+## Main frame decision (from U3c timing, v0.35.0)
+
+Decided 2026-11-11 from the U3c `dogsled serve timing` lines. The source is the lead's Mac (`~/Library/Logs/dogsled.log`), with serve on v0.35.0 after the restart at 03:15. Each line covers one 60 s window. The values are `count/total ms/max ms`.
+
+| Phase | Mac, per 60 s window | Share of the window |
+|---|---|---|
+| `collect.host` | 8 passes, 46,472–48,035 ms total, max 6,237–7,503 ms | about 78% |
+| `collect.snapshot` | 11,042–13,838 ms total, max 1,956–3,733 ms | about 20% |
+| `collect.terminals` | 1,922–3,526 ms total | about 4% |
+| `peers.compose` | about 2,400 ms total | about 4% |
+| `publish.replace` (includes `serde_json::to_vec` of the whole frame) | 168–193 ms total, max 23–35 ms | about 0.3% |
+| `collect.publication` | 103–157 ms total | about 0.2% |
+
+The `collect` total is 61–64 s per 60 s window, so the loop is fully busy. That matches U3a, which found 0.19 publications per second.
+
+On netcup, `collect.host` is 27.5 s of each 60 s window. `publish.replace` is 2.1–2.4 s of each window over 48 passes, with a maximum of 93 ms.
+
+**Decision 1: latency.** Do not split or slim the main frame to fix publication latency. Serializing and replacing the whole frame costs about 25 ms for each pass, which is 0.3% of the loop. The latency belongs to `collect.host`, which is `observation::collect::host` (`src/observation/collect.rs:19`). That phase does these whole-store reads on every pass:
+
+- `holds::local`;
+- `done::list`;
+- `store::read(failing_lanes)`.
+
+The second cost is `collect.snapshot`. The next serve-latency unit fixes those owners. U3b already removed the activity authority from the frame path.
+
+**Decision 2: size.** Frame size is a separate correctness risk, and it needs a fix. The Mac frame is now 15,621,607 bytes. `ipc::MAX_FRAME_BYTES` is 16 MiB (16,777,216 bytes), so the frame is at 93% of the cap. When a frame is over the cap, `Publisher::replace` (`src/observation.rs`) returns `observation publication too large`, and no publication is made. The frame was about 9 MB in U3a.
+
+The measured contents:
+
+- `views` is 12.5 MB, and `local` is 3.1 MB.
+- The host reports appear three times:
+  - `views.hosts`, 1.6 MB;
+  - `views.status.data.hosts`, 1.6 MB;
+  - `local.status`, 2.4 MB.
+- `inventory` and `inventories` are 1.7 MB each.
+- Retained records grow without a bound. `status.queue` holds 438 tickets in 1.27 MB, `status.items` holds 586 items, and `status.holds` holds 609 holds.
+
+The owning fix is to remove the duplicate projections, so each fact is in the frame once, and to bound the retained queue, items and holds in the published views. Raising the cap is not a fix.
