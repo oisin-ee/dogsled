@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { EventEmitter } from "node:events";
+import { subscribe, unsubscribe } from "node:diagnostics_channel";
+import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,12 +27,30 @@ fi
 cat >/dev/null
 `, { mode: 0o700 });
 process.env["DOGSLED_BIN"] = publicationBinary;
-after(() => {
+const watchers: { child: ChildProcess; frames: string | undefined; closed: Promise<void> }[] = [];
+const trackWatcher = (message: unknown) => {
+	const { process: child } = message as { process: ChildProcess };
+	const frames = process.env["DOGSLED_FRAMES"];
+	const closed = new Promise<void>(resolve => { child.once("close", () => resolve()); });
+	child.once("spawn", () => {
+		if (child.spawnfile === publicationBinary && child.spawnargs[1] === "board" && child.spawnargs[2] === "--watch") {
+			watchers.push({ child, frames, closed });
+		}
+	});
+};
+subscribe("child_process", trackWatcher);
+after(async () => {
+	unsubscribe("child_process", trackWatcher);
+	const leaked = watchers.filter(({ child }) => child.exitCode === null && child.signalCode === null);
+	// A failed test must report its leak, but must not leave it behind either.
+	for (const { child } of leaked) child.kill();
+	await Promise.all(watchers.map(watcher => watcher.closed));
 	if (previousBinary === undefined) delete process.env["DOGSLED_BIN"];
 	else process.env["DOGSLED_BIN"] = previousBinary;
 	if (previousFrames === undefined) delete process.env["DOGSLED_FRAMES"];
 	else process.env["DOGSLED_FRAMES"] = previousFrames;
 	rmSync(publicationDirectory, { recursive: true, force: true });
+	assert.deepEqual(leaked.map(({ child, frames }) => ({ pid: child.pid, frames })), [], "board watchers survived session shutdown");
 });
 let rigs = 0;
 
@@ -56,6 +76,7 @@ function rig() {
 	let context = "local 3/8\n";
 	let gate = "";
 	let missing = false;
+	let sessionRunning = false;
 	const frames = join(publicationDirectory, `frames-${rigs++}`);
 	writeFileSync(frames, "");
 	process.env["DOGSLED_FRAMES"] = frames;
@@ -136,6 +157,8 @@ function rig() {
 		gate: (text: string) => { gate = text; },
 		context: (text: string) => { context = text; }, missing: () => { missing = true; }, fail: () => { code = 2; }, recover: () => { code = 0; }, board: (value: unknown) => frame({ revision: ++revision, board: value, history: { jobs: [], hosts: [] } }), opened: (value: unknown) => { opened = value; }, version: (text: string) => { version = text; },
 		async invoke(name: string, event: any = {}) {
+			if (name === "session_shutdown" && !sessionRunning) return;
+			if (name === "session_start") sessionRunning = true;
 			const registered = handlers.get(name); assert.ok(registered, name);
 			let current = name === "agent_before_settle" ? { entries: [], continue: false, ...event } : event;
 			let result: any;
@@ -146,6 +169,11 @@ function rig() {
 					if (name === "tool_call" && next.block) return next;
 					if (name === "agent_before_settle") current = { ...current, ...next };
 				}
+			}
+			if (name === "session_shutdown") {
+				sessionRunning = false;
+				// kill() sends a signal; wait for those children to close before the file's leak check.
+				await Promise.all(watchers.filter(watcher => watcher.frames === frames && watcher.child.killed).map(watcher => watcher.closed));
 			}
 			return result;
 		} };
@@ -190,6 +218,7 @@ test("the extension publishes real activity through PortalClient with bearer aut
 			producer_id: body.producer_id, session: "native-key", sequence: body.sequence ?? 0, heartbeat_ms: 5000, ttl_ms: 15000 });
 	});
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	t.mock.method(r.ctx.sessionManager, "getSessionFile", () => sessionFile);
 	await r.invoke("session_start");
 	await firstPublication;
@@ -266,6 +295,7 @@ test("Herdr owns the display: requests the side split and never sets a widget", 
 		await rm(dir, { recursive: true, force: true });
 	});
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	await r.invoke("session_start");
 	assert.ok(r.calls.some(call => call.slice(1).join(" ") === "board --open --owner w1:p1 --json"));
 	assert.equal(r.widgets.filter(([key]) => key === "dogsled").length, 0);
@@ -291,6 +321,7 @@ test("a Dogsled-launched child under Herdr keeps the widget: the board belongs t
 		await rm(dir, { recursive: true, force: true });
 	});
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	r.opened({ skipped: "child" });
 	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
 	await r.invoke("session_start");
@@ -307,6 +338,7 @@ test("an unreachable Herdr socket keeps the existing above-editor widget", async
 	process.env["HERDR_SOCKET_PATH"] = "/nonexistent-dogsled-herdr.sock";
 	t.after(() => { if (previous === undefined) delete process.env["HERDR_SOCKET_PATH"]; else process.env["HERDR_SOCKET_PATH"] = previous; });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	r.board({ hosts: [], rows: [{ group: "running", kind: "agent", id: "one", name: "worker", what: "pi", host: "local", state: "working", activity: "", age_ms: 0 }] });
 	await r.invoke("session_start");
 	await r.until(r.showsBoard);
@@ -406,6 +438,7 @@ test("the board widget follows one publication subscription and stops at shutdow
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	await r.invoke("session_start");
 	// Claims first, so this pane is a registered reader before anyone sends to it.
 	assert.deepEqual(r.calls[0]?.slice(1, 3), ["inbox", "claim"]);
@@ -437,6 +470,7 @@ test("an unavailable publication is reported once and the next frame recovers", 
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	r.unavailable("observation unavailable: board was not published");
 	r.unavailable("observation unavailable: board was not published");
 	r.board({ hosts: [], rows: [{ group: "waiting", kind: "agent", id: "t1", name: "lints", what: "pi · sol", host: "any", state: "queued", activity: "for a host with room", age_ms: 0 }] });
@@ -451,6 +485,7 @@ test("a stopped publisher keeps the last board, and the refresh timer subscribes
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	r.publisherStops(true);
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
 	await r.invoke("session_start");
@@ -510,6 +545,7 @@ test("the board widget steps aside while /dogsled is open, so no row shows twice
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "make", what: "job", host: "local", state: "running", activity: "make", age_ms: 0 }] });
 	await r.invoke("session_start");
 	await r.until(r.showsBoard);
@@ -525,6 +561,7 @@ test("Alt+W and /work expand the same above-editor widget without an overlay or 
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j1", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
 	await r.invoke("session_start");
 	await r.until(r.showsBoard);
@@ -556,6 +593,7 @@ test("work navigation uses modified keys and resets on session replacement", asy
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	await r.invoke("session_start");
 	await r.shortcuts.get("alt+w").handler(r.ctx);
 	const panel = r.widget();
@@ -573,6 +611,7 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	withPane(t);
 	t.mock.timers.enable({ apis: ["setInterval"] });
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	await r.invoke("session_start");
 	let signal: AbortSignal | undefined;
 	r.board({ hosts: [], rows: [{ group: "running", kind: "job", id: "j", name: "tests", what: "job", host: "local", state: "running", activity: "tests", age_ms: 0 }] });
@@ -595,11 +634,12 @@ test("shutdown aborts a pending work confirmation before it can mutate a job", a
 	assert.equal(r.calls.some(args => args[1] === "stop"), false);
 });
 
-test("without a Herdr pane the extension starts no commands and explains unavailable jobs", async () => {
+test("without a Herdr pane the extension starts no commands and explains unavailable jobs", async t => {
 	const previous = process.env["HERDR_PANE_ID"];
 	delete process.env["HERDR_PANE_ID"];
 	try {
 		const r = rig();
+		t.after(() => r.invoke("session_shutdown"));
 		await r.invoke("session_start");
 		assert.deepEqual(r.calls, []);
 		const lines: string[] = r.widget().render(100);
@@ -618,10 +658,12 @@ test("the extension's version is the package's, and a different dogsled binary i
 	assert.equal(versionMismatch(`dogsled ${VERSION}\n`), undefined);
 	assert.match(versionMismatch("dogsled 0.9.1\n") ?? "", new RegExp(`^dogsled 0\\.9\\.1 is on PATH, but this extension is ${VERSION.replaceAll(".", "\\.")}\\.`));
 	const r = rig();
+	t.after(() => r.invoke("session_shutdown"));
 	await r.invoke("session_start");
 	assert.equal(r.notices.length, 0);
 	await r.invoke("session_shutdown");
 	const old = rig();
+	t.after(() => old.invoke("session_shutdown"));
 	old.version("dogsled 0.9.1\n");
 	await old.invoke("session_start");
 	assert.deepEqual(old.notices.map(n => (n as unknown[])[1]), ["warning"]);

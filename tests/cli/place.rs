@@ -1642,10 +1642,15 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-pub(super) fn peer_observer(rig: &Rig) -> Background {
+/// Publish the fixed peer fixture without live lanes changing its facts during actions.
+pub(super) fn peer_observer(rig: &Rig) -> super::observation::Supplied {
     let sampled = rig.read("remote.json")["sampled_ms"].clone();
+    let clock = rig.dir.join("clock");
+    if !clock.exists() {
+        fs::write(clock, sampled.to_string()).unwrap();
+    }
     let observer = rig.serve();
-    wait_publication(rig, |frame| {
+    let peer_published = |frame: &Value| {
         frame["views"]["hosts"]["data"]
             .as_array()
             .is_some_and(|hosts| {
@@ -1655,8 +1660,16 @@ pub(super) fn peer_observer(rig: &Rig) -> Background {
                         && host["sampled_ms"] == sampled
                 })
             })
-    });
-    observer
+    };
+    wait_publication(rig, peer_published);
+    drop(observer);
+    // The observer is reaped before projection; this publisher has no collection or lanes.
+    let publisher = super::observation::seeded(rig);
+    // Exercise the CLI's endpoint resolution, not only the fixture's direct socket reader.
+    let (code, frame) = rig.json(&["observation", "current"]);
+    assert_eq!(code, 0, "{frame}");
+    assert!(peer_published(&frame), "{frame}");
+    publisher
 }
 
 /// Crash/replay fixtures neutralize only the host's real CPU load, not other capacity checks.
