@@ -149,6 +149,19 @@ pub async fn focus_agent(address: &portal_types::agents::AgentAddress) -> Result
     }
 }
 
+/// Close the terminal at this host-qualified address.
+pub async fn close_agent(address: &portal_types::agents::AgentAddress) -> Result<(), String> {
+    let response = Request::post(&agent_url(address, "close"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(failure(response).await)
+    }
+}
+
 /// Send a prompt to the agent in `pane`.
 pub async fn send_prompt(
     address: &portal_types::agents::AgentAddress,
