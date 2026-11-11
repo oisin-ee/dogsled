@@ -1710,7 +1710,9 @@ fn remote_agent(rig: &Rig, repo: Option<&Path>) -> (i32, Value) {
 fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() {
     let rig = Rig::new("reservation-refusal");
     rig.peer();
-    rig.snapshot("state", now(), 0.0, 8);
+    let at = rig.read("remote.json")["sampled_ms"].as_u64().unwrap();
+    fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
+    rig.snapshot("state", at, 0.0, 8);
     rig.put(
         "reserve.json",
         &json!({"reserved":false,"headroom":{
@@ -1729,7 +1731,7 @@ fn reservation_refusal_overrides_an_eligible_snapshot_and_clears_on_admission() 
         "netcup: reservation raced with another request"
     );
     let (_, board) = {
-        let _observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        let _observer = super::observation::seeded(&rig);
         rig.json(&["board", "--all"])
     };
     assert_ne!(ticket["id"], ticket["request"]["id"], "{ticket}");
@@ -1780,7 +1782,9 @@ fn unpinned_refusal_keeps_one_line_per_host() {
 fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     let rig = Rig::new("legacy-wait-reason");
     rig.peer();
-    rig.snapshot("state", now(), 20.0, 8);
+    let at = rig.read("remote.json")["sampled_ms"].as_u64().unwrap();
+    fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
+    rig.snapshot("state", at, 20.0, 8);
     rig.put("reserve.json", &json!({"reserved":false,"headroom":null}));
     rig.ingest_peers();
     let observer = super::observation::seeded(&rig);
@@ -1789,25 +1793,39 @@ fn legacy_ticket_without_saved_reason_keeps_the_snapshot_fallback_and_pin() {
     let mut queue = rig.tickets();
     queue[0].as_object_mut().unwrap().remove("wait_reason");
     rig.put_tickets(&queue);
+    // Project the legacy row without live admission lanes saving a new wait reason.
+    // The fixed clock keeps peer freshness independent of time spent on a loaded runner.
     let (_, board) = {
-        let observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        let observer = super::observation::seeded(&rig);
         let board = rig.json(&["board", "--all"]);
         drop(observer);
         board
     };
     assert_eq!(
+        rig.tickets(),
+        queue,
+        "legacy ticket changed during board read"
+    );
+    assert_eq!(
         board["rows"][0]["activity"], "for a host with room",
         "{board}"
     );
-    rig.snapshot("remote.json", now(), 100.0, 16);
+    rig.snapshot("remote.json", at, 100.0, 16);
     rig.expire_cache();
     rig.ingest_peers();
+    // Peer ingestion runs startup lanes; restore the legacy fixture after they finish.
+    rig.put_tickets(&queue);
     let (_, board) = {
-        let observer = rig.serve_at(&rig.dir.join("state"), "3600");
+        let observer = super::observation::seeded(&rig);
         let board = rig.json(&["board", "--all"]);
         drop(observer);
         board
     };
+    assert_eq!(
+        rig.tickets(),
+        queue,
+        "legacy ticket changed during board read"
+    );
     let reason = board["rows"][0]["activity"].as_str().unwrap();
     assert!(reason.starts_with("for netcup: "), "{board}");
     assert!(!reason.contains("local:"), "{board}");
