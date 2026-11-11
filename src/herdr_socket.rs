@@ -145,6 +145,11 @@ impl Client {
         self.call("pane.focus", &json!({"pane_id": pane_id}))
     }
 
+    /// Close exactly one terminal pane, preserving Herdr's native refusals.
+    pub fn close_pane(&self, pane_id: &str) -> Result<Value> {
+        self.call("pane.close", &json!({"pane_id": pane_id}))
+    }
+
     /// The agents Herdr sees, as the `agents` array of an `agent_list` reply.
     pub fn agent_list(&self) -> Result<Vec<Value>> {
         let result = self.call("agent.list", &json!({}))?;
@@ -661,6 +666,31 @@ mod tests {
             server.methods(),
             ["agent.prompt", "agent.send_keys", "agent.focus"]
         );
+    }
+
+    #[test]
+    fn close_pane_sends_only_the_exact_pane_and_preserves_native_refusals() {
+        for refused in [false, true] {
+            let server = fake::Server::start(move |method, params| {
+                assert_eq!(method, "pane.close");
+                assert_eq!(*params, json!({"pane_id": "w1:p2"}));
+                if refused {
+                    json!({"error": {"code": "worktree_group_confirmation_required", "message": "confirm the worktree group"}})
+                } else {
+                    json!({"result": {"type": "ok"}})
+                }
+            });
+            let result = server.client().close_pane("w1:p2");
+            if refused {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "herdr pane.close: worktree_group_confirmation_required: confirm the worktree group"
+                );
+            } else {
+                assert_eq!(result.unwrap(), json!({"type": "ok"}));
+            }
+            assert_eq!(server.methods(), ["pane.close"]);
+        }
     }
 
     #[test]

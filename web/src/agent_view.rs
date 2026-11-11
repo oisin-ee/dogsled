@@ -134,6 +134,32 @@ fn agent_metadata(
     }
 }
 
+fn close_disabled(pending: bool, metadata: &AgentMetadata) -> bool {
+    pending || !matches!(metadata, AgentMetadata::Present(_))
+}
+
+/// A late close response may only clear selections for its own host and pane.
+fn complete_close(
+    address: &wire::AgentAddress,
+    result: Result<(), String>,
+    selected: &mut Option<wire::AgentAddress>,
+    inbox: &mut Option<crate::app::InboxSelection>,
+) -> Option<String> {
+    if let Err(error) = result {
+        return Some(error);
+    }
+    if selected.as_ref() == Some(address) {
+        *selected = None;
+    }
+    if inbox
+        .as_ref()
+        .is_some_and(|item| item.host == address.host && item.pane == address.pane)
+    {
+        *inbox = None;
+    }
+    None
+}
+
 #[component]
 fn AgentSession(
     host: String,
@@ -529,6 +555,9 @@ fn AgentSession(
     let disabled = busy() || !reachable() || current.is_none();
     let plan_open = tab == Tab::Pending && matches!(pending, Some(RequestTab::Review(_)));
     let focus_pane = address.clone();
+    let close_pane = address.clone();
+    let close_unavailable = close_disabled(busy(), &metadata.read());
+    let mut selected = use_context::<Signal<Option<wire::AgentAddress>>>();
     let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
     use_effect(use_reactive(&identity, move |identity| {
         if !identity.is_empty() {
@@ -675,6 +704,21 @@ fn AgentSession(
                                 busy.set(false);
                             }
                         }, ExternalLink { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                    }
+                    Button { class: "icon-button", variant: ButtonVariant::Outline, r#type: "button", disabled: close_unavailable,
+                        aria_label: "Close session", title: "Close session",
+                        onclick: move |_| {
+                            if close_disabled(busy(), &metadata.read()) { return; }
+                            let pane = close_pane.clone();
+                            busy.set(true);
+                            action_error.set(None);
+                            spawn(async move {
+                                let result = api::close_agent(&pane).await;
+                                let error = complete_close(&pane, result, &mut selected.write(), &mut selection.write());
+                                action_error.set(error);
+                                busy.set(false);
+                            });
+                        }, X { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
                     }
                 }
             }
@@ -1745,6 +1789,94 @@ mod tests {
             repository: None,
             blocked: None,
         }
+    }
+
+    #[test]
+    fn close_is_enabled_for_working_and_blocked_agents_but_not_unavailable_or_pending() {
+        for state in ["working", "blocked"] {
+            let mut agent = metadata_agent();
+            agent.state = state.into();
+            let metadata = AgentMetadata::Present(agent);
+            assert!(!close_disabled(false, &metadata));
+            assert!(close_disabled(true, &metadata));
+        }
+        for metadata in [
+            AgentMetadata::Loading,
+            AgentMetadata::Missing,
+            AgentMetadata::Unreachable {
+                message: "offline".into(),
+                agent: None,
+            },
+            AgentMetadata::Unreachable {
+                message: "offline".into(),
+                agent: Some(metadata_agent()),
+            },
+        ] {
+            assert!(close_disabled(false, &metadata));
+        }
+    }
+
+    fn close_inbox(address: &wire::AgentAddress) -> crate::app::InboxSelection {
+        crate::app::InboxSelection {
+            host: address.host.clone(),
+            pane: address.pane.clone(),
+            kind: crate::app::InboxKind::Prompt,
+            id: "request".into(),
+        }
+    }
+
+    #[test]
+    fn close_success_clears_only_matching_host_and_pane_selections() {
+        let requested = wire::AgentAddress::local("pane");
+        let other_host = wire::AgentAddress {
+            host: "remote".into(),
+            pane: "pane".into(),
+        };
+        let other_pane = wire::AgentAddress::local("other-pane");
+        for current in [
+            None,
+            Some(requested.clone()),
+            Some(other_host),
+            Some(other_pane),
+        ] {
+            for inbox_address in [None, Some(requested.clone()), current.clone()] {
+                let mut selected = current.clone();
+                let mut inbox = inbox_address.as_ref().map(close_inbox);
+                let original_inbox = inbox.clone();
+                assert_eq!(
+                    complete_close(&requested, Ok(()), &mut selected, &mut inbox),
+                    None
+                );
+                assert_eq!(
+                    selected,
+                    current.clone().filter(|address| address != &requested)
+                );
+                assert_eq!(
+                    inbox,
+                    original_inbox
+                        .filter(|item| item.host != requested.host || item.pane != requested.pane)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn close_failure_retains_the_view_and_inbox_and_returns_the_action_error() {
+        let requested = wire::AgentAddress::local("pane");
+        let mut selected = Some(requested.clone());
+        let mut inbox = Some(close_inbox(&requested));
+        let original_inbox = inbox.clone();
+        assert_eq!(
+            complete_close(
+                &requested,
+                Err("confirm worktree group".into()),
+                &mut selected,
+                &mut inbox
+            ),
+            Some("confirm worktree group".into())
+        );
+        assert_eq!(selected, Some(requested));
+        assert_eq!(inbox, original_inbox);
     }
 
     #[test]

@@ -405,10 +405,14 @@ enum MachineAction {
     Focus {
         pane: String,
     },
+    Close {
+        pane: String,
+    },
 }
 
 async fn machine_action(state: AppState, host: String, action: MachineAction) -> Response {
     let label = host.clone();
+    let closing = matches!(&action, MachineAction::Close { .. });
     let outcome = tokio::task::spawn_blocking(move || -> crate::error::Result<Response> {
         let launch = state
             .leads
@@ -422,7 +426,11 @@ async fn machine_action(state: AppState, host: String, action: MachineAction) ->
             launch.home.clone(),
         )?;
         let target = fleet.find(&host)?;
-        let mut command = vec!["--machine".into(), target.label.clone(), "agent".into()];
+        let mut command = vec![
+            "--machine".into(),
+            target.label.clone(),
+            if closing { "pane" } else { "agent" }.into(),
+        ];
         match action {
             MachineAction::Prompt { pane, text, reply } => {
                 let mut get = command.clone();
@@ -442,6 +450,7 @@ async fn machine_action(state: AppState, host: String, action: MachineAction) ->
                 command.extend(keys);
             }
             MachineAction::Focus { pane } => command.extend(["focus".into(), pane]),
+            MachineAction::Close { pane } => command.extend(["close".into(), pane]),
         }
         launch.shell.run_ok("herdr", &command)?;
         Ok(StatusCode::ACCEPTED.into_response())
@@ -449,6 +458,9 @@ async fn machine_action(state: AppState, host: String, action: MachineAction) ->
     .await;
     match outcome {
         Ok(Ok(response)) => response,
+        Ok(Err(error)) if closing && matches!(error, crate::error::Error::Command { .. }) => {
+            error_response(&error)
+        }
         Ok(Err(error)) => peer_error(&label, &error),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
@@ -557,6 +569,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents/{host}/{pane}/prompt", post(prompt))
         .route("/api/agents/{host}/{pane}/keys", post(keys))
         .route("/api/agents/{host}/{pane}/focus", post(focus))
+        .route("/api/agents/{host}/{pane}/close", post(close))
         .route("/api/agents/{host}/{pane}/events", get(events))
         .route("/api/leads", post(create_lead))
         .route("/api/repos", get(repos))
@@ -917,6 +930,33 @@ async fn focus(
         return no_socket();
     };
     match socket.agent_focus(&pane) {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(error) => error_response(&error),
+    }
+}
+
+/// Close the selected terminal, not its Dogsled work or sibling panes.
+async fn close(
+    State(state): State<AppState>,
+    Path((host, pane)): Path<(String, String)>,
+) -> Response {
+    if host != crate::hosts::LOCAL {
+        return machine_action(state, host, MachineAction::Close { pane }).await;
+    }
+    let Some(socket) = socket(&state) else {
+        return no_socket();
+    };
+    let agents = match socket.agent_list() {
+        Ok(agents) => agents,
+        Err(error) => return error_response(&error),
+    };
+    if !agents
+        .iter()
+        .any(|agent| agent["pane_id"].as_str() == Some(&pane))
+    {
+        return not_found(&pane);
+    }
+    match socket.close_pane(&pane) {
         Ok(_) => StatusCode::ACCEPTED.into_response(),
         Err(error) => error_response(&error),
     }
@@ -1452,6 +1492,158 @@ mod tests {
             assert_eq!(response.status(), StatusCode::ACCEPTED, "{route}");
         }
         assert_eq!(local.methods(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn close_local_working_and_blocked_agents_without_cleanup() {
+        struct Checkout(std::path::PathBuf);
+        impl Drop for Checkout {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        for status in ["working", "blocked"] {
+            let checkout = Checkout(std::env::temp_dir().join(crate::ledger::new_id()));
+            std::fs::create_dir(&checkout.0).unwrap();
+            std::fs::write(checkout.0.join("work.txt"), "uncommitted work").unwrap();
+            let cwd = checkout.0.clone();
+            let server = fake::Server::start(move |method, params| match method {
+                "agent.list" => json!({"result":{"agents":[
+                    {"pane_id":"w1:p2", "agent_status":status, "cwd":cwd},
+                    {"pane_id":"w1:p1", "agent_status":"working"}
+                ]}}),
+                "pane.close" => {
+                    assert_eq!(*params, json!({"pane_id":"w1:p2"}));
+                    json!({"result":{"type":"ok"}})
+                }
+                other => panic!("unexpected action {other}"),
+            });
+            let state = with_socket(&server);
+            // A close must not even open the Dogsled ledger or create completion records.
+            assert!(!state.web.dir.exists());
+            let response = call(
+                state.clone(),
+                request(Method::POST, "/api/agents/local/w1:p2/close", None),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "{status}");
+            assert_eq!(server.methods(), ["agent.list", "pane.close"]);
+            assert!(!state.web.dir.exists());
+            assert_eq!(
+                std::fs::read_to_string(checkout.0.join("work.txt")).unwrap(),
+                "uncommitted work"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn close_reports_missing_panes_unavailable_sockets_and_native_refusals() {
+        let missing = fake::Server::start(|method, _| {
+            assert_eq!(method, "agent.list");
+            json!({"result":{"agents":[]}})
+        });
+        let response = call(
+            with_socket(&missing),
+            request(Method::POST, "/api/agents/local/missing/close", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"no agent in pane missing"})
+        );
+        assert_eq!(missing.methods(), ["agent.list"]);
+
+        let response = call(
+            state(None),
+            request(Method::POST, "/api/agents/local/w1:p2/close", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"herdr socket is not available"})
+        );
+
+        let refused = fake::Server::start(|method, _| match method {
+            "agent.list" => json!({"result":{"agents":[{"pane_id":"w1:p2"}]}}),
+            "pane.close" => {
+                json!({"error":{"code":"confirmation_required", "message":"confirm worktree group"}})
+            }
+            other => panic!("unexpected action {other}"),
+        });
+        let response = call(
+            with_socket(&refused),
+            request(Method::POST, "/api/agents/local/w1:p2/close", None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body_json(response).await,
+            json!({"error":"herdr pane.close: confirmation_required: confirm worktree group"})
+        );
+        assert_eq!(refused.methods(), ["agent.list", "pane.close"]);
+    }
+
+    #[tokio::test]
+    async fn close_rejects_foreign_origins_before_any_action() {
+        let server = fake::Server::start(|_, _| panic!("foreign origin reached Herdr"));
+        let mut req = request(Method::POST, "/api/agents/local/w1:p2/close", None);
+        req.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            "http://evil.example".parse().unwrap(),
+        );
+        let response = call(with_socket(&server), req).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(server.methods(), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn close_remote_targets_the_resolved_machine_without_local_fallback() {
+        for success in [true, false] {
+            let fixture = PeerFixture::new();
+            let command = "herdr --machine netcup pane close w1:p2";
+            fixture.shell.on_output(
+                command,
+                crate::shell::Output {
+                    status: if success { 0 } else { 2 },
+                    stdout: "{}".into(),
+                    stderr: if success {
+                        ""
+                    } else {
+                        "confirm worktree group"
+                    }
+                    .into(),
+                },
+            );
+            let local = fake::Server::start(|_, _| panic!("remote close reached local Herdr"));
+            let mut state = fixture.state.clone();
+            state.agents = Arc::new(std::sync::OnceLock::from(Some(Arc::new(local.client()))));
+            // Resolve the immutable peer id to its Herdr machine label.
+            let response = call(
+                state,
+                request(Method::POST, "/api/agents/peer-id/w1:p2/close", None),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                if success {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::BAD_GATEWAY
+                }
+            );
+            if !success {
+                assert!(
+                    body_json(response).await["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("confirm worktree group")
+                );
+            }
+            assert_eq!(*fixture.shell.calls.lock().unwrap(), [command]);
+            assert_eq!(local.methods(), Vec::<String>::new());
+        }
     }
 
     #[tokio::test]
