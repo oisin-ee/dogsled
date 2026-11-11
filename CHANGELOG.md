@@ -2,6 +2,52 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.35.0](https://github.com/oisin-ee/dogsled/compare/v0.34.2...v0.35.0) (2026-11-11)
+
+
+### Features
+
+* **checkout:** keep a worker's repository at a standard path on peers ([b988f48](https://github.com/oisin-ee/dogsled/commit/b988f484aeb7980f6ebc249beeee573eaee5d128))
+* collect agent batch with repository transfer, catalogue recovery and load-race fixes ([6cb3a7b](https://github.com/oisin-ee/dogsled/commit/6cb3a7bc9d159c4c1372b292886dda28aac5b8cd))
+* **repo:** open a repository on any host ([c2fd182](https://github.com/oisin-ee/dogsled/commit/c2fd182406f63aba0ca5c892ae9c6b35f867747f))
+* **service:** log per-phase observation timing once a minute ([99a1b91](https://github.com/oisin-ee/dogsled/commit/99a1b91bf836e1e61d530ed3e324926be321ec01))
+* **transfer:** apply received changes to working files ([e3512cf](https://github.com/oisin-ee/dogsled/commit/e3512cf546dcbade9c7050780ee23ca459845429))
+* **transfer:** capture and import a pinned source ([89e7044](https://github.com/oisin-ee/dogsled/commit/89e704465ab3cd14190616277c4c7c89a1e8ba56))
+* **transfer:** capture and import a pinned source ([e30c58f](https://github.com/oisin-ee/dogsled/commit/e30c58f51e010c4796c4c51d66e57abbc0b09ebd))
+* **transfer:** deliver transfers to another host ([bba9ca9](https://github.com/oisin-ee/dogsled/commit/bba9ca90b997777b91aa0175a658acf47c75629f))
+* **transfer:** send, list, show, and drop transfers ([4ebd024](https://github.com/oisin-ee/dogsled/commit/4ebd024a1205a40dd0da09c9e1ca9846c101b254))
+
+
+### Bug Fixes
+
+* **activity:** bound registration refusal memory and skip invalid panes ([63bf732](https://github.com/oisin-ee/dogsled/commit/63bf732f6036139d2cf0574e63d93c559706c50c))
+* **activity:** register Pi live detail when verifiable, without console output ([f443a7d](https://github.com/oisin-ee/dogsled/commit/f443a7de94011a4c9f8c38050955a6decc9a78d6))
+* **activity:** verify producer registration against a post-receipt sample ([332ffe8](https://github.com/oisin-ee/dogsled/commit/332ffe86adc8c6fdbd3198742050d9e82af9383c))
+* finish the activity-startup batch (header notices, test watcher leak, load-stable peer fixtures) ([67c8949](https://github.com/oisin-ee/dogsled/commit/67c89497d96e474f89b0f7c8d5668b8d22838fc0))
+* **inbox:** hide requests from agents that have closed ([59b9e1e](https://github.com/oisin-ee/dogsled/commit/59b9e1eb84871ae4fe2cc1ec1559509062deacaa))
+* **launch:** back off refused-job release retries and log changes only ([ff3cc69](https://github.com/oisin-ee/dogsled/commit/ff3cc69e2efc2c2f693b44b72f216d92088ba596))
+* **observation:** log dropped IPC clients ([#321](https://github.com/oisin-ee/dogsled/issues/321)) ([a479b93](https://github.com/oisin-ee/dogsled/commit/a479b9337e57a3bfa38a22fad6a2dcfe01eb1d34))
+* **observation:** measure one collection in the boundary test ([737a119](https://github.com/oisin-ee/dogsled/commit/737a1195e2dc471307847d227bbdb4654c56801d))
+* **pi:** preserve terminal observation errors ([#320](https://github.com/oisin-ee/dogsled/issues/320)) ([a02b1f8](https://github.com/oisin-ee/dogsled/commit/a02b1f8427392062f987bda3a165d9331d21d365))
+* **pi:** register live activity once the session is verifiable and stop console output ([6da106e](https://github.com/oisin-ee/dogsled/commit/6da106e42d668201c8edcfa41b70b2c5d296f2cc))
+* **pi:** stop test watchers after failed assertions ([983ab8c](https://github.com/oisin-ee/dogsled/commit/983ab8c90e8e1194438e17aee967e67880acf6be))
+* **portal:** publish the repository catalogue on the portal stream so the picker recovers ([01688d2](https://github.com/oisin-ee/dogsled/commit/01688d29b6d092ec22e46b5ada4a033e47de8afe))
+* **shell:** let deadline cleanup reap the command leader on macOS ([560683c](https://github.com/oisin-ee/dogsled/commit/560683c640294b3d36d00bb0eaf81ed58d193265))
+* **sidebar:** exit when the terminal is lost and reap test sidebars ([a31ed64](https://github.com/oisin-ee/dogsled/commit/a31ed6493dffa1120621a7e83f86a89abf36bec0))
+* **sidebar:** watch the terminal on stdin, since Darwin reports POLLNVAL for /dev/tty ([6248a12](https://github.com/oisin-ee/dogsled/commit/6248a1269474fb5785ce32c9e5a05ece0def5de5))
+* **todo:** fence delta sessions from older extensions and validate deltas on read ([abbdc33](https://github.com/oisin-ee/dogsled/commit/abbdc33f4c2222b7b8b34b130bf01d004478928f))
+* **todo:** save task changes as deltas instead of full snapshots ([c4ed5a3](https://github.com/oisin-ee/dogsled/commit/c4ed5a34164db0624693b5164415d751527da226))
+* **transfer:** record the source commit and reuse Git isolation ([2ee24e2](https://github.com/oisin-ee/dogsled/commit/2ee24e23a5912705b9c0d7616419374bf2618045))
+* **wait:** report a deadline reached before the target was resolved ([b223d58](https://github.com/oisin-ee/dogsled/commit/b223d58ac5506515dc49d3948d8ee68794d3bdfa))
+* **web:** drain refused request bodies so refusals are not reset ([#318](https://github.com/oisin-ee/dogsled/issues/318)) ([454b286](https://github.com/oisin-ee/dogsled/commit/454b286a18985480314eba7849e52abbada971d0))
+* **web:** keep catalogue notices out of the New header ([f86bbe4](https://github.com/oisin-ee/dogsled/commit/f86bbe41e4a3d7083f3fb4716540af1a1f579867))
+* **web:** keep the retained catalogue when a fetch fails without repositories ([cda0892](https://github.com/oisin-ee/dogsled/commit/cda0892eda01994a2f1b8bdd37ec6023bff8455b))
+
+
+### Performance Improvements
+
+* **activity:** read only appended transcript bytes for conversation detail ([f25aed4](https://github.com/oisin-ee/dogsled/commit/f25aed420e2b18bd62564ced5530f4623b775a44))
+
 ## [0.34.2](https://github.com/oisin-ee/dogsled/compare/v0.34.1...v0.34.2) (2026-11-09)
 
 
