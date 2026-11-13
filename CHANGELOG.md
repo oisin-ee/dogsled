@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.36.1](https://github.com/oisin-ee/dogsled/compare/v0.36.0...v0.36.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **observation:** select domains and frame replies so no publication is too large ([3c56ef1](https://github.com/oisin-ee/dogsled/commit/3c56ef126d3acbe30364e505ecd7dd00009494e9))
+* **observation:** select domains and frame replies so no publication is too large ([dbaab3f](https://github.com/oisin-ee/dogsled/commit/dbaab3f5fba3158548e9d47d528b8686ca2b5c89))
+
 ## [0.36.0](https://github.com/oisin-ee/dogsled/compare/v0.35.0...v0.36.0) (2026-11-11)
 
 
