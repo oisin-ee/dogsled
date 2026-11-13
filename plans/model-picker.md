@@ -20,6 +20,7 @@ The portal shows a model and thinking-level picker in two places:
   Each choice carries `getSupportedThinkingLevels(model)` from `@earendil-works/pi-ai`.
 - The New flow reads a serve-owned catalogue. Serve runs `pi --mode rpc --no-session`, sends `get_available_models`, and publishes the result.
   It refreshes at startup and at most hourly, and keeps the last good list on error, like the repository catalogue.
+- The lead record and the `leads` table do not store the model. A store schema bump restarts every host's store empty (`src/store.rs`), and a lead never retries an uncertain start, so nothing reads it back. Pi's session records the model.
 - The New lead passes `--model provider/id` and `--thinking level` to Pi. The lead goes to the roomiest host.
   If that host lacks the model, Pi's startup error is the launch failure.
 - The settings channel is separate from the live-activity producer protocol. `LiveState` denies unknown fields, so a new field would break
