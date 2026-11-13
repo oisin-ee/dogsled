@@ -11,6 +11,10 @@ pub(super) struct Delivery {
     pub id: String,
     pub repo: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<portal_types::models::ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<portal_types::models::ThinkingLevel>,
     pub validity: crate::jobs::Validity,
     pub host: String,
 }
@@ -33,6 +37,8 @@ pub(super) fn create(
     context: &CreateContext<'_>,
     slug: &str,
     prompt: &str,
+    model: Option<portal_types::models::ModelRef>,
+    thinking: Option<portal_types::models::ThinkingLevel>,
 ) -> std::result::Result<Started, Failure> {
     let invalid = |error| super::failure(FailureKind::Invalid, error);
     let unavailable = |error| super::failure(FailureKind::Unavailable, error);
@@ -76,6 +82,8 @@ pub(super) fn create(
         id,
         repo: slug.into(),
         prompt: prompt.into(),
+        model,
+        thinking,
         validity,
         host: host.label.clone(),
     };

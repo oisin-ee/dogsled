@@ -3,6 +3,8 @@
 
 #[path = "catalogue.rs"]
 mod catalogue;
+#[path = "models.rs"]
+mod models;
 
 use super::{Availability, Domains, Gap, Publication, Sources};
 use crate::commands::Status;
@@ -111,6 +113,7 @@ pub(crate) struct Collector {
     sample_error: Option<String>,
     report: Option<HostReport>,
     catalogue: catalogue::Catalogue,
+    models: models::Catalogue,
 }
 
 impl Collector {
@@ -248,6 +251,11 @@ impl Collector {
             self.record("repos", now, Ok(catalogue));
         }
         timings.push(("collect.catalogue", started.elapsed()));
+        let started = Instant::now();
+        if let Some(models) = self.models.refresh(node.shell, now) {
+            self.record("models", now, Ok(models));
+        }
+        timings.push(("collect.models", started.elapsed()));
         let started = Instant::now();
         let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
         let terminals = if capture_terminals {

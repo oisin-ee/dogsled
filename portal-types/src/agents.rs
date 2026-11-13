@@ -235,6 +235,10 @@ pub struct PromptBody {
 pub struct CreateLeadBody {
     pub repo: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::models::ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<crate::models::ThinkingLevel>,
 }
 
 /// One accessible, non-archived GitHub repository. Forks are included.

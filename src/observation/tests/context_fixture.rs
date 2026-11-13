@@ -76,7 +76,11 @@ impl Shell for Source {
         input: &[u8],
         timeout: std::time::Duration,
     ) -> crate::error::Result<crate::shell::Output> {
-        System::default().run_input_bounded("env", &isolated(program, args), input, timeout)
+        if program == "git" || program == "env" {
+            System::default().run_input_bounded("env", &isolated(program, args), input, timeout)
+        } else {
+            self.0.run_input_bounded(program, args, input, timeout)
+        }
     }
     fn read_file(&self, path: &str) -> crate::error::Result<String> {
         self.0.read_file(path)
@@ -189,6 +193,7 @@ impl Fixture {
             .on("df -Pk /home", "FS 1000 500 500 50% /")
             .on("sysctl -n vm.loadavg", "{ 1.0 1.0 1.0 }")
             .on("iostat -c 2 -w 1", "us sy id 1m 5m 15m\n1 2 97 1 1 1\n1 2 97 1 1 1\n")
+            .on("pi --mode rpc --no-session", r#"{"id":"models","type":"response","success":true,"data":{"models":[{"type":"chat","provider":"fixture","id":"chat","name":"Fixture Chat","reasoning":false}]}}"#)
             .on("sysctl -n hw.memsize", "8589934592\n")
             .on("sysctl -n kern.memorystatus_vm_pressure_level", "1\n")
             .on("vm_stat", "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 458752.\nPages inactive: 0.\nPages speculative: 0.\n");
