@@ -1764,15 +1764,22 @@ esac
     (rig, repo.canonicalize().unwrap())
 }
 
-/// Each call starts with no reservations, so admission never decides a test's outcome.
+/// Each call starts with published capacity; transient admission waits are not test results.
 fn place(rig: &Rig, repo: &Path, branch: &str, base: Option<&str>) -> (i32, Value) {
     rig.put_reservations(&json!([]));
     wait_publication(rig, |frame| {
         let host = &frame["views"]["hosts"]["data"][0];
         host["probe"]["reservations"] == json!([]) && host["headroom"]["eligible"] == true
     });
+    place_wait(rig, repo, branch, base)
+}
+
+/// Observe the same request through admission, including its queued and terminal output.
+fn place_wait(rig: &Rig, repo: &Path, branch: &str, base: Option<&str>) -> (i32, Value) {
     let mut args = vec![
         "place",
+        "--wait",
+        "--json",
         "--branch",
         branch,
         "--repo",
@@ -1781,7 +1788,26 @@ fn place(rig: &Rig, repo: &Path, branch: &str, base: Option<&str>) -> (i32, Valu
     if let Some(base) = base {
         args.extend(["--base", base]);
     }
-    rig.json(&args)
+    let mut caller = rig.start(&args);
+    let status = caller.wait();
+    let (stdout, stderr) = caller.output();
+    let values = serde_json::Deserializer::from_str(&stdout)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| panic!("{error}: {stdout} {stderr}"));
+    let result = match values.as_slice() {
+        [result] => result,
+        [queued, result] => {
+            assert_eq!(queued["queued"], true, "{values:?}");
+            assert!(queued["ticket"].is_string(), "{queued}");
+            assert!(queued["request_id"].is_string(), "{queued}");
+            assert_eq!(queued["request_id"], result["request_id"], "{values:?}");
+            result
+        }
+        _ => panic!("unexpected placement output: {stdout} {stderr}"),
+    };
+    assert_ne!(result["queued"], true, "{result}");
+    (status.code().unwrap(), result.clone())
 }
 
 fn locks(repo: &Path) -> String {
@@ -2006,6 +2032,65 @@ fn setup_failure_removes_the_new_worktree_and_branch_and_keeps_the_reservation()
     assert_eq!(rig.log("setup.log"), setup);
     assert!(!rig.log("herdr.log").contains("worktree open"));
     assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn queued_setup_failures_observe_the_same_requests_terminal_diagnostic() {
+    for (name, config) in [("setup", SETUP), ("config", "[worktree]\nhooks = []\n")] {
+        let (rig, repo) = place_rig(&format!("queued-{name}-failure"));
+        // Keep the main checkout valid so invalid config fails in the new worktree.
+        git(&repo, &["checkout", "-q", "-b", "failure-base"]);
+        fs::write(repo.join("dogsled.toml"), config).unwrap();
+        git(&repo, &["add", "dogsled.toml"]);
+        git(
+            &repo,
+            &["commit", "-q", "--allow-empty", "-m", "failure base"],
+        );
+        git(&repo, &["checkout", "-q", "main"]);
+        fs::write(rig.dir.join("setup-fails"), "").unwrap();
+        // Publish a full host without a live lane that could admit the request early.
+        rig.snapshot("state", rig.now_ms(), 99.0, 1);
+        let publisher = super::observation::seeded(&rig);
+        let (code, error, ticket) = std::thread::scope(|scope| {
+            let caller =
+                scope.spawn(|| place_wait(&rig, &repo, "queued-failure", Some("failure-base")));
+            let deadline = Instant::now() + PROCESS_DEADLINE;
+            let ticket = loop {
+                let tickets = rig.tickets();
+                if let Some(ticket) = tickets.as_array().unwrap().first()
+                    && ticket["waiting"] == true
+                {
+                    assert_eq!(ticket["state"], "pending", "{ticket}");
+                    break ticket.clone();
+                }
+                assert!(Instant::now() < deadline, "placement did not queue");
+                std::thread::yield_now();
+            };
+            assert_eq!(rig.log("setup.log"), "");
+            assert!(!repo.join(".worktrees/queued-failure").exists());
+            drop(publisher);
+            // The real service now supplies capacity and completes the queued request.
+            rig.config("free_core_fraction_min = 0\nreservation_load = 0\nmemory_reserve_bytes = 0\ndisk_free_min_percent = 0\n");
+            let out = rig.run(&["serve", "--once", "--interval", "1"]);
+            assert!(out.status.success(), "{out:?}");
+            let (code, error) = caller.join().unwrap();
+            (code, error, ticket)
+        });
+        assert_eq!(code, 2, "{error}");
+        assert_eq!(error["request_id"], ticket["request"]["id"]);
+        assert_eq!(error["diagnostic"]["cause"], "setup_failed", "{error}");
+        assert_eq!(error["diagnostic"]["context"]["new_worktree_removed"], true);
+        let finished = &rig.tickets()[0];
+        assert_eq!(finished["id"], ticket["id"]);
+        assert_eq!(finished["state"], "failed", "{finished}");
+        assert_eq!(finished["diagnostic"], error["diagnostic"]);
+        assert_eq!(finished["retry"]["attempts"], 0);
+        assert!(!repo.join(".worktrees/queued-failure").exists());
+        assert!(!locks(&repo).contains("queued-failure"));
+        assert_eq!(git(&repo, &["branch", "--list", "queued-failure"]), "");
+        assert!(!rig.log("herdr.log").contains("worktree open"));
+        assert_eq!(rig.reservations().as_array().unwrap().len(), 1);
+    }
 }
 
 #[test]
