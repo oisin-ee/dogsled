@@ -11,6 +11,292 @@ use serde_json::json;
 
 mod reconcile;
 
+fn settlement_request(id: &str) -> Request {
+    serde_json::from_value(json!({
+        "id": id, "action": {"type": "agent", "kind": "pi", "name": id, "message": "task"},
+        "cwd": "/", "owner": "owner", "owner_host": "origin",
+        "validity": {"version": 1, "created_ms": 100}
+    }))
+    .unwrap()
+}
+
+fn settlement_admission(ledger: &Ledger, id: &str, certified: bool, finished: bool) {
+    let request = settlement_request(id);
+    let launch = json!({
+        "id": id, "action": request.action, "host": "local", "cwd": "/",
+        "owner": request.owner, "owner_host": request.owner_host, "validity": request.validity
+    });
+    let certificate = json!({
+        "version": 2, "origin_host": "origin",
+        "execution": {"executor": "dogsled", "ownerId": "owner", "requestId": id},
+        "launch": launch, "binding": {"kind": "none"},
+        "terminal_evidence": {"kind": "agent", "pane": id, "terminal": "terminal", "closed_ms": 1000},
+        "custody_revision": 0, "released_references": ["execution", "recovery", "custody"]
+    });
+    let release = certified.then(|| {
+        json!({
+            "certificate": certificate,
+            "acknowledgement": {"certificate": certificate, "accepted_ms": 1000}, "result": "closed"
+        })
+    });
+    crate::admissions::put_value(
+        ledger,
+        id,
+        &json!({
+            "request": request, "host": Host::local(), "launch": launch,
+            "finished_ms": finished.then_some(1000), "ordinary_release": release, "error": null
+        }),
+    )
+    .unwrap();
+}
+
+fn settlement_ticket(id: &str, state: &str) -> work::Ticket {
+    work::Ticket {
+        id: format!("ticket-{id}"),
+        request: settlement_request(id),
+        finished_ms: (!matches!(state, "pending" | "admitting")).then_some(1000),
+        created_ms: 100,
+        state: state.into(),
+        waiting: false,
+        waiting_until_ms: None,
+        wait_reason: None,
+        notified: true,
+        result: None,
+        error: None,
+        diagnostic: None,
+        retry: crate::backoff::Backoff::default(),
+    }
+}
+
+#[test]
+fn settlement_ticket_states_only_block_the_matching_request() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    assert!(work::references_released(&ledger, "missing").unwrap());
+    for state in ["pending", "admitting", "admitted", "failed", "cancelled"] {
+        crate::store::put_tickets(
+            &ledger,
+            &[
+                settlement_ticket("target", state),
+                settlement_ticket("unrelated", "pending"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            work::references_released(&ledger, "target").unwrap(),
+            !matches!(state, "pending" | "admitting"),
+            "{state}"
+        );
+        assert!(work::references_released(&ledger, "missing").unwrap());
+    }
+    crate::store::write(&ledger, |tx| {
+        tx.execute_batch("DROP TABLE tickets")?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(work::references_released(&ledger, "target").is_err());
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn settlement_legacy_completion_requires_exact_item_provenance() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    assert_eq!(
+        work::admission_completion(&ledger, "missing").unwrap(),
+        None
+    );
+    settlement_admission(&ledger, "unfinished", false, false);
+    assert_eq!(
+        work::admission_completion(&ledger, "unfinished").unwrap(),
+        None
+    );
+    settlement_admission(&ledger, "target", false, true);
+    let matching = Item {
+        id: "target".into(),
+        host: "local".into(),
+        closed_ms: Some(1000),
+        ..Item::default()
+    };
+    let unrelated = Item {
+        id: "unrelated".into(),
+        ..matching.clone()
+    };
+    for (host, closed_ms, resource_closed_ms, valid) in [
+        ("local", Some(1000), None, true),
+        ("peer", Some(1000), None, false),
+        ("local", Some(1001), None, false),
+        ("local", None, None, false),
+        ("local", Some(1000), Some(1000), false),
+    ] {
+        let item = Item {
+            host: host.into(),
+            closed_ms,
+            resource_closed_ms,
+            ..matching.clone()
+        };
+        crate::store::put_items(&ledger, &vec![unrelated.clone(), item]).unwrap();
+        let completion = work::admission_completion(&ledger, "target");
+        if valid {
+            assert_eq!(completion.unwrap(), Some(1000));
+        } else {
+            assert!(completion.is_err());
+        }
+        // Local close evidence alone never proves ordinary reference release.
+        assert!(!work::settled(&ledger, "target", 2000).unwrap_or(false));
+    }
+    crate::store::put_items(&ledger, &vec![unrelated]).unwrap();
+    assert!(work::admission_completion(&ledger, "target").is_err());
+    crate::store::write(&ledger, |tx| {
+        tx.execute_batch("DROP TABLE items")?;
+        Ok(())
+    })
+    .unwrap();
+    // Preserve the old is_ok_and behavior: a failed item read is not terminal proof.
+    assert!(
+        work::admission_completion(&ledger, "target")
+            .unwrap_err()
+            .to_string()
+            .contains("completion timestamp contradicts terminal provenance")
+    );
+    settlement_admission(&ledger, "certified", true, true);
+    assert_eq!(
+        work::admission_completion(&ledger, "certified").unwrap(),
+        Some(1000)
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn settlement_reads_only_matching_ticket_and_item_rows() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    settlement_admission(&ledger, "target", false, true);
+    crate::store::put_tickets(
+        &ledger,
+        &[
+            settlement_ticket("target", "admitted"),
+            settlement_ticket("unrelated", "pending"),
+        ],
+    )
+    .unwrap();
+    crate::store::put_items(
+        &ledger,
+        &vec![
+            Item {
+                id: "target".into(),
+                host: "local".into(),
+                closed_ms: Some(1000),
+                ..Item::default()
+            },
+            Item {
+                id: "unrelated".into(),
+                ..Item::default()
+            },
+        ],
+    )
+    .unwrap();
+    crate::store::write(&ledger, |tx| {
+        tx.execute(
+            "UPDATE tickets SET retry_attempts = -1 WHERE request_id = ?1",
+            ["unrelated"],
+        )?;
+        tx.execute(
+            "UPDATE items SET closed_ms = -1 WHERE id = ?1",
+            ["unrelated"],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        work::admission_completion(&ledger, "target").unwrap(),
+        Some(1000)
+    );
+    assert!(!work::references_released(&ledger, "target").unwrap());
+    assert!(!work::settled(&ledger, "target", 2000).unwrap());
+    crate::store::write(&ledger, |tx| {
+        tx.execute(
+            "UPDATE tickets SET retry_attempts = -1 WHERE request_id = ?1",
+            ["target"],
+        )?;
+        tx.execute("UPDATE items SET closed_ms = -1 WHERE id = ?1", ["target"])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(work::references_released(&ledger, "target").is_err());
+    assert!(work::admission_completion(&ledger, "target").is_err());
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+fn seed_close_publication(ledger: &Ledger) -> Vec<String> {
+    let ids: Vec<_> = (0..779).map(|n| format!("close-{n:03}")).collect();
+    for (n, id) in ids.iter().enumerate() {
+        settlement_admission(ledger, id, (156..757).contains(&n), n < 757);
+    }
+    let states = ["pending", "admitting", "admitted", "failed", "cancelled"];
+    let tickets: Vec<_> = ids
+        .iter()
+        .take(506)
+        .enumerate()
+        .map(|(n, id)| settlement_ticket(id, states[n % states.len()]))
+        .collect();
+    crate::store::put_tickets(ledger, &tickets).unwrap();
+    let items: Vec<_> = ids
+        .iter()
+        .take(665)
+        .map(|id| Item {
+            id: id.clone(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: id.clone(),
+            owner_pane: "owner".into(),
+            created_ms: 100,
+            closed_ms: Some(1000),
+            ..Item::default()
+        })
+        .collect();
+    crate::store::put_items(ledger, &items).unwrap();
+    ids
+}
+
+/// Run unchanged against the baseline and candidate. Setup is outside all timings;
+/// fingerprints compare the complete production results, not duplicated SQL predicates.
+#[test]
+fn close_publication_workload_preserves_settlement_and_holds() {
+    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ids = seed_close_publication(&ledger);
+    let states = ["pending", "admitting", "admitted", "failed", "cancelled"];
+    let mut previous = None;
+    for sample in 0..3 {
+        let start = std::time::Instant::now();
+        let results: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(n, id)| {
+                let result = work::settled(&ledger, id, 2000).unwrap();
+                let active = n < 506 && matches!(states[n % states.len()], "pending" | "admitting");
+                assert_eq!(result, (156..757).contains(&n) && !active, "{id}");
+                result
+            })
+            .collect();
+        let settlement_elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        let holds = crate::holds::local(&ledger, "local", 2000, 90_000).unwrap();
+        let holds_elapsed = start.elapsed();
+        assert_eq!(results.iter().filter(|settled| **settled).count(), 461);
+        assert_eq!(holds.len(), 480);
+        let evidence = json!({"settled": results, "holds": holds});
+        if let Some(previous) = &previous {
+            assert_eq!(&evidence, previous);
+        }
+        eprintln!(
+            "close publication sample={sample} admissions=779 finished=757 legacy=156 tickets=506 items=665 settled={} holds={} fingerprint={} settlement={settlement_elapsed:?} holds_time={holds_elapsed:?}",
+            results.iter().filter(|settled| **settled).count(),
+            holds.len(),
+            crate::unit_transport::digest_hex(&serde_json::to_vec(&evidence).unwrap())
+        );
+        previous = Some(evidence);
+    }
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
 fn actions<'a>(fleet: &Fleet<'a>, now: u64) -> crate::hosts::ActionFleet<'a> {
     crate::observation::captured_actions(fleet, now).unwrap()
 }

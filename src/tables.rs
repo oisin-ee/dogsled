@@ -211,6 +211,16 @@ pub(crate) fn ticket(tx: &Transaction<'_>, id: &str) -> Result<Option<Ticket>> {
     }
 }
 
+/// One ticket by its request id, without decoding unrelated requests.
+pub(crate) fn ticket_by_request(tx: &Transaction<'_>, id: &str) -> Result<Option<Ticket>> {
+    let mut statement = tx.prepare_cached("SELECT * FROM tickets WHERE request_id = ?1")?;
+    let mut rows = statement.query([id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(ticket_row(tx, row)?)),
+        None => Ok(None),
+    }
+}
+
 /// Whether a ticket was queued for request `id`.
 pub(crate) fn queued_request(tx: &Transaction<'_>, id: &str) -> Result<bool> {
     Ok(tx
@@ -239,6 +249,16 @@ pub(crate) fn items(tx: &Transaction<'_>) -> Result<Vec<Item>> {
         items.push(item_row(tx, row)?);
     }
     Ok(items)
+}
+
+/// One item by its id, using the same decoder as the full list.
+pub(crate) fn item(tx: &Transaction<'_>, id: &str) -> Result<Option<Item>> {
+    let mut statement = tx.prepare_cached("SELECT * FROM items WHERE id = ?1")?;
+    let mut rows = statement.query([id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(item_row(tx, row)?)),
+        None => Ok(None),
+    }
 }
 
 /// Make the stored items equal `items`, in their order of first insertion.
@@ -510,6 +530,98 @@ fn item_row(tx: &Transaction<'_>, row: &Row<'_>) -> Result<Item> {
         recovery,
         id,
     })
+}
+
+#[cfg(test)]
+mod targeted_read_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn records(tx: &Transaction<'_>) {
+        for id in ["target", "unrelated"] {
+            let ticket: Ticket = serde_json::from_value(json!({
+                "id": format!("ticket-{id}"), "finished_ms": null,
+                "request": {"id": id, "action": {"type": "job", "cmd": ["echo", id]},
+                    "cwd": "/", "owner": "owner"},
+                "created_ms": 100, "state": "pending", "waiting": true,
+                "waiting_until_ms": 1, "notified": false, "result": {"id": id}, "error": null
+            }))
+            .unwrap();
+            save_ticket(tx, &ticket).unwrap();
+            save_item(
+                tx,
+                &Item {
+                    id: id.into(),
+                    host: "local".into(),
+                    closed_ms: Some(1000),
+                    recovery: Some(crate::preservation::Recovery {
+                        host: "local".into(),
+                        repository: "/repo".into(),
+                        id: format!("recovery-{id}"),
+                        pinned_oid: "head".into(),
+                        predecessors: vec!["first".into(), "second".into()],
+                        operation: "close".into(),
+                        item: Some(id.into()),
+                    }),
+                    ..Item::default()
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn work_targeted_reads_match_list_decoders_and_preserve_child_records() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let tx = db.transaction().unwrap();
+        records(&tx);
+        assert!(ticket_by_request(&tx, "missing").unwrap().is_none());
+        assert!(ticket_by_request(&tx, "ticket-target").unwrap().is_none());
+        assert!(item(&tx, "missing").unwrap().is_none());
+        assert_eq!(
+            serde_json::to_value(ticket_by_request(&tx, "target").unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&tickets(&tx).unwrap()[0]).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(item(&tx, "target").unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&items(&tx).unwrap()[0]).unwrap()
+        );
+    }
+
+    #[test]
+    fn work_targeted_reads_do_not_decode_unrelated_rows_but_refuse_bad_matches() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let tx = db.transaction().unwrap();
+        records(&tx);
+        tx.execute(
+            "UPDATE tickets SET retry_attempts = -1 WHERE request_id = ?1",
+            ["unrelated"],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE items SET closed_ms = -1 WHERE id = ?1",
+            ["unrelated"],
+        )
+        .unwrap();
+        assert!(tickets(&tx).is_err());
+        assert!(items(&tx).is_err());
+        assert!(ticket_by_request(&tx, "target").unwrap().is_some());
+        assert!(item(&tx, "target").unwrap().is_some());
+        assert!(ticket_by_request(&tx, "missing").unwrap().is_none());
+        assert!(item(&tx, "missing").unwrap().is_none());
+        assert!(ticket_by_request(&tx, "unrelated").is_err());
+        assert!(item(&tx, "unrelated").is_err());
+    }
+
+    #[test]
+    fn work_targeted_reads_propagate_storage_failures() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let tx = db.transaction().unwrap();
+        assert!(ticket_by_request(&tx, "missing").is_err());
+        assert!(item(&tx, "missing").is_err());
+    }
 }
 
 #[cfg(test)]
