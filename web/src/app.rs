@@ -501,7 +501,9 @@ pub fn App() -> Element {
                 }
                 ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
                     if let Some(message) = board_error() { Alert { "Board updates unavailable: {message}" } }
-                    if let Some(message) = agent_error() { Status { title: "{message}", "Herdr is not reachable. The board still works." } }
+                    // The agent list comes from the observation, not from Herdr. Show its own
+                    // error, once when the board has the same one.
+                    if let Some(message) = agent_error().filter(|message| board_error().as_ref() != Some(message)) { Alert { "Agents unavailable: {message}" } }
                     match groups {
                         Some(groups) => rsx! {
                             for (index, group) in groups.repos.into_iter().enumerate() {

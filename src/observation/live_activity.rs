@@ -17,6 +17,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 #[path = "tests/live_activity.rs"]
 pub(crate) mod tests;
 
+/// The activity protocol has its own version. It does not follow the observation version.
+pub(crate) const VERSION: u32 = 1;
 pub(crate) const MAX_BODY: usize = 64 * 1024;
 pub(crate) const MAX_FRAME: usize = 2 * MAX_BODY;
 const CAPACITY: usize = 128;
@@ -709,7 +711,7 @@ impl Authority {
             .filter(|value| *value <= SAFE_COUNTER)
             .ok_or_else(|| error(ActivityCode::Capacity, "producer generation exhausted"))?;
         let ack = ActivityAck {
-            version: 1,
+            version: VERSION,
             pane: pane.into(),
             epoch: self.epoch.clone(),
             generation: self.generation,
@@ -787,7 +789,7 @@ impl Authority {
                 (
                     pane.clone(),
                     ActivityView {
-                        version: 1,
+                        version: VERSION,
                         pane: pane.clone(),
                         epoch: self.epoch.clone(),
                         revision: 0,
@@ -890,7 +892,7 @@ pub(crate) fn validate_pane(pane: &str) -> std::result::Result<(), ActivityError
 }
 
 fn version(value: u32) -> std::result::Result<(), ActivityError> {
-    if value == 1 {
+    if value == VERSION {
         Ok(())
     } else {
         Err(error(

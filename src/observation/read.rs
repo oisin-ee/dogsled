@@ -5,6 +5,14 @@ use crate::error::{Error, Result};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+/// The views that each reader function below reads. A caller selects what it reads, so
+/// its reply does not grow with the rest of the publication.
+pub(crate) const BOARD: [&str; 3] = ["board", "boards", "empty_board"];
+pub(crate) const SIDEBAR: [&str; 2] = ["sidebars", "empty_sidebar"];
+pub(crate) const FINDINGS: [&str; 1] = ["findings"];
+pub(crate) const JOB_HISTORY: [&str; 2] = ["job_history", "empty_job_history"];
+pub(crate) const INVENTORY: [&str; 3] = ["inventories", "inventory", "empty_inventory"];
+
 fn missing(domain: &str) -> Error {
     Error::Invalid(format!(
         "observation unavailable: {domain} was not published"

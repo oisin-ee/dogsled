@@ -579,7 +579,7 @@ pub fn router() -> Router<AppState> {
 async fn repos(State(state): State<AppState>) -> Response {
     let directory = state.web.dir.clone();
     match tokio::task::spawn_blocking(move || {
-        let published = ipc::Client::at(&directory).current()?;
+        let published = ipc::Client::at(&directory).current(&ipc::Select::views(["repos"]))?;
         crate::observation::read::view::<portal_types::agents::RepoList>(&published, "repos")
     })
     .await
@@ -2780,7 +2780,11 @@ mod tests {
             .unwrap();
         let first = agent_sse_payload(&first);
         for name in ["renamed", "renamed again"] {
-            let previous = fixture.client.current().unwrap().revision;
+            let previous = fixture
+                .client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap()
+                .revision;
             raw.lock().unwrap()["name"] = json!(name);
             fixture.wake();
             fixture.wait(|frame| frame.revision > previous);
@@ -2869,7 +2873,11 @@ mod tests {
         reader.read_line(&mut first).unwrap();
         let first: PeerReply = serde_json::from_str(&first).unwrap();
         assert_eq!(first.status, 200);
-        let previous = fixture.client.current().unwrap().revision;
+        let previous = fixture
+            .client
+            .current(&crate::observation::ipc::Select::All)
+            .unwrap()
+            .revision;
         raw.lock().unwrap()["name"] = json!("renamed");
         fixture.wake();
         fixture.wait(|frame| frame.revision > previous);

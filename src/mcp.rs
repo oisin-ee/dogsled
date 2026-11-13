@@ -439,7 +439,9 @@ impl Server {
     async fn status(&self, Parameters(args): Parameters<StatusArgs>) -> Result<String, String> {
         let client = crate::observation::ipc::Client::at(&self.context.ledger.dir);
         tokio::task::spawn_blocking(move || {
-            let published = client.current()?;
+            let published = client.current(&crate::observation::ipc::Select::views(
+                crate::observation::read::BOARD,
+            ))?;
             let owner = if args.all {
                 None
             } else {

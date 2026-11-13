@@ -453,6 +453,28 @@ impl Observation {
         })
     }
 
+    /// A failed pass must not stop the lanes: admission, handoff and the watchdog do not
+    /// depend on it. Readers get the last domains with a gap that names the failure, and the
+    /// next pass tries again. `--once` has no next pass, so it returns the failure.
+    fn settle(&mut self, refreshed: Result<()>, once: bool) -> Result<()> {
+        let Err(error) = refreshed else {
+            return Ok(());
+        };
+        if once {
+            return Err(error);
+        }
+        let reported = self.exchange.diagnostics.fail(
+            &mut self.publisher,
+            &error.to_string(),
+            now_ms(),
+            |line| eprintln!("{line}"),
+        );
+        if let Err(unreported) = reported {
+            eprintln!("dogsled service: observation pass failed: {error}; {unreported}");
+        }
+        Ok(())
+    }
+
     /// The earliest of the schedule and the first baseline sample.
     fn due(next: Instant, baseline: Option<Instant>) -> Instant {
         baseline.map_or(next, |at| next.min(at))
@@ -555,14 +577,16 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
         let scheduled = Instant::now() >= next;
         let baseline_due = baseline.take_if(|at| Instant::now() >= *at).is_some();
         let domains = dirty.take();
-        observation.timed_refresh(
+        let refreshed = observation.timed_refresh(
             node,
             policy,
             &dirty,
             (domains, once),
             scheduled || baseline_due,
-        )?;
-        if baseline_due {
+        );
+        let published = refreshed.is_ok();
+        observation.settle(refreshed, once)?;
+        if baseline_due && published {
             eprintln!("dogsled service: baseline sample published");
         }
         if scheduled {

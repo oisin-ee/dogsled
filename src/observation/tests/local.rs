@@ -744,10 +744,10 @@ fn publication_freezes_inputs_and_readers_do_not_collect() {
         .ledger
         .with_lock("state-db", || {
             for _ in 0..8 {
-                let read = client.current()?;
+                let read = client.current(&crate::observation::ipc::Select::All)?;
                 assert_eq!(read, *frame);
                 assert_eq!(read.local["host"]["jobs"].as_array().unwrap().len(), 1);
-                let subscription = client.subscribe()?;
+                let subscription = client.subscribe(&crate::observation::ipc::Select::All)?;
                 assert_eq!(*subscription.current().publication, *frame);
             }
             Ok(())
@@ -799,7 +799,7 @@ fn failed_endpoint_bind_retains_exclusive_publication_ownership() {
     assert!(ipc::Server::new(&state).is_err());
     assert!(
         ipc::Client::at(&state)
-            .current()
+            .current(&crate::observation::ipc::Select::All)
             .unwrap_err()
             .to_string()
             .contains("unavailable")
@@ -913,14 +913,14 @@ fn observation_without_serve_never_falls_back_to_persisted_facts() {
     let client = ipc::Client::at(&fixture.ledger.dir);
     assert!(
         client
-            .current()
+            .current(&crate::observation::ipc::Select::All)
             .unwrap_err()
             .to_string()
             .contains("unavailable")
     );
     assert!(
         client
-            .subscribe()
+            .subscribe(&crate::observation::ipc::Select::All)
             .unwrap_err()
             .to_string()
             .contains("unavailable")

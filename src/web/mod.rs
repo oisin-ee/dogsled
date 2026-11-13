@@ -339,25 +339,28 @@ fn reader(ledger: &Ledger, sender: &watch::Sender<PortalState>, stop: &Cancellat
 
     let client = ipc::Client::at(&ledger.dir);
     while !stop.is_cancelled() && !sender.is_closed() {
-        let result = client.subscribe().and_then(|mut subscription| {
-            let mut connection = subscription.current();
-            let mut last = None;
-            while !stop.is_cancelled() && !sender.is_closed() {
-                if let ipc::Status::Disconnected(detail) = connection.status {
-                    return Err(crate::error::Error::Invalid(detail));
-                }
-                if last != Some(connection.publication.revision) {
-                    let snapshot = read::view(&connection.publication, "portal")?;
-                    sender.send_replace(PortalState {
-                        snapshot: Some(snapshot),
-                        error: None,
-                    });
-                    last = Some(connection.publication.revision);
-                }
-                connection = subscription.changed(TICK);
-            }
-            Ok(())
-        });
+        let result =
+            client
+                .subscribe(&ipc::Select::views(["portal"]))
+                .and_then(|mut subscription| {
+                    let mut connection = subscription.current();
+                    let mut last = None;
+                    while !stop.is_cancelled() && !sender.is_closed() {
+                        if let ipc::Status::Disconnected(detail) = connection.status {
+                            return Err(crate::error::Error::Invalid(detail));
+                        }
+                        if last != Some(connection.publication.revision) {
+                            let snapshot = read::view(&connection.publication, "portal")?;
+                            sender.send_replace(PortalState {
+                                snapshot: Some(snapshot),
+                                error: None,
+                            });
+                            last = Some(connection.publication.revision);
+                        }
+                        connection = subscription.changed(TICK);
+                    }
+                    Ok(())
+                });
         if let Err(error) = result {
             sender.send_modify(|current| current.error = Some(error.to_string()));
         }

@@ -954,6 +954,15 @@ fn logs(fleet: &Fleet, id: &str, follow: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `published_inventory` reads.
+pub(crate) fn inventory_select() -> crate::observation::ipc::Select {
+    crate::observation::ipc::Select::views(
+        crate::observation::read::INVENTORY
+            .into_iter()
+            .chain(["jobs", "active_jobs"]),
+    )
+}
+
 pub(crate) fn published_inventory(
     published: &crate::observation::Published,
     command: Command,
@@ -1000,7 +1009,8 @@ fn inspect(fleet: &Fleet, command: Command, json_output: bool) -> Result<ExitCod
     match command {
         command @ (Command::Items { .. } | Command::Ps { .. }) => {
             return published_inventory(
-                &crate::observation::ipc::Client::at(&fleet.ledger.dir).current()?,
+                &crate::observation::ipc::Client::at(&fleet.ledger.dir)
+                    .current(&inventory_select())?,
                 command,
                 json_output,
             );

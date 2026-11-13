@@ -308,7 +308,7 @@
     },
     "peers": {}
   },
-  "version": 1,
+  "version": 2,
   "views": {
     "active_jobs": {
       "data": [],

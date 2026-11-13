@@ -369,7 +369,7 @@ fn host_lead(node: &Node<'_>, config_path: &std::path::Path) -> Result<()> {
 }
 
 fn repo_command(client: &observation::ipc::Client, json: bool) -> Result<()> {
-    let published = client.current()?;
+    let published = client.current(&observation::ipc::Select::views(["repos"]))?;
     observation::read::report(&published, None);
     let list: portal_types::agents::RepoList = observation::read::view(&published, "repos")?;
     print(json, &list, || repos::render(&list))
@@ -395,10 +395,11 @@ struct Watch {
 
 /// The status command: the fleet's state, printed once or watched.
 fn status_command(client: &observation::ipc::Client, ask: Watch, json: bool) -> Result<()> {
-    let mut subscription = ask.watch.then(|| client.subscribe()).transpose()?;
+    let select = observation::ipc::Select::views(["status", "status_display"]);
+    let mut subscription = ask.watch.then(|| client.subscribe(&select)).transpose()?;
     let mut published = match &subscription {
         Some(subscription) => (*subscription.current().publication).clone(),
-        None => client.current()?,
+        None => client.current(&select)?,
     };
     loop {
         observation::read::report(&published, None);
@@ -622,7 +623,7 @@ fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
             // Keep inbox delivery working even when fleet status is unavailable.
             let published = if event == inbox::HookEvent::Stop {
                 sweep::request_at_stop(ledger);
-                client.current().ok()
+                client.current(&gate::select()).ok()
             } else {
                 None
             };
@@ -638,7 +639,7 @@ fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
         HookCommand::Gate => {
             let owner = inbox::own_pane(None)?;
             sweep::request_at_stop(ledger);
-            let published = client.current()?;
+            let published = client.current(&gate::select())?;
             let notices = gate::notices(ledger, &published, &owner)?;
             let board = observation::read::board(&published, Some(&owner))?;
             gate::deliver(ledger, &board, &owner, &notices, |reminder| {
@@ -646,7 +647,7 @@ fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
             })
         }
         HookCommand::Context { harness, event } => {
-            let published = client.current()?;
+            let published = client.current(&context::select())?;
             let owner = std::env::var("HERDR_PANE_ID").ok();
             let text = context::format(harness, event, &published, owner.as_deref())?;
             print(false, &(), || text)
@@ -690,7 +691,8 @@ fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Opt
                 board::watch(client, &owner, cli.json)?;
                 return Ok(Some(ExitCode::SUCCESS));
             }
-            let published = client.current()?;
+            let published =
+                client.current(&observation::ipc::Select::views(observation::read::BOARD))?;
             observation::read::report(&published, None);
             let board = observation::read::board(&published, owner.as_deref())?;
             print(cli.json, &board, || board.render())?;
@@ -711,14 +713,14 @@ fn published_command(client: &observation::ipc::Client, cli: &Cli) -> Result<Opt
             return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Snapshot) => {
-            let published = client.current()?;
+            let published = client.current(&observation::ipc::Select::local(["host"]))?;
             observation::read::report(&published, Some("host"));
             let report: node::SnapshotReport = observation::read::local(&published, "host")?;
             print(true, &report, String::new)?;
             return Ok(Some(ExitCode::SUCCESS));
         }
         Command::Host(HostCommand::Todos) => {
-            let published = client.current()?;
+            let published = client.current(&observation::ipc::Select::views(["todos"]))?;
             observation::read::report(&published, None);
             let todos: Vec<board::TodoSections> = observation::read::view(&published, "todos")?;
             print(true, &todos, String::new)?;
@@ -742,7 +744,11 @@ fn run_recovery_or_command(cli: Cli, budget: budget::Budget) -> Result<ExitCode>
         return Ok(code);
     }
     if let Command::Items { .. } | Command::Ps { .. } = cli.command {
-        return runtime::published_inventory(&client.current()?, cli.command, cli.json);
+        return runtime::published_inventory(
+            &client.current(&runtime::inventory_select())?,
+            cli.command,
+            cli.json,
+        );
     }
     if let Command::Observation { command } = cli.command {
         return observation::command(&command);
@@ -1607,7 +1613,8 @@ fn host(cmd: HostCommand, node: &Node<'_>) -> Result<ExitCode> {
         HostCommand::Todos => print(
             true,
             &observation::read::view::<Vec<board::TodoSections>>(
-                &observation::ipc::Client::at(&node.ledger.dir).current()?,
+                &observation::ipc::Client::at(&node.ledger.dir)
+                    .current(&observation::ipc::Select::views(["todos"]))?,
                 "todos",
             )?,
             String::new,

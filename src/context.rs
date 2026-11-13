@@ -32,6 +32,16 @@ pub enum Event {
     UserPromptSubmit,
 }
 
+/// What `format` reads.
+pub(crate) fn select() -> crate::observation::ipc::Select {
+    crate::observation::ipc::Select::views(
+        read::BOARD
+            .into_iter()
+            .chain(read::FINDINGS)
+            .chain(["status", "status_display"]),
+    )
+}
+
 /// `owner` is the caller's Herdr pane. Its own children and jobs come first, with those that
 /// have work to land named; the fleet's hosts and counts follow. The cleanup line counts only
 /// `found`: the last pass's findings about work the caller created.

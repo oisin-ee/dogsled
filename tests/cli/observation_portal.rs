@@ -324,7 +324,7 @@ printf '[{"full_name":"owner/repo","description":"Published choice","pushed_at":
             );
         }
     }
-    assert_eq!(good["version"], 1);
+    assert_eq!(good["version"], 2);
     assert_eq!(
         good["views"]["portal"]["data"]["version"],
         portal_types::PORTAL_VERSION
@@ -526,7 +526,7 @@ fn capture_agent_detail(rig: &Rig) -> (Value, Value) {
     writeln!(
         interest,
         "{}",
-        json!({"version":1,"operation":"detail","pane":"w1:p1"})
+        json!({"version":2,"operation":"detail","pane":"w1:p1"})
     )
     .unwrap();
     let frame = wait_publication(rig, |frame| {

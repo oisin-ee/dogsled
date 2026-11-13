@@ -90,7 +90,7 @@ impl Supplied {
                     let mut line = String::new();
                     BufReader::new(&stream).read_line(&mut line).unwrap();
                     let request: Value = serde_json::from_str(&line).unwrap();
-                    assert_eq!(request["version"], 1);
+                    assert_eq!(request["version"], 2);
                     let selected = if request["operation"] == "detail" {
                         &details[request["pane"].as_str().unwrap()]
                     } else {
@@ -218,7 +218,7 @@ pub(super) fn publication(revision: u64) -> Value {
     let job = json!({"id":format!("job-{revision}"),"cmd":["true"],"cwd":"/foreign/tree","host":"foreign","owner":"w1:p1","pane":"foreign:p1","state":"running"});
     let inventory = json!({"items":[{"id":format!("item-{revision}")}],"queue":[{"id":format!("queue-{revision}")}]});
     let view = |data: Value| json!({"data":data,"gaps":[]});
-    json!({"version":1,"epoch":"supplied","revision":revision,"local_revision":1,"published_ms":revision,"sources":{"local":{},"peers":{}},
+    json!({"version":2,"epoch":"supplied","revision":revision,"local_revision":1,"published_ms":revision,"sources":{"local":{},"peers":{}},
         "local":{"host":host,"todos":["not-the-todos-view"],"status":{"items":["not-the-status-view"]}},
         "views":{"status":view(status),"status_display":view(display(vec![host_display(&format!("published-{revision}"), "0/8", "eligible", Some(1), "service: up")])), "board":view(board.clone()),"boards":view(json!({"w1:p1":board.clone()})),"empty_board":view(board),
             "todos":view(todos),"inventory":view(inventory.clone()),"inventories":view(json!({"w1:p1":inventory})),"empty_inventory":view(json!({"items":[],"queue":[]})),
@@ -234,7 +234,7 @@ fn serve_logs_an_observation_connection_error_once_with_its_operation() {
     let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
     stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
     stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
-    writeln!(stream, "{{\"version\":1,\"operation\":\"subscribe\"}}").unwrap();
+    writeln!(stream, "{{\"version\":2,\"operation\":\"subscribe\"}}").unwrap();
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -261,7 +261,7 @@ fn serve_logs_an_observation_connection_error_once_with_its_operation() {
     // A normal current request succeeds, and a normal subscriber EOF stays silent.
     let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
     stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
-    writeln!(stream, "{{\"version\":1,\"operation\":\"subscribe\"}}").unwrap();
+    writeln!(stream, "{{\"version\":2,\"operation\":\"subscribe\"}}").unwrap();
     let mut reader = BufReader::new(stream);
     line.clear();
     reader.read_line(&mut line).unwrap();
@@ -290,7 +290,7 @@ async fn serve_logs_when_the_observation_client_limit_refuses_a_connection() {
         let mut stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
         stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
         stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
-        writeln!(stream, "{{\"version\":1,\"operation\":\"subscribe\"}}").unwrap();
+        writeln!(stream, "{{\"version\":2,\"operation\":\"subscribe\"}}").unwrap();
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
@@ -848,7 +848,7 @@ mod boundary {
     fn unsupported_or_out_of_order_publications_are_unavailable() {
         let rig = Rig::short("boundary-versions");
         let mut future = publication(5);
-        future["version"] = json!(2);
+        future["version"] = json!(3);
         let server = Supplied::start(&rig, future);
         let _locks = isolate(&rig);
         for args in [

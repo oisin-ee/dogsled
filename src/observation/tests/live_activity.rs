@@ -914,7 +914,14 @@ fn producer_commands_and_extra_activity_viewers_never_capture_transcripts() {
         assert!(Instant::now() < deadline);
         viewer.changed(Duration::from_millis(50));
     }
-    assert!(fixture.client.current().unwrap().local.is_empty());
+    assert!(
+        fixture
+            .client
+            .current(&crate::observation::ipc::Select::All)
+            .unwrap()
+            .local
+            .is_empty()
+    );
     drop(viewers);
 }
 

@@ -105,7 +105,10 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
         other => panic!("unexpected method {other}"),
     });
     let fixture = Fixture::paused(socket.client());
-    let publication = fixture.client.current().unwrap();
+    let publication = fixture
+        .client
+        .current(&crate::observation::ipc::Select::All)
+        .unwrap();
     let mut viewer = fixture.client.detail("w1:p1").unwrap();
     started.recv_timeout(WAIT_DEADLINE).unwrap();
     assert!(matches!(
@@ -137,7 +140,13 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
         assert!(Instant::now() < deadline, "next capture was not delivered");
         viewer.changed(Duration::from_millis(100));
     }
-    assert_eq!(fixture.client.current().unwrap(), publication);
+    assert_eq!(
+        fixture
+            .client
+            .current(&crate::observation::ipc::Select::All)
+            .unwrap(),
+        publication
+    );
     drop(second);
     drop(viewer);
     let deadline = Instant::now() + WAIT_DEADLINE;
@@ -165,7 +174,14 @@ fn interests_scope_ticks_and_viewers_share_one_capture() {
         assert!(fixture.tick("w1:p1"));
         assert_eq!(native.reads(), count);
         assert_eq!(fixture.collector.lock().unwrap().transcript_reads(), 1);
-        assert_eq!(fixture.client.current().unwrap().revision, first.revision);
+        assert_eq!(
+            fixture
+                .client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap()
+                .revision,
+            first.revision
+        );
     }
     assert_eq!(
         native
@@ -201,7 +217,14 @@ fn native_revision_change_publishes_once_and_peer_export_excludes_content() {
     assert!(updated.parts.screen > original.parts.screen);
     assert_eq!(native.reads(), 2);
     fixture.tick("w1:p1");
-    assert_eq!(fixture.client.current().unwrap().revision, changed.revision);
+    assert_eq!(
+        fixture
+            .client
+            .current(&crate::observation::ipc::Select::All)
+            .unwrap()
+            .revision,
+        changed.revision
+    );
     let export = serde_json::to_string(&peers::Export::of(&changed)).unwrap();
     assert!(!export.contains("changed screen"));
     assert!(!export.contains("original task"));
@@ -264,7 +287,14 @@ fn file_edit_changes_only_files_and_unchanged_tree_does_not_publish() {
     let snapshot = viewer.current().publication.detail.files.clone();
     assert!(fixture.files_tick("w1:p1"));
     fixture.wake();
-    assert_eq!(fixture.client.current().unwrap().revision, changed.revision);
+    assert_eq!(
+        fixture
+            .client
+            .current(&crate::observation::ipc::Select::All)
+            .unwrap()
+            .revision,
+        changed.revision
+    );
     assert_eq!(viewer.current().publication.detail.files, snapshot);
 }
 

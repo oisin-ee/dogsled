@@ -345,7 +345,8 @@ impl<'a> Node<'a> {
 
     pub fn snapshot(&self) -> Result<SnapshotReport> {
         crate::observation::read::local(
-            &crate::observation::ipc::Client::at(&self.ledger.dir).current()?,
+            &crate::observation::ipc::Client::at(&self.ledger.dir)
+                .current(&crate::observation::ipc::Select::local(["host"]))?,
             "host",
         )
     }

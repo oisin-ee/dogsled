@@ -117,7 +117,13 @@ fn send(tx: &mpsc::SyncSender<Msg>, mut message: Msg, stop: &AtomicBool) -> bool
 
 fn reader(client: &ipc::Client, tx: &mpsc::SyncSender<Msg>, stop: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
-        let result = client.subscribe().and_then(|mut subscription| {
+        let select = ipc::Select::views(
+            publication::SIDEBAR
+                .into_iter()
+                .chain(publication::FINDINGS)
+                .chain(["sidebar_preferences"]),
+        );
+        let result = client.subscribe(&select).and_then(|mut subscription| {
             let mut connection = subscription.current();
             let mut last = None;
             while !stop.load(Ordering::Relaxed) {
