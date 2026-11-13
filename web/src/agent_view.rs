@@ -229,6 +229,64 @@ fn AgentSession(
     let mut conversation_trigger = use_signal(|| 0_u64);
     let mut screen_trigger = use_signal(|| 0_u64);
     let mut files_trigger = use_signal(|| 0_u64);
+    let mut settings_trigger = use_signal(|| 0_u64);
+    let mut settings = use_signal(|| None::<portal_types::models::AgentSettings>);
+    let mut settings_error = use_signal(|| None::<String>);
+    let mut settings_load_error = use_signal(|| None::<String>);
+    let mut settings_busy = use_signal(|| false);
+    let settings_pane = address.clone();
+    use_resource(move || {
+        let trigger = settings_trigger();
+        let is_pi = agent
+            .read()
+            .as_ref()
+            .is_some_and(|agent| agent.agent.as_deref() == Some("pi"));
+        let pane = settings_pane.clone();
+        let session = detail_session.peek().clone();
+        async move {
+            if !is_pi || *settings_busy.peek() {
+                return;
+            }
+            let result = api::agent_settings(&pane).await;
+            if *detail_session.peek() != session
+                || *settings_trigger.peek() != trigger
+                || *settings_busy.peek()
+            {
+                return;
+            }
+            match result {
+                Ok(value) => {
+                    settings.set(Some(value));
+                    settings_load_error.set(None);
+                }
+                Err(error) => {
+                    settings.set(None);
+                    settings_load_error.set(Some(error));
+                }
+            }
+        }
+    });
+    let settings_target = address.clone();
+    let change_settings = move |change: portal_types::models::SettingsChange| {
+        if settings_busy() {
+            return;
+        }
+        settings_busy.set(true);
+        settings_trigger += 1;
+        settings_error.set(None);
+        let pane = settings_target.clone();
+        let session = detail_session.peek().clone();
+        spawn(async move {
+            let result = api::change_settings(&pane, &change).await;
+            if *detail_session.peek() == session {
+                match result {
+                    Ok(value) => settings.set(Some(value)),
+                    Err(error) => settings_error.set(Some(error)),
+                }
+            }
+            settings_busy.set(false);
+        });
+    };
     // A choice belongs to the request that was visible when it was made.
     // A new request opens in front; the same request preserves the tab.
     let mut choice = use_signal(|| None::<(String, Tab)>);
@@ -355,6 +413,9 @@ fn AgentSession(
                     was_blocked = event_is_blocked(&event, was_blocked);
                     let session_changed = detail_session.peek().as_ref() != Some(&event.session);
                     if session_changed {
+                        settings.set(None);
+                        settings_error.set(None);
+                        settings_load_error.set(None);
                         match &event.session {
                             wire::DetailSession::Available(session) => conversations
                                 .write()
@@ -371,6 +432,7 @@ fn AgentSession(
                     }
                     revisions.clone_from(&event.revisions);
                     latest_event.set(Some(event));
+                    settings_trigger += 1;
                     if parts.conversation {
                         conversation_trigger += 1;
                     }
@@ -668,6 +730,15 @@ fn AgentSession(
                         }
                     }
                 }
+                if harness == Some("pi") {
+                    if let Some(value) = settings() {
+                        crate::model_picker::ModelPicker { choices: value.models, selected_model: value.model, selected_level: Some(value.thinking), busy: settings_busy(), on_change: change_settings }
+                    }
+                } else if matches!(harness, Some("claude" | "codex")) {
+                    crate::model_picker::ReadOnlyModel { model: retained.as_ref().and_then(|conversation| conversation.turns.iter().rev().find_map(|turn| match &turn.source {
+                        wire::Source::Harness { model, .. } => model.clone(), _ => None,
+                    })) }
+                }
                 if !plan_open && width() < 1400 {
                     div { class: "lead-tabs",
                         TabList { aria_label: "Lead view",
@@ -733,6 +804,7 @@ fn AgentSession(
                 if let Some(message) = pending_error() { Alert { "{message}" } }
                 if let Some(message) = (portal.board_error)() { Alert { "{message}" } }
                 if stream_error().is_some() { Status { "Live updates paused. Reconnecting." } }
+                if let Some(message) = settings_error().or(settings_load_error()) { Alert { "{message}" } }
                 if let Some(message) = action_error() { Alert { "{message}" } }
                 if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
             }

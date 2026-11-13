@@ -5,6 +5,86 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+fn model_picker_root() -> Element {
+    use portal_types::models::{ModelChoice, ModelRef, ThinkingLevel};
+    let model = ModelRef {
+        provider: "provider".into(),
+        id: "test-model".into(),
+    };
+    rsx! { crate::model_picker::ModelPicker {
+        choices: vec![ModelChoice { model: model.clone(), name: Some("Test model".into()), thinking: vec![ThinkingLevel::Off, ThinkingLevel::High] }],
+        selected_model: Some(model), selected_level: Some(ThinkingLevel::High), busy: false, on_change: move |_| {},
+    } }
+}
+
+#[test]
+fn model_picker_composes_searchable_model_and_supported_thinking_controls() {
+    let mut dom = VirtualDom::prebuilt(model_picker_root);
+    settle_catalogue(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(r#"aria-label="Model""#), "{html}");
+    assert!(html.contains(r#"role="combobox""#), "{html}");
+    assert!(html.contains(r#"name="model""#), "{html}");
+    assert!(html.contains(r#"aria-label="Thinking level""#), "{html}");
+    assert!(html.contains("high"), "{html}");
+    assert!(!html.contains("xhigh"), "{html}");
+}
+
+type ModelChangeHandle =
+    std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::models::SettingsChange>>>>>;
+
+fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
+    use portal_types::models::{ModelChoice, ModelRef, ThinkingLevel};
+    let mut requested = use_signal(|| None::<portal_types::models::SettingsChange>);
+    handle.set(Some(requested));
+    let choices: Vec<_> = (0..70)
+        .map(|index| ModelChoice {
+            model: ModelRef {
+                provider: "provider".into(),
+                id: format!("model-{index}"),
+            },
+            name: Some(format!("Choice {index}")),
+            thinking: vec![ThinkingLevel::Off, ThinkingLevel::High],
+        })
+        .collect();
+    let selected_model = Some(choices[0].model.clone());
+    rsx! { crate::model_picker::ModelPicker { choices, selected_model, selected_level: Some(ThinkingLevel::High), busy: false,
+        on_change: move |change| requested.set(Some(change)),
+    } }
+}
+
+#[test]
+fn model_picker_search_requests_a_model_without_optimistically_changing_it() {
+    let handle = ModelChangeHandle::default();
+    let mut dom = VirtualDom::new_with_props(changing_model_picker_root, handle.clone());
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    catalogue_query(&mut dom, "Choice 69");
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Choice 69"), "{html}");
+    assert!(!html.contains("Choice 68"), "{html}");
+    catalogue_key(&mut dom, Key::ArrowDown);
+    catalogue_key(&mut dom, Key::Enter);
+    let change = handle.get().unwrap().peek().clone().unwrap();
+    assert_eq!(change.model.unwrap().pattern(), "provider/model-69");
+    assert_eq!(change.thinking, None);
+    assert!(dioxus_ssr::render(&dom).contains(r#"value="provider/model-0""#));
+}
+
+#[test]
+fn model_picker_readonly_note_preserves_the_recorded_model() {
+    fn root() -> Element {
+        rsx! { crate::model_picker::ReadOnlyModel { model: Some("recorded-model".to_owned()) } }
+    }
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(root));
+    assert!(html.contains("Recorded model: recorded-model"), "{html}");
+    assert!(
+        html.contains("Model changes work for Pi sessions only"),
+        "{html}"
+    );
+    assert!(!html.contains("combobox"), "{html}");
+}
+
 type PortalHandle = std::rc::Rc<std::cell::Cell<Option<Signal<crate::app::PortalState>>>>;
 type DraftHandle = std::rc::Rc<std::cell::Cell<Option<Signal<String>>>>;
 
@@ -20,7 +100,92 @@ fn catalogue_root(props: (PortalHandle, DraftHandle)) -> Element {
     });
     let draft = use_context_provider(|| crate::agent_view::Draft(Signal::new(String::new()))).0;
     props.1.set(Some(draft));
-    rsx! { crate::new_lead::NewLead {} }
+    rsx! { crate::new_lead::NewLeadForm {} }
+}
+
+fn new_model_catalogue_root(
+    model_catalogue: Result<portal_types::models::ModelCatalogue, String>,
+) -> Element {
+    let publication = use_signal(|| {
+        let mut state = crate::app::PortalState::default();
+        state.update(Ok(catalogue_snapshot(&["owner/repo"], None, 1)), 1);
+        state
+    });
+    let catalogue = use_memo(move || publication.read().catalogue.clone());
+    use_context_provider(|| crate::app::CataloguePortal(catalogue));
+    use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
+    use_context_provider(|| crate::new_lead::NewConversation {
+        open: Signal::new(true),
+        repository: Signal::new(None),
+    });
+    use_context_provider(|| crate::agent_view::Draft(Signal::new("First message".into())));
+    rsx! { crate::new_lead::NewLeadForm { model_catalogue: Some(model_catalogue) } }
+}
+
+#[test]
+fn new_conversation_renders_catalogue_choices_and_pi_defaults() {
+    use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, ThinkingLevel};
+    let mut dom = VirtualDom::new_with_props(
+        new_model_catalogue_root,
+        Ok(ModelCatalogue {
+            models: vec![ModelChoice {
+                model: ModelRef {
+                    provider: "provider".into(),
+                    id: "reasoning".into(),
+                },
+                name: Some("Reasoning model".into()),
+                thinking: vec![ThinkingLevel::High],
+            }],
+            error: None,
+        }),
+    );
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    let header = html.split_once("</header>").unwrap().0;
+    assert!(header.contains("New conversation"), "{html}");
+    assert!(header.contains(r#"name="model""#), "{html}");
+    assert!(header.contains(r#"placeholder="Pi default""#), "{html}");
+    assert!(header.contains(">Pi default</span>"), "{html}");
+    catalogue_input_event_for(&dom, "model", "oninput", || {
+        FormData::from(CatalogueInput("reasoning".into()))
+    });
+    settle_catalogue(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Reasoning model"), "{html}");
+    assert!(html.contains("provider/reasoning"), "{html}");
+}
+
+#[test]
+fn new_conversation_model_catalogue_failures_alert_without_disabling_send() {
+    use portal_types::models::ModelCatalogue;
+    for result in [
+        Err("observation unavailable".into()),
+        Ok(ModelCatalogue {
+            models: vec![],
+            error: Some("Pi catalogue refresh failed".into()),
+        }),
+    ] {
+        let mut dom = VirtualDom::new_with_props(new_model_catalogue_root, result);
+        dom.rebuild_in_place();
+        settle_catalogue(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"role="alert""#), "{html}");
+        assert!(html.contains("Model list unavailable:"), "{html}");
+        assert!(
+            html.contains("The lead starts with Pi&#39;s default model."),
+            "{html}"
+        );
+        let send = html
+            .split("<button")
+            .find(|button| button.contains(r#"aria-label="Send message""#))
+            .unwrap();
+        let attributes = send.split('>').next().unwrap();
+        assert!(
+            !attributes.contains("disabled=true") && !attributes.contains(r#"disabled="true""#),
+            "{attributes}"
+        );
+    }
 }
 
 fn catalogue_snapshot(
@@ -48,14 +213,17 @@ fn catalogue_component_scopes(
         match dynamic {
             DynamicNode::Component(component) => {
                 if let Some(scope) = component.mounted_scope_id(index, node, dom) {
-                    if component.name.ends_with("::NewLead")
+                    if component.name.ends_with("::NewLeadForm")
                         || component.name.ends_with("::Composer")
                         || component.name.ends_with("::RepositoryPicker")
                         || component.name.ends_with("::ComboboxInput")
                         || component.name.ends_with("::Input")
                         || component.name.contains("::ComboboxOption")
                     {
-                        scopes.insert(format!("{}:{:?}", component.name, node.key), scope);
+                        scopes.insert(
+                            format!("{}:{:?}:{scope:?}", component.name, node.key),
+                            scope,
+                        );
                     }
                     if let Some(state) = dom.get_scope(scope) {
                         catalogue_component_scopes(dom, state.root_node(), scopes);
@@ -98,11 +266,25 @@ macro_rules! catalogue_event_converter {
 dioxus::html::with_html_event_groups!(catalogue_event_converter);
 
 fn catalogue_input_event<T: 'static>(dom: &VirtualDom, name: &str, data: impl Fn() -> T + 'static) {
-    let scope = catalogue_scopes(dom)
+    catalogue_input_event_for(dom, "repository", name, data);
+}
+
+fn catalogue_input_event_for<T: 'static>(
+    dom: &VirtualDom,
+    field: &str,
+    name: &str,
+    data: impl Fn() -> T + 'static,
+) {
+    let inputs: Vec<_> = catalogue_scopes(dom)
         .into_iter()
-        .find(|(name, _)| name.contains("::ComboboxInput"))
+        .filter(|(name, _)| name.contains("::ComboboxInput"))
         .map(|(_, scope)| scope)
-        .expect("mounted combobox input");
+        .collect();
+    let scope = inputs.iter().copied().find(|scope| {
+        dom.get_scope(*scope).unwrap().root_node().dynamic_attrs.iter().flatten().any(|attr| {
+            attr.name == "name" && matches!(&attr.value, dioxus::core::AttributeValue::Text(value) if value == field)
+        })
+    }).or_else(|| inputs.first().copied()).expect("mounted combobox input");
     let listener = dom
         .get_scope(scope)
         .unwrap()
@@ -178,7 +360,8 @@ impl dioxus::html::HasKeyboardData for CatalogueKey {
 fn settle_catalogue(dom: &mut VirtualDom) -> usize {
     use futures_util::FutureExt as _;
     let mut edits = 0;
-    for _ in 0..64 {
+    // Options register independently. Allow the bounded 1,000-model catalogue to settle.
+    for _ in 0..1024 {
         edits += dom.render_immediate_to_vec().edits.len();
         if dom.wait_for_work().now_or_never().is_none() {
             return edits;
@@ -437,7 +620,14 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
     settle_catalogue(&mut dom);
     let healthy = dioxus_ssr::render(&dom);
     assert!(healthy.contains("value=\"owner/beta\""), "{healthy}");
-    assert!(!healthy.contains("disabled=true"), "{healthy}");
+    assert!(
+        !healthy
+            .split_once("<form")
+            .unwrap()
+            .1
+            .contains("disabled=true"),
+        "{healthy}"
+    );
     let before = catalogue_scopes(&dom);
     // A serve restarted during a GitHub outage publishes its failure with no repositories.
     dom.in_runtime(|| {
@@ -459,7 +649,14 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
         "{failed}"
     );
     assert!(!failed.contains("No GitHub repositories found"), "{failed}");
-    assert!(!failed.contains("disabled=true"), "{failed}");
+    assert!(
+        !failed
+            .split_once("<form")
+            .unwrap()
+            .1
+            .contains("disabled=true"),
+        "{failed}"
+    );
     assert_eq!(catalogue_scopes(&dom), before);
     assert_eq!(draft(), "Keep this draft");
 }

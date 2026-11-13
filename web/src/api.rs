@@ -68,6 +68,30 @@ pub async fn fetch_conversation(
     read_json(response).await.map(Some)
 }
 
+/// Read the live Pi session's settings from its execution host.
+pub async fn agent_settings(
+    address: &portal_types::agents::AgentAddress,
+) -> Result<portal_types::models::AgentSettings, String> {
+    read_json(
+        Request::get(&agent_url(address, "settings"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .await
+}
+
+/// Apply a live change; the reply contains Pi's effective settings, not an optimistic selection.
+pub async fn change_settings(
+    address: &portal_types::agents::AgentAddress,
+    change: &portal_types::models::SettingsChange,
+) -> Result<portal_types::models::AgentSettings, String> {
+    let request = Request::post(&agent_url(address, "settings"))
+        .json(change)
+        .map_err(|error| error.to_string())?;
+    read_json(request.send().await.map_err(|error| error.to_string())?).await
+}
+
 /// Read a complete activity snapshot, separately from transcript and lifecycle reads.
 pub async fn fetch_activity(
     address: &portal_types::agents::AgentAddress,
@@ -175,15 +199,40 @@ pub async fn send_prompt(
     post(&agent_url(address, "prompt"), &body).await
 }
 
+/// Read the serve-owned model catalogue for new conversations.
+pub async fn models() -> Result<portal_types::models::ModelCatalogue, String> {
+    read_json(
+        Request::get(&format!("{BASE}/api/models"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .await
+}
+
+/// Build the first-message request, omitting settings that use Pi's defaults.
+pub(crate) fn create_lead_body(
+    repo: &str,
+    prompt: &str,
+    model: Option<portal_types::models::ModelRef>,
+    thinking: Option<portal_types::models::ThinkingLevel>,
+) -> portal_types::agents::CreateLeadBody {
+    portal_types::agents::CreateLeadBody {
+        repo: repo.to_owned(),
+        prompt: prompt.to_owned(),
+        model,
+        thinking,
+    }
+}
+
 /// Start a lead in `repo` with its first prompt. The result is the lead's pane.
 pub async fn create_lead(
     repo: &str,
     prompt: &str,
+    model: Option<portal_types::models::ModelRef>,
+    thinking: Option<portal_types::models::ThinkingLevel>,
 ) -> Result<portal_types::agents::AgentAddress, String> {
-    let body = portal_types::agents::CreateLeadBody {
-        repo: repo.to_owned(),
-        prompt: prompt.to_owned(),
-    };
+    let body = create_lead_body(repo, prompt, model, thinking);
     let response = Request::post(&format!("{BASE}/api/leads"))
         .json(&body)
         .map_err(|error| error.to_string())?

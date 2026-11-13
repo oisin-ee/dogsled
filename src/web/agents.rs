@@ -75,6 +75,8 @@ pub(crate) enum PeerOperation {
     Files,
     Event,
     Activity,
+    Settings,
+    ChangeSettings(portal_types::models::SettingsChange),
     Register(portal_types::agents::RegisterProducer),
     Publish(portal_types::agents::PublishActivity),
 }
@@ -263,6 +265,18 @@ async fn peer_read(
             Ok(view) => Json(view).into_response(),
             Err(error) => super::activity::failure(error),
         },
+        PeerOperation::Settings => {
+            super::settings::local(state, pane, crate::observation::settings::Command::Current)
+                .await
+        }
+        PeerOperation::ChangeSettings(change) => {
+            super::settings::local(
+                state,
+                pane,
+                crate::observation::settings::Command::Change(change),
+            )
+            .await
+        }
         PeerOperation::Register(body) => activity_command(
             &client,
             &pane,
@@ -573,6 +587,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents/{host}/{pane}/events", get(events))
         .route("/api/leads", post(create_lead))
         .route("/api/repos", get(repos))
+        .route("/api/models", get(models))
 }
 
 /// The serve-owned GitHub catalogue, without configuration or shell reads.
@@ -581,6 +596,21 @@ async fn repos(State(state): State<AppState>) -> Response {
     match tokio::task::spawn_blocking(move || {
         let published = ipc::Client::at(&directory).current(&ipc::Select::views(["repos"]))?;
         crate::observation::read::view::<portal_types::agents::RepoList>(&published, "repos")
+    })
+    .await
+    {
+        Ok(Ok(list)) => ([("cache-control", "no-store")], Json(list)).into_response(),
+        Ok(Err(error)) => super::observation_error(&error.to_string()),
+        Err(error) => super::observation_error(&format!("observation unavailable: {error}")),
+    }
+}
+
+/// The serve-owned Pi model catalogue, without launching Pi from a request.
+async fn models(State(state): State<AppState>) -> Response {
+    let directory = state.web.dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        let published = ipc::Client::at(&directory).current(&ipc::Select::views(["models"]))?;
+        crate::observation::read::view::<portal_types::models::ModelCatalogue>(&published, "models")
     })
     .await
     {
@@ -623,7 +653,13 @@ async fn create_lead(
             home: &launch.home,
             herdr: socket.as_ref(),
         };
-        crate::leads::create(&context, &body.repo, &body.prompt)
+        crate::leads::create(
+            &context,
+            &body.repo,
+            &body.prompt,
+            body.model,
+            body.thinking,
+        )
     })
     .await;
     match outcome {
@@ -1244,6 +1280,8 @@ mod tests {
         for bad in [
             r#"{"repo":"r"}"#,
             r#"{"repo":"r","prompt":"go","owner":"w1:p1"}"#,
+            r#"{"repo":"r","prompt":"go","thinking":"invalid"}"#,
+            r#"{"repo":"r","prompt":"go","model":{"provider":"p","id":"m","extra":true}}"#,
             "{",
         ] {
             let (status, body) = post_lead(leads(), bad).await;
@@ -1264,13 +1302,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        // A valid slug still reports unavailable launch capability as 503.
-        let (status, body) = post_lead(
-            state(None).with_leads(launch("")),
+        // Both request forms reach placement, rather than failing JSON validation.
+        for input in [
             r#"{"repo":"owner/repo","prompt":"go"}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            r#"{"repo":"owner/repo","prompt":"go","model":{"provider":"openai","id":"gpt-5"},"thinking":"high"}"#,
+        ] {
+            let (status, body) = post_lead(state(None).with_leads(launch("")), input).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        }
         assert!(!server.methods().iter().any(|m| m == "agent.prompt"));
     }
 
@@ -1284,6 +1323,45 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(body["error"].as_str().unwrap().contains("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn models_route_requires_a_publication() {
+        let response =
+            super::test_request(state(None), request(Method::GET, "/api/models", None)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(response).await;
+        assert!(body["error"].as_str().unwrap().contains("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn models_route_reads_the_published_catalogue_with_its_error() {
+        let state = state(None);
+        let catalogue = json!({"models":[{
+            "model":{"provider":"openai","id":"gpt-5"},"name":"GPT-5","thinking":["off","high"]
+        }],"error":"last refresh failed"});
+        let mut publisher = crate::observation::Publisher::new().unwrap();
+        publisher
+            .replace(crate::observation::Publication {
+                published_ms: 1,
+                sources: crate::observation::Sources::default(),
+                local: crate::observation::Domains::new(),
+                views: crate::observation::Domains::from([(
+                    "models".into(),
+                    json!({"data":catalogue,"gaps":[]}),
+                )]),
+                gaps: vec![],
+            })
+            .unwrap();
+        let mut server = ipc::Server::new(&state.web.dir).unwrap();
+        server.bind(publisher.subscribe()).unwrap();
+        let directory = state.web.dir.clone();
+        let response = super::test_request(state, request(Method::GET, "/api/models", None)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(body_json(response).await, catalogue);
+        drop(server);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// Capture native source records before installing a publication in the reader.
@@ -2008,6 +2086,58 @@ mod tests {
                 .is_none()
         );
         std::fs::remove_file(release).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_settings_routes_read_and_apply_on_the_named_host() {
+        let fixture = PeerFixture::new();
+        let settings = crate::observation::settings::tests::selection();
+        let change = portal_types::models::SettingsChange {
+            model: None,
+            thinking: Some(portal_types::models::ThinkingLevel::Low),
+        };
+        for (method, body, operation) in [
+            (Method::GET, None, PeerOperation::Settings),
+            (
+                Method::POST,
+                Some(serde_json::to_string(&change).unwrap()),
+                PeerOperation::ChangeSettings(change),
+            ),
+        ] {
+            fixture.shell.on(
+                &fixture.command("w1:p1", &operation),
+                &json!({"status":200,"body":settings}).to_string(),
+            );
+            let response = call(
+                fixture.state.clone(),
+                request(method, "/api/agents/netcup/w1:p1/settings", body.as_deref()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                body_json(response).await,
+                serde_json::to_value(&settings).unwrap()
+            );
+        }
+        let operation = PeerOperation::ChangeSettings(portal_types::models::SettingsChange {
+            model: None,
+            thinking: Some(portal_types::models::ThinkingLevel::High),
+        });
+        fixture.shell.on(&fixture.command("w1:p1", &operation), &json!({"status":409,"body":{"code":"settings_refused","error":"no credentials for provider"}}).to_string());
+        let response = call(
+            fixture.state.clone(),
+            request(
+                Method::POST,
+                "/api/agents/netcup/w1:p1/settings",
+                Some("{\"thinking\":\"high\"}"),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(response).await["error"],
+            "no credentials for provider"
+        );
     }
 
     #[tokio::test]

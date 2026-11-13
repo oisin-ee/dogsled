@@ -92,6 +92,21 @@
       "service_lanes": [],
       "transfer": 1
     },
+    "models": {
+      "error": null,
+      "models": [
+        {
+          "model": {
+            "id": "chat",
+            "provider": "fixture"
+          },
+          "name": "Fixture Chat",
+          "thinking": [
+            "off"
+          ]
+        }
+      ]
+    },
     "repos": {
       "error": "gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate: exit fake: no scripted response for `gh api user/repos?per_page=100&affiliation=owner,collaborator,organization_member --paginate`",
       "repos": []
@@ -297,6 +312,7 @@
       "findings": 10000,
       "headroom": 10000,
       "host": 10000,
+      "models": 10000,
       "questions": 10000,
       "repos": 10000,
       "reviews": 10000,
@@ -821,6 +837,24 @@
     },
     "jobs": {
       "data": [],
+      "gaps": []
+    },
+    "models": {
+      "data": {
+        "error": null,
+        "models": [
+          {
+            "model": {
+              "id": "chat",
+              "provider": "fixture"
+            },
+            "name": "Fixture Chat",
+            "thinking": [
+              "off"
+            ]
+          }
+        ]
+      },
       "gaps": []
     },
     "portal": {

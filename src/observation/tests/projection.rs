@@ -163,6 +163,62 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn models_projection_distinguishes_missing_malformed_and_retained_error() {
+    let fixture = Fixture::new();
+    let mut projector = project::Projector::default();
+    let models = json!([{
+        "model": {"provider": "openai", "id": "gpt-5"},
+        "name": "GPT-5", "thinking": ["off", "high"]
+    }]);
+    for (value, expected, malformed) in [
+        (None, None, false),
+        (Some(json!({"models":"broken"})), None, true),
+        (
+            Some(json!({"models": [], "error": null})),
+            Some(json!({"models": [], "error": null})),
+            false,
+        ),
+        (
+            Some(json!({"models": models, "error": null})),
+            Some(json!({"models": models, "error": null})),
+            false,
+        ),
+        (
+            Some(json!({"models": models, "error": "Pi model catalogue: failed"})),
+            Some(json!({"models": models, "error": "Pi model catalogue: failed"})),
+            false,
+        ),
+    ] {
+        let mut input = fixture.input();
+        if let Some(value) = value {
+            input.local.insert("models".into(), value);
+        }
+        let local = projector.inputs(&fixture.fleet(), &input);
+        let calls = fixture.shell.calls.lock().unwrap().len();
+        project::derive(
+            &local,
+            vec![fixture.local.clone()],
+            &(&fixture.policy).into(),
+            &mut input,
+        )
+        .unwrap();
+        assert_eq!(
+            input.views["models"]["data"],
+            expected.unwrap_or(Value::Null)
+        );
+        assert_eq!(
+            input.gaps.iter().any(|gap| gap.domain == "models"),
+            malformed
+        );
+        assert_eq!(
+            input.views["models"]["gaps"].as_array().unwrap().len(),
+            usize::from(malformed)
+        );
+        assert_eq!(fixture.shell.calls.lock().unwrap().len(), calls);
+    }
+}
+
+#[test]
 fn catalogue_projection_distinguishes_missing_malformed_empty_and_refresh_failure() {
     let fixture = Fixture::new();
     let mut projector = project::Projector::default();
@@ -799,9 +855,9 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
     )
     .unwrap();
     for (key, view) in &input.views {
-        // The agent list and the GitHub catalogue do not derive from the failed capture;
-        // the catalogue reports its own read failure in `data.error`.
-        if key == "agents" || key == "repos" {
+        // Agents and catalogues do not derive from the failed capture;
+        // catalogues report their own read failure in `data.error`.
+        if matches!(key.as_str(), "agents" | "repos" | "models") {
             assert_eq!(view["gaps"], json!([]));
             continue;
         }

@@ -35,6 +35,84 @@ fn record(id: &str) -> Record {
 }
 
 #[test]
+fn peer_delivery_without_model_settings_still_parses() {
+    let delivery: super::routing::Delivery = serde_json::from_value(json!({
+        "version": 1, "id": "request", "repo": "owner/repo", "prompt": "go",
+        "validity": Validity::new(100), "host": "netcup"
+    }))
+    .unwrap();
+    assert_eq!(delivery.model, None);
+    assert_eq!(delivery.thinking, None);
+    let mut wire = serde_json::to_value(delivery).unwrap();
+    assert!(wire.get("model").is_none());
+    wire["model"] = json!({"provider":"openai", "id":"gpt-5"});
+    wire["thinking"] = json!("high");
+    let selected: super::routing::Delivery = serde_json::from_value(wire).unwrap();
+    assert_eq!(selected.model.unwrap().pattern(), "openai/gpt-5");
+    assert_eq!(selected.thinking, Some(ThinkingLevel::High));
+}
+
+#[test]
+fn lead_launch_passes_model_settings_to_native_pi() {
+    let ledger = ledger();
+    std::fs::create_dir_all(&ledger.dir).unwrap();
+    let path = ledger.dir.display().to_string();
+    let shell = Fake::new();
+    shell
+        .on(&format!("git -C {path} rev-parse --show-toplevel"), &path)
+        .on(
+            &format!("herdr worktree list --cwd {path}"),
+            r#"{"result":{"worktrees":[]}}"#,
+        )
+        .on(
+            &format!("herdr workspace create --cwd {path} --no-focus"),
+            r#"{"result":{"root_pane":{"pane_id":"w1:p1","terminal_id":"lead-terminal"}}}"#,
+        );
+    lead_panes(&shell, "lead-terminal", "idle");
+    let server = crate::herdr_socket::fake::Server::start(|_, _| json!({"result":{}}));
+    let socket = server.client();
+    let context = CreateContext {
+        shell: &shell,
+        ledger: &ledger,
+        config_path: std::path::Path::new("unused"),
+        home: &path,
+        herdr: Some(&socket),
+    };
+    let model = ModelRef {
+        provider: "openai".into(),
+        id: "gpt-5".into(),
+    };
+    for (id, selected, thinking, suffix) in [
+        ("defaults", None, None, ""),
+        (
+            "selected",
+            Some(&model),
+            Some(ThinkingLevel::High),
+            " -- --model openai/gpt-5 --thinking high",
+        ),
+        (
+            "thinking",
+            None,
+            Some(ThinkingLevel::Off),
+            " -- --thinking off",
+        ),
+        ("model", Some(&model), None, " -- --model openai/gpt-5"),
+    ] {
+        let mut saved = record(id);
+        saved.repository.path.clone_from(&path);
+        saved.validity = Validity::new(crate::ledger::now_ms());
+        lead_store::insert(&ledger, &saved).unwrap();
+        let command = format!("herdr agent start lead-{id} --kind pi --pane w1:p1{suffix}");
+        shell.on(&command, r#"{"result":{}}"#);
+        launch(&context, &mut saved, selected, thinking).unwrap();
+        assert_eq!(saved.phase, Phase::Ready);
+        assert!(calls(&shell).contains(&command));
+    }
+    assert_eq!(server.methods(), vec!["agent.prompt"; 4]);
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
 fn lead_records_round_trip() {
     let ledger = ledger();
     let mut saved = record("request");

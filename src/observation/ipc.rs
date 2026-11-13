@@ -21,7 +21,7 @@ use tokio::sync::{oneshot, watch};
 
 /// The size of one frame, not of one reply. A larger reply has more frames.
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = super::settings::MAX_BODY;
 const MAX_CLIENTS: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET: &str = "observation.sock";
@@ -37,6 +37,7 @@ enum Operation {
     Activity,
     ActivitySubscribe,
     ActivityCommand,
+    Settings,
 }
 
 impl Operation {
@@ -50,6 +51,7 @@ impl Operation {
             Self::Activity => "activity",
             Self::ActivitySubscribe => "activity_subscribe",
             Self::ActivityCommand => "activity_command",
+            Self::Settings => "settings",
         }
     }
 }
@@ -67,6 +69,8 @@ struct Request {
     pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activity: Option<super::live_activity::Command>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings: Option<super::settings::Command>,
     /// Absent: the whole publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     select: Option<Chosen>,
@@ -266,6 +270,15 @@ impl Drop for Server {
     }
 }
 
+#[derive(Clone)]
+struct Services {
+    activity: Option<(
+        super::live_activity::Commands,
+        super::live_activity::ActivityFeed,
+    )>,
+    settings: super::settings::Authority,
+}
+
 async fn serve(
     listener: tokio::net::UnixListener,
     receiver: watch::Receiver<Option<Arc<Frame>>>,
@@ -278,10 +291,24 @@ async fn serve(
         super::live_activity::ActivityFeed,
     )>,
 ) {
+    let settings = super::settings::Authority::default();
+    let services = Services { activity, settings };
+    let mut observed = receiver.clone();
+    let mut observing = true;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut clients = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             _ = &mut stopped => break,
+            _ = tick.tick() => {
+                let frame = observed.borrow_and_update().clone();
+                services.settings.observe(|| frame.as_ref().filter(|_| observing).map(|frame| frame.published.as_ref()));
+            },
+            changed = observed.changed(), if observing => {
+                observing = changed.is_ok();
+                let frame = observed.borrow_and_update().clone();
+                services.settings.observe(|| frame.as_ref().filter(|_| observing).map(|frame| frame.published.as_ref()));
+            },
             result = clients.join_next(), if !clients.is_empty() => { let _ = result; },
             accepted = listener.accept() => {
                 let Ok((socket, _)) = accepted else { break; };
@@ -290,8 +317,8 @@ async fn serve(
                     let interests = interests.clone();
                     let dirty = dirty.clone();
                     let details = details.clone();
-                    let activity = activity.clone();
-                    clients.spawn(connection(socket, receiver, interests, dirty, details, activity));
+                    let services = services.clone();
+                    clients.spawn(connection(socket, receiver, interests, dirty, details, services));
                 } else {
                     eprintln!("dogsled observation accept: client refused: MAX_CLIENTS ({MAX_CLIENTS}) reached");
                 }
@@ -365,16 +392,13 @@ async fn connection(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
-    activity: Option<(
-        super::live_activity::Commands,
-        super::live_activity::ActivityFeed,
-    )>,
+    services: Services,
 ) {
     let (operation, result) = match tokio::time::timeout(TIMEOUT, request(&socket)).await {
         Ok(Ok(request)) => (
             request.operation.name(),
             respond(
-                socket, receiver, interests, dirty, details, activity, request,
+                socket, receiver, interests, dirty, details, services, request,
             )
             .await,
         ),
@@ -394,10 +418,7 @@ async fn respond(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
-    activity: Option<(
-        super::live_activity::Commands,
-        super::live_activity::ActivityFeed,
-    )>,
+    services: Services,
     request: Request,
 ) -> Result<()> {
     if request.version != VERSION {
@@ -408,14 +429,36 @@ async fn respond(
         )
         .await;
     }
+    if matches!(request.operation, Operation::Settings) {
+        let frame = receiver.borrow().clone();
+        let publication = frame
+            .as_ref()
+            .filter(|_| receiver.has_changed().is_ok())
+            .map(|frame| frame.published.as_ref());
+        if matches!(
+            request.settings.as_ref(),
+            Some(super::settings::Command::Publish(_))
+        ) {
+            services.settings.refresh_bindings(publication);
+        } else {
+            services.settings.observe(|| publication);
+        }
+        return settings_connection(&socket, request, services.settings).await;
+    }
     if matches!(request.operation, Operation::ActivityCommand) {
-        return activity_command(&socket, request, activity.map(|(commands, _)| commands)).await;
+        return activity_command(
+            &socket,
+            request,
+            services.activity.map(|(commands, _)| commands),
+        )
+        .await;
     }
     if matches!(
         request.operation,
         Operation::Activity | Operation::ActivitySubscribe
     ) {
-        return activity_connection(&socket, activity.map(|(_, feed)| feed), request).await;
+        return activity_connection(&socket, services.activity.map(|(_, feed)| feed), request)
+            .await;
     }
     if matches!(request.operation, Operation::Detail) {
         let Some(pane) = request.pane.as_deref() else {
@@ -569,6 +612,53 @@ async fn retry_command(
     let mut bytes = serde_json::to_vec(&RetryAck {
         retry_token: dirty.retry_peer(selected.host.id),
     })?;
+    bytes.push(b'\n');
+    write(socket, &bytes).await
+}
+
+async fn settings_connection(
+    socket: &tokio::net::UnixStream,
+    request: Request,
+    authority: super::settings::Authority,
+) -> Result<()> {
+    use super::settings::{Command, Failure};
+    let Some(pane) = request.pane else {
+        return failure(socket, "invalid_settings", "missing settings pane").await;
+    };
+    let Some(command) = request.settings else {
+        return failure(socket, "invalid_settings", "missing settings command").await;
+    };
+    if let Command::Subscribe(evidence) = command {
+        let subscription = authority.subscribe(&pane, &evidence);
+        let initial: std::result::Result<(), Failure> =
+            subscription.as_ref().map(|_| ()).map_err(Clone::clone);
+        let mut bytes = serde_json::to_vec(&initial)?;
+        bytes.push(b'\n');
+        write(socket, &bytes).await?;
+        let Ok(mut requests) = subscription else {
+            return Ok(());
+        };
+        loop {
+            tokio::select! {
+                request = requests.recv() => {
+                    let Some(request) = request else { return Ok(()); };
+                    let mut bytes = serde_json::to_vec(&request)?;
+                    bytes.push(b'\n');
+                    write(socket, &bytes).await?;
+                }
+                ready = socket.readable() => {
+                    ready?;
+                    let mut byte = [0];
+                    match socket.try_read(&mut byte) {
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
+                        _ => return Ok(()),
+                    }
+                }
+            }
+        }
+    }
+    let result = authority.execute(pane, command).await;
+    let mut bytes = serde_json::to_vec(&result)?;
     bytes.push(b'\n');
     write(socket, &bytes).await
 }
@@ -823,6 +913,7 @@ impl Client {
                 host: None,
                 pane: pane.map(str::to_owned),
                 activity: None,
+                settings: None,
                 select,
             },
         )?;
@@ -845,6 +936,7 @@ impl Client {
                 host: Some(host.into()),
                 pane: None,
                 activity: None,
+                settings: None,
                 select: None,
             },
         )?;
@@ -875,6 +967,7 @@ impl Client {
                 host: None,
                 pane: None,
                 activity: None,
+                settings: None,
                 select: None,
             },
         )?;
@@ -887,6 +980,79 @@ impl Client {
             )));
         }
         serde_json::from_value(value).map_err(Into::into)
+    }
+
+    fn settings_socket(&self, pane: &str, command: super::settings::Command) -> Result<UnixStream> {
+        let mut socket = self.connect()?;
+        socket.set_write_timeout(Some(TIMEOUT))?;
+        socket.set_read_timeout(Some(super::settings::WAIT + Duration::from_secs(2)))?;
+        serde_json::to_writer(
+            &mut socket,
+            &Request {
+                version: VERSION,
+                operation: Operation::Settings,
+                peer: None,
+                host: None,
+                pane: Some(pane.into()),
+                activity: None,
+                settings: Some(command),
+                select: None,
+            },
+        )?;
+        socket.write_all(b"\n")?;
+        Ok(socket)
+    }
+
+    pub fn settings(
+        &self,
+        pane: &str,
+        command: super::settings::Command,
+    ) -> std::result::Result<portal_types::models::AgentSettings, super::settings::Failure> {
+        let exchange = || -> Result<_> {
+            let socket = self.settings_socket(pane, command)?;
+            let mut bytes = Vec::new();
+            BufReader::new(socket)
+                .take(super::settings::MAX_BODY as u64 + 1)
+                .read_until(b'\n', &mut bytes)?;
+            if bytes.len() > super::settings::MAX_BODY || bytes.last() != Some(&b'\n') {
+                return Err(Error::Invalid("invalid settings reply".into()));
+            }
+            Ok(serde_json::from_slice::<std::result::Result<_, _>>(&bytes)?)
+        };
+        exchange().map_err(|error| {
+            super::settings::Failure::new("settings_unavailable", &error.to_string())
+        })?
+    }
+
+    pub fn settings_subscribe(
+        &self,
+        pane: &str,
+        evidence: portal_types::agents::ProducerEvidence,
+    ) -> std::result::Result<SettingsSubscription, super::settings::Failure> {
+        let connect = || -> Result<_> {
+            let socket =
+                self.settings_socket(pane, super::settings::Command::Subscribe(evidence))?;
+            let mut reader = BufReader::new(socket);
+            let mut bytes = Vec::new();
+            (&mut reader)
+                .take(super::settings::MAX_BODY as u64 + 1)
+                .read_until(b'\n', &mut bytes)?;
+            if bytes.len() > super::settings::MAX_BODY || bytes.last() != Some(&b'\n') {
+                return Err(Error::Invalid("invalid settings subscription".into()));
+            }
+            let result: std::result::Result<(), super::settings::Failure> =
+                serde_json::from_slice(&bytes)?;
+            reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(100)))?;
+            Ok(result.map(|()| SettingsSubscription {
+                reader,
+                bytes: Vec::new(),
+            }))
+        };
+        connect().map_err(|error| {
+            super::settings::Failure::new("settings_unavailable", &error.to_string())
+        })?
     }
 
     pub fn activity_command(
@@ -909,6 +1075,7 @@ impl Client {
                     host: None,
                     pane: Some(pane.into()),
                     activity: Some(command),
+                    settings: None,
                     select: None,
                 },
             )?;
@@ -1014,6 +1181,39 @@ fn start_subscription<T: Wire>(
         shared,
         thread,
         seen: 0,
+    }
+}
+
+pub(crate) struct SettingsSubscription {
+    reader: BufReader<UnixStream>,
+    bytes: Vec<u8>,
+}
+
+impl SettingsSubscription {
+    pub fn next(&mut self) -> Result<Option<super::settings::Request>> {
+        let remaining = super::settings::MAX_BODY.saturating_sub(self.bytes.len()) + 1;
+        match (&mut self.reader)
+            .take(remaining as u64)
+            .read_until(b'\n', &mut self.bytes)
+        {
+            Ok(0) => return Err(Error::Invalid("settings subscription closed".into())),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => (),
+        }
+        if self.bytes.len() > super::settings::MAX_BODY || self.bytes.last() != Some(&b'\n') {
+            return Err(Error::Invalid("invalid settings request frame".into()));
+        }
+        let request = serde_json::from_slice(&self.bytes)?;
+        self.bytes.clear();
+        Ok(Some(request))
     }
 }
 
