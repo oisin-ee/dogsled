@@ -11,6 +11,7 @@ pub mod components;
 mod conversations;
 mod files;
 mod highlight;
+mod model_picker;
 mod new_lead;
 mod notice;
 mod question_form;

@@ -5,6 +5,86 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+fn model_picker_root() -> Element {
+    use portal_types::models::{ModelChoice, ModelRef, ThinkingLevel};
+    let model = ModelRef {
+        provider: "provider".into(),
+        id: "test-model".into(),
+    };
+    rsx! { crate::model_picker::ModelPicker {
+        choices: vec![ModelChoice { model: model.clone(), name: Some("Test model".into()), thinking: vec![ThinkingLevel::Off, ThinkingLevel::High] }],
+        selected_model: Some(model), selected_level: ThinkingLevel::High, busy: false, on_change: move |_| {},
+    } }
+}
+
+#[test]
+fn model_picker_composes_searchable_model_and_supported_thinking_controls() {
+    let mut dom = VirtualDom::prebuilt(model_picker_root);
+    settle_catalogue(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(r#"aria-label="Model""#), "{html}");
+    assert!(html.contains(r#"role="combobox""#), "{html}");
+    assert!(html.contains(r#"name="model""#), "{html}");
+    assert!(html.contains(r#"aria-label="Thinking level""#), "{html}");
+    assert!(html.contains("high"), "{html}");
+    assert!(!html.contains("xhigh"), "{html}");
+}
+
+type ModelChangeHandle =
+    std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::models::SettingsChange>>>>>;
+
+fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
+    use portal_types::models::{ModelChoice, ModelRef, ThinkingLevel};
+    let mut requested = use_signal(|| None::<portal_types::models::SettingsChange>);
+    handle.set(Some(requested));
+    let choices: Vec<_> = (0..70)
+        .map(|index| ModelChoice {
+            model: ModelRef {
+                provider: "provider".into(),
+                id: format!("model-{index}"),
+            },
+            name: Some(format!("Choice {index}")),
+            thinking: vec![ThinkingLevel::Off, ThinkingLevel::High],
+        })
+        .collect();
+    let selected_model = Some(choices[0].model.clone());
+    rsx! { crate::model_picker::ModelPicker { choices, selected_model, selected_level: ThinkingLevel::High, busy: false,
+        on_change: move |change| requested.set(Some(change)),
+    } }
+}
+
+#[test]
+fn model_picker_search_requests_a_model_without_optimistically_changing_it() {
+    let handle = ModelChangeHandle::default();
+    let mut dom = VirtualDom::new_with_props(changing_model_picker_root, handle.clone());
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    catalogue_query(&mut dom, "Choice 69");
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Choice 69"), "{html}");
+    assert!(!html.contains("Choice 68"), "{html}");
+    catalogue_key(&mut dom, Key::ArrowDown);
+    catalogue_key(&mut dom, Key::Enter);
+    let change = handle.get().unwrap().peek().clone().unwrap();
+    assert_eq!(change.model.unwrap().pattern(), "provider/model-69");
+    assert_eq!(change.thinking, None);
+    assert!(dioxus_ssr::render(&dom).contains(r#"value="provider/model-0""#));
+}
+
+#[test]
+fn model_picker_readonly_note_preserves_the_recorded_model() {
+    fn root() -> Element {
+        rsx! { crate::model_picker::ReadOnlyModel { model: Some("recorded-model".to_owned()) } }
+    }
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(root));
+    assert!(html.contains("Recorded model: recorded-model"), "{html}");
+    assert!(
+        html.contains("Model changes work for Pi sessions only"),
+        "{html}"
+    );
+    assert!(!html.contains("combobox"), "{html}");
+}
+
 type PortalHandle = std::rc::Rc<std::cell::Cell<Option<Signal<crate::app::PortalState>>>>;
 type DraftHandle = std::rc::Rc<std::cell::Cell<Option<Signal<String>>>>;
 
@@ -178,7 +258,8 @@ impl dioxus::html::HasKeyboardData for CatalogueKey {
 fn settle_catalogue(dom: &mut VirtualDom) -> usize {
     use futures_util::FutureExt as _;
     let mut edits = 0;
-    for _ in 0..64 {
+    // Options register independently. Allow the bounded 1,000-model catalogue to settle.
+    for _ in 0..1024 {
         edits += dom.render_immediate_to_vec().edits.len();
         if dom.wait_for_work().now_or_never().is_none() {
             return edits;
