@@ -301,12 +301,14 @@ fn capture_expected(
     let (panes, terminals) = crate::cleanup::pane_snapshot(shell)?;
     let owners = local_owners(ledger, pane)?;
     let target = panes.iter().find(|p| p.pane_id == pane);
-    let cwd = target.and_then(|p| p.cwd.as_deref());
+    let saved = crate::launch::checkout_for_pane(ledger, pane)?;
+    let cwd = target
+        .and_then(|p| p.cwd.as_deref())
+        .or_else(|| saved.as_ref().map(|tree| tree.path.as_str()));
     let capture = cwd
         .map(|cwd| worktree::capture_close(shell, cwd))
         .transpose()?
         .flatten();
-    let saved = crate::launch::checkout_for_pane(ledger, pane)?;
     let observation = capture
         .map(|capture| capture.bind_saved(saved.as_ref()))
         .transpose()?;
@@ -377,26 +379,22 @@ fn with_expected<T>(
         observation,
         planned,
     } = capture_expected(shell, ledger, pane, existing)?;
+    let pane_absent = panes.iter().all(|target| target.pane_id != pane);
     let (live, directory) = match &observation {
         Some(worktree::CloseObservation::Live { tree, pin }) => (Some(tree), pin.as_ref()),
         Some(worktree::CloseObservation::Missing) | None => (None, None),
     };
+    let context = CloseContext {
+        mode,
+        request,
+        existing,
+        terminal: terminals.get(pane).map(String::as_str),
+        directory,
+    };
     let Some(planned) = planned else {
         let target = validate_target(shell, &panes, pane, caller)?;
         return reconcile(remove_target(
-            shell,
-            ledger,
-            target,
-            &panes,
-            caller,
-            None,
-            CloseContext {
-                mode,
-                request,
-                existing,
-                terminal: terminals.get(pane).map(String::as_str),
-                directory: None,
-            },
+            shell, ledger, target, &panes, caller, None, context,
         )?);
     };
     let repo = planned.repo.clone();
@@ -413,38 +411,39 @@ fn with_expected<T>(
         {
             return Err(refuse("pane moved to another checkout"));
         }
-        let absent = worktree::verified_absent(lifecycle, shell, &planned)
-            || (saved.is_none()
-                && live.is_some_and(|tree| {
-                    worktree::verified_absent_unmarked(lifecycle, shell, tree)
-                }));
-        if !absent && matches!(observation, Some(worktree::CloseObservation::Missing)) {
-            return Err(refuse("checkout reappeared"));
-        }
-        let planned = if absent {
-            planned
-        } else {
-            establish_close_identity(lifecycle, shell, planned, live, directory, saved.is_none())?
+        let (planned, absent) = observed_expectation(
+            lifecycle,
+            shell,
+            planned,
+            observation.as_ref(),
+            saved.is_some(),
+        )?;
+        let close = AbsentClose {
+            pane,
+            caller,
+            planned,
+            terminal: context.terminal,
+            owners: &owners,
+            saved: saved.is_some(),
         };
-        if absent || worktree::verified_absent(lifecycle, shell, &planned) {
-            return reconcile(close_absent(
-                shell,
-                ledger,
-                AbsentClose {
-                    pane,
-                    caller,
-                    planned,
-                    terminal: terminals.get(pane).map(String::as_str),
-                    owners: &owners,
-                    saved: saved.is_some(),
-                },
-            )?);
+        if absent {
+            return reconcile(close_absent(shell, ledger, close)?);
         }
         // Every removal needs an observation and its original directory handles.
         let live = live.ok_or_else(|| refuse("checkout identity is unreadable"))?;
         let directory = directory.ok_or_else(|| refuse("checkout identity is unreadable"))?;
         directory.validate(live)?;
         let panes = crate::cleanup::current_panes(shell)?;
+        if pane_absent
+            && panes.iter().all(|target| target.pane_id != pane)
+            && saved.is_some()
+            && mode == Guard::Clean
+            && existing.is_none()
+        {
+            return reconcile(remove_without_pane(
+                shell, ledger, lifecycle, live, close, directory,
+            )?);
+        }
         let target = validate_target(shell, &panes, pane, caller)?;
         directory.validate(live)?;
         reconcile(remove_target(
@@ -453,16 +452,36 @@ fn with_expected<T>(
             target,
             &panes,
             caller,
-            Some((lifecycle, &planned)),
-            CloseContext {
-                mode,
-                request,
-                existing,
-                terminal: terminals.get(pane).map(String::as_str),
-                directory: Some(directory),
-            },
+            Some((lifecycle, &close.planned)),
+            context,
         )?)
     })
+}
+
+fn observed_expectation(
+    lifecycle: &worktree::Guard,
+    shell: &dyn crate::shell::Shell,
+    planned: crate::cleanup::Tree,
+    observation: Option<&worktree::CloseObservation>,
+    saved: bool,
+) -> Result<(crate::cleanup::Tree, bool)> {
+    let (live, directory) = match observation {
+        Some(worktree::CloseObservation::Live { tree, pin }) => (Some(tree), pin.as_ref()),
+        Some(worktree::CloseObservation::Missing) | None => (None, None),
+    };
+    let absent = worktree::verified_absent(lifecycle, shell, &planned)
+        || (!saved
+            && live.is_some_and(|tree| worktree::verified_absent_unmarked(lifecycle, shell, tree)));
+    if !absent && matches!(observation, Some(worktree::CloseObservation::Missing)) {
+        return Err(refuse("checkout reappeared"));
+    }
+    let planned = if absent {
+        planned
+    } else {
+        establish_close_identity(lifecycle, shell, planned, live, directory, !saved)?
+    };
+    let absent = absent || worktree::verified_absent(lifecycle, shell, &planned);
+    Ok((planned, absent))
 }
 
 fn owner_identities(owners: &[crate::items::Item]) -> Vec<crate::preservation::CloseRequest> {
@@ -538,6 +557,75 @@ fn close_absent(
         }),
         pane_closed: false,
         retained_branch: None,
+        recovery: None,
+    })
+}
+
+/// A vanished pane cannot authorize preservation. Remove only work already held by refs,
+/// using the saved launch owner and the ordinary loss and checkout safety checks.
+fn remove_without_pane(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    lifecycle: &worktree::Guard,
+    live: &worktree::Linked,
+    close: AbsentClose<'_>,
+    directory: &worktree::Pin,
+) -> Result<Closed> {
+    let AbsentClose {
+        pane,
+        caller,
+        planned,
+        owners,
+        ..
+    } = close;
+    validate_absent_target(shell, ledger, pane, caller, &planned, None, owners)?;
+    crate::launch::validate_checkout_owner(ledger, pane, None, None)?;
+    let saved = crate::launch::checkout_for_pane(ledger, pane)?
+        .ok_or_else(|| refuse("saved checkout disappeared"))?;
+    if close_expectation(Some(&saved), Some(live)).as_ref() != Some(&planned) {
+        return Err(refuse("worktree identity changed"));
+    }
+    let tree = validate_checkout(shell, None, &planned)?;
+    directory.validate(&tree)?;
+    if worktree::lock_reason(shell, &tree.checkout, &tree.path)?.as_deref() != Some(AGENT_LOCK) {
+        return Err(refuse("checkout is not a locked agent worktree"));
+    }
+    outside(&tree, caller)?;
+    let evidence = unsaved(shell, ledger, &tree, caller, Guard::Clean)?;
+    let retained_branch = retained_branch(shell, &tree, Guard::Clean)?;
+    let workspace = worktree::workspace(shell, &tree.checkout, &tree.path)?;
+    let panes = crate::cleanup::current_panes(shell)?;
+    let holders = worktree::holders(&panes, &tree.path, workspace.as_deref());
+    if shared(shell, ledger, pane, &holders)? {
+        return Err(refuse("shared checkout ownership; checkout remains"));
+    }
+    validate_absent_target(shell, ledger, pane, caller, &planned, None, owners)?;
+    crate::launch::validate_checkout_owner(ledger, pane, None, None)?;
+    validate_checkout(shell, None, &planned)?;
+    directory.validate(&tree)?;
+    let removed = worktree::remove(
+        shell,
+        ledger,
+        &tree,
+        worktree::Removal {
+            guard: lifecycle,
+            workspace: workspace.as_deref(),
+            holders: &holders,
+            caller_workspace: caller.workspace.as_deref(),
+            evidence: &evidence,
+        },
+    )?;
+    Ok(Closed {
+        pane: pane.into(),
+        worktree: Some(Worktree {
+            path: tree.path,
+            branch: tree.branch,
+            workspace,
+            branch_deleted: removed.branch_deleted,
+            anchor_closed: removed.anchor_closed,
+        }),
+        pane_closed: false,
+        retained_branch,
         recovery: None,
     })
 }
@@ -698,7 +786,7 @@ fn validate_absent_target(
 /// Repeat the captured-resource check before entering any close effect.
 fn validate_checkout(
     shell: &dyn crate::shell::Shell,
-    target: &crate::probe::Pane,
+    target: Option<&crate::probe::Pane>,
     expected: &crate::cleanup::Tree,
 ) -> Result<worktree::Linked> {
     let now = worktree::linked_or_detached(shell, &expected.path)?
@@ -713,7 +801,9 @@ fn validate_checkout(
     if now.head != expected.head {
         return Err(refuse("HEAD moved before close"));
     }
-    worktree::validate_pane_checkout(shell, target, &now)?;
+    if let Some(target) = target {
+        worktree::validate_pane_checkout(shell, target, &now)?;
+    }
     Ok(now)
 }
 
@@ -834,7 +924,7 @@ fn remove_target(
     let guard = context.mode;
     let pane = target.pane_id.as_str();
     let validated = lifecycle
-        .map(|(_, expected)| validate_checkout(shell, target, expected))
+        .map(|(_, expected)| validate_checkout(shell, Some(target), expected))
         .transpose()?;
     // An explicit recovery may end a stranded shell without removing its checkout or
     // assigning an outcome to the interrupted launch. Automatic cleanup cannot do this.

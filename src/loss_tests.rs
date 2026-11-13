@@ -1777,7 +1777,7 @@ fn external_remove(repo: &Repo) {
     );
 }
 
-fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
+fn close_preserves_head_moved_while_waiting(saved_identity: bool, pane_open: bool) {
     use std::sync::atomic::Ordering::SeqCst;
     let fixture = lifecycle_fixture(false);
     let captured = recorded(&fixture.ledger)[0].clone();
@@ -1813,6 +1813,7 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
     let request_head = git(&fixture.repo.tree, &["rev-parse", "HEAD"]);
     let (tx, rx) = std::sync::mpsc::channel();
     let mut shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.open.store(pane_open, SeqCst);
     shell.lock_attempt = Some(tx);
     std::thread::scope(|scope| {
         let close =
@@ -1852,7 +1853,7 @@ fn close_preserves_head_moved_while_waiting(saved_identity: bool) {
         git(&fixture.repo.tree, &["log", "-1", "--format=%s"]).trim(),
         "concurrent work"
     );
-    assert!(shell.open.load(SeqCst));
+    assert_eq!(shell.open.load(SeqCst), pane_open);
     assert_eq!(shell.teardowns.load(SeqCst), 0);
 }
 
@@ -2026,12 +2027,14 @@ fn close_refuses_pane_moved_during_locked_teardown() {
 
 #[test]
 fn saved_close_preserves_head_moved_while_waiting() {
-    close_preserves_head_moved_while_waiting(true);
+    for pane_open in [true, false] {
+        close_preserves_head_moved_while_waiting(true, pane_open);
+    }
 }
 
 #[test]
 fn discovered_close_preserves_head_moved_while_waiting() {
-    close_preserves_head_moved_while_waiting(false);
+    close_preserves_head_moved_while_waiting(false, true);
 }
 
 fn unmark_checkout(fixture: &Landed) -> PathBuf {
@@ -2544,6 +2547,135 @@ fn saved_close_accepts_work_committed_before_the_request() {
     assert!(!shell.open.load(SeqCst));
     assert_eq!(shell.teardowns.load(SeqCst), 1);
     assert_eq!(recorded(&fixture.ledger), []);
+}
+
+#[test]
+fn saved_close_without_a_pane_removes_work_committed_before_the_request() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let fixture = lifecycle_fixture(false);
+    save_close_checkout(&fixture);
+    let captured = recorded(&fixture.ledger)[0].clone();
+    git(
+        &fixture.repo.tree,
+        &["commit", "-q", "--allow-empty", "-m", "finished work"],
+    );
+    git(&fixture.repo.repo, &["merge", "-q", "feature"]);
+    git(&fixture.repo.repo, &["push", "-q", "origin", "main"]);
+    assert_ne!(
+        captured.head,
+        git(&fixture.repo.tree, &["rev-parse", "HEAD"]).trim()
+    );
+    let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+    shell.open.store(false, SeqCst);
+    let closed = crate::close::local(
+        &shell,
+        &fixture.ledger,
+        "placed-shell",
+        &crate::close::Caller::default(),
+        crate::close::Guard::Clean,
+    )
+    .unwrap();
+    assert!(closed.worktree.is_some());
+    assert!(!closed.pane_closed);
+    assert!(!fixture.repo.tree.exists());
+    assert_eq!(shell.teardowns.load(SeqCst), 1);
+    assert_eq!(recorded(&fixture.ledger), []);
+}
+
+#[test]
+fn saved_close_without_a_pane_refuses_dirty_or_unpushed_work() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for dirty in [true, false] {
+        let fixture = lifecycle_fixture(false);
+        save_close_checkout(&fixture);
+        let captured = recorded(&fixture.ledger);
+        std::fs::write(fixture.repo.tree.join("unique"), "unique work").unwrap();
+        if !dirty {
+            git(&fixture.repo.tree, &["add", "unique"]);
+            git(&fixture.repo.tree, &["commit", "-q", "-m", "unpushed work"]);
+        }
+        let head = git(&fixture.repo.tree, &["rev-parse", "HEAD"]);
+        let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        shell.open.store(false, SeqCst);
+        let error = crate::close::local(
+            &shell,
+            &fixture.ledger,
+            "placed-shell",
+            &crate::close::Caller::default(),
+            crate::close::Guard::Clean,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(if dirty {
+                "uncommitted changes"
+            } else {
+                "commits are not held"
+            }),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.repo.tree.join("unique")).unwrap(),
+            "unique work"
+        );
+        assert_eq!(git(&fixture.repo.tree, &["rev-parse", "HEAD"]), head);
+        assert_eq!(shell.teardowns.load(SeqCst), 0);
+        assert_eq!(recorded(&fixture.ledger), captured);
+        assert!(
+            git(&fixture.repo.repo, &["worktree", "list", "--porcelain"])
+                .contains("locked agent:worktree")
+        );
+    }
+}
+
+#[test]
+fn saved_close_without_a_pane_refuses_replaced_identity_or_owner() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for replaced_owner in [true, false] {
+        let fixture = lifecycle_fixture(false);
+        save_close_checkout(&fixture);
+        let captured = recorded(&fixture.ledger);
+        if replaced_owner {
+            crate::store::put_items(
+                &fixture.ledger,
+                &serde_json::json!([{
+                    "id":"replacement", "kind":"agent", "host":"local", "pane":"placed-shell",
+                    "owner_pane":"parent", "created_ms":2, "closed_ms":null
+                }]),
+            )
+            .unwrap();
+        } else {
+            let marker = captured[0]
+                .identity
+                .as_ref()
+                .unwrap()
+                .gitdir
+                .join("dogsled-checkout-id");
+            std::fs::write(marker, "0123456789abcdef0123456789abcdef\n").unwrap();
+        }
+        let shell = LifecycleShell::new(&fixture.repo.tree, || {});
+        shell.open.store(false, SeqCst);
+        let error = crate::close::local(
+            &shell,
+            &fixture.ledger,
+            "placed-shell",
+            &crate::close::Caller::default(),
+            crate::close::Guard::Clean,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(if replaced_owner {
+                "another checkout owner"
+            } else {
+                "another checkout"
+            }),
+            "{error}"
+        );
+        assert!(fixture.repo.tree.exists());
+        assert_eq!(shell.teardowns.load(SeqCst), 0);
+        assert_eq!(recorded(&fixture.ledger), captured);
+    }
 }
 
 #[test]
