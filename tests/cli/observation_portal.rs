@@ -1,4 +1,4 @@
-//! Exercise the running portal against real producer projections supplied over IPC.
+//! Exercise the running portal against supplied projections and the live observer.
 
 use super::*;
 use std::collections::BTreeMap;
@@ -22,10 +22,14 @@ impl Portal {
         let reader = std::thread::spawn(move || {
             let mut line = String::new();
             BufReader::new(stdout).read_line(&mut line).unwrap();
-            sender.send(line).unwrap();
+            let _ = sender.send(line);
         });
-        let line = receiver.recv_timeout(PROCESS_DEADLINE).unwrap();
+        let line = receiver.recv_timeout(PROCESS_DEADLINE);
+        if line.is_err() {
+            process.terminate();
+        }
         reader.join().unwrap();
+        let line = line.unwrap();
         let port = line
             .split("127.0.0.1:")
             .nth(1)
@@ -42,7 +46,16 @@ impl Portal {
     }
 
     fn get(&self, path: &str) -> (u16, BTreeMap<String, String>, Value) {
-        let (mut http, status, headers) = Http::open(self.port, path);
+        self.request("GET", path)
+    }
+
+    fn post(&self, path: &str) -> (u16, Value) {
+        let (status, _, body) = self.request("POST", path);
+        (status, body)
+    }
+
+    fn request(&self, method: &str, path: &str) -> (u16, BTreeMap<String, String>, Value) {
+        let (mut http, status, headers) = Http::request(self.port, method, path);
         let bytes = if headers
             .get("transfer-encoding")
             .is_some_and(|value| value == "chunked")
@@ -62,7 +75,12 @@ impl Portal {
             http.reader.read_exact(&mut bytes).unwrap();
             bytes
         };
-        (status, headers, serde_json::from_slice(&bytes).unwrap())
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, headers, body)
     }
 
     fn stream(&self) -> Http {
@@ -80,12 +98,16 @@ struct Http {
 
 impl Http {
     fn open(port: u16, path: &str) -> (Self, u16, BTreeMap<String, String>) {
+        Self::request(port, "GET", path)
+    }
+
+    fn request(port: u16, method: &str, path: &str) -> (Self, u16, BTreeMap<String, String>) {
         let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
         socket.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
         socket.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
         write!(
             socket,
-            "GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         )
         .unwrap();
         let mut reader = BufReader::new(socket);
@@ -159,6 +181,358 @@ impl Http {
             assert!(frame["error"].is_string());
         }
     }
+}
+
+/// Native Herdr remains a test transport; serve, the Close adapter and web are real.
+struct CloseHerdr {
+    path: PathBuf,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    sockets: Arc<Mutex<Vec<std::os::unix::net::UnixStream>>>,
+    events: Arc<Mutex<Vec<std::os::unix::net::UnixStream>>>,
+    subscriptions: mpsc::Receiver<Value>,
+    closes: mpsc::Receiver<Value>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CloseHerdr {
+    fn start(rig: &Rig, refuse: bool) -> Self {
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let path = rig.dir.join("herdr.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&stopped);
+        let sockets = Arc::new(Mutex::new(Vec::new()));
+        let connections = Arc::clone(&sockets);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscribers = Arc::clone(&events);
+        let (subscribed, subscriptions) = mpsc::channel();
+        let (actions, closes) = mpsc::channel();
+        let dir = rig.dir.clone();
+        let thread = std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = listener.accept() {
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+                stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
+                connections
+                    .lock()
+                    .unwrap()
+                    .push(stream.try_clone().unwrap());
+                if stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let mut line = String::new();
+                if !matches!(BufReader::new(&stream).read_line(&mut line), Ok(n) if n > 0) {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let method = request["method"].as_str().unwrap();
+                let mut reply = match method {
+                    "agent.list" => {
+                        serde_json::from_slice::<Value>(&fs::read(dir.join("agents.json")).unwrap())
+                            .unwrap()
+                    }
+                    "events.subscribe" => json!({"result":{"type":"subscription_started"}}),
+                    "pane.read" => {
+                        json!({"result":{"type":"pane_read","read":{"text":"","revision":1}}})
+                    }
+                    "pane.close" => {
+                        actions.send(request["params"].clone()).unwrap();
+                        if refuse {
+                            json!({"error":{"code":"confirmation_required","message":"confirm worktree group"}})
+                        } else {
+                            let pane = request["params"]["pane_id"].as_str().unwrap();
+                            remove_native_pane(&dir, pane);
+                            Self::notify(&subscribers, "pane.closed", pane);
+                            json!({"result":{}})
+                        }
+                    }
+                    other => panic!("unexpected Close transport method: {other}"),
+                };
+                reply["id"] = request["id"].clone();
+                if writeln!(stream, "{reply}").is_ok() && method == "events.subscribe" {
+                    subscribers.lock().unwrap().push(stream);
+                    let _ = subscribed.send(request["params"]["subscriptions"].clone());
+                }
+            }
+        });
+        Self {
+            path,
+            stopped,
+            sockets,
+            events,
+            subscriptions,
+            closes,
+            thread: Some(thread),
+        }
+    }
+
+    fn ready(&self) {
+        loop {
+            let filters = self.subscriptions.recv_timeout(PROCESS_DEADLINE).unwrap();
+            if ["w1:p1", "w1:p2"].iter().all(|pane| {
+                filters.as_array().unwrap().iter().any(|filter| {
+                    filter["type"] == "pane.agent_status_changed" && filter["pane_id"] == *pane
+                })
+            }) {
+                assert!(
+                    filters
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|f| f["type"] == "pane.closed")
+                );
+                break;
+            }
+        }
+    }
+
+    fn notify(subscribers: &Mutex<Vec<std::os::unix::net::UnixStream>>, event: &str, pane: &str) {
+        let event = json!({"event":event,"data":{"pane_id":pane}});
+        let mut subscribers = subscribers.lock().unwrap();
+        subscribers.retain_mut(|stream| writeln!(stream, "{event}").is_ok());
+        assert!(!subscribers.is_empty(), "no held native event subscription");
+    }
+}
+
+impl Drop for CloseHerdr {
+    fn drop(&mut self) {
+        use std::net::Shutdown;
+        use std::sync::atomic::Ordering;
+        self.stopped.store(true, Ordering::Release);
+        for socket in self.sockets.lock().unwrap().iter() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        let _ = std::os::unix::net::UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let result = thread.join();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn remove_native_pane(dir: &Path, pane: &str) {
+    // The CLI collector and the socket adapter read the same native evidence.
+    for (file, key) in [("agents.json", "agents"), ("panes.json", "panes")] {
+        let path = dir.join(file);
+        let mut evidence: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        evidence["result"][key]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| entry["pane_id"] != pane);
+        let next = path.with_extension("next");
+        fs::write(&next, serde_json::to_vec(&evidence).unwrap()).unwrap();
+        fs::rename(next, path).unwrap();
+    }
+}
+
+fn seed_close_sessions(rig: &Rig) -> Vec<(PathBuf, Vec<u8>)> {
+    let checkout = rig.dir.join("home/checkout");
+    repository(&checkout);
+    let sentinels = [
+        ("tracked", b"committed bytes\n".to_vec()),
+        ("dirty", b"untracked\0bytes\n".to_vec()),
+    ];
+    for (name, bytes) in &sentinels {
+        fs::write(checkout.join(name), bytes).unwrap();
+    }
+    close::git(&checkout, &["add", "tracked"]);
+    close::git(&checkout, &["commit", "-qm", "sentinel"]);
+    fs::write(checkout.join("tracked"), b"dirty tracked bytes\n").unwrap();
+    let mut agents = Vec::new();
+    let mut panes = Vec::new();
+    for (pane, terminal, status) in [
+        ("w1:p1", "sibling-terminal", "working"),
+        ("w1:p2", "selected-terminal", "blocked"),
+    ] {
+        let transcript = checkout.join(format!("{terminal}.jsonl"));
+        fs::write(
+            &transcript,
+            format!("{{\"type\":\"session\",\"id\":\"{terminal}\"}}\n"),
+        )
+        .unwrap();
+        agents.push(
+            json!({"pane_id":pane,"terminal_id":terminal,"agent":"pi","agent_status":status,
+            "cwd":checkout,"agent_session":{"kind":"path","value":transcript}}),
+        );
+        panes.push(json!({"pane_id":pane,"terminal_id":terminal,"cwd":checkout}));
+    }
+    rig.put("agents.json", &json!({"result":{"agents":agents}}));
+    rig.put("panes.json", &json!({"result":{"panes":panes}}));
+    [
+        "tracked",
+        "dirty",
+        "sibling-terminal.jsonl",
+        "selected-terminal.jsonl",
+        ".git/HEAD",
+        ".git/index",
+    ]
+    .into_iter()
+    .map(|name| {
+        let path = checkout.join(name);
+        let bytes = fs::read(&path).unwrap();
+        (path, bytes)
+    })
+    .collect()
+}
+
+fn start_close_observer(rig: &Rig, native: &CloseHerdr) -> Owned {
+    // Longer than every test wait: fallback polling cannot satisfy the assertions.
+    let mut command = rig.cmd(&["serve", "--interval", "3600"]);
+    command
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(rig.dir.join("close-observer.stderr")).unwrap());
+    let observer = Owned::spawn(&mut command);
+    native.ready();
+    wait_publication(rig, |_| {
+        rig.log("close-observer.stderr")
+            .contains("baseline sample published")
+    });
+    wait_publication(rig, |frame| {
+        frame["views"]["portal"]["data"]["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.len() == 2)
+    });
+    observer
+}
+
+fn assert_close_files(sentinels: &[(PathBuf, Vec<u8>)]) {
+    for (path, bytes) in sentinels {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            *bytes,
+            "changed {}",
+            path.display()
+        );
+    }
+}
+
+fn agent_panes(agents: &Value) -> Vec<String> {
+    let mut panes: Vec<_> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|agent| {
+            assert_eq!(agent["host"], "local", "{agent}");
+            agent["pane"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    panes.sort();
+    panes
+}
+
+#[test]
+fn observation_portal_close_removes_only_selected_session_from_open_stream_and_get() {
+    let rig = Rig::short("portal-close-live");
+    let sentinels = seed_close_sessions(&rig);
+    let native = CloseHerdr::start(&rig, false);
+    let _observer = start_close_observer(&rig, &native);
+    let portal = Portal::start(&rig);
+    let mut client = portal.stream();
+    let before = client.publication();
+    assert_eq!(agent_panes(&before["agents"]), ["w1:p1", "w1:p2"]);
+    let sibling = before["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["pane"] == "w1:p1")
+        .unwrap()
+        .clone();
+    let (status, body) = portal.post("/api/agents/local/w1:p2/close");
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(
+        native.closes.recv_timeout(PROCESS_DEADLINE).unwrap(),
+        json!({"pane_id":"w1:p2"})
+    );
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let after = loop {
+        let frame = client.publication();
+        if agent_panes(&frame["agents"]) == ["w1:p1"] {
+            break frame;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Close was not published: {frame}"
+        );
+    };
+    assert_eq!(after["epoch"], before["epoch"]);
+    assert!(after["revision"].as_u64().unwrap() > before["revision"].as_u64().unwrap());
+    assert_eq!(after["agents"], json!([sibling]));
+    let (status, _, body) = portal.get("/api/agents");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["agents"], after["agents"]);
+    assert_eq!(
+        rig.read("panes.json")["result"]["panes"],
+        json!([{"pane_id":"w1:p1","terminal_id":"sibling-terminal","cwd":rig.dir.join("home/checkout")}])
+    );
+    let remaining = rig.read("agents.json");
+    assert_eq!(remaining["result"]["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        remaining["result"]["agents"][0]["terminal_id"],
+        "sibling-terminal"
+    );
+    assert!(native.closes.try_recv().is_err(), "closed a sibling");
+    assert_close_files(&sentinels);
+}
+
+#[test]
+fn observation_portal_close_native_refusal_preserves_session_in_get_and_open_stream() {
+    let rig = Rig::short("portal-close-refused");
+    let sentinels = seed_close_sessions(&rig);
+    let native = CloseHerdr::start(&rig, true);
+    let _observer = start_close_observer(&rig, &native);
+    let portal = Portal::start(&rig);
+    let mut client = portal.stream();
+    let before = client.publication();
+    assert_eq!(agent_panes(&before["agents"]), ["w1:p1", "w1:p2"]);
+    let agents = rig.read("agents.json");
+    let panes = rig.read("panes.json");
+    let (status, body) = portal.post("/api/agents/local/w1:p2/close");
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(
+        body,
+        json!({"error":"herdr pane.close: confirmation_required: confirm worktree group"})
+    );
+    assert_eq!(
+        native.closes.recv_timeout(PROCESS_DEADLINE).unwrap(),
+        json!({"pane_id":"w1:p2"})
+    );
+    assert_eq!(rig.read("agents.json"), agents);
+    assert_eq!(rig.read("panes.json"), panes);
+    // A native topology notification proves the held stream still publishes both sessions
+    // after a fresh observer capture. It supplies no replacement portal snapshot.
+    let sampled = wait_publication(&rig, |_| true)["local"]["host"]["sampled_ms"]
+        .as_u64()
+        .unwrap();
+    CloseHerdr::notify(&native.events, "pane.updated", "w1:p2");
+    let captured = wait_publication(&rig, |frame| {
+        frame["local"]["host"]["sampled_ms"]
+            .as_u64()
+            .is_some_and(|at| at > sampled)
+    });
+    let revision = captured["revision"].as_u64().unwrap();
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    loop {
+        let frame = client.publication();
+        assert_eq!(frame["agents"], before["agents"]);
+        if frame["revision"].as_u64().unwrap() >= revision {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fresh refused session was not streamed"
+        );
+    }
+    let (status, _, body) = portal.get("/api/agents");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["agents"], before["agents"]);
+    assert!(native.closes.try_recv().is_err());
+    assert_close_files(&sentinels);
 }
 
 /// Every projection is built by state project's real collector/projector and Publisher.
