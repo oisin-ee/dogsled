@@ -35,7 +35,10 @@ fn a_long_missing_state_directory_reads_as_not_running() {
     let state = std::env::temp_dir()
         .join("x".repeat(120))
         .join(crate::ledger::new_id());
-    let error = Client::at(&state).current().unwrap_err().to_string();
+    let error = Client::at(&state)
+        .current(&crate::observation::ipc::Select::All)
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("dogsled serve is not running"), "{error}");
 }
 
@@ -228,9 +231,13 @@ fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_fr
         }
     ));
     assert!(
-        !serde_json::to_string(&client.current().unwrap())
-            .unwrap()
-            .contains("active_tools")
+        !serde_json::to_string(
+            &client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap()
+        )
+        .unwrap()
+        .contains("active_tools")
     );
     assert!(
         !serde_json::to_string(&super::super::peers::Export::of(&frame.published))

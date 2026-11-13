@@ -109,6 +109,12 @@ pub(crate) fn findings_from(
     }
 }
 
+/// What `notices` and the owner's board read.
+pub(crate) fn select() -> crate::observation::ipc::Select {
+    use crate::observation::read::{BOARD, FINDINGS};
+    crate::observation::ipc::Select::views(BOARD.into_iter().chain(FINDINGS).chain(["status"]))
+}
+
 pub fn notices(
     ledger: &Ledger,
     published: &crate::observation::Published,

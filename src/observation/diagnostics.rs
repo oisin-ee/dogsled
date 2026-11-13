@@ -25,6 +25,19 @@ impl Diagnostics {
         Ok(())
     }
 
+    /// A pass that failed as a whole: publish the last domains with the failure, and log it
+    /// as any other gap, once for each change.
+    pub(crate) fn fail(
+        &mut self,
+        publisher: &mut super::Publisher,
+        detail: &str,
+        now: u64,
+        write: impl FnMut(String),
+    ) -> crate::error::Result<()> {
+        let input = publisher.failed(now, detail)?;
+        self.publish(publisher, input, now, write)
+    }
+
     pub(crate) fn record(&mut self, gaps: &[Gap], now: u64, mut write: impl FnMut(String)) {
         let mut current: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
         for gap in gaps {
@@ -93,6 +106,48 @@ mod tests {
             availability: Availability::Failed,
             detail: detail.into(),
         }
+    }
+
+    #[test]
+    fn a_failed_pass_is_published_and_logged_once_until_it_recovers() {
+        let mut publisher = super::super::Publisher::new().unwrap();
+        let mut diagnostics = Diagnostics::default();
+        let input = super::super::Publication {
+            published_ms: 1,
+            sources: super::super::Sources::default(),
+            local: super::super::Domains::from([("host".into(), serde_json::json!({"id": "a"}))]),
+            views: super::super::Domains::new(),
+            gaps: Vec::new(),
+        };
+        let mut lines = Vec::new();
+        diagnostics
+            .publish(&mut publisher, input.clone(), 1, |line| lines.push(line))
+            .unwrap();
+        for now in [2, 3] {
+            diagnostics
+                .fail(&mut publisher, "store is busy", now, |line| {
+                    lines.push(line);
+                })
+                .unwrap();
+        }
+        let failed = publisher.current().unwrap();
+        assert_eq!(failed.revision, 2);
+        assert_eq!(failed.local, input.local);
+        assert_eq!(
+            failed.gaps,
+            [failure(super::super::FAILED_PASS, "store is busy")]
+        );
+        diagnostics
+            .publish(&mut publisher, input, 4, |line| lines.push(line))
+            .unwrap();
+        assert_eq!(publisher.current().unwrap().gaps, [] as [Gap; 0]);
+        assert_eq!(
+            lines,
+            [
+                "dogsled service: observation collection failed: store is busy",
+                "dogsled service: observation collection recovered",
+            ]
+        );
     }
 
     #[test]

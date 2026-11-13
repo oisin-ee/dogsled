@@ -16,7 +16,7 @@ pub(crate) fn retry_command(
     json: bool,
 ) -> Result<std::process::ExitCode> {
     let client = super::ipc::Client::at(&fleet.ledger.dir);
-    let report = if let Ok(subscription) = client.subscribe() {
+    let report = if let Ok(subscription) = client.subscribe(&retry_select()) {
         retry_published(&client, subscription, host)?
     } else {
         // host_peer uses fixed SQL columns, not serialized topology. This cold-only
@@ -41,6 +41,11 @@ pub(crate) fn retry_command(
         )
     })?;
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// What `retry_published` reads.
+pub(crate) fn retry_select() -> super::ipc::Select {
+    super::ipc::Select::views(["hosts"])
 }
 
 pub(crate) fn retry_published(

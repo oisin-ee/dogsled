@@ -243,7 +243,7 @@ fn catalogue_only_error_changes_publish_without_changing_ipc_version() {
         )
         .unwrap();
         let frame = publisher.replace(input.clone()).unwrap();
-        assert_eq!(frame.version, 1, "portal evolution must not bump fleet IPC");
+        assert_eq!(frame.version, 2, "portal evolution must not bump fleet IPC");
         assert_eq!(frame.revision, previous + 1);
         assert_eq!(
             frame.views["portal"]["data"]["version"],

@@ -442,7 +442,8 @@ impl<'a> ActionFleet<'a> {
         policy: &'a Policy,
         home: String,
     ) -> Result<Self> {
-        let published = crate::observation::ipc::Client::at(&ledger.dir).current()?;
+        let published = crate::observation::ipc::Client::at(&ledger.dir)
+            .current(&crate::observation::ipc::Select::views(["hosts"]))?;
         Self::new(shell, ledger, policy, home, std::sync::Arc::new(published))
     }
 
@@ -939,7 +940,8 @@ impl Fleet<'_> {
     pub fn retry_now(&self, host: &Host) -> Result<HostReport> {
         if host.is_local() {
             let reports: Vec<HostReport> = crate::observation::read::view(
-                &crate::observation::ipc::Client::at(&self.ledger.dir).current()?,
+                &crate::observation::ipc::Client::at(&self.ledger.dir)
+                    .current(&crate::observation::ipc::Select::views(["hosts"]))?,
                 "hosts",
             )?;
             return reports
@@ -960,11 +962,13 @@ impl Fleet<'_> {
             })
         })?;
         let client = crate::observation::ipc::Client::at(&self.ledger.dir);
-        let subscription = client.subscribe().map_err(|_| {
-            Error::Invalid(
-                "backoff reset; observation unavailable because serve is not running".into(),
-            )
-        })?;
+        let subscription = client
+            .subscribe(&crate::observation::peers::retry_select())
+            .map_err(|_| {
+                Error::Invalid(
+                    "backoff reset; observation unavailable because serve is not running".into(),
+                )
+            })?;
         crate::observation::peers::retry_published(&client, subscription, &host.id)
     }
 

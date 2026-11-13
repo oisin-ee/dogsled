@@ -367,7 +367,7 @@ impl Observer {
             std::os::unix::net::UnixStream::connect(self.rig.dir.join("state/observation.sock"))
                 .unwrap();
         stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
-        writeln!(stream, "{{\"version\":1,\"operation\":\"current\"}}").unwrap();
+        writeln!(stream, "{{\"version\":2,\"operation\":\"current\"}}").unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
@@ -503,6 +503,60 @@ fn observation_commit_wakes_inventory_without_terminal_resampling() {
         before,
         "ledger input resampled terminals"
     );
+}
+
+/// The failure of 2026-11-13: the store grew until the publication was larger than one
+/// frame. Serve then exited on every start, and no reader or lane worked. Serve now
+/// publishes it, a reader gets every record, and no frame is over the limit.
+#[test]
+fn serve_publishes_a_store_larger_than_one_frame() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    const FRAME: usize = 1024 * 1024;
+    let observer = Observer::start("observe-large", "3600");
+    let reply = "r".repeat(2048);
+    let items: Vec<Value> = (0..2500)
+        .map(|index| {
+            json!({"id":format!("item-{index:04}"),"kind":"agent","host":"local",
+                "pane":format!("gone:p{index}"),"owner_pane":"w1:p1","created_ms":1,
+                "closed_ms":2,"reply":{"seq":1,"text":reply,"captured_ms":2}})
+        })
+        .collect();
+    observer.rig.put_items(&Value::Array(items));
+    let deadline = Instant::now() + PROCESS_DEADLINE;
+    let listed = loop {
+        let (code, listed) = observer.rig.json(&["items"]);
+        assert_eq!(code, 0, "{listed}");
+        if listed["items"]
+            .as_array()
+            .is_some_and(|items| items.len() == 2500)
+        {
+            break listed;
+        }
+        assert!(Instant::now() < deadline, "items were not published");
+        std::thread::yield_now();
+    };
+    for (index, item) in listed["items"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(item["id"], format!("item-{index:04}"));
+        assert_eq!(item["reply"]["text"], reply);
+    }
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(observer.rig.dir.join("state/observation.sock"))
+            .unwrap();
+    stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    writeln!(stream, "{{\"version\":2,\"operation\":\"current\"}}").unwrap();
+    let frames: Vec<Vec<u8>> = BufReader::new(stream)
+        .split(b'\n')
+        .map(Result::unwrap)
+        .collect();
+    let total: usize = frames.iter().map(Vec::len).sum();
+    assert!(total > 16 * FRAME, "the publication has only {total} bytes");
+    assert!(frames.iter().all(|frame| frame.len() < FRAME));
+    let head: Value = serde_json::from_slice(&frames[0]).unwrap();
+    assert_eq!(head["continues"], true);
+    // Serve is still running: a later reader gets its own, smaller selection.
+    let (code, status) = observer.rig.json(&["status"]);
+    assert_eq!(code, 0, "{status}");
+    assert!(!observer.rig.log("journal").contains("too large"));
 }
 
 #[test]

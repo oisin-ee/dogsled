@@ -373,9 +373,17 @@ mod publication {
         assert_eq!(old.revision, 1);
         assert_eq!(old.local["host"]["value"], 1);
         assert_eq!(new.revision, 2);
-        let wire: Published = serde_json::from_slice(&old_frame.bytes).unwrap();
+        let lines = old_frame.reply(None).unwrap();
+        assert_eq!(lines.len(), 1);
+        let wire: Published = serde_json::from_slice(&lines[0]).unwrap();
         assert_eq!(wire, *old);
-        assert_eq!(fixture.client.current().unwrap(), *new);
+        assert_eq!(
+            fixture
+                .client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap(),
+            *new
+        );
     }
 
     #[test]
@@ -385,9 +393,15 @@ mod publication {
         let client = fixture.client.clone();
         std::thread::scope(|scope| {
             let reader = scope.spawn(move || {
-                let mut subscription = client.subscribe().unwrap();
+                let mut subscription = client
+                    .subscribe(&crate::observation::ipc::Select::All)
+                    .unwrap();
                 for _ in 0..64 {
-                    consistent(&client.current().unwrap());
+                    consistent(
+                        &client
+                            .current(&crate::observation::ipc::Select::All)
+                            .unwrap(),
+                    );
                     consistent(&subscription.current().publication);
                 }
                 let end = Instant::now() + WAIT;
@@ -412,7 +426,10 @@ mod publication {
     fn restart_uses_new_epoch_and_disconnects_retained_state() {
         let mut fixture = Fixture::new();
         let old = fixture.publish(1);
-        let mut subscription = fixture.client.subscribe().unwrap();
+        let mut subscription = fixture
+            .client
+            .subscribe(&crate::observation::ipc::Select::All)
+            .unwrap();
         fixture.server.take();
         let retained = subscription.changed(WAIT);
         assert!(matches!(retained.status, ipc::Status::Disconnected(_)));
@@ -420,7 +437,7 @@ mod publication {
         assert!(
             fixture
                 .client
-                .current()
+                .current(&crate::observation::ipc::Select::All)
                 .unwrap_err()
                 .to_string()
                 .contains("unavailable")
@@ -432,7 +449,13 @@ mod publication {
         let new = fixture.publish(2);
         assert_ne!(old.epoch, new.epoch);
         assert_eq!(new.revision, 1);
-        assert_eq!(fixture.client.current().unwrap(), *new);
+        assert_eq!(
+            fixture
+                .client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap(),
+            *new
+        );
         assert!(matches!(
             subscription.current().status,
             ipc::Status::Disconnected(_)
@@ -443,7 +466,10 @@ mod publication {
     fn slow_subscriber_skips_to_newest_complete_publication() {
         let mut fixture = Fixture::new();
         fixture.publish(1);
-        let mut subscription = fixture.client.subscribe().unwrap();
+        let mut subscription = fixture
+            .client
+            .subscribe(&crate::observation::ipc::Select::All)
+            .unwrap();
         let mut receiver = fixture.publisher.subscribe();
         receiver.borrow_and_update();
         for value in 2..=512 {
@@ -486,7 +512,7 @@ mod publication {
         let mut socket = UnixStream::connect(fixture.state.join("observation.sock")).unwrap();
         socket.set_read_timeout(Some(WAIT)).unwrap();
         socket
-            .write_all(b"{\"version\":1,\"operation\":\"subscribe\"}\n")
+            .write_all(b"{\"version\":2,\"operation\":\"subscribe\"}\n")
             .unwrap();
         // Reading one byte confirms revision 1 is in flight, then stops draining the socket.
         let mut first = [0];
@@ -500,14 +526,15 @@ mod publication {
             started.elapsed() < std::time::Duration::from_secs(3),
             "backpressure blocked the publisher"
         );
-        let mut reader = BufReader::new(socket);
-        let mut bytes = vec![first[0]];
-        reader.read_until(b'\n', &mut bytes).unwrap();
-        let old: Published = serde_json::from_slice(&bytes).unwrap();
+        // Revision 1 has several frames. All of them arrive before the next revision starts.
+        let mut reader = BufReader::new(std::io::Cursor::new(first).chain(socket));
+        let mut next = || -> Published {
+            serde_json::from_value(pages::read(&mut reader, ipc::MAX_FRAME_BYTES).unwrap()).unwrap()
+        };
+        let old = next();
         assert_eq!(old.revision, 1);
-        bytes.clear();
-        reader.read_until(b'\n', &mut bytes).unwrap();
-        let newest: Published = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(old.views["large"].as_str().unwrap().len(), 4 * 1024 * 1024);
+        let newest = next();
         assert_eq!(newest.revision, 32);
         consistent(&newest);
     }
@@ -518,14 +545,14 @@ mod publication {
         let client = ipc::Client::at(&state);
         assert!(
             client
-                .current()
+                .current(&crate::observation::ipc::Select::All)
                 .unwrap_err()
                 .to_string()
                 .contains("observation unavailable")
         );
         assert!(
             client
-                .subscribe()
+                .subscribe(&crate::observation::ipc::Select::All)
                 .unwrap_err()
                 .to_string()
                 .contains("observation unavailable")
@@ -539,7 +566,7 @@ mod publication {
         assert!(
             fixture
                 .client
-                .current()
+                .current(&crate::observation::ipc::Select::All)
                 .unwrap_err()
                 .to_string()
                 .contains("observation unavailable")
@@ -547,7 +574,7 @@ mod publication {
         assert!(
             fixture
                 .client
-                .subscribe()
+                .subscribe(&crate::observation::ipc::Select::All)
                 .unwrap_err()
                 .to_string()
                 .contains("observation unavailable")
@@ -586,7 +613,7 @@ mod publication {
         fixture.publish(1);
         for (request, code) in [
             (
-                "{\"version\":2,\"operation\":\"current\"}\n".to_owned(),
+                "{\"version\":1,\"operation\":\"current\"}\n".to_owned(),
                 "unsupported",
             ),
             ("not json\n".to_owned(), "invalid"),
@@ -600,7 +627,12 @@ mod publication {
             let response: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(response["error"]["code"], code);
         }
-        consistent(&fixture.client.current().unwrap());
+        consistent(
+            &fixture
+                .client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap(),
+        );
     }
 
     #[test]
@@ -608,7 +640,12 @@ mod publication {
         let mut fixture = Fixture::new();
         fixture.publish(1);
         assert!(ipc::Server::new(&fixture.state).is_err());
-        consistent(&fixture.client.current().unwrap());
+        consistent(
+            &fixture
+                .client
+                .current(&crate::observation::ipc::Select::All)
+                .unwrap(),
+        );
         let _silent = UnixStream::connect(fixture.state.join("observation.sock")).unwrap();
         let started = Instant::now();
         fixture.server.take();
@@ -621,7 +658,10 @@ mod publication {
     fn dropping_publisher_closes_subscription() {
         let mut fixture = Fixture::new();
         fixture.publish(1);
-        let mut subscription = fixture.client.subscribe().unwrap();
+        let mut subscription = fixture
+            .client
+            .subscribe(&crate::observation::ipc::Select::All)
+            .unwrap();
         fixture.publisher = Publisher::new().unwrap();
         let state = subscription.changed(WAIT);
         assert!(matches!(state.status, ipc::Status::Disconnected(_)));
@@ -629,25 +669,179 @@ mod publication {
         assert!(
             fixture
                 .client
-                .current()
+                .current(&crate::observation::ipc::Select::All)
                 .unwrap_err()
                 .to_string()
                 .contains("unavailable")
         );
     }
 
-    #[test]
-    fn oversized_replacement_keeps_previous_revision() {
-        let mut fixture = Fixture::new();
-        let old = fixture.publish(1);
-        let mut large = input(2);
+    /// More than 32 MiB: 36,000 records of about 1 KiB, one record body of 3 MiB, and a
+    /// 2 MiB host export.
+    fn large(value: u64) -> Publication {
+        let mut large = input(value);
+        let records: Vec<Value> = (0..36_000)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("r-{value}-{index}"),
+                    "request": {"task": "t".repeat(900), "value": value},
+                })
+            })
+            .collect();
         large.views.insert(
-            "large".into(),
-            Value::String("x".repeat(ipc::MAX_FRAME_BYTES)),
+            "queue".into(),
+            serde_json::json!({"data": {"tickets": records, "body": "b".repeat(3 * 1024 * 1024)}}),
         );
-        assert!(fixture.publisher.replace(large).is_err());
-        assert_eq!(fixture.client.current().unwrap(), *old);
-        assert_eq!(fixture.publish(3).revision, 2);
+        large
+            .local
+            .insert("todos".into(), Value::String("h".repeat(2 * 1024 * 1024)));
+        large
+    }
+
+    /// The lines of one `current` reply, as the socket carries them.
+    fn lines(fixture: &Fixture, request: &str) -> Vec<Vec<u8>> {
+        let mut socket = UnixStream::connect(fixture.state.join("observation.sock")).unwrap();
+        socket.set_read_timeout(Some(WAIT)).unwrap();
+        socket.write_all(request.as_bytes()).unwrap();
+        BufReader::new(socket)
+            .split(b'\n')
+            .map(std::result::Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn a_publication_larger_than_any_frame_is_published_and_read_exactly() {
+        let mut fixture = Fixture::new();
+        let published = fixture.publisher.replace(large(1)).unwrap();
+        assert!(serde_json::to_vec(&*published).unwrap().len() > 32 * 1024 * 1024);
+
+        // The whole publication: many frames, none over the limit, the exact value.
+        let whole = lines(&fixture, "{\"version\":2,\"operation\":\"current\"}\n");
+        assert!(whole.len() > 32, "{} frames", whole.len());
+        assert!(whole.iter().all(|line| line.len() < ipc::MAX_FRAME_BYTES));
+        assert_eq!(
+            fixture.client.current(&ipc::Select::All).unwrap(),
+            *published
+        );
+
+        // One small view: one frame, and nothing of the rest.
+        let small = lines(
+            &fixture,
+            "{\"version\":2,\"operation\":\"current\",\"select\":{\"views\":[\"status\"]}}\n",
+        );
+        assert_eq!(small.len(), 1);
+        assert!(small[0].len() < 1024, "{} bytes", small[0].len());
+        let selected = fixture
+            .client
+            .current(&ipc::Select::views(["status"]))
+            .unwrap();
+        assert!(selected.local.is_empty());
+        assert_eq!(selected.views.keys().collect::<Vec<_>>(), ["status"]);
+        assert_eq!(selected.views["status"], published.views["status"]);
+        assert_eq!(selected.revision, published.revision);
+        assert_eq!(selected.sources, published.sources);
+        assert_eq!(selected.gaps, published.gaps);
+
+        // One large view, with a record body over one frame.
+        let queue = fixture
+            .client
+            .current(&ipc::Select::views(["queue"]))
+            .unwrap();
+        assert_eq!(queue.views["queue"], published.views["queue"]);
+
+        // The peer export has the same frames.
+        let export = fixture.client.peer(peers::Request::default()).unwrap();
+        assert_eq!(export.local["todos"], published.local["todos"]);
+        assert_eq!(export.local_revision, published.local_revision);
+
+        // A later publication is a normal revision.
+        assert_eq!(fixture.publish(2).revision, 2);
+    }
+
+    #[test]
+    fn a_reply_of_many_frames_holds_one_revision_while_newer_ones_are_published() {
+        let mut fixture = Fixture::new();
+        fixture.publisher.replace(large(1)).unwrap();
+        let client = fixture.client.clone();
+        let uniform = |published: &Published| {
+            consistent(published);
+            let value = published.published_ms;
+            let tickets = published.views["queue"]["data"]["tickets"]
+                .as_array()
+                .unwrap();
+            assert_eq!(tickets.len(), 36_000);
+            assert!(
+                tickets
+                    .iter()
+                    .all(|ticket| ticket["request"]["value"] == value)
+            );
+        };
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                let mut subscription = client.subscribe(&ipc::Select::All).unwrap();
+                uniform(&subscription.current().publication);
+                let end = Instant::now() + WAIT;
+                while subscription.current().publication.revision < 6 {
+                    assert!(Instant::now() < end, "subscriber did not reach revision 6");
+                    let connection = subscription.changed(WAIT);
+                    assert_eq!(connection.status, ipc::Status::Connected);
+                    uniform(&connection.publication);
+                    uniform(&client.current(&ipc::Select::All).unwrap());
+                }
+            });
+            for value in 2..=6 {
+                fixture.publisher.replace(large(value)).unwrap();
+            }
+            reader.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_failed_pass_keeps_the_last_domains_and_publishes_the_failure() {
+        let mut fixture = Fixture::new();
+        let first = fixture.publisher.failed(5, "store is busy").unwrap();
+        assert!(first.local.is_empty() && first.views.is_empty());
+        let published = fixture.publish(1);
+        let mut portal = input(1);
+        portal.views.insert(
+            "portal".into(),
+            serde_json::json!({"data": {"version": 1, "epoch": "", "revision": 0, "published_ms": 1,
+                "board": null, "agents": [], "inbox": null, "gaps": []}, "gaps": []}),
+        );
+        fixture.publisher.replace(portal).unwrap();
+        for _ in 0..2 {
+            let input = fixture.publisher.failed(9, "store is busy").unwrap();
+            fixture.publisher.replace(input).unwrap();
+        }
+        let failed = fixture.client.current(&ipc::Select::All).unwrap();
+        // The second identical failure is not a new revision.
+        assert_eq!(failed.revision, published.revision + 2);
+        assert_eq!(failed.local, published.local);
+        assert_eq!(failed.views["status"], published.views["status"]);
+        let gap = failed.gaps.last().unwrap();
+        assert_eq!(
+            (gap.domain.as_str(), gap.detail.as_str()),
+            (FAILED_PASS, "store is busy")
+        );
+        assert_eq!(
+            failed
+                .gaps
+                .iter()
+                .filter(|gap| gap.domain == FAILED_PASS)
+                .count(),
+            1
+        );
+        let portal = &failed.views["portal"]["data"]["gaps"];
+        assert_eq!(portal.as_array().unwrap().len(), 1);
+        assert_eq!(portal[0]["detail"], "store is busy");
+        // The next good pass clears it.
+        assert!(
+            fixture
+                .publish(3)
+                .gaps
+                .iter()
+                .all(|gap| gap.domain != FAILED_PASS)
+        );
     }
 
     #[test]

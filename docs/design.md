@@ -164,6 +164,10 @@ Normal restarts retain delivered events and last-send times. The inbox lease car
 Top-level notification attempts are at-most-once per stall; a crash during submission can lose that notification.
 Watchdog, admission, child completion, inbox delivery, and requested cleanup have separate workers. Slow cleanup cannot block check-ins or publication.
 
+The service holds each observation revision in memory. A publication has no size limit. A reader on `observation.sock` names the domains that it needs (`select`), and its reply carries only those domains, with the sources and gaps of the revision. A reply is one or more frames. A frame is one JSON line of at most 1 MiB. When a selection is larger, the first frame has `"continues": true` and later frames hold operations (`merge`, `extend`, `concat`) that build the rest. All frames of a reply come from one revision. The reader gets the complete selection or an error, never a shorter value. This is observation protocol version 2; version 1 readers and servers are refused.
+
+A pass that fails as a whole does not stop the service. The service keeps the last domains, adds an `observation` gap with the cause, logs it once for each change, and tries again on the next pass. `serve --once` returns the failure.
+
 **Hung parent.** The stall rule applies to every agent. A stalled agent that has an owner causes a check-in for that owner. A stalled top-level agent gets the sidebar mark and a Herdr notification.
 
 **Bounded waits.** One deadline starts at command entry. `--max` (default 30m) includes discovery, locks, transport, preparation, admission, and job completion.

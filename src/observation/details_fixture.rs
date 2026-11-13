@@ -115,7 +115,10 @@ impl Fixture {
         &self,
         predicate: impl Fn(&crate::observation::Published) -> bool,
     ) -> Arc<crate::observation::Published> {
-        let mut subscription = self.client.subscribe().unwrap();
+        let mut subscription = self
+            .client
+            .subscribe(&crate::observation::ipc::Select::All)
+            .unwrap();
         let deadline = Instant::now() + WAIT_DEADLINE;
         loop {
             let connection = subscription.current();

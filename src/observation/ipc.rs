@@ -1,5 +1,6 @@
-//! Newline-delimited JSON over `observation.sock`. Requests are versioned `current` or
-//! `subscribe` operations; responses are complete publications or explicit error objects.
+//! Newline-delimited JSON over `observation.sock`. Requests are versioned operations that
+//! select domains; a response is the selection from one revision, in one or more frames,
+//! or an explicit error object.
 
 #[cfg(test)]
 mod tests;
@@ -7,6 +8,7 @@ mod tests;
 use super::{Frame, Published, VERSION};
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
@@ -17,7 +19,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 
-pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// The size of one frame, not of one reply. A larger reply has more frames.
+pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CLIENTS: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,6 +67,50 @@ struct Request {
     pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activity: Option<super::live_activity::Command>,
+    /// Absent: the whole publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    select: Option<Chosen>,
+}
+
+/// Domain names of one selection. `sources` and `gaps` always travel with them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Chosen {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub local: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub views: BTreeSet<String>,
+}
+
+/// What one reader needs. The cost of a reply follows this, not the publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Select {
+    /// For the `observation` command and readers that pass the publication on.
+    All,
+    Domains(Chosen),
+}
+
+impl Select {
+    pub fn views<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::Domains(Chosen {
+            local: BTreeSet::new(),
+            views: names.into_iter().map(str::to_owned).collect(),
+        })
+    }
+
+    pub fn local<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self::Domains(Chosen {
+            local: names.into_iter().map(str::to_owned).collect(),
+            views: BTreeSet::new(),
+        })
+    }
+
+    fn chosen(&self) -> Option<Chosen> {
+        match self {
+            Self::All => None,
+            Self::Domains(chosen) => Some(chosen.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -293,6 +340,14 @@ async fn write(socket: &tokio::net::UnixStream, mut bytes: &[u8]) -> Result<()> 
     Ok(())
 }
 
+/// Each frame has its own deadline, so a large reply needs progress, not one fast write.
+async fn write_frames(socket: &tokio::net::UnixStream, frames: &[Vec<u8>]) -> Result<()> {
+    for frame in frames {
+        write(socket, frame).await?;
+    }
+    Ok(())
+}
+
 async fn failure(socket: &tokio::net::UnixStream, code: &str, message: &str) -> Result<()> {
     let mut bytes = serde_json::to_vec(&Failure {
         error: FailureDetail {
@@ -383,9 +438,11 @@ async fn respond(
             return failure(&socket, "unavailable", "observation publisher disconnected").await;
         }
         // Release the watch borrow before writing: readers cannot delay publication.
+        // The reply holds this revision until its last frame: a newer publication cannot
+        // mix into it, and a slow reader delays no one else.
         let frame = receiver.borrow_and_update().clone();
         match frame {
-            Some(frame) => write(&socket, &frame.bytes).await?,
+            Some(frame) => write_frames(&socket, &frame.reply(request.select.as_ref())?).await?,
             None => return failure(&socket, "unavailable", "observation unavailable").await,
         }
         if matches!(request.operation, Operation::Current | Operation::Retry)
@@ -636,9 +693,8 @@ async fn peer_connection(
             || peer.local_revision != Some(frame.published.local_revision)
             || tokio::time::Instant::now() >= deadline
         {
-            let mut bytes = serde_json::to_vec(&super::peers::Export::of(&frame.published))?;
-            bytes.push(b'\n');
-            return write(socket, &bytes).await;
+            let export = serde_json::to_value(super::peers::Export::of(&frame.published))?;
+            return write_frames(socket, &super::pages::frames(&export, MAX_FRAME_BYTES)?).await;
         }
         match tokio::time::timeout_at(deadline, updated(socket, receiver)).await {
             Ok(Ok(false)) => return Ok(()),
@@ -745,7 +801,12 @@ impl Client {
         })
     }
 
-    fn open(&self, operation: Operation, pane: Option<&str>) -> Result<UnixStream> {
+    fn open(
+        &self,
+        operation: Operation,
+        pane: Option<&str>,
+        select: Option<Chosen>,
+    ) -> Result<UnixStream> {
         let mut socket = self.connect()?;
         socket
             .set_write_timeout(Some(TIMEOUT))
@@ -762,6 +823,7 @@ impl Client {
                 host: None,
                 pane: pane.map(str::to_owned),
                 activity: None,
+                select,
             },
         )?;
         socket
@@ -783,6 +845,7 @@ impl Client {
                 host: Some(host.into()),
                 pane: None,
                 activity: None,
+                select: None,
             },
         )?;
         socket.write_all(b"\n")?;
@@ -812,19 +875,18 @@ impl Client {
                 host: None,
                 pane: None,
                 activity: None,
+                select: None,
             },
         )?;
         socket.write_all(b"\n")?;
-        let mut bytes = Vec::new();
-        BufReader::new(socket)
-            .take(MAX_FRAME_BYTES as u64 + 1)
-            .read_until(b'\n', &mut bytes)?;
-        if bytes.len() > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
-            return Err(Error::Invalid(
-                "observation unavailable: invalid peer frame".into(),
-            ));
+        let value = super::pages::read(&mut BufReader::new(socket), MAX_FRAME_BYTES)?;
+        if let Ok(failure) = Failure::deserialize(&value) {
+            return Err(Error::Invalid(format!(
+                "observation {}: {}",
+                failure.error.code, failure.error.message
+            )));
         }
-        serde_json::from_slice(&bytes).map_err(Into::into)
+        serde_json::from_value(value).map_err(Into::into)
     }
 
     pub fn activity_command(
@@ -847,6 +909,7 @@ impl Client {
                     host: None,
                     pane: Some(pane.into()),
                     activity: Some(command),
+                    select: None,
                 },
             )?;
             socket.write_all(b"\n")?;
@@ -870,7 +933,7 @@ impl Client {
     ) -> std::result::Result<portal_types::agents::ActivityView, portal_types::agents::ActivityError>
     {
         let socket = self
-            .open(Operation::Activity, Some(pane))
+            .open(Operation::Activity, Some(pane), None)
             .map_err(|error| activity_transport_error(&error))?;
         read_activity(&mut BufReader::new(socket))
     }
@@ -883,7 +946,7 @@ impl Client {
         portal_types::agents::ActivityError,
     > {
         let socket = self
-            .open(Operation::ActivitySubscribe, Some(pane))
+            .open(Operation::ActivitySubscribe, Some(pane), None)
             .map_err(|error| activity_transport_error(&error))?;
         let mut reader = BufReader::new(
             socket
@@ -894,24 +957,29 @@ impl Client {
         Ok(start_subscription(socket, reader, publication))
     }
 
-    pub fn current(&self) -> Result<Published> {
-        read(&mut BufReader::new(self.open(Operation::Current, None)?))
+    pub fn current(&self, select: &Select) -> Result<Published> {
+        read(&mut BufReader::new(self.open(
+            Operation::Current,
+            None,
+            select.chosen(),
+        )?))
     }
 
-    pub fn subscribe(&self) -> Result<Subscription> {
-        self.subscription(Operation::Subscribe, None)
+    pub fn subscribe(&self, select: &Select) -> Result<Subscription> {
+        self.subscription(Operation::Subscribe, None, select.chosen())
     }
 
     pub fn detail(&self, pane: &str) -> Result<Subscription<super::details::DetailFrame>> {
-        self.subscription(Operation::Detail, Some(pane))
+        self.subscription(Operation::Detail, Some(pane), None)
     }
 
     fn subscription<T: Wire>(
         &self,
         operation: Operation,
         pane: Option<&str>,
+        select: Option<Chosen>,
     ) -> Result<Subscription<T>> {
-        let socket = self.open(operation, pane)?;
+        let socket = self.open(operation, pane, select)?;
         let mut reader = BufReader::new(socket.try_clone()?);
         let publication = read_value::<T>(&mut reader)?;
         Ok(start_subscription(socket, reader, publication))
@@ -980,7 +1048,11 @@ fn read_activity(
     let reply: Reply<portal_types::agents::ActivityView> =
         serde_json::from_slice(&bytes).map_err(|_| invalid("invalid activity frame"))?;
     match reply {
-        Reply::Publication(view) if view.valid() && view.version == VERSION => Ok(view),
+        Reply::Publication(view)
+            if view.valid() && view.version == super::live_activity::VERSION =>
+        {
+            Ok(view)
+        }
         Reply::Publication(_) => Err(invalid("invalid activity revision or version")),
         Reply::Failure(failure) => {
             let code = match failure.error.code.as_str() {
@@ -1006,6 +1078,9 @@ pub(crate) trait Wire:
     serde::de::DeserializeOwned + std::fmt::Debug + Clone + Send + Sync + 'static
 {
     const MAX_BYTES: usize;
+    /// A framed reply has no size bound; `MAX_BYTES` bounds each of its frames.
+    const FRAMED: bool = false;
+    const VERSION: u32 = VERSION;
     fn version(&self) -> u32;
     fn epoch(&self) -> &str;
     fn revision(&self) -> u64;
@@ -1019,6 +1094,7 @@ pub(crate) trait Wire:
 
 impl Wire for Published {
     const MAX_BYTES: usize = MAX_FRAME_BYTES;
+    const FRAMED: bool = true;
     fn version(&self) -> u32 {
         self.version
     }
@@ -1035,6 +1111,7 @@ impl Wire for Published {
 
 impl Wire for portal_types::agents::ActivityView {
     const MAX_BYTES: usize = super::live_activity::MAX_FRAME;
+    const VERSION: u32 = super::live_activity::VERSION;
     fn version(&self) -> u32 {
         self.version
     }
@@ -1065,6 +1142,10 @@ impl Wire for super::details::DetailFrame {
 }
 
 fn read_value<T: Wire>(reader: &mut BufReader<UnixStream>) -> Result<T> {
+    if T::FRAMED {
+        let value = super::pages::read(reader, T::MAX_BYTES)?;
+        return accept(serde_json::from_value(value)?);
+    }
     let mut bytes = Vec::new();
     reader
         .take(T::MAX_BYTES as u64 + 1)
@@ -1075,9 +1156,16 @@ fn read_value<T: Wire>(reader: &mut BufReader<UnixStream>) -> Result<T> {
             "observation unavailable: closed or oversized frame".into(),
         ));
     }
-    match super::details::Codec::decode::<Reply<T>>(&bytes, T::MAX_BYTES)? {
+    accept(super::details::Codec::decode::<Reply<T>>(
+        &bytes,
+        T::MAX_BYTES,
+    )?)
+}
+
+fn accept<T: Wire>(reply: Reply<T>) -> Result<T> {
+    match reply {
         Reply::Publication(value) => {
-            if value.version() != VERSION {
+            if value.version() != T::VERSION {
                 return Err(Error::Invalid(
                     "unsupported observation protocol version".into(),
                 ));

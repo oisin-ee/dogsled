@@ -366,7 +366,9 @@ pub fn command(
         };
         return crate::print(true, &result, String::new);
     }
-    let published = crate::observation::ipc::Client::at(&ledger.dir).current()?;
+    let published = crate::observation::ipc::Client::at(&ledger.dir).current(
+        &crate::observation::ipc::Select::views(crate::observation::read::BOARD),
+    )?;
     crate::observation::read::report(&published, None);
     let board = crate::observation::read::board(&published, owner.as_deref())?;
     crate::print(json, &board, || board.render())
@@ -377,7 +379,10 @@ pub fn command(
 /// a publisher disconnect ends it. The reader never rebuilds state.
 pub fn watch(client: &crate::observation::ipc::Client, owner: &str, json: bool) -> Result<()> {
     use crate::observation::ipc::Status;
-    let mut subscription = client.subscribe()?;
+    use crate::observation::read::{BOARD, JOB_HISTORY};
+    let mut subscription = client.subscribe(&crate::observation::ipc::Select::views(
+        BOARD.into_iter().chain(JOB_HISTORY),
+    ))?;
     let mut connection = subscription.current();
     loop {
         if let Status::Disconnected(detail) = &connection.status {

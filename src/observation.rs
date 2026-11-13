@@ -1,5 +1,6 @@
 //! Immutable, host-owned observations. Collection and projection belong to the producer;
-//! clients receive complete publications without a shell, ledger, or fleet.
+//! clients receive the domains that they select from one publication, without a shell,
+//! ledger, or fleet.
 
 pub(crate) mod collect;
 pub(crate) mod details;
@@ -7,6 +8,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod display;
 pub(crate) mod ipc;
 pub(crate) mod live_activity;
+mod pages;
 pub(crate) mod peers;
 pub(crate) mod peers_runtime;
 pub(crate) mod project;
@@ -21,11 +23,14 @@ pub(crate) use socket::socket_path;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::watch;
 
-pub(crate) const VERSION: u32 = 1;
+/// Version 2: a reader selects domains, and a reply can have several frames.
+pub(crate) const VERSION: u32 = 2;
+/// The gap domain of a pass that failed as a whole.
+pub(crate) const FAILED_PASS: &str = "observation";
 
 /// Domain payloads are already-derived wire projections. The transport neither interprets
 /// foreign paths nor assembles projections. Collectors supply these complete maps together.
@@ -73,13 +78,106 @@ pub(crate) struct Publication {
     pub gaps: Vec<Gap>,
 }
 
+type Members = BTreeMap<String, Arc<pages::Member>>;
+
 #[derive(Debug)]
 pub(crate) struct Frame {
     pub published: Arc<Published>,
-    /// One newline-delimited frame, serialized before making this revision visible.
-    pub bytes: Arc<[u8]>,
+    /// Each member serialized once, before this revision becomes visible. A reply shares
+    /// them, so its size follows the selection, not the publication.
+    sources: pages::Member,
+    gaps: pages::Member,
+    local: Members,
+    views: Members,
     /// Host-local detail channels advance independently of the main publication.
     pub details: details::Payloads,
+}
+
+impl Frame {
+    fn new(
+        published: Arc<Published>,
+        previous: Option<&Self>,
+        details: details::Payloads,
+    ) -> Result<Self> {
+        let limit = ipc::MAX_FRAME_BYTES;
+        Ok(Self {
+            sources: pages::Member::new(
+                "",
+                "sources",
+                &serde_json::to_value(&published.sources)?,
+                limit,
+            )?,
+            gaps: pages::Member::new("", "gaps", &serde_json::to_value(&published.gaps)?, limit)?,
+            local: Self::members(
+                "/local",
+                &published.local,
+                previous.map(|frame| (&frame.published.local, &frame.local)),
+            )?,
+            views: Self::members(
+                "/views",
+                &published.views,
+                previous.map(|frame| (&frame.published.views, &frame.views)),
+            )?,
+            published,
+            details,
+        })
+    }
+
+    /// An unchanged domain keeps its bytes across revisions.
+    fn members(at: &str, current: &Domains, old: Option<(&Domains, &Members)>) -> Result<Members> {
+        current
+            .iter()
+            .map(|(name, value)| {
+                let kept = old
+                    .filter(|(values, _)| values.get(name) == Some(value))
+                    .and_then(|(_, members)| members.get(name).cloned());
+                let member = match kept {
+                    Some(member) => member,
+                    None => Arc::new(pages::Member::new(at, name, value, ipc::MAX_FRAME_BYTES)?),
+                };
+                Ok((name.clone(), member))
+            })
+            .collect()
+    }
+
+    fn chosen<'a>(
+        members: &'a Members,
+        names: Option<&BTreeSet<String>>,
+    ) -> Vec<&'a pages::Member> {
+        members
+            .iter()
+            .filter(|(name, _)| names.is_none_or(|names| names.contains(*name)))
+            .map(|(_, member)| &**member)
+            .collect()
+    }
+
+    /// The frames of one reply: this revision's selected domains with its sources and gaps.
+    pub fn reply(&self, select: Option<&ipc::Chosen>) -> Result<Vec<Vec<u8>>> {
+        let published = &self.published;
+        let scalars = format!(
+            "\"version\":{},\"epoch\":{},\"revision\":{},\"published_ms\":{},\"local_revision\":{}",
+            published.version,
+            Value::from(published.epoch.as_str()),
+            published.revision,
+            published.published_ms,
+            published.local_revision,
+        );
+        pages::reply(
+            &scalars,
+            &[
+                ("", vec![&self.sources, &self.gaps]),
+                (
+                    "local",
+                    Self::chosen(&self.local, select.map(|chosen| &chosen.local)),
+                ),
+                (
+                    "views",
+                    Self::chosen(&self.views, select.map(|chosen| &chosen.views)),
+                ),
+            ],
+            ipc::MAX_FRAME_BYTES,
+        )
+    }
 }
 
 /// The single producer owns revision assignment. Watch retains only the latest value.
@@ -128,6 +226,44 @@ impl Publisher {
             .as_ref()
             .map(|frame| Arc::clone(&frame.published))
             .ok_or_else(|| Error::Invalid("observation unavailable: no publication".into()))
+    }
+
+    /// The input after a pass that failed as a whole: the last domains, and a gap that
+    /// says they are no longer refreshed. A reader never sees the failure as current data.
+    pub fn failed(&self, published_ms: u64, detail: &str) -> Result<Publication> {
+        let gap = Gap {
+            domain: FAILED_PASS.into(),
+            availability: Availability::Failed,
+            detail: detail.into(),
+        };
+        let mut input = self.sender.borrow().as_ref().map_or_else(
+            || Publication {
+                published_ms,
+                sources: Sources::default(),
+                local: Domains::new(),
+                views: Domains::new(),
+                gaps: Vec::new(),
+            },
+            |frame| Publication {
+                published_ms,
+                sources: frame.published.sources.clone(),
+                local: frame.published.local.clone(),
+                views: frame.published.views.clone(),
+                gaps: frame.published.gaps.clone(),
+            },
+        );
+        input.gaps.retain(|gap| gap.domain != FAILED_PASS);
+        if let Some(gaps) = input
+            .views
+            .get_mut("portal")
+            .and_then(|view| view.pointer_mut("/data/gaps"))
+            .and_then(Value::as_array_mut)
+        {
+            gaps.retain(|gap| gap["domain"] != FAILED_PASS);
+            gaps.push(serde_json::to_value(&gap)?);
+        }
+        input.gaps.push(gap);
+        Ok(input)
     }
 
     pub fn replace(&mut self, mut input: Publication) -> Result<Arc<Published>> {
@@ -182,16 +318,13 @@ impl Publisher {
             views: input.views,
             gaps: input.gaps,
         });
-        let mut bytes = serde_json::to_vec(&*published)?;
-        bytes.push(b'\n');
-        if bytes.len() > ipc::MAX_FRAME_BYTES {
-            return Err(Error::Invalid("observation publication too large".into()));
-        }
-        self.sender.send_replace(Some(Arc::new(Frame {
-            published: Arc::clone(&published),
-            bytes: bytes.into(),
-            details: self.details.clone(),
-        })));
+        let previous = self.sender.borrow().clone();
+        let frame = Frame::new(
+            Arc::clone(&published),
+            previous.as_deref(),
+            self.details.clone(),
+        )?;
+        self.sender.send_replace(Some(Arc::new(frame)));
         Ok(published)
     }
 }
@@ -223,9 +356,9 @@ fn portal_content(view: &Value) -> Value {
 pub(crate) fn command(command: &crate::cli::ObservationCommand) -> Result<std::process::ExitCode> {
     let client = ipc::Client::at(&crate::ledger::default_dir());
     if matches!(command, crate::cli::ObservationCommand::Current) {
-        crate::print(true, &client.current()?, String::new)?;
+        crate::print(true, &client.current(&ipc::Select::All)?, String::new)?;
     } else {
-        let mut subscription = client.subscribe()?;
+        let mut subscription = client.subscribe(&ipc::Select::All)?;
         let mut connection = subscription.current();
         loop {
             if let ipc::Status::Disconnected(detail) = connection.status {

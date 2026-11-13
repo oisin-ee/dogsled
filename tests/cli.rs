@@ -2133,7 +2133,7 @@ fn missing_stale_unreachable_and_malformed_hosts_remain_visible() {
     );
     fs::remove_file(rig.dir.join("unreachable")).unwrap();
     let script = rig.log("bin/ssh");
-    rig.put("peer-export.json", &json!({"version":1,"epoch":"retry-peer","local_revision":1,
+    rig.put("peer-export.json", &json!({"version":2,"epoch":"retry-peer","local_revision":1,
         "measured":{"host":sampled},"local":{"host":serde_json::from_str::<Value>(&rig.log("remote.json")).unwrap()},"gaps":[]}));
     rig.script(
         "ssh",
@@ -2236,7 +2236,7 @@ fn wait_publication_at(rig: &Rig, state: &Path, ready: impl Fn(&Value) -> bool) 
             use std::io::{BufRead as _, Write as _};
             socket.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
             socket
-                .write_all(b"{\"version\":1,\"operation\":\"current\"}\n")
+                .write_all(b"{\"version\":2,\"operation\":\"current\"}\n")
                 .unwrap();
             let mut line = String::new();
             if std::io::BufReader::new(socket).read_line(&mut line).is_ok()
