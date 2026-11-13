@@ -13,6 +13,7 @@ pub(crate) mod peers;
 pub(crate) mod peers_runtime;
 pub(crate) mod project;
 pub(crate) mod read;
+pub(crate) mod settings;
 pub(crate) mod sidebar;
 mod socket;
 #[cfg(debug_assertions)]

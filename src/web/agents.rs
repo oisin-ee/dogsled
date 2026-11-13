@@ -75,6 +75,8 @@ pub(crate) enum PeerOperation {
     Files,
     Event,
     Activity,
+    Settings,
+    ChangeSettings(portal_types::models::SettingsChange),
     Register(portal_types::agents::RegisterProducer),
     Publish(portal_types::agents::PublishActivity),
 }
@@ -263,6 +265,18 @@ async fn peer_read(
             Ok(view) => Json(view).into_response(),
             Err(error) => super::activity::failure(error),
         },
+        PeerOperation::Settings => {
+            super::settings::local(state, pane, crate::observation::settings::Command::Current)
+                .await
+        }
+        PeerOperation::ChangeSettings(change) => {
+            super::settings::local(
+                state,
+                pane,
+                crate::observation::settings::Command::Change(change),
+            )
+            .await
+        }
         PeerOperation::Register(body) => activity_command(
             &client,
             &pane,
@@ -2008,6 +2022,58 @@ mod tests {
                 .is_none()
         );
         std::fs::remove_file(release).unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_settings_routes_read_and_apply_on_the_named_host() {
+        let fixture = PeerFixture::new();
+        let settings = crate::observation::settings::tests::selection();
+        let change = portal_types::models::SettingsChange {
+            model: None,
+            thinking: Some(portal_types::models::ThinkingLevel::Low),
+        };
+        for (method, body, operation) in [
+            (Method::GET, None, PeerOperation::Settings),
+            (
+                Method::POST,
+                Some(serde_json::to_string(&change).unwrap()),
+                PeerOperation::ChangeSettings(change),
+            ),
+        ] {
+            fixture.shell.on(
+                &fixture.command("w1:p1", &operation),
+                &json!({"status":200,"body":settings}).to_string(),
+            );
+            let response = call(
+                fixture.state.clone(),
+                request(method, "/api/agents/netcup/w1:p1/settings", body.as_deref()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                body_json(response).await,
+                serde_json::to_value(&settings).unwrap()
+            );
+        }
+        let operation = PeerOperation::ChangeSettings(portal_types::models::SettingsChange {
+            model: None,
+            thinking: Some(portal_types::models::ThinkingLevel::High),
+        });
+        fixture.shell.on(&fixture.command("w1:p1", &operation), &json!({"status":409,"body":{"code":"settings_refused","error":"no credentials for provider"}}).to_string());
+        let response = call(
+            fixture.state.clone(),
+            request(
+                Method::POST,
+                "/api/agents/netcup/w1:p1/settings",
+                Some("{\"thinking\":\"high\"}"),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(response).await["error"],
+            "no credentials for provider"
+        );
     }
 
     #[tokio::test]

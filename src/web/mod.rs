@@ -11,6 +11,7 @@ pub mod oneshot;
 mod peer_stream;
 pub mod questions;
 pub mod reviews;
+pub mod settings;
 pub mod store;
 #[cfg(test)]
 mod test_support;
@@ -241,6 +242,7 @@ fn router(state: AppState) -> Router {
         .route("/api/stream", get(stream))
         .merge(agents::router())
         .merge(activity::router())
+        .merge(settings::router())
         .merge(inbox::routes())
         .merge(questions::routes())
         .merge(reviews::routes())
@@ -301,7 +303,20 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
         *request.method(),
         axum::http::Method::POST | axum::http::Method::PUT
     );
-    let refusal = if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
+    let settings_producer = matches!(
+        segments.as_slice(),
+        ["", "api", "agents", _, "settings"]
+            | ["", "api", "agents", _, "settings", "requests"]
+            | ["", "api", "agents", _, "settings", "requests", _, "result"]
+    );
+    let refusal = if settings_producer && !guard::bearer_allowed(request.headers(), &state.token) {
+        Some(settings::failure(
+            crate::observation::settings::Failure::new(
+                "unauthorized",
+                "Pi settings routes require bearer authentication",
+            ),
+        ))
+    } else if activity_write && !guard::bearer_allowed(request.headers(), &state.token) {
         Some(activity::failure(crate::observation::live_activity::error(
             portal_types::agents::ActivityCode::Unauthorized,
             "activity mutations require bearer authentication",

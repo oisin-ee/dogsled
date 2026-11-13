@@ -145,7 +145,7 @@ name = "dogsled"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = "0.29.0"
