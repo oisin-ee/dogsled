@@ -338,7 +338,7 @@ fn lead_command(
         home: node.home,
         herdr: None,
     };
-    let started = leads::create(&context, &args.repo, &prompt)?;
+    let started = leads::create(&context, &args.repo, &prompt, None, None)?;
     print(json, &started, || {
         format!("{}\t{}\t{}\n", started.host, started.name, started.pane)
     })

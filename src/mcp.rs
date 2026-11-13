@@ -576,7 +576,7 @@ impl Server {
                 home: &fleet.home,
                 herdr: None,
             };
-            let started = crate::leads::create(&context, &args.repo, &args.message)?;
+            let started = crate::leads::create(&context, &args.repo, &args.message, None, None)?;
             Ok(serde_json::to_value(started)?)
         })
         .await

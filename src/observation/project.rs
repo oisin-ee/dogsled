@@ -37,6 +37,7 @@ pub(crate) struct LocalInputs {
     questions: Option<Vec<Pending>>,
     reviews: Option<Vec<Review>>,
     repos: Option<portal_types::agents::RepoList>,
+    models: Option<portal_types::models::ModelCatalogue>,
     gaps: Vec<Gap>,
 }
 
@@ -65,6 +66,19 @@ fn capture_repos(local: &Domains, gaps: &mut Vec<Gap>) -> Option<portal_types::a
     local.get("repos").and_then(|value| {
         capture(
             "repos",
+            serde_json::from_value(value.clone()).map_err(Into::into),
+            gaps,
+        )
+    })
+}
+
+fn capture_models(
+    local: &Domains,
+    gaps: &mut Vec<Gap>,
+) -> Option<portal_types::models::ModelCatalogue> {
+    local.get("models").and_then(|value| {
+        capture(
+            "models",
             serde_json::from_value(value.clone()).map_err(Into::into),
             gaps,
         )
@@ -149,6 +163,7 @@ impl LocalInputs {
             &mut gaps,
         );
         let repos = capture_repos(&input.local, &mut gaps);
+        let models = capture_models(&input.local, &mut gaps);
         let findings = status.as_ref().and_then(|status| {
             capture(
                 "findings",
@@ -181,6 +196,7 @@ impl LocalInputs {
             questions,
             reviews,
             repos,
+            models,
             gaps,
         }
     }
@@ -346,6 +362,7 @@ pub(crate) fn derive(
     let views = &mut input.views;
     views.clear();
     repos_view(views, local.repos.as_ref(), &gaps)?;
+    models_view(views, local.models.as_ref(), &gaps)?;
     insert(views, "hosts", Some(&reports), &gaps)?;
     insert(views, "status", status.as_ref(), &gaps)?;
     insert(
@@ -416,6 +433,19 @@ fn repos_view(
         .cloned()
         .collect();
     insert(views, "repos", repos, &repo_gaps)
+}
+
+fn models_view(
+    views: &mut Domains,
+    models: Option<&portal_types::models::ModelCatalogue>,
+    gaps: &[Gap],
+) -> Result<()> {
+    let model_gaps: Vec<_> = gaps
+        .iter()
+        .filter(|gap| gap.domain == "models")
+        .cloned()
+        .collect();
+    insert(views, "models", models, &model_gaps)
 }
 
 fn sidebar_views(
@@ -615,5 +645,43 @@ fn portal(
         inbox,
         repos: local.repos.clone(),
         gaps: gaps.to_vec(),
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn model_capture_and_view_preserve_retained_choices_and_refresh_error() {
+        let catalogue = portal_types::models::ModelCatalogue {
+            models: vec![portal_types::models::ModelChoice {
+                model: portal_types::models::ModelRef {
+                    provider: "openai".into(),
+                    id: "gpt-5".into(),
+                },
+                name: Some("GPT-5".into()),
+                thinking: vec![portal_types::models::ThinkingLevel::High],
+            }],
+            error: Some("refresh failed".into()),
+        };
+        let local = Domains::from([("models".into(), json!(catalogue))]);
+        let mut gaps = Vec::new();
+        let captured = capture_models(&local, &mut gaps).unwrap();
+        assert_eq!(captured, catalogue);
+        let mut views = Domains::new();
+        models_view(&mut views, Some(&captured), &gaps).unwrap();
+        let view: View<portal_types::models::ModelCatalogue> =
+            serde_json::from_value(views.remove("models").unwrap()).unwrap();
+        assert_eq!(view.data, Some(catalogue));
+        assert_eq!(view.gaps, []);
+        assert!(capture_models(&Domains::new(), &mut gaps).is_none());
+        assert_eq!(gaps, []);
+        let malformed = Domains::from([("models".into(), json!({"models": false}))]);
+        assert!(capture_models(&malformed, &mut gaps).is_none());
+        assert_eq!(gaps[0].domain, "models");
+        models_view(&mut views, None, &gaps).unwrap();
+        assert!(views["models"]["data"].is_null());
+        assert_eq!(views["models"]["gaps"][0]["domain"], "models");
     }
 }

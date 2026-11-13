@@ -3,6 +3,7 @@
 use crate::checkout::Repository;
 use crate::jobs::Validity;
 use crate::probe::Agent;
+use portal_types::models::{ModelRef, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 
 mod checkout;
@@ -184,8 +185,10 @@ pub(crate) fn create(
     context: &CreateContext<'_>,
     selector: &str,
     prompt: &str,
+    model: Option<ModelRef>,
+    thinking: Option<ThinkingLevel>,
 ) -> Result<Started, Failure> {
-    routing::create(context, selector, prompt)
+    routing::create(context, selector, prompt, model, thinking)
 }
 
 fn failure(kind: FailureKind, error: crate::error::Error) -> Failure {
@@ -241,7 +244,13 @@ fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<St
         phase: None,
         error: Box::new(error),
     })?;
-    launch(context, &mut record).map_err(|error| {
+    launch(
+        context,
+        &mut record,
+        delivery.model.as_ref(),
+        delivery.thinking,
+    )
+    .map_err(|error| {
         let error = match record.pane.as_deref() {
             Some(pane) if record.phase == Phase::Starting => {
                 crate::launch::startup_error(context.shell, pane, error)
@@ -281,7 +290,12 @@ pub(crate) fn peer(
 }
 
 /// Advance one saved phase per effect. `record` mirrors what is saved.
-fn launch(context: &CreateContext<'_>, record: &mut Record) -> crate::error::Result<()> {
+fn launch(
+    context: &CreateContext<'_>,
+    record: &mut Record,
+    model: Option<&ModelRef>,
+    thinking: Option<ThinkingLevel>,
+) -> crate::error::Result<()> {
     let ledger = context.ledger;
     let advance = |record: &mut Record, phase: Phase| -> crate::error::Result<()> {
         record.phase = phase;
@@ -306,7 +320,7 @@ fn launch(context: &CreateContext<'_>, record: &mut Record) -> crate::error::Res
         crate::error::Error::Invalid(format!("{pane}: cannot establish its terminal identity"))
     })?;
     advance(record, Phase::Starting)?;
-    let args = [
+    let mut args = [
         "agent",
         "start",
         &record.name,
@@ -315,7 +329,17 @@ fn launch(context: &CreateContext<'_>, record: &mut Record) -> crate::error::Res
         "--pane",
         &pane,
     ]
-    .map(str::to_owned);
+    .map(str::to_owned)
+    .to_vec();
+    if model.is_some() || thinking.is_some() {
+        args.push("--".into());
+        if let Some(model) = model {
+            args.extend(["--model".into(), model.pattern()]);
+        }
+        if let Some(thinking) = thinking {
+            args.extend(["--thinking".into(), thinking.as_str().into()]);
+        }
+    }
     let validity = record.validity;
     crate::launch::start_native(ledger, context.shell, &args, &pane, &terminal, &|| {
         crate::jobs::check_validity(ledger, Some(&validity))

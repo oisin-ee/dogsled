@@ -183,6 +183,8 @@ pub async fn create_lead(
     let body = portal_types::agents::CreateLeadBody {
         repo: repo.to_owned(),
         prompt: prompt.to_owned(),
+        model: None,
+        thinking: None,
     };
     let response = Request::post(&format!("{BASE}/api/leads"))
         .json(&body)
