@@ -732,7 +732,7 @@ fn AgentSession(
                 }
                 if harness == Some("pi") {
                     if let Some(value) = settings() {
-                        crate::model_picker::ModelPicker { choices: value.models, selected_model: value.model, selected_level: value.thinking, busy: settings_busy(), on_change: change_settings }
+                        crate::model_picker::ModelPicker { choices: value.models, selected_model: value.model, selected_level: Some(value.thinking), busy: settings_busy(), on_change: change_settings }
                     }
                 } else if matches!(harness, Some("claude" | "codex")) {
                     crate::model_picker::ReadOnlyModel { model: retained.as_ref().and_then(|conversation| conversation.turns.iter().rev().find_map(|turn| match &turn.source {

@@ -10,7 +10,7 @@ use portal_types::models::{ModelChoice, ModelRef, SettingsChange, ThinkingLevel}
 pub(crate) fn ModelPicker(
     choices: Vec<ModelChoice>,
     selected_model: Option<ModelRef>,
-    selected_level: ThinkingLevel,
+    selected_level: Option<ThinkingLevel>,
     busy: bool,
     on_change: EventHandler<SettingsChange>,
 ) -> Element {
@@ -39,7 +39,7 @@ pub(crate) fn ModelPicker(
                 filter: move |(query, model): (String, String)| {
                     searchable.iter().find(|choice| choice.model.pattern() == model).is_some_and(|choice| default_combobox_filter(&query, &format!("{} {}", model, choice.name.as_deref().unwrap_or(""))))
                 },
-                ComboboxInput { class: "repo-search", aria_label: "Model", "name": "model" }
+                ComboboxInput { class: "repo-search", aria_label: "Model", "name": "model", placeholder: "Pi default" }
                 ComboboxList { class: "repo-options", aria_label: "Models",
                     for (index, choice) in choices.into_iter().enumerate() {
                         ComboboxOption::<String> { key: "{choice.model.pattern()}", index,
@@ -51,13 +51,16 @@ pub(crate) fn ModelPicker(
                     ComboboxEmpty { div { class: "repo-empty", "No matching models" } }
                 }
             }
-            Select::<ThinkingLevel> { class: "thinking-select", name: "thinking", aria_label: "Thinking level",
+            Select::<Option<ThinkingLevel>> { class: "thinking-select", name: "thinking", aria_label: "Thinking level",
                 value: Some(ReadSignal::from(level)), disabled: busy || supported.is_empty(),
-                on_value_change: move |level: Option<ThinkingLevel>| {
-                    if let Some(level) = level { on_change.call(SettingsChange { model: None, thinking: Some(level) }); }
+                on_value_change: move |level: Option<Option<ThinkingLevel>>| {
+                    if let Some(Some(level)) = level { on_change.call(SettingsChange { model: None, thinking: Some(level) }); }
                 },
+                if selected_level.is_none() {
+                    SelectOption::<Option<ThinkingLevel>> { index: 0usize, value: None, text_value: "Pi default", "Pi default" }
+                }
                 for (index, level) in supported.into_iter().enumerate() {
-                    SelectOption::<ThinkingLevel> { key: "{level.as_str()}", index, value: level, text_value: level.as_str(), "{level.as_str()}" }
+                    SelectOption::<Option<ThinkingLevel>> { key: "{level.as_str()}", index: index + usize::from(selected_level.is_none()), value: Some(level), text_value: level.as_str(), "{level.as_str()}" }
                 }
             }
         }

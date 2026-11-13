@@ -13,7 +13,7 @@ fn model_picker_root() -> Element {
     };
     rsx! { crate::model_picker::ModelPicker {
         choices: vec![ModelChoice { model: model.clone(), name: Some("Test model".into()), thinking: vec![ThinkingLevel::Off, ThinkingLevel::High] }],
-        selected_model: Some(model), selected_level: ThinkingLevel::High, busy: false, on_change: move |_| {},
+        selected_model: Some(model), selected_level: Some(ThinkingLevel::High), busy: false, on_change: move |_| {},
     } }
 }
 
@@ -48,7 +48,7 @@ fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
         })
         .collect();
     let selected_model = Some(choices[0].model.clone());
-    rsx! { crate::model_picker::ModelPicker { choices, selected_model, selected_level: ThinkingLevel::High, busy: false,
+    rsx! { crate::model_picker::ModelPicker { choices, selected_model, selected_level: Some(ThinkingLevel::High), busy: false,
         on_change: move |change| requested.set(Some(change)),
     } }
 }
@@ -100,7 +100,92 @@ fn catalogue_root(props: (PortalHandle, DraftHandle)) -> Element {
     });
     let draft = use_context_provider(|| crate::agent_view::Draft(Signal::new(String::new()))).0;
     props.1.set(Some(draft));
-    rsx! { crate::new_lead::NewLead {} }
+    rsx! { crate::new_lead::NewLeadForm {} }
+}
+
+fn new_model_catalogue_root(
+    model_catalogue: Result<portal_types::models::ModelCatalogue, String>,
+) -> Element {
+    let publication = use_signal(|| {
+        let mut state = crate::app::PortalState::default();
+        state.update(Ok(catalogue_snapshot(&["owner/repo"], None, 1)), 1);
+        state
+    });
+    let catalogue = use_memo(move || publication.read().catalogue.clone());
+    use_context_provider(|| crate::app::CataloguePortal(catalogue));
+    use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
+    use_context_provider(|| crate::new_lead::NewConversation {
+        open: Signal::new(true),
+        repository: Signal::new(None),
+    });
+    use_context_provider(|| crate::agent_view::Draft(Signal::new("First message".into())));
+    rsx! { crate::new_lead::NewLeadForm { model_catalogue: Some(model_catalogue) } }
+}
+
+#[test]
+fn new_conversation_renders_catalogue_choices_and_pi_defaults() {
+    use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, ThinkingLevel};
+    let mut dom = VirtualDom::new_with_props(
+        new_model_catalogue_root,
+        Ok(ModelCatalogue {
+            models: vec![ModelChoice {
+                model: ModelRef {
+                    provider: "provider".into(),
+                    id: "reasoning".into(),
+                },
+                name: Some("Reasoning model".into()),
+                thinking: vec![ThinkingLevel::High],
+            }],
+            error: None,
+        }),
+    );
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    let header = html.split_once("</header>").unwrap().0;
+    assert!(header.contains("New conversation"), "{html}");
+    assert!(header.contains(r#"name="model""#), "{html}");
+    assert!(header.contains(r#"placeholder="Pi default""#), "{html}");
+    assert!(header.contains(">Pi default</span>"), "{html}");
+    catalogue_input_event_for(&dom, "model", "oninput", || {
+        FormData::from(CatalogueInput("reasoning".into()))
+    });
+    settle_catalogue(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Reasoning model"), "{html}");
+    assert!(html.contains("provider/reasoning"), "{html}");
+}
+
+#[test]
+fn new_conversation_model_catalogue_failures_alert_without_disabling_send() {
+    use portal_types::models::ModelCatalogue;
+    for result in [
+        Err("observation unavailable".into()),
+        Ok(ModelCatalogue {
+            models: vec![],
+            error: Some("Pi catalogue refresh failed".into()),
+        }),
+    ] {
+        let mut dom = VirtualDom::new_with_props(new_model_catalogue_root, result);
+        dom.rebuild_in_place();
+        settle_catalogue(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(r#"role="alert""#), "{html}");
+        assert!(html.contains("Model list unavailable:"), "{html}");
+        assert!(
+            html.contains("The lead starts with Pi&#39;s default model."),
+            "{html}"
+        );
+        let send = html
+            .split("<button")
+            .find(|button| button.contains(r#"aria-label="Send message""#))
+            .unwrap();
+        let attributes = send.split('>').next().unwrap();
+        assert!(
+            !attributes.contains("disabled=true") && !attributes.contains(r#"disabled="true""#),
+            "{attributes}"
+        );
+    }
 }
 
 fn catalogue_snapshot(
@@ -128,14 +213,17 @@ fn catalogue_component_scopes(
         match dynamic {
             DynamicNode::Component(component) => {
                 if let Some(scope) = component.mounted_scope_id(index, node, dom) {
-                    if component.name.ends_with("::NewLead")
+                    if component.name.ends_with("::NewLeadForm")
                         || component.name.ends_with("::Composer")
                         || component.name.ends_with("::RepositoryPicker")
                         || component.name.ends_with("::ComboboxInput")
                         || component.name.ends_with("::Input")
                         || component.name.contains("::ComboboxOption")
                     {
-                        scopes.insert(format!("{}:{:?}", component.name, node.key), scope);
+                        scopes.insert(
+                            format!("{}:{:?}:{scope:?}", component.name, node.key),
+                            scope,
+                        );
                     }
                     if let Some(state) = dom.get_scope(scope) {
                         catalogue_component_scopes(dom, state.root_node(), scopes);
@@ -178,11 +266,25 @@ macro_rules! catalogue_event_converter {
 dioxus::html::with_html_event_groups!(catalogue_event_converter);
 
 fn catalogue_input_event<T: 'static>(dom: &VirtualDom, name: &str, data: impl Fn() -> T + 'static) {
-    let scope = catalogue_scopes(dom)
+    catalogue_input_event_for(dom, "repository", name, data);
+}
+
+fn catalogue_input_event_for<T: 'static>(
+    dom: &VirtualDom,
+    field: &str,
+    name: &str,
+    data: impl Fn() -> T + 'static,
+) {
+    let inputs: Vec<_> = catalogue_scopes(dom)
         .into_iter()
-        .find(|(name, _)| name.contains("::ComboboxInput"))
+        .filter(|(name, _)| name.contains("::ComboboxInput"))
         .map(|(_, scope)| scope)
-        .expect("mounted combobox input");
+        .collect();
+    let scope = inputs.iter().copied().find(|scope| {
+        dom.get_scope(*scope).unwrap().root_node().dynamic_attrs.iter().flatten().any(|attr| {
+            attr.name == "name" && matches!(&attr.value, dioxus::core::AttributeValue::Text(value) if value == field)
+        })
+    }).or_else(|| inputs.first().copied()).expect("mounted combobox input");
     let listener = dom
         .get_scope(scope)
         .unwrap()
@@ -518,7 +620,14 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
     settle_catalogue(&mut dom);
     let healthy = dioxus_ssr::render(&dom);
     assert!(healthy.contains("value=\"owner/beta\""), "{healthy}");
-    assert!(!healthy.contains("disabled=true"), "{healthy}");
+    assert!(
+        !healthy
+            .split_once("<form")
+            .unwrap()
+            .1
+            .contains("disabled=true"),
+        "{healthy}"
+    );
     let before = catalogue_scopes(&dom);
     // A serve restarted during a GitHub outage publishes its failure with no repositories.
     dom.in_runtime(|| {
@@ -540,7 +649,14 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
         "{failed}"
     );
     assert!(!failed.contains("No GitHub repositories found"), "{failed}");
-    assert!(!failed.contains("disabled=true"), "{failed}");
+    assert!(
+        !failed
+            .split_once("<form")
+            .unwrap()
+            .1
+            .contains("disabled=true"),
+        "{failed}"
+    );
     assert_eq!(catalogue_scopes(&dom), before);
     assert_eq!(draft(), "Keep this draft");
 }

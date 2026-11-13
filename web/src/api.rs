@@ -199,17 +199,40 @@ pub async fn send_prompt(
     post(&agent_url(address, "prompt"), &body).await
 }
 
+/// Read the serve-owned model catalogue for new conversations.
+pub async fn models() -> Result<portal_types::models::ModelCatalogue, String> {
+    read_json(
+        Request::get(&format!("{BASE}/api/models"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .await
+}
+
+/// Build the first-message request, omitting settings that use Pi's defaults.
+pub(crate) fn create_lead_body(
+    repo: &str,
+    prompt: &str,
+    model: Option<portal_types::models::ModelRef>,
+    thinking: Option<portal_types::models::ThinkingLevel>,
+) -> portal_types::agents::CreateLeadBody {
+    portal_types::agents::CreateLeadBody {
+        repo: repo.to_owned(),
+        prompt: prompt.to_owned(),
+        model,
+        thinking,
+    }
+}
+
 /// Start a lead in `repo` with its first prompt. The result is the lead's pane.
 pub async fn create_lead(
     repo: &str,
     prompt: &str,
+    model: Option<portal_types::models::ModelRef>,
+    thinking: Option<portal_types::models::ThinkingLevel>,
 ) -> Result<portal_types::agents::AgentAddress, String> {
-    let body = portal_types::agents::CreateLeadBody {
-        repo: repo.to_owned(),
-        prompt: prompt.to_owned(),
-        model: None,
-        thinking: None,
-    };
+    let body = create_lead_body(repo, prompt, model, thinking);
     let response = Request::post(&format!("{BASE}/api/leads"))
         .json(&body)
         .map_err(|error| error.to_string())?

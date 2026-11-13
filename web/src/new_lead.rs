@@ -5,6 +5,7 @@ use dioxus_primitives::combobox::{
     Combobox, ComboboxEmpty, ComboboxInput, ComboboxList, ComboboxOption, default_combobox_filter,
 };
 use portal_types::agents::RepoChoice;
+use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, SettingsChange, ThinkingLevel};
 
 use crate::agent_view::{Composer, Draft, message_with_images};
 use crate::api;
@@ -75,8 +76,42 @@ fn RepositoryPicker(
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LaunchSettings {
+    model: Option<ModelRef>,
+    thinking: Option<ThinkingLevel>,
+}
+
+impl LaunchSettings {
+    fn change(&mut self, change: SettingsChange, choices: &[ModelChoice]) {
+        if let Some(model) = change.model {
+            if !choices.iter().any(|choice| {
+                choice.model == model
+                    && self
+                        .thinking
+                        .is_some_and(|level| choice.thinking.contains(&level))
+            }) {
+                self.thinking = None;
+            }
+            self.model = Some(model);
+        }
+        if let Some(level) = change.thinking {
+            self.thinking = Some(level);
+        }
+    }
+}
+
 #[component]
 pub(crate) fn NewLead() -> Element {
+    let catalogue = use_resource(api::models);
+    rsx! { NewLeadForm { model_catalogue: catalogue() } }
+}
+
+#[component]
+pub(crate) fn NewLeadForm(
+    #[props(default)] model_catalogue: Option<Result<ModelCatalogue, String>>,
+) -> Element {
+    let mut settings = use_signal(LaunchSettings::default);
     let mut selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
     let conversation = use_context::<NewConversation>();
     let mut composing = conversation.open;
@@ -138,10 +173,11 @@ pub(crate) fn NewLead() -> Element {
         if busy() || uploading() || message.trim().is_empty() {
             return;
         }
+        let launch = settings();
         busy.set(true);
         error.set(None);
         spawn(async move {
-            match api::create_lead(&target, &message).await {
+            match api::create_lead(&target, &message, launch.model, launch.thinking).await {
                 Ok(pane) => {
                     if draft() == text {
                         draft.set(String::new());
@@ -163,6 +199,16 @@ pub(crate) fn NewLead() -> Element {
         .as_ref()
         .map(|list| list.repos.clone())
         .unwrap_or_default();
+    let model_choices = model_catalogue
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|catalogue| catalogue.models.clone())
+        .unwrap_or_default();
+    let model_error = model_catalogue.as_ref().and_then(|result| match result {
+        Ok(catalogue) => catalogue.error.as_deref(),
+        Err(message) => Some(message.as_str()),
+    });
+    let launch = settings();
     rsx! {
         section { class: "new-lead", aria_label: "New conversation", aria_busy: busy(),
             header { class: "lead-header new-lead-header",
@@ -173,8 +219,16 @@ pub(crate) fn NewLead() -> Element {
                         selection_removed.set(false);
                     }
                 }
+                crate::model_picker::ModelPicker {
+                    choices: model_choices.clone(), selected_model: launch.model,
+                    selected_level: launch.thinking, busy: busy(),
+                    on_change: move |change| settings.write().change(change, &model_choices),
+                }
             }
             div { class: "new-lead-body",
+                if let Some(message) = model_error {
+                    Alert { "Model list unavailable: {message}. The lead starts with Pi's default model." }
+                }
                 if let Some(message) = catalogue.observation_error {
                     if catalogue.list.is_some() {
                         Alert { "Last-known repository choices: {message}" }
@@ -204,9 +258,112 @@ pub(crate) fn NewLead() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{RepositoryPicker, matches, repository};
+    use super::{LaunchSettings, RepositoryPicker, matches, repository};
     use dioxus::prelude::*;
     use portal_types::agents::RepoChoice;
+    use portal_types::models::{ModelChoice, ModelRef, SettingsChange, ThinkingLevel};
+
+    fn model_choice(id: &str, thinking: Vec<ThinkingLevel>) -> ModelChoice {
+        ModelChoice {
+            model: ModelRef {
+                provider: "provider".into(),
+                id: id.into(),
+            },
+            name: None,
+            thinking,
+        }
+    }
+
+    #[test]
+    fn chosen_model_and_level_reach_the_lead_request_body() {
+        let choice = model_choice("reasoning", vec![ThinkingLevel::Off, ThinkingLevel::High]);
+        let mut settings = LaunchSettings::default();
+        settings.change(
+            SettingsChange {
+                model: Some(choice.model.clone()),
+                thinking: None,
+            },
+            std::slice::from_ref(&choice),
+        );
+        settings.change(
+            SettingsChange {
+                model: None,
+                thinking: Some(ThinkingLevel::High),
+            },
+            std::slice::from_ref(&choice),
+        );
+        let body = crate::api::create_lead_body(
+            "owner/repo",
+            "First message",
+            settings.model,
+            settings.thinking,
+        );
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({
+                "repo": "owner/repo", "prompt": "First message",
+                "model": {"provider": "provider", "id": "reasoning"}, "thinking": "high"
+            })
+        );
+    }
+
+    #[test]
+    fn unset_launch_settings_omit_both_fields_for_pi_defaults() {
+        let settings = LaunchSettings::default();
+        let body = crate::api::create_lead_body(
+            "owner/repo",
+            "First message",
+            settings.model,
+            settings.thinking,
+        );
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({
+                "repo": "owner/repo", "prompt": "First message"
+            })
+        );
+    }
+
+    #[test]
+    fn model_change_clears_unsupported_thinking_but_keeps_a_supported_level() {
+        let choices = vec![
+            model_choice("reasoning", vec![ThinkingLevel::Off, ThinkingLevel::High]),
+            model_choice("basic", vec![ThinkingLevel::Off]),
+        ];
+        let mut settings = LaunchSettings {
+            model: None,
+            thinking: Some(ThinkingLevel::High),
+        };
+        settings.change(
+            SettingsChange {
+                model: Some(choices[0].model.clone()),
+                thinking: None,
+            },
+            &choices,
+        );
+        assert_eq!(settings.thinking, Some(ThinkingLevel::High));
+        settings.change(
+            SettingsChange {
+                model: Some(choices[1].model.clone()),
+                thinking: None,
+            },
+            &choices,
+        );
+        assert_eq!(settings.model, Some(choices[1].model.clone()));
+        assert_eq!(settings.thinking, None);
+        let body = crate::api::create_lead_body(
+            "owner/repo",
+            "First message",
+            settings.model,
+            settings.thinking,
+        );
+        assert!(
+            serde_json::to_value(body)
+                .unwrap()
+                .get("thinking")
+                .is_none()
+        );
+    }
 
     fn picker_root() -> Element {
         let selected = use_signal(|| Some("owner/repo-0".to_owned()));
