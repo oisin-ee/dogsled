@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.36.2](https://github.com/oisin-ee/dogsled/compare/v0.36.1...v0.36.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **close:** remove saved checkouts after their pane is gone ([#334](https://github.com/oisin-ee/dogsled/issues/334)) ([211a473](https://github.com/oisin-ee/dogsled/commit/211a473e13a47701add80bf7a12b7554150ee2f4))
+
 ## [0.36.1](https://github.com/oisin-ee/dogsled/compare/v0.36.0...v0.36.1) (2026-11-13)
 
 
