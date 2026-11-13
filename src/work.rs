@@ -245,9 +245,11 @@ pub(crate) fn references_released(ledger: &Ledger, id: &str) -> Result<bool> {
     if crate::prepare::held(ledger, id)? {
         return Ok(false);
     }
-    if queue(ledger)?.iter().any(|ticket| {
-        ticket.request.id == id && matches!(ticket.state.as_str(), "pending" | "admitting")
-    }) {
+    if crate::store::read(ledger, |tx| crate::tables::ticket_by_request(tx, id))?.is_some_and(
+        |ticket| {
+            ticket.request.id == id && matches!(ticket.state.as_str(), "pending" | "admitting")
+        },
+    ) {
         return Ok(false);
     }
     if crate::preservation::operations(ledger)?
@@ -2522,8 +2524,8 @@ pub(crate) fn admission_completion(ledger: &Ledger, id: &str) -> Result<Option<u
             )
     } else {
         attempt.launch.as_ref().is_some_and(|launch| {
-            items::list(ledger).is_ok_and(|items| {
-                items.iter().any(|item| {
+            crate::store::read(ledger, |tx| crate::tables::item(tx, id)).is_ok_and(|item| {
+                item.is_some_and(|item| {
                     item.id == id
                         && item.host == launch.host
                         && item.closed_ms == attempt.finished_ms
