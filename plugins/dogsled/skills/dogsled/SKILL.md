@@ -1,6 +1,6 @@
 ---
 name: dogsled
-description: Lead procedure for a change to code, config, or Git. It covers splitting the work, starting workers, and landing their results. Load it when a top-level session gets a change request. Do not load it in an exec session given prewalk. Do not load it in a worker session, because the worker profile prompt is your whole job.
+description: Lead procedure for a change to code, config, or Git. It covers when to start workers, how to split and brief the work, and how to land the change. Load it when a top-level session gets a change request. Do not load it in an exec session given prewalk. Do not load it in a worker session, because the worker profile prompt is your whole job.
 ---
 
 # Exec agents given prewalk
@@ -9,19 +9,27 @@ If you are an exec agent given prewalk, this procedure is not for you. Do not de
 
 # Lead
 
-You split the work, brief workers, check their results, and land them.
+You own the change from plan to landing. By default, you make it yourself in this session.
+Start writers only when step 0 says the work needs them. Then you split the work, brief workers, check their results, and land them.
 You may edit plans, briefs, and docs that you own.
 
-## 0. Do it yourself when a worker costs more
+## 0. Do the work yourself unless it needs parallel writers
 
-Make the code or config edit in this session, with no worker, in these cases:
+Plan, edit, and test the change in this session. Fix review and integration findings yourself.
+Start writers only when all of these are true:
 
-- You can name every edit before you start, and there are at most 3. An edit is one change to one place in one file. Tests you add count as edits.
-- No host can start a worker, and the change fits in one session. A failed spawn alone is not a blocker.
-- The user tells you to make the change. Never cite this skill to refuse.
+- The work splits into two or more units that can run at the same time.
+- Each unit owns different files behind a fixed interface.
+- Each unit has its own pass or fail check.
+- The units together do not fit in one session.
 
-Keep the scope of the request. Run the repository's checks as a writer would. Then go to step 6.
-Otherwise, do not edit code or config. Delegate it with steps 1 to 5.
+Never split a plan from its implementation, an implementation from its tests, or review fixes from the change.
+A `research` worker for an independent question, or for a review of the finished diff, does not need these conditions (step 2).
+If the user tells you to delegate, or not to delegate, do that. Never cite this skill to refuse.
+If every host refuses or fails the spawn, do the units yourself, one at a time.
+
+When you do the work yourself, keep the scope of the request. Run the repository's checks as a writer would. Then go to step 6.
+Otherwise, follow steps 1 to 5.
 
 ## 1. Split
 
@@ -29,6 +37,7 @@ List the deliverables. Each one has one outcome, an acceptance condition, and th
 Add each deliverable as a todo unit with a `worker` assignment and the profile from step 2.
 Put deliverables that touch the same files in one unit.
 Put small specified edits of one request in one unit, even across files. Never start one worker per small edit.
+You can keep one unit for yourself with a `self` assignment.
 
 ## 2. Pick the profile
 
@@ -58,7 +67,7 @@ For research, use `spawn {unit: {id}}` without a branch or base.
 A bare `spawn` with a name does not link the unit, so the unit can never close.
 Start independent units in the same turn.
 Start a dependent unit only after its prerequisite is accepted and any prerequisite code changes are merged.
-Then end your turn. Replies arrive in your inbox. Do not wait or poll.
+Then work on your `self` unit, if you kept one, or end your turn. Replies arrive in your inbox. Do not wait or poll.
 
 ## 5. Check each reply
 
