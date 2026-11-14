@@ -127,17 +127,43 @@ fn settings_observe_skips_publication_reads_until_a_session_publishes() {
             requests: None,
         },
     );
+    // A missing or stale terminal measurement proves nothing about the session: keep it.
+    let measured = |measured_ms: u64| crate::observation::Published {
+        version: 1,
+        epoch: "epoch".into(),
+        revision: 1,
+        published_ms: measured_ms,
+        local_revision: 1,
+        sources: Sources {
+            local: BTreeMap::from([("terminals".into(), measured_ms)]),
+            ..Sources::default()
+        },
+        local: Domains::from([("terminals".into(), json!({"agents":[],"panes":[]}))]),
+        views: Domains::new(),
+        gaps: vec![],
+    };
+    let stale = measured(crate::ledger::now_ms() - super::super::live_activity::NATIVE_TTL_MS - 1);
+    for publication in [None, Some(&stale)] {
+        authority.observe(|| {
+            reads.set(reads.get() + 1);
+            publication
+        });
+        assert_eq!(authority.state().unwrap().entries.len(), 1);
+    }
+    assert_eq!(reads.get(), 2);
+    // A fresh measurement without the session removes it, and idle observation stops reading.
+    let fresh = measured(crate::ledger::now_ms());
     authority.observe(|| {
         reads.set(reads.get() + 1);
-        None
+        Some(&fresh)
     });
-    assert_eq!(reads.get(), 1);
+    assert_eq!(reads.get(), 3);
     assert!(authority.state().unwrap().entries.is_empty());
     authority.observe(|| {
         reads.set(reads.get() + 1);
         None
     });
-    assert_eq!(reads.get(), 1);
+    assert_eq!(reads.get(), 3);
 }
 
 #[test]
