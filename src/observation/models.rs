@@ -110,7 +110,9 @@ fn parse(transcript: &str) -> Result<Vec<ModelChoice>> {
             .ok_or_else(|| Error::Invalid("Pi model catalogue: missing models array".into()))?;
         return models
             .iter()
-            .filter(|model| model["type"] == "chat")
+            // pi-ai 1.3.0 dist/types.d.ts: a chat model's `type` is optional; only image
+            // models always carry their type.
+            .filter(|model| model.get("type").is_none_or(|kind| kind == "chat"))
             .map(|model| {
                 serde_json::from_value::<ChatModel>(model.clone())
                     .map(ChatModel::choice)
@@ -145,7 +147,9 @@ mod tests {
         assert_eq!(models[0].thinking, [Low, Medium, High, Xhigh]);
         assert_eq!(models[1].thinking, [Off, Minimal, Low, Medium, High, Max]);
         assert_eq!(models[2].thinking, [Off]);
-        let default = parse(r#"{"id":"models","type":"response","success":true,"data":{"models":[{"type":"chat","provider":"p","id":"m","reasoning":true}]}}"#).unwrap();
+        // Untyped models (custom providers such as `tier`) are chat models too.
+        let default = parse(r#"{"id":"models","type":"response","success":true,"data":{"models":[{"provider":"p","id":"m","reasoning":true}]}}"#).unwrap();
+        assert_eq!(default.len(), 1);
         assert_eq!(default[0].thinking, [Off, Minimal, Low, Medium, High]);
     }
 

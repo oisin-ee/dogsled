@@ -170,8 +170,11 @@ impl Authority {
     }
 
     /// An explicit Pi publication must establish its native binding, including the first one.
+    /// Only a fresh terminal measurement reconciles. A stale or missing one proves nothing about
+    /// a session, so it keeps the last bindings: a loaded host measures terminals more than
+    /// `NATIVE_TTL_MS` apart, and dropping entries then made live sessions unavailable.
     pub fn refresh_bindings(&self, publication: Option<&Published>) {
-        let bindings = publication
+        let Some(bindings) = publication
             .filter(|publication| {
                 !publication.gaps.iter().any(|gap| gap.domain == "terminals")
                     && publication
@@ -195,7 +198,9 @@ impl Authority {
                     })
                     .collect()
             })
-            .unwrap_or_default();
+        else {
+            return;
+        };
         if let Ok(mut state) = self.state() {
             state.reconcile(bindings);
         }
