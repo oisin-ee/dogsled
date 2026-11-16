@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.37.1](https://github.com/oisin-ee/dogsled/compare/v0.37.0...v0.37.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **ci:** rebalance the macOS test shards ([6d584f4](https://github.com/oisin-ee/dogsled/commit/6d584f49aa8896b4c6f3a3edd61b1111b39240d6))
+* **skill:** do the change in the lead session unless it needs parallel writers ([#340](https://github.com/oisin-ee/dogsled/issues/340)) ([1da4bd6](https://github.com/oisin-ee/dogsled/commit/1da4bd6b42300526d3b5bf984923aefd537d6c16))
+
 ## [0.37.0](https://github.com/oisin-ee/dogsled/compare/v0.36.2...v0.37.0) (2026-11-14)
 
 
