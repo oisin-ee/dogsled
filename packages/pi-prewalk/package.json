@@ -1,6 +1,6 @@
 {
   "name": "@oisin-ee/pi-prewalk",
-  "version": "0.36.2",
+  "version": "0.37.0",
   "description": "A one-shot planner-to-executor handoff for pi, with branch-backed Rust rules.",
   "keywords": [
     "pi-extension",

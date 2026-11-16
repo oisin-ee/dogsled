@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.37.0](https://github.com/oisin-ee/dogsled/compare/v0.36.2...v0.37.0) (2026-11-14)
+
+
+### Features
+
+* **portal:** model and thinking picker for Pi sessions and new conversations ([#338](https://github.com/oisin-ee/dogsled/issues/338)) ([75613c6](https://github.com/oisin-ee/dogsled/commit/75613c620919bb3bc8548a3a844c7cb43461c124))
+
+
+### Bug Fixes
+
+* **observation:** keep untyped Pi models and live settings sessions ([#341](https://github.com/oisin-ee/dogsled/issues/341)) ([1950f8e](https://github.com/oisin-ee/dogsled/commit/1950f8e1d30bdc9991cfef1c5d8ef3dab676f2e2))
+* **portal:** remove close publication delays from retained history ([febcfb3](https://github.com/oisin-ee/dogsled/commit/febcfb35afd1119f2231379401c0429a18af23b5))
+* **work:** target settlement ticket and item reads ([f58f007](https://github.com/oisin-ee/dogsled/commit/f58f007f26e03d4cbeb2df23372d4d03b6617064))
+
 ## [0.36.2](https://github.com/oisin-ee/dogsled/compare/v0.36.1...v0.36.2) (2026-11-13)
 
 
