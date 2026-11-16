@@ -3,11 +3,13 @@
 # Shard 1 runs the CLI test modules in the list below. Shard 2 runs every other test:
 # the unit tests, the plugin tests, and the remaining CLI modules. Both shards read the
 # same list, so together they run each test exactly once.
+# Shard 2 also builds and runs the unit tests, so the list gives shard 1 more of the CLI
+# suite. Keep the two macOS jobs about equally long when a module grows.
 # libtest matches each name as a substring. `sweep::` therefore also selects
 # `stop_sweep::`. That is correct, because shard 2 skips the same substrings.
 set -eu
 
-modules="sweep:: launch_retry:: jobs:: preservation:: close:: signals::"
+modules="sweep:: launch_retry:: jobs:: preservation:: close:: signals:: unit_seeded:: legacy_continue::"
 
 case "${1:-}" in
 1)
