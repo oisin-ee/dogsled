@@ -1,6 +1,6 @@
 # Land the change
 
-1. Run the repository's heavy gate once, at the final revision. Limit it to the change if the task runner can do that. If a target fails, start a follow-up writer unit on the same branch with the failure. A finished writer is closed. When the fix arrives, run only the failed targets again.
+1. Run the repository's heavy gate once, at the final revision. Limit it to the change if the task runner can do that. If a target fails, fix its cause yourself on the same branch. Then run only the failed targets again.
 2. Run `gh pr ready <n>`, then merge the PR. Then confirm that its state is `MERGED`.
 3. Landing never bumps versions or creates tags. Use conventional commit titles for feature PRs because release-please builds the changelog from them. Release only when the user asks: merge the open release-please PR. Its workflow reuses the passing CI proof of the tree under the release commit, or runs the full CI suite on the release commit when no run proved that tree. Then it tags the release commit and dispatches publication. A failed release stays outstanding: retry it by dispatching `release-please.yml` before anything else lands on main, or abandon it by reverting its release commit with a `chore(release):` subject. Never auto-merge the release-please PR.
 4. If GitHub Actions does not run because of billing, the local gate is the evidence. Say so once in the PR body.

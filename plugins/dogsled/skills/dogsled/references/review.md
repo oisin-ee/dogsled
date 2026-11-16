@@ -11,5 +11,5 @@ For a writer reply:
 1. Read the diff on the reported branch: `git diff <base>...<branch>`.
 2. Compare the diff with the brief. Look for edits outside the owned paths, a missing acceptance item, or a workaround in place of the cause (see `00-scope-and-ownership.md`).
 3. Run the acceptance command once, at the reported head SHA. Skip it if existing acceptance evidence shows it passing at that same SHA. Do not run the repository's heavy gate yet. A docs-only unit needs no build or test run.
-4. If something is wrong and its cause and fix are known, apply step 0 of `SKILL.md`: a small fix is yours to make on the same branch. Otherwise, add a follow-up `writer` unit with the specific defect. Start it on the same branch, so it continues from the kept commits: `spawn {unit: {id}, branch: <same branch>}`.
+4. If something is wrong, fix it yourself on the same branch. Check out the kept branch in a repo-local `.worktrees/` worktree, fix the cause, and run the failed check again. The finished writer is closed, so its context is gone. If the user asks for a worker to make the fix, add a follow-up `writer` unit with the specific defect and start it on the same branch: `spawn {unit: {id}, branch: <same branch>}`.
 5. When the unit is accepted, mark its todo done with the evidence: the SHA, the command, and the result.
