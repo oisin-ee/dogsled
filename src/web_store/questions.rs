@@ -33,6 +33,7 @@ pub(crate) fn get(tx: &Transaction<'_>, id: &str) -> Result<Option<Entry>> {
     };
     Ok(Some(Entry {
         pending: Pending {
+            host: "local".into(),
             id: required(row, "id")?,
             pane: required(row, "pane")?,
             session: required(row, "session")?,

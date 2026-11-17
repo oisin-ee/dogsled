@@ -25,7 +25,8 @@ pub fn command(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<E
 
 async fn run(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<ExitCode> {
     let (sender, receiver) = watch::channel(super::PortalState::default());
-    let (listener, state) = super::listen(ledger, 0, receiver).await?;
+    let (listener, mut state) = super::listen(ledger, 0, receiver).await?;
+    state.standalone_interactive = true;
     let _reader = super::spawn_reader(ledger.clone(), sender, state.stop.clone());
     let server_state = state.clone();
     let mut server = tokio::spawn(async move {
@@ -49,8 +50,13 @@ async fn run(shell: &dyn Shell, ledger: &Ledger, command: Command) -> Result<Exi
                         None => std::env::current_dir()?.to_string_lossy().into_owned(),
                     },
                 };
-                if let Some(answers) =
-                    interview(&state, shell, body, Duration::from_secs(timeout)).await?
+                if let Some(answers) = interview(
+                    &state,
+                    shell,
+                    body,
+                    (timeout != 0).then(|| Duration::from_secs(timeout)),
+                )
+                .await?
                 {
                     print_json(&answers)?;
                     Ok(ExitCode::SUCCESS)
@@ -106,17 +112,30 @@ async fn interview(
     state: &AppState,
     shell: &dyn Shell,
     body: AskBody,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<Option<Responses>> {
     let pane = query_value(&body.pane);
     let id = state.questions.create(body).await?;
-    let url = format!("http://127.0.0.1:{}/?question={id}&pane={pane}", state.port);
+    let url = format!(
+        "http://127.0.0.1:{}/?question={id}&pane={pane}&host=local",
+        state.port
+    );
     if let Err(error) = open(shell, &url) {
         state.questions.withdraw(&id).await?;
         return Err(error);
     }
+    let wait = async {
+        loop {
+            // Pi uses zero for an interview without an implicit deadline.
+            let limit = timeout.unwrap_or(Duration::from_secs(60));
+            let answer = state.questions.wait(&id, limit).await?;
+            if timeout.is_some() || answer != Poll::Timeout {
+                return Ok::<_, Error>(answer);
+            }
+        }
+    };
     let answer = tokio::select! {
-        answer = state.questions.wait(&id, timeout) => answer?,
+        answer = wait => answer?,
         () = super::shutdown() => Poll::Gone,
     };
     match answer {
@@ -131,8 +150,12 @@ async fn interview(
 /// Submit and wait through the review store used by the HTTP routes.
 async fn review(state: &AppState, shell: &dyn Shell, body: SubmitBody) -> Result<DecisionEvent> {
     let session = body.session.clone();
+    let pane = query_value(&body.pane);
     let submitted = reviews::submit_plan(&state.web, body).await?;
-    let url = format!("http://127.0.0.1:{}/?review={}", state.port, submitted.id);
+    let url = format!(
+        "http://127.0.0.1:{}/?review={}&pane={pane}&host=local",
+        state.port, submitted.id
+    );
     open(shell, &url)?;
     tokio::select! {
         event = reviews::wait_for_decision(&state.web, session, &submitted.id) => event,
@@ -345,13 +368,18 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let (send, mut opened) = mpsc::unbounded_channel();
         let browser = Browser(send);
-        let work = interview(&state, &browser, ask()?, crate::test_support::WAIT_DEADLINE);
+        let work = interview(
+            &state,
+            &browser,
+            ask()?,
+            Some(crate::test_support::WAIT_DEADLINE),
+        );
         let answer = async {
             let url = opened
                 .recv()
                 .await
                 .ok_or_else(|| Error::Invalid("no tab".to_owned()))?;
-            assert!(url.ends_with("&pane=pane%20%26%20name"));
+            assert!(url.ends_with("&pane=pane%20%26%20name&host=local"));
             let pending = state.questions.list().await?;
             let question = pending
                 .first()
@@ -406,7 +434,7 @@ mod tests {
         let (ledger, _listener, state) = fixture().await?;
         let (send, _opened) = mpsc::unbounded_channel();
         assert!(
-            interview(&state, &Browser(send), ask()?, Duration::ZERO)
+            interview(&state, &Browser(send), ask()?, Some(Duration::ZERO))
                 .await?
                 .is_none()
         );
@@ -435,9 +463,14 @@ mod tests {
                 .recv()
                 .await
                 .ok_or_else(|| Error::Invalid("no tab".to_owned()))?;
-            let (_, id) = url
+            let (_, query) = url
                 .split_once("?review=")
                 .ok_or_else(|| Error::Invalid("no review link".to_owned()))?;
+            let id = query
+                .split('&')
+                .next()
+                .ok_or_else(|| Error::Invalid("no review id".into()))?;
+            assert!(url.ends_with("&pane=pane&host=local"));
             let response = post(
                 state.port,
                 format!("/api/reviews/{id}/approve"),

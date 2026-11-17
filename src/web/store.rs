@@ -81,6 +81,7 @@ impl Store {
             let id = ledger::new_id();
             let entry = Entry {
                 pending: Pending {
+                    host: crate::hosts::LOCAL.into(),
                     id: id.clone(),
                     pane: body.pane,
                     session: body.session,
@@ -253,7 +254,7 @@ impl Store {
     }
 
     /// Wake the waiters of a question.
-    fn wake(&self, id: &str) {
+    pub(super) fn wake(&self, id: &str) {
         let sender = self
             .waiters
             .lock()

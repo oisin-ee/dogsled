@@ -7,6 +7,7 @@ import { test } from "node:test";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { bashBlocked, PlanMode, planPathAllowed, registerPlanMode, type PlanHost } from "./plan-mode.ts";
 import { PortalClient } from "./portal-client.ts";
+import { ServeClient } from "./serve-client.ts";
 
 interface Call { method: string; path: string; headers: Record<string, string | string[] | undefined>; body: string }
 
@@ -270,6 +271,27 @@ test("a reconnected decisions stream does not deliver an acknowledged decision t
 	}
 });
 
+test("serve owns review submission, decision events and acknowledgement without a portal", async t => {
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-review-serve-"));
+	const socket = join(directory, "producer.sock");
+	const path = join(directory, "plan.md");
+	writeFileSync(path, "# Plan");
+	const p = portal([JSON.stringify(DECISION)]);
+	await new Promise<void>(resolve => p.server.listen(socket, resolve));
+	const h = host();
+	const mode = new PlanMode(h.plan, () => {}, new ServeClient({ DOGSLED_STATE: directory }), () => undefined);
+	t.after(async () => {
+		mode.stopWatching();
+		await new Promise<void>(resolve => { p.server.closeAllConnections(); p.server.close(() => resolve()); });
+		rmSync(directory, { recursive: true, force: true });
+	});
+	const created = await mode.submit(path, context());
+	assert.ok("id" in created);
+	await until(() => p.calls.some(call => call.path.endsWith("/ack")));
+	assert.deepEqual(h.sent, ["Looks good."]);
+	assert.ok(p.calls.every(call => call.headers["authorization"] === undefined));
+});
+
 /** A real dogsled executable that records argv and answers later. */
 function fallbackEnvironment(t: { after: (fn: () => void) => void }, script: string) {
 	const directory = mkdtempSync(join(tmpdir(), "dogsled-review-fallback-"));
@@ -291,7 +313,7 @@ test("an unreachable portal starts a review in the background and delivers the a
 	const fake = fallbackEnvironment(t, `setTimeout(() => process.stdout.write(${JSON.stringify(JSON.stringify(DECISION))}), 200);`);
 	const h = host();
 	const approved: unknown[] = [];
-	const mode = new PlanMode(h.plan, plan => { approved.push(plan); }, new PortalClient(fake.env), () => undefined);
+	const mode = new PlanMode(h.plan, plan => { approved.push(plan); }, new ServeClient(fake.env), () => undefined);
 	t.after(() => mode.stopWatching());
 	mode.start();
 	const submitted = await mode.submit(fake.plan, context());
@@ -311,7 +333,7 @@ test("a fallback change request steers the running agent and leaves planning on"
 	const h = host();
 	const steered: unknown[] = [];
 	h.plan.sendUserMessage = (message, options) => steered.push([message, options?.deliverAs]);
-	const mode = new PlanMode(h.plan, () => {}, new PortalClient(fake.env), () => undefined);
+	const mode = new PlanMode(h.plan, () => {}, new ServeClient(fake.env), () => undefined);
 	t.after(() => mode.stopWatching());
 	mode.start();
 	await mode.submit(fake.plan, { ...context(), isIdle: () => false } as unknown as ExtensionContext);
@@ -324,7 +346,7 @@ test("closing plan mode terminates a pending review child", async t => {
 	const fake = fallbackEnvironment(t, 'process.on("SIGTERM", () => { fs.writeFileSync(process.env.DOGSLED_TEST_TERMINATED, "yes"); process.exit(0); }); setInterval(() => {}, 1000);');
 	const terminated = join(fake.directory, "terminated");
 	const h = host();
-	const mode = new PlanMode(h.plan, () => {}, new PortalClient({ ...fake.env, DOGSLED_TEST_TERMINATED: terminated }), () => undefined);
+	const mode = new PlanMode(h.plan, () => {}, new ServeClient({ ...fake.env, DOGSLED_TEST_TERMINATED: terminated }), () => undefined);
 	t.after(() => mode.stopWatching());
 	await mode.submit(fake.plan, context());
 	await until(() => existsSync(fake.calls));
@@ -336,7 +358,7 @@ test("closing plan mode terminates a pending review child", async t => {
 test("a failed review child reports its failure as a message", async t => {
 	const fake = fallbackEnvironment(t, "process.exit(2);");
 	const h = host();
-	const mode = new PlanMode(h.plan, () => {}, new PortalClient(fake.env), () => undefined);
+	const mode = new PlanMode(h.plan, () => {}, new ServeClient(fake.env), () => undefined);
 	t.after(() => mode.stopWatching());
 	await mode.submit(fake.plan, context());
 	await until(() => h.sent.length > 0);

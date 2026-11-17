@@ -21,7 +21,7 @@ use tokio::sync::{oneshot, watch};
 
 /// The size of one frame, not of one reply. A larger reply has more frames.
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = super::settings::MAX_BODY;
+const MAX_REQUEST_BYTES: usize = crate::web::producer::INTERACTIVE_LIMIT;
 const MAX_CLIENTS: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET: &str = "observation.sock";
@@ -38,6 +38,7 @@ enum Operation {
     ActivitySubscribe,
     ActivityCommand,
     Settings,
+    Interactive,
 }
 
 impl Operation {
@@ -52,6 +53,7 @@ impl Operation {
             Self::ActivitySubscribe => "activity_subscribe",
             Self::ActivityCommand => "activity_command",
             Self::Settings => "settings",
+            Self::Interactive => "interactive",
         }
     }
 }
@@ -71,6 +73,8 @@ struct Request {
     activity: Option<super::live_activity::Command>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settings: Option<super::settings::Command>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interactive: Option<crate::web::producer::Interactive>,
     /// Absent: the whole publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     select: Option<Chosen>,
@@ -262,9 +266,12 @@ impl Server {
             }
         };
         let producer_stop = tokio_util::sync::CancellationToken::new();
+        let interactive =
+            crate::web::producer::interactive_state(&self.state, producer_stop.clone());
         runtime.spawn(crate::web::producer::run(
             producer_listener,
             crate::web::producer::Producer::serve(&self.state, producer_stop.clone()),
+            interactive.clone(),
         ));
         self.producer = Some((producer_path, producer_stop));
         let (stop, stopped) = oneshot::channel();
@@ -274,7 +281,17 @@ impl Server {
         let activity = self.activity.clone();
         let thread = std::thread::spawn(move || {
             runtime.block_on(serve(
-                listener, receiver, stopped, interests, dirty, details, activity,
+                listener,
+                receiver,
+                stopped,
+                interests,
+                dirty,
+                details,
+                Services {
+                    activity,
+                    settings: super::settings::Authority::default(),
+                    interactive,
+                },
             ));
         });
         self.stop = Some(stop);
@@ -310,6 +327,7 @@ struct Services {
         super::live_activity::ActivityFeed,
     )>,
     settings: super::settings::Authority,
+    interactive: crate::web::AppState,
 }
 
 async fn serve(
@@ -319,13 +337,8 @@ async fn serve(
     interests: super::peers::Interests,
     dirty: Option<crate::service::wake::Dirty>,
     details: super::details::Interests,
-    activity: Option<(
-        super::live_activity::Commands,
-        super::live_activity::ActivityFeed,
-    )>,
+    services: Services,
 ) {
-    let settings = super::settings::Authority::default();
-    let services = Services { activity, settings };
     let mut observed = receiver.clone();
     let mut observing = true;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -366,14 +379,26 @@ async fn request(socket: &tokio::net::UnixStream) -> Result<Request> {
     let mut bytes = Vec::new();
     loop {
         socket.readable().await?;
-        let mut byte = [0];
-        match socket.try_read(&mut byte) {
+        let mut chunk = [0; 8192];
+        match socket.try_read(&mut chunk) {
             Ok(0) => return Err(Error::Invalid("observation request disconnected".into())),
-            Ok(_) if byte[0] == b'\n' => return Ok(serde_json::from_slice(&bytes)?),
-            Ok(_) => {
-                bytes.push(byte[0]);
-                if bytes.len() >= MAX_REQUEST_BYTES {
+            Ok(count) => {
+                bytes.extend_from_slice(
+                    chunk
+                        .get(..count)
+                        .ok_or_else(|| Error::Invalid("invalid request length".into()))?,
+                );
+                if bytes.len() > MAX_REQUEST_BYTES {
                     return Err(Error::Invalid("observation request too large".into()));
+                }
+                if bytes.contains(&b'\n') {
+                    let request: Request = serde_json::from_slice(&bytes)?;
+                    if bytes.len() > super::settings::MAX_BODY
+                        && !matches!(request.operation, Operation::Interactive)
+                    {
+                        return Err(Error::Invalid("observation request too large".into()));
+                    }
+                    return Ok(request);
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => (),
@@ -461,6 +486,15 @@ async fn respond(
             "unsupported observation protocol version",
         )
         .await;
+    }
+    if matches!(request.operation, Operation::Interactive) {
+        let Some(command) = request.interactive else {
+            return failure(&socket, "invalid", "missing interactive command").await;
+        };
+        let reply = crate::web::producer::interactive(services.interactive, command).await?;
+        let mut bytes = serde_json::to_vec(&reply)?;
+        bytes.push(b'\n');
+        return write(&socket, &bytes).await;
     }
     if matches!(request.operation, Operation::Settings) {
         let frame = receiver.borrow().clone();
@@ -947,6 +981,7 @@ impl Client {
                 pane: pane.map(str::to_owned),
                 activity: None,
                 settings: None,
+                interactive: None,
                 select,
             },
         )?;
@@ -970,6 +1005,7 @@ impl Client {
                 pane: None,
                 activity: None,
                 settings: None,
+                interactive: None,
                 select: None,
             },
         )?;
@@ -1001,6 +1037,7 @@ impl Client {
                 pane: None,
                 activity: None,
                 settings: None,
+                interactive: None,
                 select: None,
             },
         )?;
@@ -1029,11 +1066,48 @@ impl Client {
                 pane: Some(pane.into()),
                 activity: None,
                 settings: Some(command),
+                interactive: None,
                 select: None,
             },
         )?;
         socket.write_all(b"\n")?;
         Ok(socket)
+    }
+
+    /// Route an owner action to the same serve process that owns Pi's waiters.
+    pub fn interactive(
+        &self,
+        command: crate::web::producer::Interactive,
+    ) -> Result<crate::web::agents::PeerReply> {
+        let mut socket = self.connect()?;
+        socket.set_write_timeout(Some(TIMEOUT))?;
+        socket.set_read_timeout(Some(TIMEOUT))?;
+        serde_json::to_writer(
+            &mut socket,
+            &Request {
+                version: VERSION,
+                operation: Operation::Interactive,
+                peer: None,
+                host: None,
+                pane: None,
+                activity: None,
+                settings: None,
+                interactive: Some(command),
+                select: None,
+            },
+        )?;
+        socket.write_all(b"\n")?;
+        let mut bytes = Vec::new();
+        BufReader::new(socket)
+            .take(crate::web::producer::INTERACTIVE_LIMIT as u64 + 1)
+            .read_until(b'\n', &mut bytes)?;
+        if bytes.len() > crate::web::producer::INTERACTIVE_LIMIT || bytes.last() != Some(&b'\n') {
+            return Err(Error::Invalid("invalid interactive reply".into()));
+        }
+        if let Ok(failure) = serde_json::from_slice::<Failure>(&bytes) {
+            return Err(Error::Invalid(failure.error.message));
+        }
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub fn settings(
@@ -1109,6 +1183,7 @@ impl Client {
                     pane: Some(pane.into()),
                     activity: Some(command),
                     settings: None,
+                    interactive: None,
                     select: None,
                 },
             )?;

@@ -248,6 +248,7 @@ fn question_forms_answers_and_attachments_round_trip_and_clear_updates() -> Resu
     let ledger = ledger();
     let mut entry = crate::web::store::Entry {
         pending: Pending {
+            host: "local".into(),
             id: "question".into(),
             pane: "pane".into(),
             session: "session".into(),
