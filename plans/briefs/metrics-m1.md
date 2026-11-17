@@ -21,8 +21,8 @@ Plan: `plans/metrics.md` (approved). Read it all before you edit. This brief nam
 1. `src/metrics/mod.rs`, `store.rs`, `index.rs`, `harvest.rs`, `report.rs`: the store (including `input_entries`), indexer, harvest, 30-day delete, and the `MetricsReport` builder. The plan's "Input entries" section defines the ask and blocked wait.
 2. `src/activity.rs`: the shared decoder move.
 3. `src/service.rs`: `Lane::Metrics` (index, harvest, delete), recorded in `service_lanes` like the other lanes.
-4. `src/cli.rs`, `src/main.rs`: `dogsled metrics [--window day|week|month] [--group …] [--tool NAME] [--json]`. Tables without `--json`.
-5. `src/web/metrics.rs` and its route in `src/web/mod.rs` (near line 241): `GET /api/metrics?window=&group=&tool=`, local report plus peers in parallel, merged; a failed peer is a `HostCoverage` with its error.
+4. `src/cli.rs`, `src/main.rs`: `dogsled metrics [--window day|week|month] [--group …] [--run-group profile|model|harness] [--tool NAME] [--json]`. Tables without `--json`.
+5. `src/web/metrics.rs` and its route in `src/web/mod.rs` (near line 241): `GET /api/metrics?window=&group=&run_group=&tool=`, local report plus peers in parallel, merged; a failed peer is a `HostCoverage` with its error.
 6. `src/web_store.rs`, `src/web_store/reviews.rs`, `src/store.rs`: D5.
 7. `README.md`: add `dogsled metrics` where the commands are listed.
 
