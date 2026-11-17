@@ -1,6 +1,6 @@
 # Metrics
 
-Status: proposed, 2026-11-17. Owner decisions from the 2026-11-17 interview are marked (owner).
+Status: approved, 2026-11-17. Owner decisions from the 2026-11-17 forms are marked (owner).
 
 ## Goal
 
@@ -35,7 +35,7 @@ Duration is the result entry's timestamp minus the call entry's timestamp. The p
 
 `dogsled serve` reads the transcripts of every harness on its host. It does not take live tool events from the Pi extension. One source gives one definition of a duration, covers Pi, Claude, and Codex, and backfills history.
 
-### D2. A separate `metrics.db`, not `state.db`
+### D2. A separate `metrics.db`, not `state.db` (owner)
 
 Metrics live in `<state dir>/metrics.db`, owned by `src/metrics/store.rs`. The interview said "a table in state.db"; this plan changes that for three reasons:
 
@@ -53,7 +53,7 @@ The portal merges peer reports the same way it reads peer agents: `ssh <peer> do
 
 Rows older than `jobs::RECORD_KEEP_MS` (30 days) are deleted each pass. The indexer reads only transcript files changed in the last 30 days.
 
-### D5. Plan reviews record their decision time
+### D5. Plan reviews record their decision time (owner)
 
 `web_reviews` has no decision time. Plan review wait needs it, and `submit_plan` returns at once (`pi/plan-mode.ts`), so its tool duration is not the wait. Add `decided_ms INTEGER CHECK (decided_ms >= 0)` to `web_reviews`, set where the decision is stored (`src/web_store/reviews.rs`), with `CHECK ((decision IS NULL) = (decided_ms IS NULL))`. This bumps `state.db` to version 6. A host with an older store starts empty, as before: the changelog says to let queued work finish before the upgrade.
 
