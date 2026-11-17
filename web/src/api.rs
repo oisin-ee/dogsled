@@ -238,6 +238,41 @@ pub async fn models() -> Result<portal_types::models::ModelCatalogue, String> {
     .await
 }
 
+/// Read fleet metrics for the selected window, tool grouping, and run grouping.
+pub async fn fetch_metrics(
+    window: portal_types::metrics::Window,
+    group: portal_types::metrics::ToolGroup,
+    run_group: portal_types::metrics::RunGroup,
+) -> Result<portal_types::metrics::MetricsReport, String> {
+    use portal_types::metrics::{RunGroup, ToolGroup, Window};
+    let window = match window {
+        Window::Day => "day",
+        Window::Week => "week",
+        Window::Month => "month",
+    };
+    let group = match group {
+        ToolGroup::Tool => "tool",
+        ToolGroup::Repository => "repository",
+        ToolGroup::Model => "model",
+        ToolGroup::Host => "host",
+        ToolGroup::Lead => "lead",
+        ToolGroup::Harness => "harness",
+    };
+    let run_group = match run_group {
+        RunGroup::Profile => "profile",
+        RunGroup::Model => "model",
+        RunGroup::Harness => "harness",
+    };
+    let url = format!("{BASE}/api/metrics?window={window}&group={group}&run_group={run_group}");
+    read_json(
+        Request::get(&url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .await
+}
+
 /// Build the first-message request, omitting settings that use Pi's defaults.
 pub(crate) fn create_lead_body(
     repo: &str,
