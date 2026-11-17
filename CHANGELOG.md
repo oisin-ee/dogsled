@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.37.2](https://github.com/oisin-ee/dogsled/compare/v0.37.1...v0.37.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **portal:** live fleet view, worker lifecycle, and readable leads ([#345](https://github.com/oisin-ee/dogsled/issues/345)) ([12fdd32](https://github.com/oisin-ee/dogsled/commit/12fdd32c1d6f0cd1846df2215e0d2b889ba4b543))
+
 ## [0.37.1](https://github.com/oisin-ee/dogsled/compare/v0.37.0...v0.37.1) (2026-11-16)
 
 
