@@ -234,12 +234,11 @@ pub async fn models() -> Result<portal_types::models::ModelCatalogue, String> {
     .await
 }
 
-/// Read fleet metrics for the selected window and tool grouping.
+/// Read fleet metrics for the selected window, tool grouping, and run grouping.
 pub async fn fetch_metrics(
     window: portal_types::metrics::Window,
     group: portal_types::metrics::ToolGroup,
     run_group: portal_types::metrics::RunGroup,
-    tool: &str,
 ) -> Result<portal_types::metrics::MetricsReport, String> {
     use portal_types::metrics::{RunGroup, ToolGroup, Window};
     let window = match window {
@@ -260,11 +259,7 @@ pub async fn fetch_metrics(
         RunGroup::Model => "model",
         RunGroup::Harness => "harness",
     };
-    let mut url = format!("{BASE}/api/metrics?window={window}&group={group}&run_group={run_group}");
-    if !tool.is_empty() {
-        url.push_str("&tool=");
-        url.push_str(&encode(tool));
-    }
+    let url = format!("{BASE}/api/metrics?window={window}&group={group}&run_group={run_group}");
     read_json(
         Request::get(&url)
             .send()

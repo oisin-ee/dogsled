@@ -6,6 +6,14 @@ use dioxus::prelude::*;
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
 fn metrics_report_root() -> Element {
+    rsx! { crate::metrics::MetricsReportView { report: metrics_report(), now_ms: 180_000 } }
+}
+
+fn metrics_filtered_root() -> Element {
+    rsx! { crate::metrics::MetricsReportView { report: metrics_report(), now_ms: 180_000, filter: " BA" } }
+}
+
+fn metrics_report() -> portal_types::metrics::MetricsReport {
     use portal_types::metrics::{
         Histogram, HostCoverage, METRICS_VERSION, MetricsReport, RunGroup, ToolGroup, ToolRow,
         Window,
@@ -14,7 +22,7 @@ fn metrics_report_root() -> Element {
     for ms in [850; 10].into_iter().chain([12_000; 9]).chain([342_000]) {
         duration.record(ms);
     }
-    let report = MetricsReport {
+    MetricsReport {
         version: METRICS_VERSION,
         window: Window::Week,
         tool_group: ToolGroup::Tool,
@@ -56,8 +64,14 @@ fn metrics_report_root() -> Element {
         ],
         owner_waits: Vec::new(),
         runs: Vec::new(),
-    };
-    rsx! { crate::metrics::MetricsReportView { report, now_ms: 180_000 } }
+    }
+}
+
+#[test]
+fn metrics_filter_keeps_tools_whose_name_contains_the_text() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(metrics_filtered_root));
+    assert!(html.contains(">bash<"), "{html}");
+    assert!(!html.contains(">unknown<"), "{html}");
 }
 
 #[test]

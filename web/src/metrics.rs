@@ -33,12 +33,12 @@ pub(crate) fn Metrics() -> Element {
     let mut tool = use_signal(String::new);
     let mut run_group = use_signal(RunGroup::default);
     let selected_group = use_memo(move || Some(group()));
+    // The tool filter narrows the fetched rows; typing never waits on the fleet.
     let mut report = use_resource(move || {
         let window = window();
         let group = group();
-        let tool = tool();
         let run_group = run_group();
-        async move { api::fetch_metrics(window, group, run_group, tool.trim()).await }
+        async move { api::fetch_metrics(window, group, run_group).await }
     });
     let width = use_context::<crate::app::ConsoleWidth>().0;
     // A resource retains its old result during a refetch. Do not show that result
@@ -78,7 +78,7 @@ pub(crate) fn Metrics() -> Element {
                     }
                 } else {
                     match report() {
-                        Some(Ok(report)) => rsx! { MetricsReportView { report, now_ms: crate::app::clock_ms(),
+                        Some(Ok(report)) => rsx! { MetricsReportView { report, now_ms: crate::app::clock_ms(), filter: tool(),
                             on_run_group: move |value| run_group.set(value) } },
                         Some(Err(error)) => rsx! {
                             div { class: "metrics-failure",
@@ -193,13 +193,21 @@ impl Column {
 pub(crate) fn MetricsReportView(
     report: MetricsReport,
     now_ms: u64,
+    /// Show only the tools whose name contains this text, ignoring case.
+    #[props(default)]
+    filter: String,
     #[props(default)] on_run_group: EventHandler<RunGroup>,
 ) -> Element {
+    let filter = filter.trim().to_lowercase();
     let mut sort = use_signal(|| (Column::Calls, true));
     let run_group_value = report.run_group;
     let selected_run_group = use_memo(use_reactive!(|run_group_value| Some(run_group_value)));
     let (column, descending) = sort();
-    let mut tools: Vec<_> = report.tools.iter().collect();
+    let mut tools: Vec<_> = report
+        .tools
+        .iter()
+        .filter(|row| row.tool.to_lowercase().contains(&filter))
+        .collect();
     tools.sort_by(|left, right| {
         let order = column.compare(left, right);
         (if descending { order.reverse() } else { order })
