@@ -1323,6 +1323,11 @@ mod tests {
         // A peer that SSH cannot read is unreachable, with the age of its last snapshot.
         let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
         let fleet = Fleet::cold(fleet.shell, &ledger, fleet.policy, fleet.home, fleet.hosts);
+        // A state directory has its own shared-connection socket, so its own SSH command.
+        let command = format!(
+            "ssh {}",
+            fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
+        );
         shell.on(&command, snapshot);
         observed_status(&fleet, 100).unwrap();
         shell.on_output(
