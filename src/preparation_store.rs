@@ -863,7 +863,7 @@ mod tests {
     use serde_json::json;
 
     fn ledger() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
     fn decode<T: DeserializeOwned>(value: Value) -> T {
         serde_json::from_value(value).unwrap()

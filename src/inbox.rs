@@ -1359,7 +1359,7 @@ mod tests {
 
     impl Rig {
         fn new(terminals: &[&str]) -> Self {
-            let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+            let ledger = Ledger::temporary();
             let rig = Self { ledger };
             rig.live(terminals);
             rig

@@ -209,9 +209,7 @@ mod tests {
     }
 
     async fn fixture() -> Result<(Ledger, tokio::net::TcpListener, AppState)> {
-        let ledger = Ledger::new(
-            std::env::temp_dir().join(format!("dogsled-oneshot-{}", crate::ledger::new_id())),
-        );
+        let ledger = Ledger::temporary();
         let (_sender, receiver) = watch::channel(super::super::PortalState::default());
         let (listener, state) = super::super::listen(&ledger, 0, receiver).await?;
         assert_eq!(listener.local_addr()?.port(), state.port);
@@ -243,7 +241,7 @@ mod tests {
     async fn temporary_portal_receives_publication_updates() -> Result<()> {
         use std::io::BufRead as _;
 
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let mut publisher = crate::observation::Publisher::new()?;
         let mut board = super::super::board::view(
             &crate::board::Board {

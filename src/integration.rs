@@ -285,13 +285,11 @@ fn check_direct(
 }
 
 /// A disposable object store: no repository config, info/attributes, or writes to the source.
-struct MergeRepo(std::path::PathBuf);
+struct MergeRepo(crate::temporary::Directory);
 
 impl MergeRepo {
     fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("dogsled-merge-{}", crate::ledger::new_id()));
-        std::fs::create_dir(&path)?;
-        Ok(Self(path))
+        Ok(Self(crate::temporary::Directory::new()?))
     }
 
     fn git(&self, shell: &dyn Shell, args: &[&str]) -> Result<crate::shell::Output> {
@@ -304,18 +302,12 @@ impl MergeRepo {
             "GIT_ATTR_NOSYSTEM=1".into(),
             "git".into(),
             "-C".into(),
-            self.0.display().to_string(),
+            self.0.path().display().to_string(),
             "-c".into(),
             "core.attributesFile=/dev/null".into(),
         ]);
         words.extend(args.iter().map(ToString::to_string));
         shell.run("env", &words)
-    }
-}
-
-impl Drop for MergeRepo {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

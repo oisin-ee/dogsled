@@ -45,7 +45,7 @@ impl Shell for StartingShell {
 
 #[test]
 fn another_request_cannot_start_while_the_pane_is_locked_for_recovery() {
-    let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let mut ledger = Ledger::temporary();
     let progress: Progress = serde_json::from_value(json!({
         "request":{"id":"different","validity":validity_for(&ledger,"different"),"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":"/checkout","pane":"w2:p2","terminal":"term_shell","owner":"w1:p1"},
@@ -155,7 +155,7 @@ impl Shell for ConfirmingShell {
 #[test]
 fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
     for recovering in [false, true] {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let progress: Progress = serde_json::from_value(json!({
             "request":{"id":"stamp","validity":validity_for(&ledger,"stamp"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"peer","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
@@ -291,7 +291,7 @@ fn start_with_simulated_busy_wait(
 
 #[test]
 fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell::new(2);
     let window = std::time::Duration::from_secs(5);
     start_with_simulated_busy_wait(
@@ -309,7 +309,7 @@ fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
 
 #[test]
 fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell {
         replaced_after: 1,
         ..BusyShell::new(usize::MAX)
@@ -336,7 +336,7 @@ fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
 
 #[test]
 fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
     let error = start_with_simulated_busy_wait(
@@ -359,7 +359,7 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
 
 #[test]
 fn a_first_busy_refusal_can_exhaust_the_window_without_a_retry() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
     let request = busy_request(&ledger);
@@ -424,7 +424,7 @@ impl Shell for BudgetShell {
 #[test]
 fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_not() {
     for uncertain in [false, true] {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let progress: Progress = serde_json::from_value(json!({
             "request":{"id":"budget","validity":validity_for(&ledger,"budget"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"local","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
@@ -477,7 +477,7 @@ impl Shell for TakenShell {
 
 #[test]
 fn only_a_busy_refusal_is_repeated() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let window = std::time::Duration::from_secs(5);
     let error = start_while_busy(
         &ledger,

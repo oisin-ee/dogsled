@@ -70,7 +70,7 @@ fn settlement_ticket(id: &str, state: &str) -> work::Ticket {
 
 #[test]
 fn settlement_ticket_states_only_block_the_matching_request() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     assert!(work::references_released(&ledger, "missing").unwrap());
     for state in ["pending", "admitting", "admitted", "failed", "cancelled"] {
         crate::store::put_tickets(
@@ -99,7 +99,7 @@ fn settlement_ticket_states_only_block_the_matching_request() {
 
 #[test]
 fn settlement_legacy_completion_requires_exact_item_provenance() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     assert_eq!(
         work::admission_completion(&ledger, "missing").unwrap(),
         None
@@ -167,7 +167,7 @@ fn settlement_legacy_completion_requires_exact_item_provenance() {
 
 #[test]
 fn settlement_reads_only_matching_ticket_and_item_rows() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     settlement_admission(&ledger, "target", false, true);
     crate::store::put_tickets(
         &ledger,
@@ -260,7 +260,7 @@ fn seed_close_publication(ledger: &Ledger) -> Vec<String> {
 /// fingerprints compare the complete production results, not duplicated SQL predicates.
 #[test]
 fn close_publication_workload_preserves_settlement_and_holds() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let ids = seed_close_publication(&ledger);
     let states = ["pending", "admitting", "admitted", "failed", "cancelled"];
     let mut previous = None;
@@ -318,7 +318,7 @@ fn put_job(ledger: &Ledger, value: &serde_json::Value) {
 
 #[test]
 fn cancellation_version_and_request_conflicts_refuse_replay_without_replacing_expectations() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let request = place_request(&ledger, "cancel-expectation");
     let ticket = work::enqueue(&ledger, request.clone(), false, 100).unwrap();
     let first = work::cancel(&ledger, &ticket).unwrap();
@@ -336,7 +336,7 @@ fn cancellation_version_and_request_conflicts_refuse_replay_without_replacing_ex
 
 #[test]
 fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let created = crate::ledger::now_ms();
     for id in ["terminal", "pending"] {
         let mut request = place_request(&ledger, id);
@@ -405,7 +405,7 @@ fn request_sidecars_expire_with_terminal_tickets_but_not_pending_work() {
 
 #[test]
 fn request_expiry_keeps_failed_lost_replies_and_non_job_tickets() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let created = crate::ledger::now_ms();
     for id in ["lost-reply", "cancelled", "placed", "agent"] {
         let mut request = place_request(&ledger, id);
@@ -449,7 +449,7 @@ fn request_expiry_keeps_failed_lost_replies_and_non_job_tickets() {
 
 #[test]
 fn orphan_request_sidecars_expire_only_without_launch_receipts() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let created = crate::ledger::now_ms();
     for id in ["orphan", "receipt"] {
         crate::jobs::record_request_validity(
@@ -476,7 +476,7 @@ fn orphan_request_sidecars_expire_only_without_launch_receipts() {
 
 #[test]
 fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let now = crate::ledger::now_ms();
     let shell = Fake::new();
     let launch = work::Launch {
@@ -526,7 +526,7 @@ fn launch_ingress_never_restores_a_receipted_requests_missing_sidecar() {
 #[test]
 fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
     for (pending, expire) in [(false, false), (true, false), (false, true)] {
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let _service = service(&ledger);
         let created = crate::ledger::now_ms();
         let mut request = place_request(&ledger, "missing-cancel");
@@ -593,7 +593,7 @@ fn missing_cancelled_tickets_do_not_block_unrelated_admission() {
 #[test]
 fn unreleasable_cancellations_are_held_and_never_starve_admission() {
     const HELD: usize = 40;
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let tickets: Vec<_> = (0..HELD)
         .map(|index| identityless_cancellation(&ledger, &format!("held-{index}")))
@@ -756,7 +756,7 @@ fn snapshot(now: u64) -> Snapshot {
 
 #[test]
 fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_inbox() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
@@ -836,7 +836,7 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
 
 #[test]
 fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
@@ -872,7 +872,7 @@ fn reconciliation_does_not_close_from_stale_or_pre_creation_snapshots() {
 
 #[test]
 fn released_completion_time_is_kept_when_the_item_closes_later() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
@@ -937,7 +937,7 @@ fn place_request(ledger: &Ledger, id: &str) -> Request {
 
 #[test]
 fn placement_replay_preserves_the_complete_origin_expectation() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
@@ -993,7 +993,7 @@ fn placement_replay_preserves_the_complete_origin_expectation() {
 
 #[test]
 fn placement_resume_skips_its_own_ticket_but_unreserved_work_waits() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
@@ -1034,7 +1034,7 @@ fn placement_resume_skips_its_own_ticket_but_unreserved_work_waits() {
 
 #[test]
 fn placement_admission_never_downgrades_missing_or_newer_progress() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = Policy::default();
     let fleet = Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![Host::local()]);
@@ -1074,7 +1074,7 @@ fn pinned(ledger: &Ledger, id: &str, host: &str) -> Request {
 
 #[test]
 fn a_full_host_holds_back_only_the_tickets_that_need_it() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
@@ -1170,7 +1170,7 @@ fn a_full_host_holds_back_only_the_tickets_that_need_it() {
 
 #[test]
 fn submit_waits_behind_pending_tickets_even_with_room() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy {
@@ -1214,7 +1214,7 @@ fn submit_waits_behind_pending_tickets_even_with_room() {
 /// to take over.
 #[test]
 fn a_job_record_says_who_may_run_the_job() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let job = crate::jobs::Job {
         id: "claimed".into(),
         cmd: vec!["true".into()],
@@ -1267,7 +1267,7 @@ fn a_job_record_says_who_may_run_the_job() {
 /// lookup refuses it, and the intent-to-claim publication refuses a changed request.
 #[test]
 fn a_record_that_embeds_another_job_is_never_its_own_claim() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let job = crate::jobs::Job {
         id: "claimed".into(),
         cmd: vec!["true".into()],
@@ -1294,7 +1294,7 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
     assert!(error.to_string().contains("identity changed"), "{error}");
     assert!(crate::jobs::record(&ledger, "claimed").unwrap().is_none());
     // A real job's intent keeps its own request: only the pane may change.
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     crate::jobs::publish_intent(&ledger, &job).unwrap();
     let mut changed = job.clone();
     changed.cwd = "/elsewhere".into();
@@ -1313,7 +1313,7 @@ fn a_record_that_embeds_another_job_is_never_its_own_claim() {
 /// receipt without the evidence fails closed.
 #[test]
 fn a_job_launch_receipt_carries_its_own_request_evidence() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let launch = crate::work::Launch {
         validity: None,
@@ -1383,7 +1383,7 @@ fn a_job_launch_receipt_carries_its_own_request_evidence() {
 /// byte-identical, with or without an existing hold, and the request is never reserved.
 #[test]
 fn a_reservation_for_an_expired_request_changes_nothing() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let shell = crate::shell::Fake::new();
     let policy = Policy {
@@ -1456,7 +1456,7 @@ fn a_reservation_for_an_expired_request_changes_nothing() {
 /// account for a record it cannot read, so it never starts the clock behind it.
 #[test]
 fn a_missing_clock_with_an_unreadable_record_refuses() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     std::fs::create_dir_all(&ledger.dir).unwrap();
     // A database that cannot be read cannot authorize clock initialization.
     let database = ledger.dir.join("state.db");
@@ -1468,7 +1468,7 @@ fn a_missing_clock_with_an_unreadable_record_refuses() {
     );
     assert_eq!(std::fs::read(&database).unwrap(), b"not sqlite");
     // A missing record directory is empty, and the clock starts at the wall clock.
-    let empty = Ledger::new(std::env::temp_dir().join(new_id()));
+    let empty = Ledger::temporary();
     std::fs::create_dir_all(&empty.dir).unwrap();
     assert!(crate::jobs::clock(&empty).is_ok());
     std::fs::remove_dir_all(&ledger.dir).unwrap();
@@ -1479,7 +1479,7 @@ fn a_missing_clock_with_an_unreadable_record_refuses() {
 /// an expired request, and the refusal is recorded at the time it was refused.
 #[test]
 fn the_validity_clock_never_moves_back() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let created = 1_000_000_u64;
     let validity = crate::jobs::Validity::new(created);
@@ -1526,7 +1526,7 @@ fn the_validity_clock_never_moves_back() {
 /// The launch result is returned, and the child stays recorded.
 #[test]
 fn a_custody_failure_after_the_launch_keeps_the_launch_result() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let item = Item {
         id: "child".into(),
         kind: "agent".into(),

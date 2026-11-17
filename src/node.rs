@@ -791,7 +791,7 @@ mod tests {
     fn zero_delta_capture_keeps_busy_and_cpu_baseline() {
         use crate::config::Policy;
         use crate::shell::Fake;
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let shell = Fake::new();
         shell
             .on("herdr pane list", r#"{"result":{"panes":[]}}"#)
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn samples_keep_a_bounded_window_of_typed_rows() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         for ts in [1_000, 2_000, 3_000] {
             record_sample(&ledger, &sample(ts), 0).unwrap();
         }
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn same_id_reservation_is_atomic_and_does_not_extend_or_duplicate_the_hold() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let shell = crate::shell::Fake::new();
         let policy = crate::config::Policy {
             memory_reserve_bytes: 0,

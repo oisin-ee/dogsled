@@ -1423,7 +1423,7 @@ mod stopped_tests {
     /// A committed admission, with a saved `stopped` settlement when `stopped` is set, and
     /// the host receipt that would otherwise import as `returned`.
     fn admission(stopped: bool) -> (Ledger, crate::unit_reply::Receipt) {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let export = export();
         let execution = json!({"executor":"dogsled","ownerId":"w1:p1","requestId":ID});
         let binding = json!({"contract":export["contract"]["ref"],"execution":execution,"exportDigest":export["digest"]});

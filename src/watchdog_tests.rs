@@ -70,7 +70,7 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         std::fs::create_dir_all(&ledger.dir).unwrap();
         let service = std::fs::OpenOptions::new()
             .create(true)

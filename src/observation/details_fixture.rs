@@ -27,7 +27,7 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub fn new(socket: Client) -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         Self::at(socket, ledger)
     }
 
@@ -36,12 +36,12 @@ impl Fixture {
     }
 
     pub fn paused(socket: Client) -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         Self::start(socket, ledger, true, None)
     }
 
     pub fn with_files_shell(socket: Client, shell: Arc<dyn crate::shell::Shell>) -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         Self::start(socket, ledger, false, Some(shell))
     }
 

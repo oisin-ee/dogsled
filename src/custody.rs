@@ -525,7 +525,7 @@ mod tests {
     use crate::shell::{Fake, Output};
 
     fn ledger() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
 
     fn item(ledger: &Ledger, owner_session: Option<&str>) -> Item {

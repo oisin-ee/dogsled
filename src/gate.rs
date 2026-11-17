@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn the_gate_names_unlanded_children_once_per_set_and_per_owner() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let first = board(vec![
             row("web", Group::ToLand, Some(2), false),
             row("api", Group::ToLand, None, true),
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn finishing_and_waiting_children_with_commits_do_not_trigger_the_gate() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         for state in [
             crate::lifecycle::State::Finishing,
             crate::lifecycle::State::Waiting,
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn hidden_children_still_change_the_signature() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let mut many = board(
             (0..6)
                 .map(|i| row(&format!("child-{i}"), Group::ToLand, None, true))
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn the_gate_finds_the_work_of_the_current_custodian() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let child = item("child", "w1:p1");
         crate::items::record(&ledger, child.clone()).unwrap();
         // The custody moved to another pane: the origin owner hears nothing about it.
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn the_gate_finds_the_work_of_the_origin_owner_without_a_custody_record() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         crate::items::record(&ledger, item("child", "w1:p1")).unwrap();
         let shell = shell_in_tree(&[("w1:p1", "origin-session"), ("w1:p2", "other-session")]);
         // No custody record: the origin owner answers for the child.

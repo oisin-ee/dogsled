@@ -64,6 +64,7 @@ mod sidebar;
 mod store;
 mod sweep;
 mod tables;
+mod temporary;
 #[cfg(test)]
 mod test_support;
 mod transcript;

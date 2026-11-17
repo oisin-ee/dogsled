@@ -1039,7 +1039,6 @@ impl Fleet<'_> {
 mod tests {
     use super::*;
     use crate::error::Refusal;
-    use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
 
@@ -1122,7 +1121,7 @@ mod tests {
             }
         }
         let shell = DeadlineShell;
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1150,16 +1149,15 @@ mod tests {
         assert!(!format!("{error:?}").contains("TASK_SECRET"));
     }
 
-    fn debug_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(new_id());
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn debug_dir() -> crate::temporary::Directory {
+        crate::temporary::Directory::new().unwrap()
     }
 
     #[test]
     fn debug_file_is_created_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = debug_dir().join("new.log");
+        let directory = debug_dir();
+        let path = directory.join("new.log");
         write_ssh_detail(&path, "ssh peer: boom").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
@@ -1169,7 +1167,8 @@ mod tests {
     #[test]
     fn debug_file_refuses_an_existing_group_or_world_readable_file() {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = debug_dir().join("open.log");
+        let directory = debug_dir();
+        let path = directory.join("open.log");
         std::fs::write(&path, "").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(write_ssh_detail(&path, "secret").is_err());
@@ -1209,7 +1208,7 @@ mod tests {
     #[test]
     fn cache_and_service_boundaries_use_injected_time() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1277,7 +1276,7 @@ mod tests {
     #[test]
     fn status_words_an_unreachable_peer_apart_from_a_stopped_service() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1321,7 +1320,7 @@ mod tests {
             Some("service: down (last snapshot 20s ago)")
         );
         // A peer that SSH cannot read is unreachable, with the age of its last snapshot.
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let fleet = Fleet::cold(fleet.shell, &ledger, fleet.policy, fleet.home, fleet.hosts);
         // A state directory has its own shared-connection socket, so its own SSH command.
         let command = format!(
@@ -1446,7 +1445,7 @@ mod tests {
             ),
         ] {
             let shell = Fake::new();
-            let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+            let ledger = Ledger::temporary();
             let policy = Policy::default();
             let host = Host {
                 id: "peer".into(),
@@ -1733,7 +1732,7 @@ mod tests {
     #[test]
     fn a_cache_with_raw_text_from_before_categories_is_not_shown() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1763,7 +1762,7 @@ mod tests {
     #[test]
     fn an_unreachable_peer_is_asked_again_with_backoff_and_at_once_after_it_answers() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),

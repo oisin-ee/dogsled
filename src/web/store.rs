@@ -308,8 +308,7 @@ mod tests {
     use portal_types::questions::QuestionSet;
 
     fn store() -> Store {
-        let dir = std::env::temp_dir().join(format!("dogsled-questions-{}", ledger::new_id()));
-        Store::new(Ledger::new(dir))
+        Store::new(Ledger::temporary())
     }
 
     fn ask() -> AskBody {

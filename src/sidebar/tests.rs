@@ -19,7 +19,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let snapshot = serde_json::from_value(json!({"sampled_ms":10_000,"probe":{
             "host":"local","label":"local","load1":0.0,"cores":8,"busy":0.1,
             "memory":{"used_bytes":1,"total_bytes":32_000_000_000u64},"disk_free_percent":99.0,

@@ -200,8 +200,8 @@ pub fn with_lifecycle<T>(
 ) -> Result<T> {
     let common = common_dir(shell, checkout)?.canonicalize()?;
     let lock = Ledger {
-        dir: common.clone(),
         budget: ledger.budget,
+        ..Ledger::new(common.clone())
     };
     lock.with_lock("dogsled-lifecycle", || operation(&Guard { common }))
 }
