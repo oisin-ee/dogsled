@@ -5,9 +5,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use portal_types::agents::{
-    ActivityCode, ActivityError, ActivityView, PublishActivity, RegisterProducer,
-};
+use portal_types::agents::{ActivityCode, ActivityError, PublishActivity, RegisterProducer};
 use tokio_stream::StreamExt as _;
 
 use super::AppState;
@@ -17,15 +15,9 @@ use crate::observation::{
     live_activity::{self, Command},
 };
 
-/// Released Pi extensions publish to the unqualified local producer paths.
-/// These paths must stay stable across binary upgrades while Pi sessions keep running.
+/// Host-qualified activity routes. Pi's unqualified producer paths are in `producer`.
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/agents/{pane}/activity",
-            get(local_current).put(local_publish),
-        )
-        .route("/api/agents/{pane}/activity/producer", post(local_register))
         .route(
             "/api/agents/{host}/{pane}/activity",
             get(current).put(publish),
@@ -54,40 +46,6 @@ pub(super) fn failure(error: ActivityError) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Json(error)).into_response()
 }
 
-fn value(view: ActivityView) -> Response {
-    ([(header::CACHE_CONTROL, "no-store")], Json(view)).into_response()
-}
-
-async fn local_current(State(state): State<AppState>, Path(pane): Path<String>) -> Response {
-    current(State(state), Path((crate::hosts::LOCAL.into(), pane))).await
-}
-
-async fn local_register(
-    State(state): State<AppState>,
-    Path(pane): Path<String>,
-    request: Request,
-) -> Response {
-    register(
-        State(state),
-        Path((crate::hosts::LOCAL.into(), pane)),
-        request,
-    )
-    .await
-}
-
-async fn local_publish(
-    State(state): State<AppState>,
-    Path(pane): Path<String>,
-    request: Request,
-) -> Response {
-    publish(
-        State(state),
-        Path((crate::hosts::LOCAL.into(), pane)),
-        request,
-    )
-    .await
-}
-
 async fn current(
     State(state): State<AppState>,
     Path((host, pane)): Path<(String, String)>,
@@ -98,15 +56,7 @@ async fn current(
     if host != crate::hosts::LOCAL {
         return peer_response(state, host, pane, PeerOperation::Activity).await;
     }
-    match tokio::task::spawn_blocking(move || ipc::Client::at(&state.web.dir).activity(&pane)).await
-    {
-        Ok(Ok(view)) => value(view),
-        Ok(Err(error)) => failure(error),
-        Err(error) => failure(live_activity::error(
-            ActivityCode::UpstreamUnavailable,
-            &error.to_string(),
-        )),
-    }
+    super::producer::current_activity(state.web.dir.clone(), pane).await
 }
 
 async fn register(
@@ -147,36 +97,9 @@ async fn mutation(
     if let Err(error) = live_activity::validate_pane(&pane) {
         return failure(error);
     }
-    let mut stream = request.into_body().into_data_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else {
-            return failure(live_activity::error(
-                ActivityCode::InvalidRequest,
-                "invalid activity body",
-            ));
-        };
-        if chunk.len() > live_activity::MAX_BODY.saturating_sub(bytes.len()) {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                [(header::CACHE_CONTROL, "no-store")],
-                Json(live_activity::error(
-                    ActivityCode::InvalidRequest,
-                    "activity body exceeds 64 KiB",
-                )),
-            )
-                .into_response();
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let command = match decode(&bytes) {
+    let command = match super::producer::activity_body(request, decode).await {
         Ok(command) => command,
-        Err(error) => {
-            return failure(live_activity::error(
-                ActivityCode::InvalidRequest,
-                &error.to_string(),
-            ));
-        }
+        Err(response) => return *response,
     };
     if host != crate::hosts::LOCAL {
         let operation = match command {
@@ -185,18 +108,7 @@ async fn mutation(
         };
         return peer_response(state, host, pane, operation).await;
     }
-    match tokio::task::spawn_blocking(move || {
-        ipc::Client::at(&state.web.dir).activity_command(&pane, command)
-    })
-    .await
-    {
-        Ok(Ok(ack)) => ([(header::CACHE_CONTROL, "no-store")], Json(ack)).into_response(),
-        Ok(Err(error)) => failure(error),
-        Err(error) => failure(live_activity::error(
-            ActivityCode::UpstreamUnavailable,
-            &error.to_string(),
-        )),
-    }
+    super::producer::activity_command(state.web.dir.clone(), pane, command).await
 }
 
 async fn events(
@@ -276,7 +188,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Method, Request};
     use portal_types::agents::{
-        ActivityAck, ActivityDetail, LivePhase, LiveState, ProducerPayload,
+        ActivityAck, ActivityDetail, ActivityView, LivePhase, LiveState, ProducerPayload,
     };
     use tower::ServiceExt as _;
 
