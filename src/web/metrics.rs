@@ -55,7 +55,8 @@ fn fleet(state: &AppState, options: &Options) -> Result<MetricsReport> {
                 let result = handle
                     .join()
                     .unwrap_or_else(|_| Err(Error::Invalid("peer metrics task panicked".into())));
-                (host.id.clone(), result)
+                // Coverage and the host group name the label the owner configured.
+                (host.label.clone(), result)
             })
             .collect::<Vec<_>>()
     });
