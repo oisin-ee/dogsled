@@ -45,7 +45,7 @@ impl Shell for StartingShell {
 
 #[test]
 fn another_request_cannot_start_while_the_pane_is_locked_for_recovery() {
-    let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let mut ledger = Ledger::temporary();
     let progress: Progress = serde_json::from_value(json!({
         "request":{"id":"different","validity":validity_for(&ledger,"different"),"action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":"/checkout","pane":"w2:p2","terminal":"term_shell","owner":"w1:p1"},
@@ -155,7 +155,7 @@ impl Shell for ConfirmingShell {
 #[test]
 fn confirmation_is_stamped_after_start_or_recovery_and_preserved_on_replay() {
     for recovering in [false, true] {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let progress: Progress = serde_json::from_value(json!({
             "request":{"id":"stamp","validity":validity_for(&ledger,"stamp"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"peer","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
@@ -291,7 +291,7 @@ fn start_with_simulated_busy_wait(
 
 #[test]
 fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell::new(2);
     let window = std::time::Duration::from_secs(5);
     start_with_simulated_busy_wait(
@@ -309,7 +309,7 @@ fn a_busy_pane_is_started_again_once_its_shell_is_ready() {
 
 #[test]
 fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell {
         replaced_after: 1,
         ..BusyShell::new(usize::MAX)
@@ -336,7 +336,7 @@ fn a_busy_retry_is_refused_once_another_terminal_holds_the_pane() {
 
 #[test]
 fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
     let error = start_with_simulated_busy_wait(
@@ -359,7 +359,7 @@ fn a_pane_busy_past_the_window_names_the_pane_and_the_wait() {
 
 #[test]
 fn a_first_busy_refusal_can_exhaust_the_window_without_a_retry() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let shell = BusyShell::new(usize::MAX);
     let window = std::time::Duration::from_millis(300);
     let request = busy_request(&ledger);
@@ -424,7 +424,7 @@ impl Shell for BudgetShell {
 #[test]
 fn command_budget_expiry_after_busy_stays_retryable_but_an_issued_timeout_does_not() {
     for uncertain in [false, true] {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let progress: Progress = serde_json::from_value(json!({
             "request":{"id":"budget","validity":validity_for(&ledger,"budget"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
                 "host":"local","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
@@ -477,7 +477,7 @@ impl Shell for TakenShell {
 
 #[test]
 fn only_a_busy_refusal_is_repeated() {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     let window = std::time::Duration::from_secs(5);
     let error = start_while_busy(
         &ledger,
@@ -490,4 +490,197 @@ fn only_a_busy_refusal_is_repeated() {
     )
     .unwrap_err();
     assert!(matches!(error, Error::Command { .. }), "{error:?}");
+}
+
+/// Herdr that times out waiting for the agent it started. The agent comes up later, unnamed,
+/// in the launch's terminal once `ready_after` agent lists have run.
+#[derive(Debug)]
+struct SlowStartShell {
+    lists: AtomicUsize,
+    ready_after: usize,
+    agent: Value,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl Shell for SlowStartShell {
+    fn run(&self, program: &str, args: &[String]) -> Result<Output> {
+        assert_eq!(program, "herdr");
+        self.calls.lock().unwrap().push(args.join(" "));
+        let reply = |value: Value| {
+            Ok(Output {
+                status: 0,
+                stdout: value.to_string(),
+                stderr: String::new(),
+            })
+        };
+        match args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["pane", "list"] => reply(json!({"result":{"panes":[{
+                "pane_id":"w2:p2","terminal_id":"term_shell"
+            }]}})),
+            ["agent", "list"] => {
+                let seen = self.lists.fetch_add(1, Ordering::SeqCst);
+                let agents = if seen >= self.ready_after {
+                    vec![self.agent.clone()]
+                } else {
+                    vec![]
+                };
+                reply(json!({"result":{"agents":agents}}))
+            }
+            ["agent", "start", ..] => Ok(Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: r#"{"error":{"code":"timeout","message":"timed out waiting for agent startup"}}"#
+                    .into(),
+            }),
+            ["agent", "rename", "w2:p2", "worker"] => reply(json!({"result":{}})),
+            ["pane", "read", ..] => Err(Error::Invalid("startup output unavailable".into())),
+            _ => panic!("unexpected command {args:?}"),
+        }
+    }
+}
+
+fn slow_start(ready_after: usize, agent: Value) -> SlowStartShell {
+    SlowStartShell {
+        lists: AtomicUsize::new(0),
+        ready_after,
+        agent,
+        calls: std::sync::Mutex::default(),
+    }
+}
+
+fn unnamed(session: &str) -> Value {
+    json!({"pane_id":"w2:p2","terminal_id":"term_shell","agent":"codex","name":null,
+        "agent_session":{"kind":"path","value":session}})
+}
+
+/// A start that Herdr gave up waiting for is not lost: its agent, found unnamed in the launch's
+/// own terminal, gets the launch's name and the launch is confirmed. Without that name the
+/// worker would show as a lead of its own, outside its owner's Workers tab and its close.
+#[test]
+fn a_timed_out_start_adopts_its_unnamed_agent_and_names_it() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let progress: Progress = serde_json::from_value(json!({
+        "request":{"id":"slow","validity":validity_for(&ledger,"slow"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
+            "host":"peer","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"},
+        "pane":"w2:p2","terminal":"term_shell","attempted":false,"confirmed":false,
+        "result":{"host":"peer","pane":"w2:p2"},"error":null
+    })).unwrap();
+    crate::launch_store::put_progress_value(&ledger, "slow", &progress).unwrap();
+    // The agent shows on the third look.
+    let shell = slow_start(2, unnamed("/sessions/one.jsonl"));
+    let mut progress = crate::launch_store::progress(&ledger, "slow")
+        .unwrap()
+        .unwrap();
+    let pauses = std::cell::Cell::new(0);
+    let wait = Adoption {
+        window: std::time::Duration::from_secs(60),
+        elapsed: &|| std::time::Duration::from_secs(pauses.get() * 2),
+        pause: &|_| pauses.set(pauses.get() + 1),
+    };
+    assert!(
+        adopt(
+            &ledger,
+            &shell,
+            &progress.request,
+            "w2:p2",
+            "term_shell",
+            &wait
+        )
+        .unwrap()
+    );
+    assert_eq!(pauses.get(), 2, "it looks again until the agent shows");
+    assert!(
+        shell
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"agent rename w2:p2 worker".to_owned())
+    );
+    // Through the launch: the first list is the check before the start, and the agent
+    // shows on the first look after the timeout.
+    let shell = slow_start(1, unnamed("/sessions/one.jsonl"));
+    let result = start_or_reconcile(&ledger, &shell, &mut progress, "w2:p2", "slow");
+    assert!(result.is_ok(), "{result:?}");
+    let calls = shell.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("agent start"))
+            .count(),
+        1
+    );
+    assert!(
+        calls.iter().any(|call| call
+            .starts_with("agent start worker --kind codex --pane w2:p2 --timeout 120000 --")),
+        "{calls:?}"
+    );
+    assert!(calls.contains(&"agent rename w2:p2 worker".to_owned()));
+    // A replay that finds the unnamed agent names it without a second start.
+    let shell = slow_start(0, unnamed("/sessions/one.jsonl"));
+    assert!(start_or_reconcile(&ledger, &shell, &mut progress, "w2:p2", "slow").is_ok());
+    assert!(
+        !shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("agent start"))
+    );
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn a_timed_out_start_never_takes_a_named_or_foreign_agent() {
+    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let request: Launch = serde_json::from_value(json!({
+        "id":"slow","validity":validity_for(&ledger,"slow"),"action":{"type":"agent","kind":"codex","name":"worker","message":"go"},
+        "host":"peer","cwd":"/","pane":"w2:p2","terminal":"term_shell","owner":"parent"
+    }))
+    .unwrap();
+    let wait = Adoption {
+        window: std::time::Duration::ZERO,
+        elapsed: &|| std::time::Duration::ZERO,
+        pause: &|_| panic!("a zero window looks once"),
+    };
+    let mut named = unnamed("/s");
+    named["name"] = json!("other");
+    let mut foreign = unnamed("/s");
+    foreign["terminal_id"] = json!("term_other");
+    for agent in [named, foreign] {
+        let shell = slow_start(0, agent);
+        assert!(!adopt(&ledger, &shell, &request, "w2:p2", "term_shell", &wait).unwrap());
+        assert!(
+            !shell
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.starts_with("agent rename"))
+        );
+    }
+    // A unit launch adopts only the agent whose session is in its fresh session directory.
+    let sessions = std::path::Path::new("/state/launches/slow.sessions");
+    let probe = |session: Option<&str>| crate::probe::Agent {
+        pane: "w2:p2".into(),
+        agent: Some("pi".into()),
+        name: None,
+        agent_session: session.map(Into::into),
+        ..crate::probe::Agent::default()
+    };
+    assert!(unnamed_start(
+        &probe(Some("/state/launches/slow.sessions/1_slow.jsonl")),
+        Some(sessions)
+    ));
+    assert!(!unnamed_start(
+        &probe(Some("/home/.pi/sessions/1.jsonl")),
+        Some(sessions)
+    ));
+    assert!(!unnamed_start(&probe(None), Some(sessions)));
+    assert!(unnamed_start(&probe(None), None));
+    std::fs::remove_dir_all(ledger.dir).unwrap();
 }

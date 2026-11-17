@@ -33,6 +33,8 @@ const RETRY: Duration = Duration::from_secs(1);
 const TICK: Duration = Duration::from_millis(100);
 /// A notice stays in the footer this long.
 const NOTICE: Duration = Duration::from_secs(5);
+/// Herdr's event stream is opened again this long after it fails.
+const TAB_RETRY: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 enum Msg {
@@ -146,6 +148,48 @@ fn reader(client: &ipc::Client, tx: &mpsc::SyncSender<Msg>, stop: &AtomicBool) {
             return;
         }
         let until = Instant::now() + RETRY;
+        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+            std::thread::park_timeout(TICK);
+        }
+    }
+}
+
+/// Herdr events that can leave the dock alone in its tab.
+const TAB_EVENTS: [&str; 2] = ["pane.closed", "pane.exited"];
+
+/// Close the dock once its tab has no other pane, whichever way that pane closed. The dock
+/// learns of each closed pane from Herdr's events, and looks once when it subscribes.
+fn watch_tab(ledger: &Ledger, shell: &dyn Shell, tx: &mpsc::SyncSender<Msg>, stop: &AtomicBool) {
+    let Ok(dock) = std::env::var("HERDR_PANE_ID") else {
+        return;
+    };
+    let lone = || match board::close_lone_dock(ledger, shell, &dock) {
+        Ok(closed) => closed,
+        Err(error) => {
+            send(tx, Msg::Notice(format!("dock: {error}")), stop);
+            false
+        }
+    };
+    let filters: Vec<_> = TAB_EVENTS
+        .iter()
+        .map(|event| serde_json::json!({ "type": event }))
+        .collect();
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(mut subscription) =
+            crate::herdr_socket::Client::from_env().and_then(|client| client.subscribe(&filters))
+        {
+            if lone() {
+                return;
+            }
+            while !stop.load(Ordering::Relaxed) {
+                match subscription.next() {
+                    Ok(crate::herdr_socket::Next::Event(_)) if lone() => return,
+                    Ok(crate::herdr_socket::Next::Event(_) | crate::herdr_socket::Next::Idle) => {}
+                    Ok(crate::herdr_socket::Next::Closed) | Err(_) => break,
+                }
+            }
+        }
+        let until = Instant::now() + TAB_RETRY;
         while Instant::now() < until && !stop.load(Ordering::Relaxed) {
             std::thread::park_timeout(TICK);
         }
@@ -414,6 +458,7 @@ pub fn command(
     std::thread::scope(|scope| {
         let lifetime = scope.spawn(|| terminal_lifetime(tty.as_fd(), &stop));
         scope.spawn(|| reader(&client, &tx, &stop));
+        scope.spawn(|| watch_tab(ledger, &shell, &tx, &stop));
         let outcome = (|| -> Result<()> {
             loop {
                 let area = terminal.size()?;

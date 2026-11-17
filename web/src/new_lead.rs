@@ -219,11 +219,6 @@ pub(crate) fn NewLeadForm(
                         selection_removed.set(false);
                     }
                 }
-                crate::model_picker::ModelPicker {
-                    choices: model_choices.clone(), selected_model: launch.model,
-                    selected_level: launch.thinking, busy: busy(),
-                    on_change: move |change| settings.write().change(change, &model_choices),
-                }
             }
             div { class: "new-lead-body",
                 if let Some(message) = model_error {
@@ -250,8 +245,15 @@ pub(crate) fn NewLeadForm(
                 }
             }
             if let Some(message) = error() { Alert { "{message}" } }
-            Composer { draft, images, uploading, disabled: !valid(), busy: busy(),
-                on_error: move |message| error.set(Some(message)), on_send: send }
+            div { class: "conversation-footer new-lead-composer",
+                crate::model_picker::ModelPicker {
+                    choices: model_choices.clone(), selected_model: launch.model,
+                    selected_level: launch.thinking, busy: busy(),
+                    on_change: move |change| settings.write().change(change, &model_choices),
+                }
+                Composer { draft, images, uploading, disabled: !valid(), busy: busy(),
+                    on_error: move |message| error.set(Some(message)), on_send: send }
+            }
         }
     }
 }
@@ -376,6 +378,34 @@ mod tests {
             })
             .collect();
         rsx! { RepositoryPicker { choices, selected, busy: false } }
+    }
+
+    fn new_conversation_root() -> Element {
+        let publication = use_signal(crate::app::PortalState::default);
+        let catalogue = use_memo(move || publication.read().catalogue.clone());
+        use_context_provider(|| crate::app::CataloguePortal(catalogue));
+        use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
+        use_context_provider(|| super::NewConversation {
+            open: Signal::new(true),
+            repository: Signal::new(None),
+        });
+        use_context_provider(|| crate::agent_view::Draft(Signal::new(String::new())));
+        rsx! { super::NewLeadForm {} }
+    }
+
+    #[test]
+    fn new_conversation_keeps_repository_in_header_and_model_beside_composer() {
+        let html = dioxus_ssr::render(&VirtualDom::prebuilt(new_conversation_root));
+        let (header, body) = html.split_once("</header>").unwrap();
+        assert!(header.contains("new-lead-header"), "{html}");
+        assert!(header.contains(r#"name="repository""#), "{html}");
+        assert!(!header.contains("model-picker"), "{html}");
+        let composer = body.split_once("new-lead-composer").unwrap().1;
+        assert!(composer.contains("model-picker"), "{html}");
+        assert!(composer.contains(r#"aria-haspopup="listbox""#), "{html}");
+        assert!(!composer.contains(r#"role="combobox""#), "{html}");
+        assert!(!composer.contains(r#"placeholder="Pi default""#), "{html}");
+        assert!(composer.contains("console-composer"), "{html}");
     }
 
     #[test]

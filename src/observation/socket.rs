@@ -45,10 +45,10 @@ fn fallback(state: &Path, name: &str, directory: &Path) -> Result<PathBuf> {
             ]
         })
         .collect();
-    let suffix = if name == "observation-wake.sock" {
-        "-wake"
-    } else {
-        ""
+    let suffix = match name {
+        "observation-wake.sock" => "-wake",
+        "producer.sock" => "-producer",
+        _ => "",
     };
     let path = directory.join(format!("{hash}{suffix}.sock"));
     std::os::unix::net::SocketAddr::from_pathname(&path)?;

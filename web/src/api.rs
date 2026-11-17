@@ -69,16 +69,40 @@ pub async fn fetch_conversation(
 }
 
 /// Read the live Pi session's settings from its execution host.
+/// The live settings of a Pi session, or `None` while the session has published none. A Pi
+/// session started before its Dogsled extension could publish settings never does; that is
+/// not a failure to show.
 pub async fn agent_settings(
     address: &portal_types::agents::AgentAddress,
-) -> Result<portal_types::models::AgentSettings, String> {
-    read_json(
-        Request::get(&agent_url(address, "settings"))
-            .send()
+) -> Result<Option<portal_types::models::AgentSettings>, String> {
+    let response = Request::get(&agent_url(address, "settings"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.ok() {
+        return response
+            .json()
             .await
-            .map_err(|error| error.to_string())?,
-    )
-    .await
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    let status = response.status();
+    let body = response.json::<serde_json::Value>().await.ok();
+    settings_failure(status, body.as_ref())
+}
+
+/// A missing publication reads as no settings; any other failure keeps its reason.
+fn settings_failure(
+    status: u16,
+    body: Option<&serde_json::Value>,
+) -> Result<Option<portal_types::models::AgentSettings>, String> {
+    match body {
+        Some(body) if status == 404 && body["code"] == "settings_unavailable" => Ok(None),
+        Some(body) => Err(body["error"]
+            .as_str()
+            .map_or_else(|| format!("the server answered {status}"), str::to_owned)),
+        None => Err(format!("the server answered {status}")),
+    }
 }
 
 /// Apply a live change; the reply contains Pi's effective settings, not an optimistic selection.
@@ -363,8 +387,28 @@ fn decode_portal(text: &str, stamp: &mut Option<(String, u64)>) -> Result<Portal
 
 #[cfg(test)]
 mod catalogue_tests {
-    use super::decode_portal;
+    use super::{decode_portal, settings_failure};
     use serde_json::json;
+
+    #[test]
+    fn an_unpublished_session_has_no_settings_and_other_failures_keep_their_reason() {
+        let unpublished =
+            json!({"code":"settings_unavailable","error":"Pi settings are unavailable"});
+        assert_eq!(settings_failure(404, Some(&unpublished)), Ok(None));
+        let stopped = json!({"code":"settings_busy","error":"too many settings requests"});
+        assert_eq!(
+            settings_failure(503, Some(&stopped)),
+            Err("too many settings requests".to_owned())
+        );
+        assert_eq!(
+            settings_failure(502, Some(&unpublished)),
+            Err("Pi settings are unavailable".to_owned())
+        );
+        assert_eq!(
+            settings_failure(500, None),
+            Err("the server answered 500".to_owned())
+        );
+    }
 
     #[test]
     fn portal_decoder_requires_version_two_and_strict_ordered_shapes() {

@@ -43,8 +43,9 @@ pub struct NavigationRow {
     pub progress: Option<(usize, usize)>,
 }
 
-/// Ledger rows are workers; Herdr agents without a ledger row are leads.
-/// Closed rows remain in their lead's Workers tab, but never become sidebar entries.
+/// Ledger rows are workers; Herdr agents without a ledger row are leads, unless a Dogsled
+/// launch started them. Closed rows remain in their lead's Workers tab, but never become
+/// sidebar entries.
 pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation {
     let mut navigation = Navigation::default();
     let rows: Vec<_> = board
@@ -53,12 +54,17 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
         .flat_map(|repo| &repo.rows)
         .filter(|row| is_navigation_row(row))
         .collect();
-    for agent in agents.iter().filter(|agent| {
+    let unlisted = |agent: &&AgentView| {
         agent.state != "closed"
             && !rows
                 .iter()
                 .any(|row| row.host == agent.host && row.pane.as_deref() == Some(&agent.pane))
-    }) {
+    };
+    for agent in agents
+        .iter()
+        .filter(unlisted)
+        .filter(|agent| agent.launch.is_none())
+    {
         let title = board
             .repos
             .iter()
@@ -125,6 +131,27 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                     .push(worker);
             }
         }
+    }
+    // A launched agent whose owner has no ledger row for it, such as a start that its owner
+    // gave up on, is still a worker. It stays visible, so it can be opened and closed.
+    for agent in agents
+        .iter()
+        .filter(unlisted)
+        .filter(|agent| agent.launch.is_some())
+    {
+        repository_group(&mut navigation.repos, agent.repository.clone())
+            .rows
+            .push(NavigationRow {
+                pane: Some(agent.pane.clone()),
+                title: agent_title(None, agent),
+                role: "agent".to_owned(),
+                host: agent.host.clone(),
+                state: agent.state.clone(),
+                worker: true,
+                unseen: false,
+                workers: Vec::new(),
+                progress: None,
+            });
     }
     navigation
         .repos
@@ -211,21 +238,35 @@ pub fn repository_name(repository: &str) -> &str {
 }
 
 /// The title of an agent: its todo, then its first message, then its Herdr
-/// name, then its worktree folder.
+/// name, then its worktree folder, then the folder it runs in.
 pub fn agent_title(todo: Option<&str>, agent: &AgentView) -> String {
-    let readable = |title: &&str| !title.trim().is_empty() && !title.starts_with("u-");
+    let readable = |title: &&str| !title.trim().is_empty() && !generated(title);
     todo.filter(readable)
         .or(agent.title.as_deref().filter(readable))
         .or(agent.name.as_deref().filter(readable))
         .or_else(|| worktree(agent.cwd.as_deref()?))
+        .or_else(|| folder(agent.cwd.as_deref()?))
         .unwrap_or("Agent task")
         .to_owned()
+}
+
+/// A name Dogsled made from an id: a unit's `u-…`, or an older lead's `lead-r-…`.
+fn generated(name: &str) -> bool {
+    name.starts_with("u-") || name.starts_with("lead-r-")
 }
 
 /// The folder of a linked worktree, which names its branch.
 fn worktree(cwd: &str) -> Option<&str> {
     let (_, folder) = cwd.trim_end_matches('/').rsplit_once("/.worktrees/")?;
     (!folder.is_empty() && !folder.contains('/')).then_some(folder)
+}
+
+/// The last folder of a path, which names the checkout an agent runs in.
+fn folder(cwd: &str) -> Option<&str> {
+    cwd.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|folder| !folder.is_empty())
 }
 
 fn task_title(title: &str) -> String {
@@ -352,15 +393,22 @@ pub(crate) fn WorkerSummary(lead: NavigationRow, inbox: Vec<InboxItem>) -> Eleme
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
     let mut detail = use_context::<crate::app::LeadDetail>().0;
-    let count = lead.workers.len();
+    let finished = lead
+        .workers
+        .iter()
+        .filter(|worker| crate::workers::finished(&worker.state))
+        .count();
+    let count = lead.workers.len() - finished;
     let working = lead
         .workers
         .iter()
         .filter(|worker| matches!(worker.state.as_str(), "working" | "running"))
         .count();
+    let summary = worker_summary(count, working, finished);
     let states: Vec<_> = lead
         .workers
         .iter()
+        .filter(|worker| !crate::workers::finished(&worker.state))
         .map(|worker| {
             let waiting = worker.unseen
                 || inbox.iter().any(|item| {
@@ -375,7 +423,7 @@ pub(crate) fn WorkerSummary(lead: NavigationRow, inbox: Vec<InboxItem>) -> Eleme
     rsx! {
         crate::components::button::Button { class: "worker-summary", variant: crate::components::button::ButtonVariant::Ghost,
             r#type: "button", "data-waiting": waiting,
-            aria_label: "Show {count} workers for {lead.title}",
+            aria_label: "Show workers for {lead.title}: {summary}",
             onclick: move |_| {
                 selected.set(lead.pane.clone().map(|pane| AgentAddress { host: lead.host.clone(), pane }));
                 selection.set(None);
@@ -387,9 +435,25 @@ pub(crate) fn WorkerSummary(lead: NavigationRow, inbox: Vec<InboxItem>) -> Eleme
                     span { key: "{index}", class: "worker-dot", "data-state": state.value() }
                 }
             }
-            span { "{count} workers · {working} working" }
+            span { "{summary}" }
         }
     }
+}
+
+/// Finished workers stay listed until their branches land, but only open workers count.
+fn worker_summary(open: usize, working: usize, finished: usize) -> String {
+    let mut summary = if open == 0 {
+        String::new()
+    } else {
+        format!("{open} workers · {working} working")
+    };
+    if finished > 0 {
+        if !summary.is_empty() {
+            summary.push_str(" · ");
+        }
+        summary.push_str(&format!("{finished} finished"));
+    }
+    summary
 }
 
 fn worker_status(row: &NavigationRow, tag: Option<InboxKind>) -> &str {
@@ -571,6 +635,7 @@ mod shell_tests {
             cwd: Some("/r/.worktrees/fix-portal-titles".to_owned()),
             repository: None,
             blocked: None,
+            launch: None,
         };
         assert_eq!(agent_title(None, &agent), "fix-portal-titles");
         agent.name = Some("reviewer".to_owned());
@@ -579,9 +644,50 @@ mod shell_tests {
         assert_eq!(agent_title(Some(" "), &agent), "Ship the redesign");
         assert_eq!(agent_title(Some("Verify it"), &agent), "Verify it");
         agent.title = None;
-        agent.name = None;
-        agent.cwd = Some("/r".to_owned());
+        agent.name = Some("lead-r-mwai1wqf-1lln-0".to_owned());
+        agent.cwd = Some("/home/dev/rondo".to_owned());
+        assert_eq!(agent_title(None, &agent), "rondo");
+        agent.cwd = None;
         assert_eq!(agent_title(None, &agent), "Agent task");
+    }
+
+    #[test]
+    fn finished_workers_are_listed_apart_from_the_open_count() {
+        assert_eq!(worker_summary(3, 1, 0), "3 workers · 1 working");
+        assert_eq!(worker_summary(0, 0, 34), "34 finished");
+        assert_eq!(
+            worker_summary(2, 0, 34),
+            "2 workers · 0 working · 34 finished"
+        );
+    }
+
+    /// A worker whose start its owner gave up on has no ledger row, but its host still
+    /// publishes the launch. It is a worker, never a lead of its own.
+    #[test]
+    fn a_launched_agent_without_a_ledger_row_is_a_worker_not_a_lead()
+    -> Result<(), serde_json::Error> {
+        let mut agents = agents()?;
+        let mut launched = agents[0].clone();
+        launched.pane = "timed-out".into();
+        launched.name = None;
+        launched.cwd = Some("/r/.worktrees/feat-account-deletion".into());
+        launched.launch = Some("attempted".into());
+        agents.push(launched);
+        let groups = navigation_groups(&board(vec![]), &agents);
+        let repo = &groups.repos[0];
+        assert_eq!(
+            repo.agent_count(),
+            3,
+            "only agents no launch started are leads"
+        );
+        let row = repo
+            .rows
+            .iter()
+            .find(|row| row.pane.as_deref() == Some("timed-out"))
+            .expect("the launched agent stays visible");
+        assert!(row.worker);
+        assert_eq!(row.title, "feat-account-deletion");
+        Ok(())
     }
 
     #[test]

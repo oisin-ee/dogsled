@@ -9,6 +9,7 @@ pub mod guard;
 pub mod inbox;
 pub mod oneshot;
 mod peer_stream;
+pub mod producer;
 pub mod questions;
 pub mod reviews;
 pub mod settings;
@@ -243,6 +244,11 @@ fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(activity::router())
         .merge(settings::router())
+        .merge(producer::router().with_state(producer::Producer::portal(
+            &state.web.dir,
+            state.stop.clone(),
+            state.token.clone(),
+        )))
         .merge(inbox::routes())
         .merge(questions::routes())
         .merge(reviews::routes())
@@ -424,15 +430,12 @@ mod tests {
             PORT,
             None,
             guard::Token::new(TOKEN.to_owned()),
-            crate::ledger::Ledger::new(
-                std::env::temp_dir().join(format!("dogsled-web-{}", crate::ledger::new_id())),
-            )
-            .clone(),
+            crate::ledger::Ledger::temporary(),
         )
     }
 
     fn board_json() -> PortalState {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         test_support::empty(&ledger)
     }
 
@@ -724,9 +727,7 @@ mod tests {
     async fn shutdown_finishes_with_an_open_board_stream() {
         use std::io::{Read as _, Write as _};
 
-        let ledger = Ledger::new(
-            std::env::temp_dir().join(format!("dogsled-stop-{}", crate::ledger::new_id())),
-        );
+        let ledger = Ledger::temporary();
         let (_sender, receiver) = watch::channel(board_json());
         let (listener, state) = listen(&ledger, 0, receiver).await.expect("bind the portal");
         let port = state.port;
@@ -780,7 +781,7 @@ mod tests {
         use std::io::BufRead as _;
         use std::os::unix::net::UnixListener;
 
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         std::fs::create_dir_all(&ledger.dir).expect("state directory");
         let path =
             crate::observation::socket_path(&ledger.dir, "observation.sock").expect("socket path");

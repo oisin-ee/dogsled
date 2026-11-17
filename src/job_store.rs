@@ -813,7 +813,7 @@ mod tests {
     use serde_json::json;
 
     fn ledger() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
 
     fn job() -> Job {

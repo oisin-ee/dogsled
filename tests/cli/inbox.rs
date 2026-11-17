@@ -203,10 +203,11 @@ fn remote_put_goes_through_ssh_and_a_remote_failure_returns_to_the_sender() {
         "ssh",
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/ssh.log"
-shift 7
-case "$1" in
+# The remote command is the last argument, after any connection options.
+for remote do :; done
+case "$remote" in
   *'host snapshot'*) cat "$RIG/remote.json" ;;
-  *) DOGSLED_STATE="$RIG/remote-state" RIG_AGENTS="$RIG/remote-agents.json" sh -c "$1" ;;
+  *) DOGSLED_STATE="$RIG/remote-state" RIG_AGENTS="$RIG/remote-agents.json" sh -c "$remote" ;;
 esac
 "#,
     );

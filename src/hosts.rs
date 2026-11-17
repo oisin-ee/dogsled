@@ -466,6 +466,47 @@ impl<'a> ObserverFleet<'a> {
     }
 }
 
+/// The longest Unix socket path that both macOS and Linux accept, without its NUL byte.
+const SOCKET_PATH_LIMIT: usize = 103;
+/// What OpenSSH adds to a `ControlPath`: `%C` becomes 40 hex digits, and the master binds a
+/// `.<16 random characters>` temporary name before it renames the socket into place.
+const CONTROL_PATH_GROWTH: usize = 40 - 2 + 17;
+
+/// SSH options that share one connection per peer. Every peer call (a snapshot, a portal
+/// detail read, a stream) otherwise pays a full SSH handshake, which is most of its latency.
+/// The master stays up for a minute after its last session. A state directory whose socket
+/// path would be too long, or that cannot hold the sockets, keeps one connection per call.
+fn multiplexing(state: &std::path::Path) -> Vec<String> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let dir = state.join("ssh");
+    let path = dir.join("%C");
+    // SSH splits an option value at spaces and expands each `%`.
+    let Some(path) = path.to_str().filter(|path| {
+        state
+            .to_str()
+            .is_some_and(|state| !state.contains(|c: char| c.is_whitespace() || "%\"'".contains(c)))
+            && path.len() + CONTROL_PATH_GROWTH <= SOCKET_PATH_LIMIT
+    }) else {
+        return Vec::new();
+    };
+    if std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        format!("ControlPath={path}"),
+        "-o".into(),
+        "ControlPersist=60".into(),
+    ]
+}
+
 impl<'a> Fleet<'a> {
     pub(crate) fn cold(
         shell: &'a dyn Shell,
@@ -526,16 +567,20 @@ impl<'a> Fleet<'a> {
             .chain(args.iter().cloned())
             .chain(["--json".into()])
             .collect();
-        vec![
+        let mut options = vec![
             "-T".into(),
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
             "ConnectTimeout=5".into(),
+        ];
+        options.extend(multiplexing(&self.ledger.dir));
+        options.extend([
             "--".into(),
             host.target.clone().unwrap_or_default(),
             words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" "),
-        ]
+        ]);
+        options
     }
 
     pub fn remote<T: for<'de> Deserialize<'de>>(&self, host: &Host, args: &[String]) -> Result<T> {
@@ -1000,7 +1045,6 @@ impl Fleet<'_> {
 mod tests {
     use super::*;
     use crate::error::Refusal;
-    use crate::ledger::new_id;
     use crate::probe::{AgentCounts, Memory};
     use crate::shell::Fake;
 
@@ -1017,6 +1061,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["peer"]
         );
+    }
+
+    #[test]
+    fn peer_calls_share_one_ssh_connection_when_the_socket_path_fits() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let short = std::path::PathBuf::from("/tmp").join(format!("dg-{}", std::process::id()));
+        let options = multiplexing(&short);
+        let control = format!("ControlPath={}/ssh/%C", short.display());
+        assert_eq!(
+            options,
+            [
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                &control,
+                "-o",
+                "ControlPersist=60"
+            ]
+        );
+        let mode = std::fs::metadata(short.join("ssh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "the sockets are private");
+        std::fs::remove_dir_all(&short).unwrap();
+        let long = std::path::PathBuf::from("/tmp").join("d".repeat(50));
+        let none: [String; 0] = [];
+        assert_eq!(multiplexing(&long), none, "a socket path must fit");
+        assert!(
+            !long.exists(),
+            "nothing is created for a path that cannot work"
+        );
+        assert_eq!(multiplexing(std::path::Path::new("/tmp/a b")), none);
+        assert_eq!(multiplexing(std::path::Path::new("/tmp/a%h")), none);
     }
 
     fn observed_status(fleet: &Fleet<'_>, now: u64) -> Result<Vec<HostReport>> {
@@ -1049,7 +1127,7 @@ mod tests {
             }
         }
         let shell = DeadlineShell;
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1115,16 +1193,15 @@ mod tests {
         }
     }
 
-    fn debug_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(new_id());
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn debug_dir() -> crate::temporary::Directory {
+        crate::temporary::Directory::new().unwrap()
     }
 
     #[test]
     fn debug_file_is_created_owner_only() {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = debug_dir().join("new.log");
+        let directory = debug_dir();
+        let path = directory.join("new.log");
         write_ssh_detail(&path, "ssh peer: boom").unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
@@ -1134,7 +1211,8 @@ mod tests {
     #[test]
     fn debug_file_refuses_an_existing_group_or_world_readable_file() {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = debug_dir().join("open.log");
+        let directory = debug_dir();
+        let path = directory.join("open.log");
         std::fs::write(&path, "").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(write_ssh_detail(&path, "secret").is_err());
@@ -1174,7 +1252,7 @@ mod tests {
     #[test]
     fn cache_and_service_boundaries_use_injected_time() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1242,7 +1320,7 @@ mod tests {
     #[test]
     fn status_words_an_unreachable_peer_apart_from_a_stopped_service() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1286,8 +1364,13 @@ mod tests {
             Some("service: down (last snapshot 20s ago)")
         );
         // A peer that SSH cannot read is unreachable, with the age of its last snapshot.
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let fleet = Fleet::cold(fleet.shell, &ledger, fleet.policy, fleet.home, fleet.hosts);
+        // A state directory has its own shared-connection socket, so its own SSH command.
+        let command = format!(
+            "ssh {}",
+            fleet.remote_argv(&host, &["snapshot".into()]).join(" ")
+        );
         shell.on(&command, snapshot);
         observed_status(&fleet, 100).unwrap();
         shell.on_output(
@@ -1406,7 +1489,7 @@ mod tests {
             ),
         ] {
             let shell = Fake::new();
-            let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+            let ledger = Ledger::temporary();
             let policy = Policy::default();
             let host = Host {
                 id: "peer".into(),
@@ -1693,7 +1776,7 @@ mod tests {
     #[test]
     fn a_cache_with_raw_text_from_before_categories_is_not_shown() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),
@@ -1723,7 +1806,7 @@ mod tests {
     #[test]
     fn an_unreachable_peer_is_asked_again_with_backoff_and_at_once_after_it_answers() {
         let shell = Fake::new();
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let policy = Policy::default();
         let host = Host {
             id: "peer".into(),

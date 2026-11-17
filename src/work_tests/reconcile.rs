@@ -20,7 +20,7 @@ fn late_remote_admission_uses_launch_host_clock_before_closing_a_missing_pane() 
     let retries = crate::launch::ReleaseRetries::default();
     // With skew, the owner's admission time is later than even the disappearance sample.
     for owner_skew in [0, 20_000] {
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let shell = Fake::new();
         let policy = Policy {
             memory_reserve_bytes: 0,
@@ -141,7 +141,7 @@ impl crate::shell::Shell for ReservingShell<'_> {
 
 #[test]
 fn job_end_rule_does_not_use_agent_launch_evidence() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();
@@ -178,7 +178,7 @@ fn job_end_rule_does_not_use_agent_launch_evidence() {
 fn a_running_job_stays_open_until_a_sample_after_its_launch_lacks_its_pane() {
     // Admission at 100, pane and dispatch confirmed at 300. A sample from 200 predates the
     // pane, so its missing pane is no evidence; that rule once closed live jobs at start.
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let _service = service(&ledger);
     let shell = Fake::new();
     let policy = Policy::default();

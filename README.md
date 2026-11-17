@@ -13,13 +13,13 @@ Install the binary on each Herdr host. Use the same release tag in each command.
 Binary:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.37.1 # x-release-please-version
+mise use github:oisin-ee/dogsled@v0.37.3 # x-release-please-version
 ```
 
 Pi (extension, tools, the `todo` tool, and skill), from npm:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.37.1 # x-release-please-version
+pi install npm:@oisin-ee/pi-dogsled@0.37.3 # x-release-please-version
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -90,6 +90,11 @@ Run the portal with `dogsled web`, then open `http://127.0.0.1:7465`.
 The server listens only on the loopback address.
 The port defaults to 7465. Set `[web] port` in `dogsled.toml`, or pass `dogsled web --port PORT`.
 If the portal uses another port, set `DOGSLED_WEB_PORT` for the Pi tools so they can find it.
+
+Pi sessions publish their live activity and model settings to their own host's `dogsled serve`, not to the portal.
+`serve` answers them on `producer.sock` in the state directory on every host. The socket has mode 0600, so it needs no token.
+The portal reads activity and settings from each host's `serve`, so a Pi session on a host without a portal shows its activity and model picker.
+After an upgrade, restart `serve` before you start new Pi sessions. A running Pi session keeps the extension it started with.
 
 The portal creates its token at `~/.local/state/dogsled/web/token`, or `$DOGSLED_STATE/web/token` with a custom state directory.
 Only the owner can read the token file. Agent API requests use it as a Bearer credential.

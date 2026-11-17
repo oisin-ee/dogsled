@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn the_token_file_is_private_and_reused() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let path = path(&ledger);
         let token = super::token(&ledger).expect("a token");
         assert_eq!(token.len(), TOKEN_BYTES * 2);
@@ -111,8 +111,8 @@ mod tests {
 
     #[test]
     fn two_ledgers_hold_different_tokens() {
-        let first = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
-        let second = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let first = Ledger::temporary();
+        let second = Ledger::temporary();
         assert_ne!(
             token(&first).expect("a token"),
             token(&second).expect("a token")

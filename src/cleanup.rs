@@ -2887,7 +2887,7 @@ mod tests {
             response["result"]["workspaces"] = workspaces;
             let rig = Self {
                 shell: Fake::new(),
-                ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+                ledger: Ledger::temporary(),
                 cleanup: crate::config::Cleanup::default(),
             };
             rig.shell

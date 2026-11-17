@@ -9,7 +9,7 @@ use super::{
 use serde_json::{Value, json};
 
 fn ledger() -> Ledger {
-    Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+    Ledger::temporary()
 }
 fn clear_lists(value: &mut Value) {
     match value {

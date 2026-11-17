@@ -107,6 +107,12 @@ const RULES: &[Rule] = &[
         command: &["dogsled", "doctor", "--host", "{host}"],
     },
     Rule {
+        code: "lead_validity",
+        evidence: &[],
+        reason: "ownerless lead validity retained; a lead has no parent pane",
+        command: &["dogsled", "doctor", "--host", "{host}"],
+    },
+    Rule {
         code: "ordinary_reference_release",
         evidence: &[],
         reason: "awaiting origin reference release; ordinary result is retained at the origin",
@@ -429,6 +435,23 @@ fn text<'a>(value: &'a Value, path: &str) -> &'a str {
 
 type Owners = BTreeMap<String, (String, String)>;
 
+/// An item belongs to its owner pane. A lead has no owner: its request validity belongs to
+/// the lead's own pane. A lead still allocating has no pane yet, so its validity stays
+/// unattributed.
+fn item_and_lead_owners(ledger: &Ledger, host: &str, owners: &mut Owners) -> Result<()> {
+    for item in crate::items::list(ledger)? {
+        owners
+            .entry(item.id)
+            .or_insert_with(|| (item.owner_pane, host.into()));
+    }
+    for lead in crate::lead_store::list(ledger)? {
+        if let Some(pane) = lead.pane {
+            owners.entry(lead.id).or_insert((pane, host.into()));
+        }
+    }
+    Ok(())
+}
+
 fn owner_panes<'a>(
     ledger: &Ledger,
     host: &str,
@@ -468,11 +491,7 @@ fn owner_panes<'a>(
             );
         }
     }
-    for item in crate::items::list(ledger)? {
-        owners
-            .entry(item.id)
-            .or_insert_with(|| (item.owner_pane, host.into()));
-    }
+    item_and_lead_owners(ledger, host, &mut owners)?;
     for id in crate::host_store::landing(ledger)?.keys() {
         if !owners.contains_key(id)
             && let Some(custody) = crate::custody::get(ledger, id)?
@@ -601,7 +620,20 @@ fn job_commands(
     }
 }
 
-fn owner_hold(owners: &Owners, host: &str, code: &str, resource: String, id: &str) -> Hold {
+fn owner_hold(
+    owners: &Owners,
+    leads: &BTreeMap<String, String>,
+    host: &str,
+    code: &str,
+    resource: String,
+    id: &str,
+) -> Hold {
+    if code == "validity"
+        && !owners.contains_key(id)
+        && let Some(lead) = leads.get(id)
+    {
+        return report("lead_validity", host, resource, lead, id, "");
+    }
     let Some((owner, origin)) = owners
         .get(id)
         .filter(|(owner, _)| !owner.is_empty() && owner != "unrecorded" && owner != id)
@@ -623,6 +655,27 @@ fn owner_hold(owners: &Owners, host: &str, code: &str, resource: String, id: &st
         hold.command_host = origin.into();
     }
     hold
+}
+
+/// Leads deliberately have no parent. Match their immutable validity before reporting
+/// that distinction; an absent or changed record remains unproved ownership.
+fn lead_validity_owners(
+    ledger: &Ledger,
+    validities: &[crate::job_store::OwnedValidity],
+) -> Result<BTreeMap<String, String>> {
+    let leads: BTreeMap<_, _> = crate::lead_store::list(ledger)?
+        .into_iter()
+        .map(|lead| (lead.id.clone(), lead))
+        .collect();
+    Ok(validities
+        .iter()
+        .filter(|saved| saved.owner.is_none())
+        .filter_map(|saved| {
+            let lead = leads.get(&saved.id)?;
+            (lead.validity == saved.validity)
+                .then(|| (saved.id.clone(), format!("ownerless lead {}", lead.name)))
+        })
+        .collect())
 }
 
 /// The host reports existing claims; it never decides whether to release them.
@@ -655,8 +708,10 @@ pub fn local(ledger: &Ledger, host: &str, now: u64, ttl_ms: u64) -> Result<Vec<H
             Err(error) => invalid.push((id.clone(), error.to_string())),
         }
     }
-    let owned =
-        |code: &str, resource: String, id: &str| Ok(owner_hold(&owners, host, code, resource, id));
+    let leads = lead_validity_owners(ledger, &validities)?;
+    let owned = |code: &str, resource: String, id: &str| {
+        Ok(owner_hold(&owners, &leads, host, code, resource, id))
+    };
     for (id, reason) in invalid {
         holds.push(
             owned(
@@ -1354,7 +1409,7 @@ mod tests {
     }
 
     fn fixture() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
 
     /// The bytes of every file under `path`, after this thread closes its cached store

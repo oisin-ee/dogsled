@@ -223,11 +223,7 @@ mod tests {
             PORT,
             None,
             crate::web::guard::Token::new(TOKEN.to_owned()),
-            crate::ledger::Ledger::new(
-                std::env::temp_dir()
-                    .join(format!("dogsled-questions-api-{}", crate::ledger::new_id())),
-            )
-            .clone(),
+            crate::ledger::Ledger::temporary(),
         )
     }
 
@@ -520,8 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_question_waiting_for_an_answer_survives_a_restart() {
-        let dir = std::env::temp_dir().join(format!("dogsled-restart-{}", crate::ledger::new_id()));
-        let web = crate::ledger::Ledger::new(dir.clone());
+        let web = crate::ledger::Ledger::temporary();
         let id = {
             let (_sender, receiver) =
                 tokio::sync::watch::channel(crate::web::PortalState::default());

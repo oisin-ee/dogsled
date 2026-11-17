@@ -1319,6 +1319,14 @@ const BUSY_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
 const BUSY_FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 const BUSY_MAX_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
 
+fn adopt_window() -> std::time::Duration {
+    // Test rigs only. Production always looks for `ADOPT_WINDOW`.
+    std::env::var("DOGSLED_TEST_ADOPT_WINDOW_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(ADOPT_WINDOW, std::time::Duration::from_millis)
+}
+
 fn busy_window() -> std::time::Duration {
     // Test rigs only. Production always waits `BUSY_WINDOW`.
     std::env::var("DOGSLED_TEST_BUSY_WINDOW_MS")
@@ -1327,15 +1335,27 @@ fn busy_window() -> std::time::Duration {
         .map_or(BUSY_WINDOW, std::time::Duration::from_millis)
 }
 
-fn is_busy(error: &Error) -> bool {
+/// How long Herdr waits for a started agent to be ready, in milliseconds. Herdr's default of
+/// 30 seconds is shorter than a Pi start with its extensions on a loaded host.
+pub(crate) const START_TIMEOUT_MS: &str = "120000";
+/// How long a launch looks for its agent after Herdr gave up waiting for it.
+const ADOPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+const ADOPT_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The code of a Herdr error reply.
+fn herdr_code(error: &Error) -> Option<String> {
     let Error::Command { stderr, .. } = error.root() else {
-        return false;
+        return None;
     };
     serde_json::from_str::<Value>(stderr)
-        .ok()
-        .and_then(|v| v.pointer("/error/code")?.as_str().map(str::to_owned))
-        .as_deref()
-        == Some("agent_pane_busy")
+        .ok()?
+        .pointer("/error/code")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn is_busy(error: &Error) -> bool {
+    herdr_code(error).as_deref() == Some("agent_pane_busy")
 }
 
 /// Run `agent start`, repeating it on the same pane while Herdr reports the shell busy. Herdr
@@ -2200,18 +2220,7 @@ fn start_or_reconcile(
         .into_iter()
         .find(|a| a.pane == pane);
     if let Some(existing) = existing {
-        if !progress.attempted
-            || existing.name.as_deref() != Some(name)
-            || existing.agent.as_deref() != Some(kind)
-            || existing.terminal_id.as_deref() != Some(current.as_str())
-        {
-            return Err(Error::Invalid(format!(
-                "launch {}: {pane} has another agent; refusing to take it over",
-                request.id
-            ))
-            .because(Cause::PaneBusy));
-        }
-        return Ok(());
+        return reconcile(ledger, shell, progress, &current, &existing);
     }
     if progress.attempted {
         // An idle shell could mean the task ran and exited, not that it never ran.
@@ -2249,6 +2258,8 @@ fn start_or_reconcile(
         kind.clone(),
         "--pane".into(),
         pane.into(),
+        "--timeout".into(),
+        START_TIMEOUT_MS.into(),
         "--".into(),
     ];
     args.extend(work::agent_args(
@@ -2274,12 +2285,138 @@ fn start_or_reconcile(
             crate::launch_store::put_progress(ledger, file, progress)?;
             return Err(error);
         }
+        if herdr_code(&error).as_deref() == Some("timeout") {
+            let began = std::time::Instant::now();
+            let wait = Adoption {
+                window: adopt_window(),
+                elapsed: &|| began.elapsed(),
+                pause: &std::thread::sleep,
+            };
+            if adopt(ledger, shell, request, pane, &current, &wait)? {
+                return Ok(());
+            }
+        }
         let error = startup_error(shell, pane, error);
         progress.error = Some(error.to_string());
         crate::launch_store::put_progress(ledger, file, progress)?;
         return Err(error);
     }
     Ok(())
+}
+
+/// A replayed launch finds an agent in its pane. It is the launch's own agent only in the
+/// launch's terminal, after the launch attempted its start; Herdr may not have named it yet.
+fn reconcile(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    progress: &Progress,
+    terminal: &str,
+    existing: &crate::probe::Agent,
+) -> Result<()> {
+    let request = &progress.request;
+    let Action::Agent { kind, name, .. } = &request.action else {
+        return Err(Error::Invalid("not an agent launch".into()).because(Cause::InvalidRequest));
+    };
+    let ours = progress.attempted
+        && existing.agent.as_deref() == Some(kind)
+        && existing.terminal_id.as_deref() == Some(terminal);
+    if ours && existing.name.as_deref() == Some(name) {
+        return Ok(());
+    }
+    if ours && unnamed_start(existing, unit_sessions(ledger, request).as_deref()) {
+        return name_agent(shell, &existing.pane, name);
+    }
+    Err(Error::Invalid(format!(
+        "launch {}: {} has another agent; refusing to take it over",
+        request.id, existing.pane
+    ))
+    .because(Cause::PaneBusy))
+}
+
+/// Herdr names an agent only once it reports it ready. When that wait times out, the agent the
+/// launch typed can still come up, unnamed, in the launch's own terminal. A unit launch must
+/// also show its session: Pi writes it inside the launch's fresh `sessions` directory.
+fn unnamed_start(agent: &crate::probe::Agent, sessions: Option<&std::path::Path>) -> bool {
+    agent.name.is_none()
+        && sessions.is_none_or(|sessions| {
+            agent
+                .agent_session
+                .as_deref()
+                .is_some_and(|session| std::path::Path::new(session).starts_with(sessions))
+        })
+}
+
+/// The fresh session directory of a unit launch, which `seed_args` passes to Pi.
+fn unit_sessions(ledger: &Ledger, request: &Launch) -> Option<std::path::PathBuf> {
+    request.unit.as_ref().map(|_| {
+        ledger
+            .child("launches")
+            .dir
+            .join(format!("{}.sessions", request.id))
+    })
+}
+
+/// Give the launch's unnamed agent its name, so that its owner, its board row, and its close
+/// find it as this launch's worker.
+fn name_agent(shell: &dyn Shell, pane: &str, name: &str) -> Result<()> {
+    shell
+        .run_ok(
+            "herdr",
+            &["agent".into(), "rename".into(), pane.into(), name.into()],
+        )
+        .map(drop)
+}
+
+/// The clock and pause of [`adopt`], so that tests can drive its polls.
+struct Adoption<'a> {
+    window: std::time::Duration,
+    elapsed: &'a dyn Fn() -> std::time::Duration,
+    pause: &'a dyn Fn(std::time::Duration),
+}
+
+/// After Herdr timed out waiting for a started agent, look for it for a bounded time and name
+/// it. `false` means it did not come up in the launch's terminal, so the outcome stays unknown.
+fn adopt(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    request: &Launch,
+    pane: &str,
+    terminal: &str,
+    wait: &Adoption<'_>,
+) -> Result<bool> {
+    let Action::Agent { kind, name, .. } = &request.action else {
+        return Ok(false);
+    };
+    let sessions = unit_sessions(ledger, request);
+    let began = (wait.elapsed)();
+    loop {
+        let found = crate::probe::agent_list(shell)?.into_iter().find(|agent| {
+            agent.pane == pane
+                && agent.agent.as_deref() == Some(kind)
+                && agent.terminal_id.as_deref() == Some(terminal)
+        });
+        match found {
+            Some(agent) if agent.name.as_deref() == Some(name) => return Ok(true),
+            Some(agent) if unnamed_start(&agent, sessions.as_deref()) => {
+                name_agent(shell, pane, name)?;
+                return Ok(true);
+            }
+            // Another agent took the terminal's name.
+            Some(agent) if agent.name.is_some() => return Ok(false),
+            // Not detected yet, or its session is not reported yet.
+            _ => (),
+        }
+        let spent = (wait.elapsed)().saturating_sub(began);
+        let left = ledger
+            .budget
+            .with_limit("agent start", wait.window.saturating_sub(spent))
+            .and_then(|left| shell.budget().with_limit("agent start", left))
+            .unwrap_or_default();
+        if left.is_zero() {
+            return Ok(false);
+        }
+        (wait.pause)(ADOPT_PAUSE.min(left));
+    }
 }
 
 pub(crate) fn startup_error(shell: &dyn Shell, pane: &str, error: Error) -> Error {
@@ -2754,7 +2891,7 @@ mod release_retry_tests {
 
     impl Rig {
         fn new() -> Self {
-            let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+            let ledger = Ledger::temporary();
             let shell = Fake::new();
             let policy = crate::config::Policy::default();
             let peer = Host {

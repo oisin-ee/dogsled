@@ -68,7 +68,7 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new() -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let local = host("local", "idle");
         crate::items::record(&ledger, item("local-child", "local", "agent")).unwrap();
         crate::items::record(&ledger, item("peer-child", "peer", "agent")).unwrap();

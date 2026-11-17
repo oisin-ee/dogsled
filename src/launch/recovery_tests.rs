@@ -59,7 +59,7 @@ impl Shell for LockedShell {
 }
 
 fn fixture() -> Ledger {
-    let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+    let ledger = Ledger::temporary();
     crate::launch_store::put_progress_value(&ledger, "own", &json!({
         "request":{"id":"own","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
             "host":"local","cwd":"/checkout","pane":"w2:p2","terminal":"term_shell","owner":"w1:p1"},

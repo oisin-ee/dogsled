@@ -735,6 +735,7 @@ fn view_of(
         cwd: agent["cwd"].as_str().map(str::to_owned),
         repository,
         blocked,
+        launch: None,
     }
 }
 
@@ -1232,10 +1233,7 @@ mod tests {
             PORT,
             socket.map(Arc::new),
             crate::web::guard::Token::new(String::new()),
-            crate::ledger::Ledger::new(
-                std::env::temp_dir().join(format!("dogsled-agents-{}", crate::ledger::new_id())),
-            )
-            .clone(),
+            crate::ledger::Ledger::temporary(),
         )
     }
 
@@ -1259,15 +1257,16 @@ mod tests {
         }
     }
 
-    fn launch(config: &str) -> crate::web::LeadLaunch {
-        let dir = std::env::temp_dir().join(format!("dogsled-lead-{}", crate::ledger::new_id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn launch(state: AppState, config: &str) -> AppState {
+        let dir = &state.web.dir;
+        std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("config.toml"), config).unwrap();
-        crate::web::LeadLaunch {
+        let launch = crate::web::LeadLaunch {
             config_path: dir.join("config.toml"),
             home: dir.display().to_string(),
             shell: Arc::new(crate::shell::Fake::new()),
-        }
+        };
+        state.with_leads(launch)
     }
 
     #[tokio::test]
@@ -1276,7 +1275,7 @@ mod tests {
         // A one-shot server has no lead capability.
         let (status, body) = post_lead(with_socket(&server), r#"{"repo":"r","prompt":"go"}"#).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        let leads = || with_socket(&server).with_leads(launch(""));
+        let leads = || launch(with_socket(&server), "");
         for bad in [
             r#"{"repo":"r"}"#,
             r#"{"repo":"r","prompt":"go","owner":"w1:p1"}"#,
@@ -1296,18 +1295,15 @@ mod tests {
         );
         assert_eq!(body["id"], serde_json::Value::Null);
         // Invalid input is rejected even without a local Herdr socket.
-        let (status, body) = post_lead(
-            state(None).with_leads(launch("")),
-            r#"{"repo":"r","prompt":"go"}"#,
-        )
-        .await;
+        let (status, body) =
+            post_lead(launch(state(None), ""), r#"{"repo":"r","prompt":"go"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         // Both request forms reach placement, rather than failing JSON validation.
         for input in [
             r#"{"repo":"owner/repo","prompt":"go"}"#,
             r#"{"repo":"owner/repo","prompt":"go","model":{"provider":"openai","id":"gpt-5"},"thinking":"high"}"#,
         ] {
-            let (status, body) = post_lead(state(None).with_leads(launch("")), input).await;
+            let (status, body) = post_lead(launch(state(None), ""), input).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         }
         assert!(!server.methods().iter().any(|m| m == "agent.prompt"));
@@ -1355,13 +1351,12 @@ mod tests {
             .unwrap();
         let mut server = ipc::Server::new(&state.web.dir).unwrap();
         server.bind(publisher.subscribe()).unwrap();
-        let directory = state.web.dir.clone();
-        let response = super::test_request(state, request(Method::GET, "/api/models", None)).await;
+        let response =
+            super::test_request(state.clone(), request(Method::GET, "/api/models", None)).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(body_json(response).await, catalogue);
         drop(server);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// Capture native source records before installing a publication in the reader.
@@ -2942,7 +2937,7 @@ mod tests {
 
     #[test]
     fn peer_follow_refuses_one_shot_operations() {
-        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = crate::ledger::Ledger::temporary();
         for operation in [
             PeerOperation::Conversation,
             PeerOperation::Screen,

@@ -1003,9 +1003,7 @@ mod tests {
     /// run side by side.
     fn fresh_state() -> AppState {
         let (_sender, receiver) = tokio::sync::watch::channel(crate::web::PortalState::default());
-        let web =
-            Ledger::new(std::env::temp_dir().join(format!("dogsled-reviews-{}", ledger::new_id())))
-                .clone();
+        let web = Ledger::temporary();
         AppState::new(
             receiver,
             PORT,
@@ -1013,6 +1011,22 @@ mod tests {
             guard::Token::new(TOKEN.to_owned()),
             web,
         )
+    }
+
+    #[test]
+    fn review_fixture_removes_state_after_the_last_owner() {
+        let state = fresh_state();
+        let dir = state.web.dir.clone();
+        crate::store::write(&state.web, |_| Ok(())).unwrap();
+        let retained = state.clone();
+        drop(state);
+        assert!(dir.join("state.db").exists());
+        drop(retained);
+        let removed = !dir.exists();
+        if !removed {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        assert!(removed, "review fixture leaked {}", dir.display());
     }
 
     /// The same guard the server uses.

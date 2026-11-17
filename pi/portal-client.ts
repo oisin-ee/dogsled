@@ -40,7 +40,7 @@ export function openInBrowser(url: string, launch: (command: string, args: strin
 }
 
 /** The dogsled state directory: `DOGSLED_STATE`, else `$XDG_STATE_HOME/dogsled`, else `~/.local/state/dogsled`. */
-function stateDirectory(env: NodeJS.ProcessEnv): string {
+export function stateDirectory(env: NodeJS.ProcessEnv): string {
 	const state = env["DOGSLED_STATE"];
 	if (state) return state;
 	const xdg = env["XDG_STATE_HOME"];
@@ -49,10 +49,10 @@ function stateDirectory(env: NodeJS.ProcessEnv): string {
 }
 
 /** One Server-Sent Event: its name and its data. */
-interface ServerEvent { event: string; data: string }
+export interface ServerEvent { event: string; data: string }
 
 /** Parse a Server-Sent Events stream into events. Comments and unnamed fields are skipped. */
-async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerEvent> {
+export async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ServerEvent> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
@@ -102,6 +102,8 @@ async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<S
 /** The HTTP client for the loopback portal server. Every call carries the bearer token. */
 export class PortalClient {
 	readonly env: NodeJS.ProcessEnv;
+	/** The server named in errors. */
+	protected readonly server: string = "dogsled web";
 	constructor(env: NodeJS.ProcessEnv = process.env) { this.env = env; }
 
 	/** The port this client talks to. */
@@ -141,7 +143,7 @@ export class PortalClient {
 	/** Send a request and return its JSON body; any other status is an error. An empty body is `undefined`. */
 	async json<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
 		const response = await this.request(method, path, { body, signal });
-		if (!response.ok) throw new Error(`dogsled web ${method} ${path} failed: ${response.status} ${(await response.text()).trim()}`);
+		if (!response.ok) throw new Error(`${this.server} ${method} ${path} failed: ${response.status} ${(await response.text()).trim()}`);
 		const text = await response.text();
 		if (!text.trim()) return undefined as T;
 		return JSON.parse(text) as T;
@@ -150,7 +152,7 @@ export class PortalClient {
 	/** Open a Server-Sent Events stream. */
 	async events(path: string, signal: AbortSignal): Promise<AsyncGenerator<ServerEvent>> {
 		const response = await this.request("GET", path, { accept: "text/event-stream", signal });
-		if (!response.ok || !response.body) throw new Error(`dogsled web GET ${path} failed: ${response.status}`);
+		if (!response.ok || !response.body) throw new Error(`${this.server} GET ${path} failed: ${response.status}`);
 		return serverEvents(response.body);
 	}
 }

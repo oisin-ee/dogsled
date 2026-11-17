@@ -16,6 +16,90 @@ fn shell() -> crate::shell::Fake {
     shell
 }
 
+fn lead(id: &str, pane: Option<&str>, validity: crate::jobs::Validity) -> crate::leads::Record {
+    crate::leads::Record {
+        id: id.into(),
+        name: format!("lead-{id}"),
+        repository: crate::checkout::Repository {
+            path: "/home/repo".into(),
+            origin: "https://github.com/oisin-ee/dogsled".into(),
+            relative: "repo".into(),
+            working_root: "/home/repo".into(),
+        },
+        prompt: "go".into(),
+        validity,
+        created_ms: validity.created_ms,
+        phase: crate::leads::Phase::Ready,
+        pane: pane.map(str::to_owned),
+        terminal: Some("term".into()),
+        workspace: None,
+        updated_ms: validity.created_ms,
+        error: None,
+        close_requested_ms: None,
+        closed_ms: None,
+    }
+}
+
+/// A lead is ownerless, so its validity belongs to the lead's own pane. Without that, every
+/// open lead published a permanent gap and the portal reported live updates as paused.
+#[test]
+fn lead_validity_is_owned_by_its_pane_and_publishes_no_gap() {
+    let root = std::env::temp_dir().join(crate::ledger::new_id());
+    let ledger = Ledger::new(root.clone());
+    let shell = shell();
+    let policy = crate::config::Policy::default();
+    let node = crate::node::Node::new(&shell, &ledger, &policy, "/home");
+    let validity = crate::jobs::issue_unowned_validity(&ledger, "lead-request").unwrap();
+    let now = validity.created_ms;
+    let mut collector = collect::Collector::default();
+    let allocating = collector.collect(&node, now);
+    allocating.sample.unwrap();
+    // Without a matching lead record, validity still has no proved owner.
+    assert_eq!(
+        allocating
+            .input
+            .gaps
+            .iter()
+            .map(|gap| gap.domain.as_str())
+            .collect::<Vec<_>>(),
+        ["holds/job-validity/lead-request"]
+    );
+
+    // An exact lead record proves that the absent parent is intentional, even
+    // during allocation. Keep its validity without inventing a pane or releasing it.
+    let mut recorded = lead("lead-request", None, validity);
+    recorded.phase = crate::leads::Phase::Recorded;
+    crate::lead_store::insert(&ledger, &recorded).unwrap();
+    let recorded = collector.collect(&node, now + 1);
+    recorded.sample.unwrap();
+    assert_eq!(recorded.input.gaps, []);
+    let retained = &recorded.input.local["host"]["holds"][0];
+    assert_eq!(retained["code"], "lead_validity");
+    assert_eq!(retained["resource"], "job-validity/lead-request");
+    assert!(retained["owner_pane"].is_null());
+    assert_eq!(
+        crate::jobs::request_validity(&ledger, "lead-request").unwrap(),
+        Some(validity)
+    );
+
+    crate::lead_store::update(&ledger, "lead-request", |saved| {
+        saved.pane = Some("w1:p1".into());
+        saved.phase = crate::leads::Phase::Ready;
+        Ok(())
+    })
+    .unwrap();
+    let ready = collector.collect(&node, now + 2);
+    ready.sample.unwrap();
+    assert_eq!(ready.input.gaps, []);
+    let holds: Vec<crate::holds::Hold> =
+        serde_json::from_value(ready.input.local["host"]["holds"].clone()).unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].resource, "job-validity/lead-request");
+    assert_eq!(holds[0].code, "validity");
+    assert_eq!(holds[0].owner_pane.as_deref(), Some("w1:p1"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn ownerless_ingress_hold_is_counted_with_a_gap_while_host_facts_stay_fresh() {
     let root = std::env::temp_dir().join(crate::ledger::new_id());

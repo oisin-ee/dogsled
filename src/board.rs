@@ -337,6 +337,41 @@ fn dock(
     })
 }
 
+/// A dock serves the agents of its tab. When none is left, the dock closes its own pane, so
+/// Herdr closes the emptied tab, and the workspace with its last tab. Returns whether it
+/// closed. A pane list that does not show the dock proves nothing, so it closes nothing.
+pub fn close_lone_dock(ledger: &Ledger, shell: &dyn Shell, dock: &str) -> Result<bool> {
+    let out = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
+    let value: serde_json::Value = serde_json::from_str(&out.stdout)?;
+    let panes = value["result"]["panes"]
+        .as_array()
+        .ok_or_else(|| Error::Invalid("invalid Herdr pane list".into()))?;
+    let Some(tab) = panes
+        .iter()
+        .find(|pane| pane["pane_id"] == dock)
+        .and_then(|pane| pane["tab_id"].as_str())
+    else {
+        return Ok(false);
+    };
+    if panes
+        .iter()
+        .any(|pane| pane["tab_id"] == tab && pane["pane_id"] != dock)
+    {
+        return Ok(false);
+    }
+    crate::store::write(ledger, |tx| {
+        if state::dock(tx, tab)?.is_some_and(|saved| saved.pane_id == dock) {
+            state::remove_dock(tx, tab)?;
+        }
+        Ok(())
+    })?;
+    shell.run_ok(
+        "herdr",
+        &["plugin".into(), "pane".into(), "close".into(), dock.into()],
+    )?;
+    Ok(true)
+}
+
 pub fn command(
     shell: &dyn Shell,
     ledger: &Ledger,
@@ -1316,7 +1351,7 @@ mod tests {
 
     #[test]
     fn board_todo_intake_roundtrips_sections_and_drops_closed_or_invalid_panes() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let host = host("local", "local", vec![agent("w1:p1", "pi", "working")]);
         let snapshot = crate::node::Snapshot {
             sampled_ms: NOW,
@@ -1414,7 +1449,7 @@ mod tests {
         Dock {
             shell,
             socket,
-            ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+            ledger: Ledger::temporary(),
         }
     }
 
@@ -1447,6 +1482,62 @@ mod tests {
         fn finish(self) {
             std::fs::remove_dir_all(&self.ledger.dir).unwrap();
         }
+    }
+
+    /// Closing a tab's last agent leaves its dock alone. The dock then closes itself, so
+    /// Herdr closes the tab too. A dock beside any other pane, or one the list does not
+    /// show, stays.
+    #[test]
+    fn a_dock_left_alone_in_its_tab_closes_itself_and_its_record() {
+        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let dock = state::Dock {
+            pane_id: "w1:p2".into(),
+            terminal_id: "term-board".into(),
+            tab_id: Some("w1:t1".into()),
+        };
+        crate::store::write(&ledger, |tx| state::put_dock(tx, "w1:t1", &dock)).unwrap();
+        let list = |panes: serde_json::Value| {
+            let shell = crate::shell::Fake::new();
+            shell.on(
+                "herdr pane list",
+                &serde_json::json!({"result":{"panes":panes}}).to_string(),
+            );
+            shell.on("herdr plugin pane close w1:p2", "{}");
+            shell
+        };
+        let board = serde_json::json!({"pane_id":"w1:p2","tab_id":"w1:t1"});
+        let other_tab = serde_json::json!({"pane_id":"w1:p3","tab_id":"w1:t2"});
+        let agent = serde_json::json!({"pane_id":"w1:p1","tab_id":"w1:t1"});
+        for panes in [
+            serde_json::json!([board.clone(), agent]),
+            serde_json::json!([other_tab.clone()]),
+        ] {
+            let shell = list(panes);
+            assert!(!close_lone_dock(&ledger, &shell, "w1:p2").unwrap());
+            assert!(
+                !shell
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|call| call.contains("close")),
+                "a dock with company, or one not listed, stays"
+            );
+        }
+        let shell = list(serde_json::json!([board, other_tab]));
+        assert!(close_lone_dock(&ledger, &shell, "w1:p2").unwrap());
+        assert!(
+            shell
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"herdr plugin pane close w1:p2".to_owned())
+        );
+        assert_eq!(
+            crate::store::read(&ledger, |tx| state::dock(tx, "w1:t1")).unwrap(),
+            None
+        );
+        std::fs::remove_dir_all(ledger.dir).unwrap();
     }
 
     #[test]
@@ -1703,7 +1794,7 @@ mod tests {
                 panic!("a child pane must not reach Herdr: {args:?}")
             }
         }
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         crate::launch_store::put_progress_value(&ledger, "r-1-1-0",
                 &serde_json::json!({
                     "request":{"id":"r-1-1-0","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
@@ -1744,7 +1835,7 @@ mod tests {
                 })
             }
         }
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         crate::launch_store::put_progress_value(&ledger, "child", &serde_json::json!({
             "request":{"id":"child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
                 "host":"local","cwd":"/checkout","owner":"w1:p1"},
@@ -1990,7 +2081,7 @@ mod tests {
 
     #[test]
     fn portal_metadata_maps_owner_title_and_latest_inbox_state() -> Result<()> {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let status = status(
             vec![host("local", "local", vec![agent("worker", "pi", "idle")])],
             vec![item("child", "local", "worker")],

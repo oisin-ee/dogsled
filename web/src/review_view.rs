@@ -94,11 +94,12 @@ pub fn ReviewView(
     #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
 ) -> Element {
-    rsx! {
+    // Another review mounts a fresh loader, without the previous review or its error.
+    crate::keyed(rsx! {
         ReviewLoader {
             key: "{review_id}", id: review_id, revision, embedded, lead, role, repository, on_close,
         }
-    }
+    })
 }
 
 #[component]

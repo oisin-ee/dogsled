@@ -195,6 +195,7 @@ mod tests {
             cwd: None,
             repository: None,
             blocked: None,
+            launch: None,
         }
     }
 
@@ -317,7 +318,7 @@ mod tests {
     #[tokio::test]
     async fn stream_publishes_inbox_changes_and_stops_on_shutdown() -> Result<()> {
         use futures_util::StreamExt as _;
-        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = crate::ledger::Ledger::temporary();
         let mut board = board()?;
         board.repos.clear();
         let mut publisher = crate::observation::Publisher::new()?;
@@ -422,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_owner_publication_removes_requests_from_get_and_open_stream() -> Result<()> {
-        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = crate::ledger::Ledger::temporary();
         let review = review();
         crate::store::write(&ledger, |tx| {
             crate::web_store::reviews::put(
@@ -524,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbox_counts_every_kind_and_excludes_answered_and_decided() -> Result<()> {
-        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = crate::ledger::Ledger::temporary();
         let mut publisher = crate::observation::Publisher::new()?;
         let (sender, receiver) = tokio::sync::watch::channel(super::super::PortalState::default());
         let state = AppState::new(
@@ -566,6 +567,7 @@ mod tests {
                 question: "Allow?".into(),
                 options: vec![],
             }),
+            launch: None,
         };
         let view = view(&board()?, &[review.clone()], &pending, &[blocked_agent], 20);
         assert_eq!(view.count, 4);

@@ -15,6 +15,7 @@ import { registerPlanMode } from "./plan-mode.ts";
 import { PortalClient } from "./portal-client.ts";
 import { registerActivity } from "./activity.ts";
 import { registerSettings } from "./settings.ts";
+import { ServeClient } from "./serve-client.ts";
 import { createTodo } from "./todo/src/index.ts";
 
 const REFRESH_MS = 10_000;
@@ -59,10 +60,12 @@ export default function dogsled(pi: ExtensionAPI) {
 
 	const inbox = new InboxReader(pi, exec);
 	const units = new UnitBridge(pi, binary, todo.tasks);
+	// The host's serve owns live activity and model settings on every host.
+	const serve = new ServeClient();
+	registerActivity(pi, serve, owner);
+	registerSettings(pi, serve, owner);
 	// The portal owns the interactive parts of Pi: the interview form and the plan review.
 	const portal = new PortalClient();
-	registerActivity(pi, portal, owner);
-	registerSettings(pi, portal, owner);
 	const planMode = registerPlanMode(pi, todo.approve, portal);
 	const interviews = registerInterview(pi, portal);
 	// One handler owns the tool call: the unit bridge first, then the plan-mode gate.

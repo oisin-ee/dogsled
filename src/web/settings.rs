@@ -1,29 +1,18 @@
-//! Settings routes forward to the host's serve authority, including Pi's request stream.
+//! Portal settings routes forward to the host's serve authority. Pi's routes are in `producer`.
 use super::{
     AppState,
     agents::{PeerOperation, peer_response},
 };
-use crate::observation::{
-    ipc,
-    settings::{self, Applied, Command, Failure, Publication},
-};
-use axum::extract::{Path, Query, State};
+use crate::observation::settings::{self, Command, Failure};
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::get;
 use axum::{Json, Router};
-use portal_types::agents::ProducerEvidence;
 use portal_types::models::SettingsChange;
-use tokio_stream::StreamExt as _;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/agents/{pane}/settings", put(publish))
-        .route("/api/agents/{pane}/settings/requests", get(requests))
-        .route(
-            "/api/agents/{pane}/settings/requests/{id}/result",
-            post(result),
-        )
         .route(
             "/api/agents/{host}/{pane}/settings",
             get(current).post(change),
@@ -44,15 +33,7 @@ pub(super) fn failure(error: Failure) -> Response {
 }
 
 pub(super) async fn local(state: AppState, pane: String, command: Command) -> Response {
-    match tokio::task::spawn_blocking(move || {
-        ipc::Client::at(&state.web.dir).settings(&pane, command)
-    })
-    .await
-    {
-        Ok(Ok(settings)) => ([(header::CACHE_CONTROL, "no-store")], Json(settings)).into_response(),
-        Ok(Err(error)) => failure(error),
-        Err(error) => failure(Failure::new("settings_unavailable", &error.to_string())),
-    }
+    super::producer::settings_command(state.web.dir.clone(), pane, command).await
 }
 
 async fn current(
@@ -83,89 +64,14 @@ async fn change(
     local(state, pane, Command::Change(change)).await
 }
 
-async fn publish(
-    State(state): State<AppState>,
-    Path(pane): Path<String>,
-    body: Result<Json<Publication>, axum::extract::rejection::JsonRejection>,
-) -> Response {
-    match body {
-        Ok(Json(body)) => local(state, pane, Command::Publish(body)).await,
-        Err(error) => failure(Failure::new("invalid_settings", &error.body_text())),
-    }
-}
-async fn result(
-    State(state): State<AppState>,
-    Path((pane, id)): Path<(String, String)>,
-    body: Result<Json<Applied>, axum::extract::rejection::JsonRejection>,
-) -> Response {
-    match body {
-        Ok(Json(result)) => local(state, pane, Command::Result { id, result }).await,
-        Err(error) => failure(Failure::new("invalid_settings", &error.body_text())),
-    }
-}
-
-async fn requests(
-    State(state): State<AppState>,
-    Path(pane): Path<String>,
-    Query(evidence): Query<ProducerEvidence>,
-) -> Response {
-    let client = ipc::Client::at(&state.web.dir);
-    let mut subscription =
-        match tokio::task::spawn_blocking(move || client.settings_subscribe(&pane, evidence)).await
-        {
-            Ok(Ok(subscription)) => subscription,
-            Ok(Err(error)) => return failure(error),
-            Err(error) => return failure(Failure::new("settings_unavailable", &error.to_string())),
-        };
-    let (sender, receiver) = tokio::sync::mpsc::channel(64);
-    let stop = state.stop.clone();
-    tokio::task::spawn_blocking(move || {
-        while !stop.is_cancelled() && !sender.is_closed() {
-            match subscription.next() {
-                Ok(Some(request)) => {
-                    if sender.blocking_send(Some(request)).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => (),
-                Err(_) => {
-                    let _ = sender.blocking_send(None);
-                    break;
-                }
-            }
-        }
-    });
-    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).map(|request| {
-        let event = match request {
-            Some(request) => axum::response::sse::Event::default()
-                .event("settings")
-                .json_data(request),
-            None => axum::response::sse::Event::default()
-                .event("error")
-                .json_data(Failure::unavailable()),
-        };
-        Ok::<_, std::convert::Infallible>(event.unwrap_or_else(|_| {
-            axum::response::sse::Event::default()
-                .event("error")
-                .data("invalid settings request")
-        }))
-    });
-    let mut response = axum::response::sse::Sse::new(state.until_shutdown(stream))
-        .keep_alive(axum::response::sse::KeepAlive::new())
-        .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-store"),
-    );
-    response
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observation::settings::Applied;
     use crate::observation::settings::tests::{Fixture, selection};
     use axum::body::Body;
     use axum::http::{Method, Request};
+    use tokio_stream::StreamExt as _;
     use tower::ServiceExt as _;
 
     fn state(fixture: &Fixture) -> AppState {

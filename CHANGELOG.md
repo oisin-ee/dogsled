@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.37.3](https://github.com/oisin-ee/dogsled/compare/v0.37.2...v0.37.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* **ci:** run the full suite only before a release, and land changes without the heavy gate ([e1e58b4](https://github.com/oisin-ee/dogsled/commit/e1e58b4be25ff8f9fbfa4669f4976f9101d788a4))
+* **ci:** run the full suite only before a release, and land changes without the heavy gate ([1c8dcd9](https://github.com/oisin-ee/dogsled/commit/1c8dcd951331eb948d0cd00c6bcd198ddc21e05f))
+* **portal:** make the model picker a dropdown beside the composer ([e687acf](https://github.com/oisin-ee/dogsled/commit/e687acfe5ea1132f0eddf663f96afc2af1fd2b76))
+* **serve:** answer Pi's activity and settings on every host ([8c2a54e](https://github.com/oisin-ee/dogsled/commit/8c2a54ee61aecb717d097de2e0106f363b75f9e0))
+
+## [0.37.2](https://github.com/oisin-ee/dogsled/compare/v0.37.1...v0.37.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **portal:** live fleet view, worker lifecycle, and readable leads ([#345](https://github.com/oisin-ee/dogsled/issues/345)) ([12fdd32](https://github.com/oisin-ee/dogsled/commit/12fdd32c1d6f0cd1846df2215e0d2b889ba4b543))
+
 ## [0.37.1](https://github.com/oisin-ee/dogsled/compare/v0.37.0...v0.37.1) (2026-11-16)
 
 

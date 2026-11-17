@@ -19,7 +19,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         Self {
-            ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+            ledger: Ledger::temporary(),
             shell: Fake::new(),
             policy: Policy::default(),
             host: Host {

@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::hosts::{ActionFleet, Fleet, Host};
-use crate::ledger::{Ledger, new_id};
+use crate::ledger::Ledger;
 use crate::shell::Fake;
 use serde_json::json;
 
@@ -29,7 +29,7 @@ fn lock(ledger: &Ledger, name: &str) -> std::fs::File {
 #[test]
 fn recorded_local_pane_send_revalidates_locally_without_any_ipc_attempt() {
     use std::os::unix::net::UnixListener;
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
     let mut sampled = snapshot();
@@ -103,7 +103,7 @@ fn recorded_local_pane_send_revalidates_locally_without_any_ipc_attempt() {
 
 #[test]
 fn cold_fleet_resolves_remote_close_host_from_the_supplied_publication() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
     crate::host_store::put_snapshot(&ledger, &snapshot()).unwrap();
@@ -152,7 +152,7 @@ fn cold_fleet_resolves_remote_close_host_from_the_supplied_publication() {
 #[test]
 fn producer_fleet_refuses_command_resolution_without_any_ipc_attempt() {
     use std::os::unix::net::UnixListener;
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     std::fs::create_dir_all(&ledger.dir).unwrap();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
@@ -184,7 +184,7 @@ fn producer_fleet_refuses_command_resolution_without_any_ipc_attempt() {
 fn remote_release_lane_and_removed_host_never_connect_to_their_own_publisher() {
     use std::os::unix::net::UnixListener;
     for removed in [false, true] {
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let shell = Fake::new();
         let policy = crate::config::Policy::default();
         crate::host_store::put_snapshot(&ledger, &snapshot()).unwrap();
@@ -251,7 +251,7 @@ fn remote_release_lane_and_removed_host_never_connect_to_their_own_publisher() {
 #[test]
 fn origin_validity_commit_wakes_an_observer_with_owned_holds_before_admission() {
     use std::os::unix::net::UnixDatagram;
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
     crate::host_store::put_snapshot(&ledger, &snapshot()).unwrap();
@@ -301,7 +301,7 @@ fn origin_validity_commit_wakes_an_observer_with_owned_holds_before_admission() 
 
 #[test]
 fn lanes_use_the_in_process_publication_without_snapshot_reads_or_ipc() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
     crate::host_store::put_snapshot(&ledger, &snapshot()).unwrap();
@@ -333,7 +333,7 @@ fn lanes_use_the_in_process_publication_without_snapshot_reads_or_ipc() {
 
 #[test]
 fn placement_selects_published_capabilities_and_revalidates_capacity_at_reserve() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
     crate::host_store::put_snapshot(&ledger, &snapshot()).unwrap();
@@ -384,7 +384,7 @@ fn placement_selects_published_capabilities_and_revalidates_capacity_at_reserve(
 
 #[test]
 fn publication_selection_needs_no_store_shell_or_observation_locks() {
-    let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+    let ledger = Ledger::temporary();
     let shell = Fake::new();
     let policy = crate::config::Policy::default();
     crate::host_store::put_snapshot(&ledger, &snapshot()).unwrap();

@@ -1,3 +1,4 @@
+import { createServer as createHttpServer } from "node:http";
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { EventEmitter } from "node:events";
@@ -8,7 +9,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import dogsled, { VERSION, versionMismatch } from "./index.ts";
 
 // Todo publication uses stdin through the real process API, not ExtensionAPI.exec. The board
@@ -179,19 +180,14 @@ function rig() {
 		} };
 }
 
-test("the extension publishes real activity through PortalClient with bearer auth and native evidence", async t => {
+test("the extension publishes real activity to its host's serve over the producer socket, with native evidence", async t => {
 	withPane(t);
-	const state = mkdtempSync(join(tmpdir(), "dogsled-activity-token-"));
+	const state = mkdtempSync(join(tmpdir(), "dogsled-activity-"));
 	const sessionFile = join(state, "session.jsonl");
 	writeFileSync(sessionFile, '{"type":"session","id":"session"}\n');
-	mkdirSync(join(state, "web"));
-	writeFileSync(join(state, "web", "token"), "fixture-token\n");
+	// No portal runs on this host: there is no token, and nothing listens on the portal port.
 	const previous = process.env["DOGSLED_STATE"];
 	process.env["DOGSLED_STATE"] = state;
-	t.after(() => {
-		if (previous === undefined) delete process.env["DOGSLED_STATE"]; else process.env["DOGSLED_STATE"] = previous;
-		rmSync(state, { recursive: true, force: true });
-	});
 	let first!: () => void;
 	let thinking!: () => void;
 	let tool!: () => void;
@@ -201,21 +197,38 @@ test("the extension publishes real activity through PortalClient with bearer aut
 	const toolPublication = new Promise<void>(resolve => { tool = resolve; });
 	const closure = new Promise<void>(resolve => { closed = resolve; });
 	const publications: any[] = [];
-	t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-		assert.match(String(url), /\/api\/agents\/local\/w1%3Ap1\/activity(?:\/producer)?$/);
-		assert.equal((init.headers as Record<string, string>)["authorization"], "Bearer fixture-token");
-		if (init.method === "GET") return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", producer: { generation: 0 } });
-		const body = JSON.parse(String(init.body));
-		if (init.method === "POST") assert.deepEqual(body.evidence, { session_file: sessionFile, session_id: "session" });
-		else {
-			publications.push(body.payload);
-			if (body.payload.state?.phase === "idle") first();
-			if (body.payload.state?.phase === "thinking") thinking();
-			if (body.payload.state?.phase === "tool_running") tool();
-			if (body.payload.kind === "closed") closed();
-		}
-		return Response.json({ version: 1, pane: "w1:p1", epoch: "serve", generation: 1,
-			producer_id: body.producer_id, session: "native-key", sequence: body.sequence ?? 0, heartbeat_ms: 5000, ttl_ms: 15000 });
+	t.mock.method(globalThis, "fetch", async () => { throw new Error("activity must not use the portal"); });
+	const serve = createHttpServer((request, response) => {
+		const chunks: Buffer[] = [];
+		request.on("data", (chunk: Buffer) => chunks.push(chunk));
+		request.on("end", () => {
+			const reply = (value: unknown) => { response.setHeader("content-type", "application/json"); response.end(JSON.stringify(value)); };
+			try {
+				assert.match(String(request.url), /^\/api\/agents\/local\/w1%3Ap1\/activity(?:\/producer)?$/);
+				assert.equal(request.headers["authorization"], undefined);
+				if (request.method === "GET") { reply({ version: 1, pane: "w1:p1", epoch: "serve", producer: { generation: 0 } }); return; }
+				const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+				if (request.method === "POST") assert.deepEqual(body.evidence, { session_file: sessionFile, session_id: "session" });
+				else {
+					publications.push(body.payload);
+					if (body.payload.state?.phase === "idle") first();
+					if (body.payload.state?.phase === "thinking") thinking();
+					if (body.payload.state?.phase === "tool_running") tool();
+					if (body.payload.kind === "closed") closed();
+				}
+				reply({ version: 1, pane: "w1:p1", epoch: "serve", generation: 1,
+					producer_id: body.producer_id, session: "native-key", sequence: body.sequence ?? 0, heartbeat_ms: 5000, ttl_ms: 15000 });
+			} catch (error) {
+				response.statusCode = 500;
+				response.end(String(error));
+			}
+		});
+	});
+	await new Promise<void>(resolve => serve.listen(join(state, "producer.sock"), resolve));
+	t.after(async () => {
+		await new Promise<void>(resolve => { serve.closeAllConnections(); serve.close(() => resolve()); });
+		if (previous === undefined) delete process.env["DOGSLED_STATE"]; else process.env["DOGSLED_STATE"] = previous;
+		rmSync(state, { recursive: true, force: true });
 	});
 	const r = rig();
 	t.after(() => r.invoke("session_shutdown"));

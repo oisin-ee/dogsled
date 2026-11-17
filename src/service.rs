@@ -165,6 +165,10 @@ fn actions(
     release_retries: &crate::launch::ReleaseRetries,
 ) -> Result<()> {
     let shell = System::default();
+    if lane == Lane::Retention {
+        // Orphan cleanup must still run when the publication or persistent store fails.
+        crate::temporary::sweep(&crate::temporary::root())?;
+    }
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }

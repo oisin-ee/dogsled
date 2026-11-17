@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod files;
 pub mod inbox;
+pub mod metrics;
 pub mod models;
 pub mod questions;
 pub mod reviews;

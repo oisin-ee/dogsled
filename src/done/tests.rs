@@ -694,7 +694,7 @@ fn inbox_acceptance_does_not_remove_turn_signals() {
 }
 
 fn ledger() -> Ledger {
-    Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+    Ledger::temporary()
 }
 
 #[test]

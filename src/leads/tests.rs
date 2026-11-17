@@ -7,7 +7,49 @@ use crate::shell::Fake;
 use serde_json::json;
 
 fn ledger() -> Ledger {
-    Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+    Ledger::temporary()
+}
+
+#[test]
+fn ownerless_lead_validity_is_reported_without_a_missing_parent_gap() {
+    for phase in [Phase::Recorded, Phase::Ready] {
+        let ledger = ledger();
+        let mut lead = record("ownerless");
+        lead.phase = phase;
+        lead.validity = crate::jobs::issue_unowned_validity(&ledger, &lead.id).unwrap();
+        crate::lead_store::insert(&ledger, &lead).unwrap();
+        let holds = crate::holds::local(&ledger, "local", crate::ledger::now_ms(), 90_000).unwrap();
+        let held = holds
+            .iter()
+            .find(|hold| hold.resource == "job-validity/ownerless")
+            .unwrap();
+        let saved = crate::jobs::request_validity(&ledger, &lead.id).unwrap();
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
+        assert_eq!(held.code, "lead_validity", "{held:?}");
+        assert_eq!(held.owner, "ownerless lead lead-ownerless");
+        assert!(held.owner_pane.is_none());
+        assert_eq!(
+            saved,
+            Some(lead.validity),
+            "inspection cannot release validity"
+        );
+    }
+}
+
+#[test]
+fn mismatched_lead_validity_still_reports_missing_provenance() {
+    let ledger = ledger();
+    let mut lead = record("mismatched");
+    lead.validity = crate::jobs::issue_unowned_validity(&ledger, &lead.id).unwrap();
+    lead.validity.created_ms += 1;
+    crate::lead_store::insert(&ledger, &lead).unwrap();
+    let holds = crate::holds::local(&ledger, "local", crate::ledger::now_ms(), 90_000).unwrap();
+    std::fs::remove_dir_all(&ledger.dir).unwrap();
+    assert!(
+        holds
+            .iter()
+            .any(|hold| hold.resource == "job-validity/mismatched" && hold.code == "unreadable")
+    );
 }
 
 fn record(id: &str) -> Record {
@@ -102,13 +144,70 @@ fn lead_launch_passes_model_settings_to_native_pi() {
         saved.repository.path.clone_from(&path);
         saved.validity = Validity::new(crate::ledger::now_ms());
         lead_store::insert(&ledger, &saved).unwrap();
-        let command = format!("herdr agent start lead-{id} --kind pi --pane w1:p1{suffix}");
+        let command =
+            format!("herdr agent start lead-{id} --kind pi --pane w1:p1 --timeout 120000{suffix}");
         shell.on(&command, r#"{"result":{}}"#);
         launch(&context, &mut saved, selected, thinking).unwrap();
         assert_eq!(saved.phase, Phase::Ready);
         assert!(calls(&shell).contains(&command));
     }
     assert_eq!(server.methods(), vec!["agent.prompt"; 4]);
+    std::fs::remove_dir_all(ledger.dir).unwrap();
+}
+
+#[test]
+fn lead_names_are_readable_valid_and_unique() {
+    let free = |_: &str| false;
+    let name = |repo, prompt| readable_name(repo, prompt, &free).unwrap();
+    assert_eq!(
+        name("oisin-ee/zoomies", "Please fix the login redirect loop"),
+        "zoomies-fix-login-redirect"
+    );
+    assert_eq!(name("owner/My.Repo", "  \n"), "my-repo");
+    assert_eq!(name("owner/u-tools", "go"), "lead-u-tools-go");
+    assert_eq!(name("owner/---", "Ship it"), "lead-ship");
+    // Long words stop the name before Herdr's limit, with room left for a suffix.
+    let long = name(
+        "owner/a-very-long-repository-name-indeed",
+        "implementation details",
+    );
+    assert!(long.len() <= 29 && valid_name(&long), "{long}");
+    assert_eq!(
+        name(
+            "owner/dogsled",
+            "Investigate supercalifragilisticexpialidocious"
+        ),
+        "dogsled-investigate"
+    );
+    // A taken name gets the next free suffix.
+    let taken = |name: &str| matches!(name, "zoomies-fix" | "zoomies-fix-2");
+    assert_eq!(
+        readable_name("owner/zoomies", "fix", &taken).unwrap(),
+        "zoomies-fix-3"
+    );
+    assert!(readable_name("owner/zoomies", "fix", &|_| true).is_err());
+    assert!(!valid_name(""));
+    assert!(!valid_name("Upper"));
+    assert!(!valid_name(&"a".repeat(33)));
+}
+
+#[test]
+fn a_lead_is_named_by_its_name_its_pane_or_its_stable_id_alias() {
+    let ledger = ledger();
+    let mut saved = record("r-1");
+    saved.name = "zoomies-fix-login".into();
+    saved.pane = Some("w1:p1".into());
+    lead_store::insert(&ledger, &saved).unwrap();
+    for target in ["zoomies-fix-login", "w1:p1", "lead-r-1"] {
+        let found = resolve_local(&ledger, target).unwrap();
+        assert_eq!(found.map(|lead| lead.id), Some("r-1".into()), "{target}");
+    }
+    for target in ["r-1", "lead-r-2", "zoomies"] {
+        assert!(
+            resolve_local(&ledger, target).unwrap().is_none(),
+            "{target}"
+        );
+    }
     std::fs::remove_dir_all(ledger.dir).unwrap();
 }
 

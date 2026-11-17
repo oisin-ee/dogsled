@@ -235,170 +235,245 @@ impl System {
         timeout: std::time::Duration,
         limit: usize,
     ) -> Result<BytesOutput> {
-        use std::io::Write as _;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
         use std::os::unix::process::CommandExt as _;
         let operation = crate::diagnostic::shell_operation(program).to_owned();
         let timeout = self.budget.with_limit(&operation, timeout)?;
         if timeout.is_zero() {
             return Err(Error::Deadline(operation));
         }
-        let mut child = command(program)
+        let end = std::time::Instant::now() + timeout;
+        let end = self
+            .budget
+            .deadline
+            .map_or(end, |deadline| deadline.min(end));
+        // Only the parent endpoints are nonblocking. Child programs retain ordinary
+        // blocking stdio, while escaped descendants cannot hold our capture open.
+        let (stdout, child_stdout) = UnixStream::pair()?;
+        let (stderr, child_stderr) = UnixStream::pair()?;
+        let (stdin, child_stdin) = if input.is_some() {
+            let (parent, child) = UnixStream::pair()?;
+            parent.set_nonblocking(true)?;
+            (Some(parent), Stdio::from(OwnedFd::from(child)))
+        } else {
+            (None, Stdio::null())
+        };
+        stdout.set_nonblocking(true)?;
+        stderr.set_nonblocking(true)?;
+        let child = command(program)
             .args(args)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(child_stdin)
+            .stdout(Stdio::from(OwnedFd::from(child_stdout)))
+            .stderr(Stdio::from(OwnedFd::from(child_stderr)))
             .process_group(0)
             .spawn()?;
-        let writer = input.map(|input| {
-            let input = input.to_vec();
-            let stdin = child.stdin.take();
-            std::thread::spawn(move || -> std::io::Result<()> {
-                if let Some(mut stdin) = stdin {
-                    stdin.write_all(&input)?;
-                }
-                Ok(())
-            })
-        });
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let child = std::sync::Arc::new(CommandChild::new(child));
-        let (send, recv) = std::sync::mpsc::channel();
-        let capture_operation = operation.clone();
-        let capture_child = std::sync::Arc::clone(&child);
-        let worker = std::thread::spawn(move || {
-            let result = capture(
-                &capture_child,
-                stdout,
-                stderr,
-                writer,
-                limit,
-                capture_operation,
-            );
-            let _ = send.send(result);
-        });
-        // A cleanup failure must return without joining a possibly live worker.
-        let result = receive_capture(&child, operation, timeout, &recv)?;
-        worker
-            .join()
-            .map_err(|_| Error::Invalid("command worker failed".into()))?;
-        result
+        let mut child = CommandChild::new(child);
+        let result = capture(
+            &mut child,
+            [Some(stdout), Some(stderr), stdin],
+            input.unwrap_or_default(),
+            limit,
+            &operation,
+            end,
+        );
+        finish_capture(&mut child, result)
     }
 }
 
-fn receive_capture(
-    child: &CommandChild,
-    operation: String,
-    timeout: std::time::Duration,
-    recv: &std::sync::mpsc::Receiver<Result<BytesOutput>>,
-) -> Result<Result<BytesOutput>> {
-    Ok(match recv.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            let deadline = Error::Deadline(operation);
-            if let Err(error) = kill_child_group(child) {
-                // Keep cleanup failures distinct from an ordinary waiting deadline.
-                return Err(Error::Invalid(format!("{deadline}; {error}")));
-            }
-            Err(deadline)
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err(Error::Invalid("command worker disconnected".into()))
-        }
-    })
+fn finish_capture(child: &mut CommandChild, result: Result<BytesOutput>) -> Result<BytesOutput> {
+    if let Err(error) = &result
+        && let Err(cleanup) = kill_child_group(child)
+    {
+        // Keep cleanup failures distinct from an ordinary waiting deadline.
+        return Err(Error::Invalid(format!("{error}; {cleanup}")));
+    }
+    result
 }
 
-/// Drain stderr concurrently while reading at most one byte beyond the stdout bound.
+/// Multiplex all three streams and child exit against the same absolute deadline.
 fn capture(
-    child: &CommandChild,
-    stdout: Option<std::process::ChildStdout>,
-    stderr: Option<std::process::ChildStderr>,
-    writer: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    child: &mut CommandChild,
+    mut streams: [Option<std::os::unix::net::UnixStream>; 3],
+    mut input: &[u8],
     limit: usize,
-    operation: String,
+    operation: &str,
+    end: std::time::Instant,
 ) -> Result<BytesOutput> {
-    use std::io::Read as _;
-    let errors = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut stderr) = stderr {
-            stderr.read_to_end(&mut bytes)?;
+    use nix::poll::{PollFd, PollFlags, poll};
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::AsFd as _;
+
+    let mut output = [Vec::new(), Vec::new()];
+    let mut status = None;
+    loop {
+        let remaining = end.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::Deadline(operation.into()));
         }
-        Ok::<_, std::io::Error>(bytes)
-    });
-    let mut bytes = Vec::new();
-    let read = stdout.map_or(Ok(0), |stdout| {
-        stdout
-            .take(u64::try_from(limit.saturating_add(1)).unwrap_or(u64::MAX))
-            .read_to_end(&mut bytes)
-    });
-    let exceeded = bytes.len() > limit;
-    if exceeded || read.is_err() {
-        kill_child_group(child)?;
+        if input.is_empty() {
+            streams[2] = None;
+        }
+        // Retain the leader PID until all I/O is done, so a late deadline cannot
+        // signal a recycled process-group ID while an escaped descendant writes.
+        if status.is_none() && streams.iter().all(Option::is_none) {
+            status = child.try_wait()?;
+        }
+        if let Some(status) = status
+            && streams.iter().all(Option::is_none)
+        {
+            let [stdout, stderr] = output;
+            return Ok(BytesOutput {
+                status: status.code().unwrap_or(-1),
+                stdout,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            });
+        }
+        let mut fds = streams
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stream)| {
+                stream.as_ref().map(|stream| {
+                    PollFd::new(
+                        stream.as_fd(),
+                        if index == 2 {
+                            PollFlags::POLLOUT
+                        } else {
+                            PollFlags::POLLIN
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        // Child exit has no stream event when it closes stdio before exiting.
+        let millis = u16::try_from(remaining.as_millis().min(10)).unwrap_or(10);
+        match poll(&mut fds, millis) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+        for (index, stream) in streams.iter_mut().enumerate() {
+            let Some(pipe) = stream else { continue };
+            let mut buffer = [0; 8192];
+            let result = if index == 2 {
+                pipe.write(input)
+            } else {
+                let length = if index == 0 {
+                    buffer
+                        .len()
+                        .min(limit.saturating_sub(output[0].len()).saturating_add(1))
+                } else {
+                    buffer.len()
+                };
+                pipe.read(&mut buffer[..length])
+            };
+            match result {
+                Ok(0) if index == 2 => {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+                }
+                Ok(0) => *stream = None,
+                Ok(count) if index == 2 => input = &input[count..],
+                Ok(count) => {
+                    output[index].extend_from_slice(&buffer[..count]);
+                    if output[0].len() > limit {
+                        return Err(Error::OutputLimit {
+                            operation: operation.into(),
+                            limit,
+                        });
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
-    let status = child.wait();
-    let stderr = errors
-        .join()
-        .map_err(|_| Error::Invalid("stderr worker failed".into()))?;
-    let written = writer.map(std::thread::JoinHandle::join);
-    if exceeded {
-        return Err(Error::OutputLimit { operation, limit });
-    }
-    read?;
-    let status = status?;
-    if let Some(written) = written {
-        written.map_err(|_| Error::Invalid("stdin worker failed".into()))??;
-    }
-    Ok(BytesOutput {
-        status: status.code().unwrap_or(-1),
-        stdout: bytes,
-        stderr: String::from_utf8_lossy(&stderr?).into_owned(),
-    })
 }
 
-/// Keep the child available to both capture and deadline cleanup. Group signalling must
-/// not acquire the mutex: capture may be waiting for a live child while holding it.
+/// Capture and cleanup share one owner. The explicit reap transition prevents
+/// deadline cleanup from signalling a recycled leader PID.
 struct CommandChild {
     pid: u32,
-    child: std::sync::Mutex<std::process::Child>,
+    child: Option<CommandState>,
+}
+
+enum CommandState {
+    Running(std::process::Child),
+    Reaped(std::process::ExitStatus),
 }
 
 impl CommandChild {
     fn new(child: std::process::Child) -> Self {
         Self {
             pid: child.id(),
-            child: std::sync::Mutex::new(child),
+            child: Some(CommandState::Running(child)),
         }
     }
 
-    fn wait(&self) -> Result<std::process::ExitStatus> {
-        Ok(self
-            .child
-            .lock()
-            .map_err(|_| Error::Invalid("command child lock poisoned".into()))?
-            .wait()?)
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        let status = match self.child.as_mut() {
+            Some(CommandState::Running(child)) => child.try_wait()?,
+            Some(CommandState::Reaped(status)) => Some(*status),
+            None => return Err(Error::Invalid("command child unavailable".into())),
+        };
+        if let Some(status) = status {
+            self.child = Some(CommandState::Reaped(status));
+        }
+        Ok(status)
     }
 }
 
-/// Kill our own child's group. Darwin answers EPERM while the group's only member is an
-/// exiting leader, because a zombie cannot be signalled. The leader is our child, so reap it;
-/// the group must then be gone or signalable.
-fn kill_child_group(child: &CommandChild) -> Result<()> {
+impl Drop for CommandChild {
+    fn drop(&mut self) {
+        if let Some(CommandState::Running(mut child)) = self.child.take() {
+            // Normal cleanup has already signalled the child; also stop it on
+            // unwind. Reaping waits only outside the caller's deadline.
+            let _ = child.kill();
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
+/// Signal the group while its leader PID is pinned, then reap or kill the leader
+/// without blocking. Darwin refuses to signal a zombie-only group; a post-reap
+/// probe may confirm its absence, but must never signal a potentially reused ID.
+fn kill_child_group(child: &mut CommandChild) -> Result<()> {
+    let Some(CommandState::Running(leader)) = child.child.as_mut() else {
+        return Ok(());
+    };
     let mut refused = false;
     let killed = kill_group_with(child.pid, |group, signal| {
         let result = nix::sys::signal::killpg(group, signal);
         refused |= result == Err(nix::errno::Errno::EPERM);
         result
     });
-    match killed {
-        Err(_) if refused => {
-            child.wait()?;
-            kill_group(child.pid)
+    let mut status = leader.try_wait()?;
+    if status.is_none() {
+        // The owned leader may have left its original group. Child::kill still
+        // targets our unreaped child, never an unrelated or recycled PID.
+        let stopped = leader.kill();
+        status = leader.try_wait()?;
+        if status.is_none() {
+            stopped?;
         }
-        other => other,
     }
+    if let Some(status) = status {
+        child.child = Some(CommandState::Reaped(status));
+    }
+    if killed.is_err() && refused && status.is_some() {
+        let group = nix::unistd::Pid::from_raw(
+            i32::try_from(child.pid).map_err(|error| Error::Invalid(error.to_string()))?,
+        );
+        if nix::sys::signal::killpg(group, None) == Err(nix::errno::Errno::ESRCH) {
+            return Ok(());
+        }
+    }
+    killed
 }
 
 /// Kill an owned command group, accepting a group that has already disappeared.
@@ -781,15 +856,101 @@ mod tests {
     }
 
     #[test]
+    fn input_and_both_output_streams_progress_together() {
+        let input = (0..=255).cycle().take(1024 * 1024).collect::<Vec<u8>>();
+        let output = System::default()
+            .run_input_bytes_bounded(
+                "sh",
+                &["-c".into(), "printf diagnostic >&2; cat".into()],
+                &input,
+                crate::test_support::WAIT_DEADLINE,
+                input.len(),
+            )
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout, input);
+        assert_eq!(output.stderr, "diagnostic");
+    }
+
+    #[test]
     fn deadline_kills_a_live_leader_after_its_output_closes() {
-        // Capture can already hold the child lock in wait() when the deadline fires.
-        // Signalling must not need that lock, or this live leader cannot be stopped.
+        // EOF does not prove child exit. Waiting for the live leader must share
+        // capture's deadline, including after both output streams have closed.
         let result = System::default().run_bounded(
             "sh",
             &["-c".into(), "exec 1>&- 2>&-; exec sleep 30".into()],
             std::time::Duration::from_millis(100),
         );
         assert!(matches!(result, Err(Error::Deadline(_))), "{result:?}");
+    }
+
+    #[test]
+    fn deadline_releases_lifecycle_lock_with_escaped_descendant() {
+        const CHILD: &str = "DOGSLED_ESCAPED_CAPTURE_CHILD";
+        let test = "shell::tests::deadline_releases_lifecycle_lock_with_escaped_descendant";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            // Escape the command's group, retaining every inherited I/O descriptor.
+            nix::unistd::setsid().unwrap();
+            std::fs::write(root.join("ready"), std::process::id().to_string()).unwrap();
+            let end = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
+            while !root.join("release").exists() && std::time::Instant::now() < end {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            return;
+        }
+        let fixture = GitFixture::new();
+        let repo = fixture.0.join("repo");
+        let shell = System::default();
+        let ledger = crate::ledger::Ledger::new(fixture.0.join("state"));
+        let executable = std::env::current_exe().unwrap();
+        let script = format!(
+            "{} --exact {} --nocapture & wait",
+            quote(executable.to_str().unwrap()),
+            quote(test),
+        );
+        let args = vec![
+            format!("{CHILD}={}", fixture.0.display()),
+            "sh".into(),
+            "-c".into(),
+            script,
+        ];
+        let (send, recv) = std::sync::mpsc::channel();
+        let checkout = repo.clone();
+        let worker = std::thread::spawn(move || {
+            let result = crate::worktree::with_lifecycle(&shell, &ledger, &checkout, |_| {
+                shell.run_input_bounded(
+                    "env",
+                    &args,
+                    &vec![b'x'; 1024 * 1024],
+                    std::time::Duration::from_secs(1),
+                )
+            });
+            send.send(result).unwrap();
+        });
+        let end = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
+        let ready = fixture.0.join("ready");
+        while !ready.exists() && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let result = recv.recv_timeout(std::time::Duration::from_secs(2));
+        let lock = std::fs::File::open(repo.join(".git/dogsled-lifecycle.lock")).unwrap();
+        let reacquired = lock.try_lock();
+        // Always release the escaped helper before checking the red-before result.
+        std::fs::write(fixture.0.join("release"), "").unwrap();
+        worker.join().unwrap();
+        let pid = std::fs::read_to_string(ready).unwrap().parse().unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid);
+        while nix::sys::signal::kill(pid, None) != Err(nix::errno::Errno::ESRCH) {
+            assert!(std::time::Instant::now() < end, "escaped helper survived");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            matches!(result, Ok(Err(Error::Deadline(_)))),
+            "capture did not return at its deadline: {result:?}"
+        );
+        reacquired.unwrap();
+        lock.unlock().unwrap();
     }
 
     #[test]
@@ -893,15 +1054,15 @@ mod tests {
         .trim_start()
         .starts_with('Z')
         {}
-        let child = CommandChild::new(child);
-        kill_child_group(&child).unwrap();
-        assert!(child.child.lock().unwrap().try_wait().unwrap().is_some());
+        let mut child = CommandChild::new(child);
+        kill_child_group(&mut child).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
     fn deadline_reaps_a_zombie_leader_before_confirming_group_cleanup() {
         use std::os::unix::process::CommandExt as _;
-        let child = CommandChild::new(command("true").process_group(0).spawn().unwrap());
+        let mut child = CommandChild::new(command("true").process_group(0).spawn().unwrap());
         let pid = child.pid.to_string();
         let end = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
         // Observe exit without reaping, exactly while capture has not reached child.wait().
@@ -926,12 +1087,9 @@ mod tests {
                 Err(nix::errno::Errno::EPERM),
             );
         }
-        // Keep capture connected but pending so this takes the real deadline branch.
-        let (_send, recv) = std::sync::mpsc::channel();
-        let result = receive_capture(&child, "git".into(), std::time::Duration::ZERO, &recv)
-            .and_then(std::convert::identity);
-        // Reap even on the red-before path, so the regression leaves no child behind.
-        let status = child.wait().unwrap();
+        // Exercise the same cleanup seam used when capture reaches its deadline.
+        let result = finish_capture(&mut child, Err(Error::Deadline("git".into())));
+        let status = child.try_wait().unwrap().unwrap();
         assert!(status.success());
         assert!(
             matches!(result, Err(Error::Deadline(ref operation)) if operation == "git"),
