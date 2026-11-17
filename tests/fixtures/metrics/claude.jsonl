@@ -1,0 +1,2 @@
+{"type":"assistant","sessionId":"claude-metrics","cwd":"/metrics/missing","timestamp":"2026-11-17T12:00:01.000Z","message":{"role":"assistant","model":"claude-model","content":[{"type":"tool_use","id":"claude-call","name":"Read","input":{"file_path":"README.md"}}]}}
+{"type":"user","sessionId":"claude-metrics","cwd":"/metrics/missing","timestamp":"2026-11-17T12:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"claude-call","is_error":false,"content":"Read complete"}]}}

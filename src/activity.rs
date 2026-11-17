@@ -1012,8 +1012,16 @@ fn result_text(content: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.join("\n"))
 }
 
-/// Convert supported calls and results into bounded transcript detail.
-fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option<Turn> {
+/// A harness tool event, before display bounds or name shortening.
+#[derive(Debug)]
+pub(crate) struct DecodedTool<'a> {
+    pub call_id: String,
+    pub name: Option<String>,
+    pub status: ToolStatus,
+    pub block: &'a Value,
+}
+
+fn decode_tool<'a>(agent: &str, block: &'a Value) -> Option<DecodedTool<'a>> {
     let (call_id, name, status) = match (agent, block["type"].as_str()) {
         ("pi", Some("toolCall")) | ("claude", Some("tool_use")) => (
             string(&block["id"])?,
@@ -1040,10 +1048,90 @@ fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option
         }
         _ => return None,
     };
+    Some(DecodedTool {
+        call_id,
+        name,
+        status,
+        block,
+    })
+}
+
+/// The shared per-entry harness decoder for conversation display and indexing.
+#[derive(Debug)]
+pub(crate) struct DecodedEntry<'a> {
+    pub message: &'a Value,
+    pub tools: Vec<DecodedTool<'a>>,
+    pub at_ms: Option<u64>,
+    pub model: Option<String>,
+    pub input: bool,
+}
+
+pub(crate) fn decode_entry<'a>(agent: &str, value: &'a Value) -> Option<DecodedEntry<'a>> {
+    let message = match agent {
+        "pi" if value["type"] == "message" => &value["message"],
+        "claude" if matches!(value["type"].as_str(), Some("user" | "assistant")) => {
+            &value["message"]
+        }
+        "codex" if value["type"] == "response_item" => &value["payload"],
+        _ => return None,
+    };
+    let mut tools = Vec::new();
+    if agent != "pi" || message["role"] == "assistant" {
+        tools.extend(
+            message["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| decode_tool(agent, block)),
+        );
+    }
+    tools.extend(decode_tool(agent, message));
+    let input = match agent {
+        "pi" => {
+            message["role"] == "user"
+                || (message["role"] == "custom" && message["customType"] == "dogsled")
+        }
+        "claude" => {
+            value["type"] == "user"
+                && (message["content"].as_str().is_some()
+                    || message["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| block["type"] != "tool_result")
+                    }))
+        }
+        "codex" => message["type"] == "message" && message["role"] == "user",
+        _ => false,
+    };
+    let envelope = envelope(agent, value, 0);
+    let model = match envelope.source {
+        Source::Harness { model, .. } => model,
+        _ => None,
+    };
+    // Metrics use the entry time; display may prefer a harness message time.
+    let at_ms = recorded_time(&value["timestamp"])
+        .or_else(|| milliseconds(&value["timestamp"], TimeMeaning::Recorded))
+        .or(envelope.timestamp)
+        .map(|time| time.ms);
+    Some(DecodedEntry {
+        message,
+        tools,
+        at_ms,
+        model,
+        input,
+    })
+}
+
+/// Convert a decoded event into bounded transcript detail.
+fn tool_record(agent: &str, value: &Value, tool: &DecodedTool<'_>, offset: u64) -> Turn {
+    let DecodedTool {
+        call_id,
+        name,
+        status,
+        block,
+    } = tool;
     let mut record = envelope(agent, value, offset);
     record.id = format!("{}:tool:{call_id}", record.id);
     record.role = Role::Tool;
-    let call = (status == ToolStatus::Unknown).then(|| {
+    let call = (*status == ToolStatus::Unknown).then(|| {
         let arguments = if agent == "claude" {
             &block["input"]
         } else {
@@ -1054,7 +1142,7 @@ fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option
             4 * 1024,
         )
     });
-    let result = (status != ToolStatus::Unknown)
+    let result = (*status != ToolStatus::Unknown)
         .then(|| {
             result_text(if agent == "codex" {
                 &block["output"]
@@ -1075,14 +1163,14 @@ fn tool_record(agent: &str, value: &Value, block: &Value, offset: u64) -> Option
         tail_bytes(&recent, 4 * 1024)
     });
     record.tool = Some(ToolSummary {
-        call_id,
-        name: name.map(|name| short(&plain(&name), 120)),
-        status,
+        call_id: call_id.clone(),
+        name: name.as_ref().map(|name| short(&plain(name), 120)),
+        status: *status,
         call,
         output,
         output_lines,
     });
-    Some(record)
+    record
 }
 
 fn result_status(error: &Value) -> ToolStatus {
@@ -1097,14 +1185,10 @@ fn records(agent: &str, value: &Value, offset: u64, truncated: &mut bool) -> Vec
     if agent == "pi" && value["type"] == "custom_message" {
         return custom_records(value, offset);
     }
-    let message = match agent {
-        "pi" if value["type"] == "message" => &value["message"],
-        "claude" if matches!(value["type"].as_str(), Some("user" | "assistant")) => {
-            &value["message"]
-        }
-        "codex" if value["type"] == "response_item" => &value["payload"],
-        _ => return Vec::new(),
+    let Some(decoded) = decode_entry(agent, value) else {
+        return Vec::new();
     };
+    let message = decoded.message;
     let mut text = turn(agent, value, offset);
     let mut found = Vec::new();
     if let Some(blocks) = message["content"].as_array() {
@@ -1127,18 +1211,24 @@ fn records(agent: &str, value: &Value, offset: u64, truncated: &mut bool) -> Vec
             {
                 found.push(turn);
             }
-            if (agent != "pi" || message["role"] == "assistant")
-                && let Some(tool) = tool_record(agent, value, block, offset)
+            if let Some(tool) = decoded
+                .tools
+                .iter()
+                .find(|tool| std::ptr::eq(tool.block, block))
             {
-                found.push(tool);
+                found.push(tool_record(agent, value, tool, offset));
             }
         }
     }
     if let Some(text) = text {
         found.push(text);
     }
-    if let Some(tool) = tool_record(agent, value, message, offset) {
-        found.push(tool);
+    if let Some(tool) = decoded
+        .tools
+        .iter()
+        .find(|tool| std::ptr::eq(tool.block, message))
+    {
+        found.push(tool_record(agent, value, tool, offset));
     }
     found
 }

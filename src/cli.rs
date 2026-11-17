@@ -23,6 +23,18 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[derive(Debug, Args)]
+pub struct MetricsArgs {
+    #[arg(long, default_value = "week", value_parser = ["day", "week", "month"])]
+    pub window: String,
+    #[arg(long, default_value = "tool", value_parser = ["tool", "repository", "model", "host", "lead", "harness"])]
+    pub group: String,
+    #[arg(long, default_value = "profile", value_parser = ["profile", "model", "harness"])]
+    pub run_group: String,
+    #[arg(long)]
+    pub tool: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ObservationCommand {
     /// Print the current publication as one JSON line; never reconstruct missing state.
@@ -42,6 +54,8 @@ pub enum Command {
     },
     /// Read quota windows from the collector or the local snapshot.
     Quota(QuotaArgs),
+    /// Read host-local tool, owner wait, and agent lifecycle metrics.
+    Metrics(MetricsArgs),
     /// Publish local measurements, reconcile owned work, and admit queued actions.
     Serve {
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]

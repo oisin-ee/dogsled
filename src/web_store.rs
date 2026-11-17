@@ -112,7 +112,9 @@ CREATE TABLE web_answer_attachments (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id) > 0), pane TEXT NOT NULL, session TEXT NOT NULL,
     cwd TEXT NOT NULL, path TEXT NOT NULL, general TEXT NOT NULL,
     decision TEXT CHECK(decision IN ('approved','changes_requested')), notes TEXT, message TEXT,
+    decided_ms INTEGER CHECK(decided_ms >= 0),
     delivered INTEGER NOT NULL CHECK(delivered IN (0,1)), latest_ms INTEGER NOT NULL CHECK(latest_ms >= 0),
+    CHECK((decision IS NULL) = (decided_ms IS NULL)),
     CHECK(decision = 'approved' OR notes IS NULL),
     CHECK((decision = 'changes_requested') = (message IS NOT NULL))
 ) STRICT;

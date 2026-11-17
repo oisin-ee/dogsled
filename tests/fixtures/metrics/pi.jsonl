@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"pi-metrics","timestamp":"2026-11-17T12:00:00.000Z","cwd":"/metrics/missing"}
+{"type":"message","id":"call","timestamp":"2026-11-17T12:00:01.000Z","message":{"role":"assistant","model":"pi-model","timestamp":1794916801000,"content":[{"type":"toolCall","id":"pi-call","name":"read","arguments":{"path":"README.md"}}]}}
+{"type":"message","id":"result","timestamp":"2026-11-17T12:00:02.000Z","message":{"role":"toolResult","toolCallId":"pi-call","toolName":"read","isError":true,"content":[{"type":"text","text":"File not found"}]}}

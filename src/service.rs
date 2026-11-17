@@ -26,9 +26,10 @@ enum Lane {
     Inbox,
     Retention,
     Quota,
+    Metrics,
 }
 
-const LANES: [Lane; 7] = [
+const LANES: [Lane; 8] = [
     Lane::Watchdog,
     Lane::Admission,
     Lane::Children,
@@ -36,6 +37,7 @@ const LANES: [Lane; 7] = [
     Lane::Inbox,
     Lane::Retention,
     Lane::Quota,
+    Lane::Metrics,
 ];
 
 impl Lane {
@@ -48,6 +50,7 @@ impl Lane {
             Self::Inbox => "inbox",
             Self::Retention => "retention",
             Self::Quota => "quota",
+            Self::Metrics => "metrics",
         }
     }
 }
@@ -172,6 +175,9 @@ fn actions(
     if lane == Lane::Handoff {
         return crate::done::handoff(ledger, &shell, now_ms());
     }
+    if lane == Lane::Metrics {
+        return crate::metrics::lane(ledger, &home, &published);
+    }
     let fleet = crate::hosts::ActionFleet::new(&shell, ledger, policy, home, published)?;
     if lane == Lane::Quota {
         return crate::quota::lane(&fleet, now_ms());
@@ -191,7 +197,7 @@ fn actions(
         Lane::Admission => work::tick(&fleet, release_retries, now_ms()),
         Lane::Children => crate::sweep::children(&fleet, now_ms()),
         Lane::Inbox => crate::inbox::tick(&fleet, now_ms()),
-        Lane::Quota | Lane::Handoff | Lane::Retention => Ok(()),
+        Lane::Quota | Lane::Handoff | Lane::Retention | Lane::Metrics => Ok(()),
     }
 }
 
