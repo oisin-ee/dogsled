@@ -7,7 +7,8 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { openInBrowser, PortalClient, PortalDown, portalUrl, sleep, startOneShot } from "./portal-client.ts";
+import { openInBrowser, type PortalClient, portalUrl, sleep, startOneShot } from "./portal-client.ts";
+import { ServeClient, ServeDown } from "./serve-client.ts";
 
 /** The tool that sends a plan to the portal. */
 const SUBMIT_PLAN = "submit_plan";
@@ -127,7 +128,7 @@ export class PlanMode {
 	/** The reviews the portal acknowledged. A review that was delivered but not acked is acked again, not delivered again. */
 	private readonly acked = new Set<string>();
 
-	constructor(pi: PlanHost, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser) {
+	constructor(pi: PlanHost, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new ServeClient(), open: (url: string) => void = openInBrowser) {
 		this.pi = pi;
 		this.approved = approved;
 		this.client = client;
@@ -179,7 +180,7 @@ export class PlanMode {
 				session: ctx.sessionManager.getSessionId(), cwd: ctx.cwd,
 			});
 		} catch (error) {
-			if (!(error instanceof PortalDown)) throw error;
+			if (!(error instanceof ServeDown)) throw error;
 			await this.fallback(path, ctx);
 			return { fallback: true };
 		}
@@ -304,7 +305,7 @@ export class PlanMode {
 }
 
 /** Register the plan mode: the submit tool, the command, and the shortcut. */
-export function registerPlanMode(pi: ExtensionAPI, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new PortalClient(), open: (url: string) => void = openInBrowser): PlanMode {
+export function registerPlanMode(pi: ExtensionAPI, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new ServeClient(), open: (url: string) => void = openInBrowser): PlanMode {
 	const host: PlanHost = {
 		sendUserMessage: (content, options) => { pi.sendUserMessage(content, options); },
 		sendMessage: (message, options) => { pi.sendMessage(message, options); },

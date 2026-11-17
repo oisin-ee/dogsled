@@ -1,9 +1,12 @@
 // Interviews live in the portal inbox. The owner opens the portal; asking a
 // question never opens a browser or starts a temporary form server.
 import { readFileSync } from "node:fs";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { PortalClient, PortalDown, portalUrl, sleep } from "./portal-client.ts";
+import { type PortalClient, portalUrl, sleep, startOneShot } from "./portal-client.ts";
+import { ServeClient, ServeDown } from "./serve-client.ts";
 
 /** How long the tool waits between two polls for the answers. */
 const POLL_MS = 500;
@@ -268,7 +271,7 @@ export class InterviewTool {
 	private readonly deliver: (content: string) => void;
 	/** The background waits of the async interviews, so the session can close them. */
 	private readonly pending = new Map<AbortController, Promise<Outcome>>();
-	constructor(client: PortalClient = new PortalClient(), deliver: (content: string) => void = () => undefined) {
+	constructor(client: PortalClient = new ServeClient(), deliver: (content: string) => void = () => undefined) {
 		this.client = client;
 		this.deliver = deliver;
 	}
@@ -284,10 +287,16 @@ export class InterviewTool {
 		if (params.timeout !== undefined && (!Number.isFinite(params.timeout) || params.timeout < 1 || params.timeout > 2_147_483)) {
 			throw new Error("Interview timeout must be between 1 and 2147483 seconds.");
 		}
-		const uploaded = await this.uploadMedia(file, cwd, signal);
-		const created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
-			questions: uploaded, pane, session, cwd,
-		}, signal);
+		let created: { id?: unknown };
+		try {
+			const uploaded = await this.uploadMedia(file, cwd, signal);
+			created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
+				questions: uploaded, pane, session, cwd,
+			}, signal);
+		} catch (error) {
+			if (!(error instanceof ServeDown)) throw error;
+			return this.fallback(file, params, cwd, pane, session, signal);
+		}
 		const id = typeof created?.id === "string" ? created.id : "";
 		if (!id) throw new Error("dogsled web did not return an interview id");
 		const url = portalUrl(`/?question=${encodeURIComponent(id)}&pane=${encodeURIComponent(pane)}`, this.client.env);
@@ -315,6 +324,33 @@ export class InterviewTool {
 		}
 		const { text, ...details } = await answer;
 		return { content: [{ type: "text", text: `${text}\n\n${url}` }], details: { ...details, url } };
+	}
+
+	/** Keep the existing CLI one-shot transport when this host has no serve. */
+	private async fallback(file: QuestionsFile, params: { timeout?: number; async?: boolean }, cwd: string, pane: string, session: string, signal: AbortSignal | undefined): Promise<AgentToolResult<InterviewDetails>> {
+		const directory = await mkdtemp(join(tmpdir(), "dogsled-interview-"));
+		const path = join(directory, "questions.json");
+		await writeFile(path, JSON.stringify(file));
+		const own = new AbortController();
+		const operation = params.async || !signal ? own.signal : AbortSignal.any([own.signal, signal]);
+		const args = ["interview", "--file", path, "--pane", pane, "--session", session, "--cwd", cwd];
+		args.push("--timeout", params.timeout === undefined ? "0" : String(Math.ceil(params.timeout)));
+		const command = startOneShot(args, this.client.env, operation);
+		const answer = command.result.then(text => this.outcome(JSON.parse(text), file))
+			.catch((error): Outcome => {
+				if (!operation.aborted) throw error;
+				return { status: "aborted", responses: [], text: "Interview was aborted." };
+			})
+			.finally(async () => { this.pending.delete(own); await rm(directory, { recursive: true, force: true }); });
+		this.pending.set(own, answer);
+		try { await command.started; } catch (error) { await answer.catch(() => undefined); throw error; }
+		if (params.async) {
+			void answer.then(outcome => { if (!own.signal.aborted) this.deliver(`Interview ${outcome.status}.\n\n${outcome.text}`); })
+				.catch(error => { if (!own.signal.aborted) this.deliver(`Interview did not finish: ${String(error)}`); });
+			return { content: [{ type: "text", text: "The one-shot interview is open. Its outcome arrives later; keep working and do not poll." }], details: { status: "started", responses: [], url: "" } };
+		}
+		const { text, ...details } = await answer;
+		return { content: [{ type: "text", text }], details: { ...details, url: "" } };
 	}
 
 	/** Finish withdrawal before the extension runtime exits or is replaced. */
@@ -394,24 +430,7 @@ export class InterviewTool {
 	 * A portal that refuses the image is an error that names the file.
 	 */
 	private async uploadAttachment(bytes: Buffer, path: string, signal: AbortSignal | undefined): Promise<string> {
-		let response: Response;
-		const init: RequestInit = {
-			method: "POST",
-			headers: {
-				authorization: `Bearer ${this.client.token()}`,
-				"content-type": "application/octet-stream",
-			},
-			body: new Uint8Array(bytes),
-		};
-		if (signal) init.signal = signal;
-		try {
-			response = await fetch(`http://127.0.0.1:${this.client.port}/api/attachments`, init);
-		} catch (error) {
-			if (signal?.aborted) throw error;
-			const cause = error instanceof Error ? error.cause : undefined;
-			const detail = cause instanceof Error ? cause.message : error instanceof Error ? error.message : String(error);
-			throw new PortalDown(detail);
-		}
+		const response = await this.client.request("POST", "/api/attachments", { bytes: new Uint8Array(bytes), signal });
 		if (!response.ok) {
 			throw new Error(`Cannot use the image ${path}: dogsled web POST /api/attachments failed: ${response.status} ${(await response.text()).trim()}`);
 		}
@@ -476,7 +495,7 @@ export class InterviewTool {
 }
 
 /** Register the `interview` tool. */
-export function registerInterview(pi: ExtensionAPI, client: PortalClient = new PortalClient()): InterviewTool {
+export function registerInterview(pi: ExtensionAPI, client: PortalClient = new ServeClient()): InterviewTool {
 	const tool = new InterviewTool(client, content => { pi.sendUserMessage(content, { deliverAs: "steer" }); });
 	pi.registerTool({
 		name: "interview",

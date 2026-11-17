@@ -1507,6 +1507,7 @@ fn question_root() -> Element {
         Err(error) => return rsx! { "Invalid question fixture: {error}" },
     };
     let pending = Pending {
+        host: "local".into(),
         id: "question-fixture".to_owned(),
         pane: "pane".to_owned(),
         session: "session".to_owned(),
@@ -1532,6 +1533,7 @@ fn switching_question_root(handle: SignalHandle) -> Element {
         Err(error) => return rsx! { "Invalid question fixture: {error}" },
     };
     let question = Pending {
+        host: "local".into(),
         id: id(),
         pane: "pane".to_owned(),
         session: "session".to_owned(),

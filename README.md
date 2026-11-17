@@ -89,19 +89,27 @@ A partial publication can leave conflicting assets and requires review before a 
 Run the portal with `dogsled web`, then open `http://127.0.0.1:7465`.
 The server listens only on the loopback address.
 The port defaults to 7465. Set `[web] port` in `dogsled.toml`, or pass `dogsled web --port PORT`.
-If the portal uses another port, set `DOGSLED_WEB_PORT` for the Pi tools so they can find it.
+If the portal uses another port, set `DOGSLED_WEB_PORT` for Pi so its links open the correct portal.
 
-Pi sessions publish their live activity and model settings to their own host's `dogsled serve`, not to the portal.
+Pi sessions send activity, model settings, interviews, plan reviews, and images to their own host's `dogsled serve`.
+They do not require `dogsled web` on that host.
 `serve` answers them on `producer.sock` in the state directory on every host. The socket has mode 0600, so it needs no token.
-The portal reads activity and settings from each host's `serve`, so a Pi session on a host without a portal shows its activity and model picker.
+The Mac portal reads each host through `serve` and shows pending interviews and reviews in its inbox and agent views.
+Owner actions include the owning host. Answers and review decisions wake Pi through the same host's `serve`.
+An unreachable host appears as an inbox gap, not an empty list.
+Pi links keep their item id. The portal resolves the host from its aggregated inbox, never from the pane id.
+If two hosts have the same item id, the portal shows an ambiguity error instead of choosing a host.
 After an upgrade, restart `serve` before you start new Pi sessions. A running Pi session keeps the extension it started with.
 
 The portal creates its token at `~/.local/state/dogsled/web/token`, or `$DOGSLED_STATE/web/token` with a custom state directory.
-Only the owner can read the token file. Agent API requests use it as a Bearer credential.
+Only the owner can read the token file. Older Pi sessions still use the unqualified portal routes with this Bearer credential.
+The private `serve` socket needs no token.
 Release archives include `dev.dogsled.web.plist` for the macOS login service.
 Dotfiles renders and loads the template. It runs `dogsled web` and restarts it after a failure.
 
-Without a persistent portal, `dogsled interview --file questions.json` opens a temporary server and prints the answers as JSON.
+If `serve` cannot be reached, Pi falls back to the one-shot interview or review command.
+These temporary servers listen on the session host, so a remote fallback is not available through the Mac portal.
+`dogsled interview --file questions.json` opens a temporary server and prints the answers as JSON.
 `dogsled review --file plan.md --pane PANE --session SESSION --cwd DIR` opens a temporary server and prints the decision as JSON.
 Both commands close their server after the interaction ends.
 

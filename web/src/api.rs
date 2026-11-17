@@ -18,6 +18,10 @@ const MAX_IMAGE_BYTES: f64 = 10.0 * 1024.0 * 1024.0;
 
 /// Store an image and return the server-owned reference path.
 pub async fn upload_image(file: &web_sys::File) -> Result<String, String> {
+    upload_image_on("local", file).await
+}
+
+pub async fn upload_image_on(host: &str, file: &web_sys::File) -> Result<String, String> {
     if !matches!(
         file.type_().as_str(),
         "image/png" | "image/jpeg" | "image/webp"
@@ -27,7 +31,7 @@ pub async fn upload_image(file: &web_sys::File) -> Result<String, String> {
     if file.size() > MAX_IMAGE_BYTES {
         return Err("Each image must be at most 10 MiB.".to_owned());
     }
-    let request = Request::post(&format!("{BASE}/api/attachments"))
+    let request = Request::post(&host_url(host, "attachments"))
         .body(file.clone())
         .map_err(|error| error.to_string())?;
     let attachment: portal_types::reviews::Attachment =
@@ -300,8 +304,39 @@ fn agent_url(address: &portal_types::agents::AgentAddress, operation: &str) -> S
 }
 
 /// A pane id as a path segment.
-fn encode(pane: &str) -> String {
-    String::from(js_sys::encode_uri_component(pane))
+pub(crate) fn encode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+#[derive(Clone)]
+pub(crate) struct InteractionHost(pub String);
+
+pub(crate) fn host_url(host: &str, resource: &str) -> String {
+    format!("{BASE}/api/hosts/{}/{resource}", encode(host))
+}
+
+pub(crate) fn attachment_url(host: &str, path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    host_url(host, &format!("attachments/{}", encode(name)))
+}
+
+pub async fn inbox() -> Result<portal_types::inbox::InboxView, String> {
+    read_json(
+        Request::get(&format!("{BASE}/api/inbox"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?,
+    )
+    .await
 }
 
 /// Call `on_event` for each change the agent in `pane` pushes, until the stream fails.

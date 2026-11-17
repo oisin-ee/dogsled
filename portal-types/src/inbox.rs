@@ -13,6 +13,8 @@ pub enum InboxKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboxItem {
+    #[serde(default = "local_host")]
+    pub host: String,
     pub kind: InboxKind,
     pub id: String,
     /// The review's number of submitted revisions; 0 for other kinds.
@@ -29,4 +31,18 @@ pub struct InboxItem {
 pub struct InboxView {
     pub count: usize,
     pub items: Vec<InboxItem>,
+    /// Hosts whose items could not be read. Absent when every host answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<HostGap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostGap {
+    pub host: String,
+    pub error: String,
+}
+
+#[must_use]
+pub fn local_host() -> String {
+    "local".to_owned()
 }

@@ -1,7 +1,6 @@
-// The client for the loopback portal server, `dogsled web`. The portal owns the
-// interactive parts of Pi: the interview form and the plan review. This module
-// speaks HTTP to it and opens its deep links. Every call carries the portal's bearer token, and the
-// server answers with the board, a form, a review, or a decision.
+// Compatibility client for the loopback portal server, `dogsled web`, plus shared
+// JSON, event, deep-link and one-shot helpers. Current Pi producers use ServeClient
+// on their own host. Calls through this legacy HTTP client carry the portal token.
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -99,6 +98,9 @@ export async function* serverEvents(body: ReadableStream<Uint8Array>): AsyncGene
 	}
 }
 
+/** Shared request options, including raw image bytes. */
+export interface RequestOptions { body?: unknown; bytes?: Uint8Array; signal?: AbortSignal | undefined; accept?: string }
+
 /** The HTTP client for the loopback portal server. Every call carries the bearer token. */
 export class PortalClient {
 	readonly env: NodeJS.ProcessEnv;
@@ -117,7 +119,7 @@ export class PortalClient {
 	}
 
 	/** Send a request. A server that cannot be reached is a `PortalDown` error; an aborted `signal` keeps its own error. */
-	async request(method: string, path: string, options: { body?: unknown; signal?: AbortSignal | undefined; accept?: string } = {}): Promise<Response> {
+	async request(method: string, path: string, options: RequestOptions = {}): Promise<Response> {
 		const headers: Record<string, string> = {
 			// The bearer token is what the portal checks: a valid token passes a
 			// state-changing request without an Origin header.
@@ -125,7 +127,10 @@ export class PortalClient {
 		};
 		if (options.accept) headers["accept"] = options.accept;
 		const init: RequestInit = { method, headers };
-		if (options.body !== undefined) {
+		if (options.bytes !== undefined) {
+			headers["content-type"] = "application/octet-stream";
+			init.body = new Uint8Array(options.bytes);
+		} else if (options.body !== undefined) {
 			headers["content-type"] = "application/json";
 			init.body = JSON.stringify(options.body);
 		}

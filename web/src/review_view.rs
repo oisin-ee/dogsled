@@ -36,7 +36,7 @@ use crate::components::{
 use crate::notice::{Alert, Status};
 
 fn segment(value: &str) -> String {
-    String::from(js_sys::encode_uri_component(value))
+    api::encode(value)
 }
 
 async fn response<T: DeserializeOwned>(response: Response) -> Result<T, String> {
@@ -64,9 +64,17 @@ async fn get<T: DeserializeOwned>(url: &str) -> Result<T, String> {
     .await
 }
 
-async fn put<T: serde::Serialize>(id: &str, field: &str, body: &T) -> Result<Review, String> {
+async fn put<T: serde::Serialize>(
+    host: &str,
+    id: &str,
+    field: &str,
+    body: &T,
+) -> Result<Review, String> {
     send(
-        Request::put(&format!("/api/reviews/{}/{field}", segment(id))),
+        Request::put(&api::host_url(
+            host,
+            &format!("reviews/{}/{field}", segment(id)),
+        )),
         body,
     )
     .await
@@ -86,6 +94,7 @@ async fn send<T: serde::Serialize>(request: RequestBuilder, body: &T) -> Result<
 
 #[component]
 pub fn ReviewView(
+    #[props(default = "local".to_owned())] host: String,
     review_id: String,
     revision: u64,
     #[props(default)] embedded: bool,
@@ -97,13 +106,14 @@ pub fn ReviewView(
     // Another review mounts a fresh loader, without the previous review or its error.
     crate::keyed(rsx! {
         ReviewLoader {
-            key: "{review_id}", id: review_id, revision, embedded, lead, role, repository, on_close,
+            key: "{host}:{review_id}", host, id: review_id, revision, embedded, lead, role, repository, on_close,
         }
     })
 }
 
 #[component]
 fn ReviewLoader(
+    host: String,
     id: String,
     revision: u64,
     embedded: bool,
@@ -114,13 +124,17 @@ fn ReviewLoader(
 ) -> Element {
     let mut review = use_signal(|| None::<Review>);
     let mut error = use_signal(|| None::<String>);
-    use_resource(use_reactive((&id, &revision), move |(id, _)| async move {
-        match get::<Review>(&format!("/api/reviews/{}", segment(&id))).await {
-            Ok(value) => {
-                review.set(Some(value));
-                error.set(None);
+    let loader_host = host.clone();
+    use_resource(use_reactive((&id, &revision), move |(id, _)| {
+        let host = loader_host.clone();
+        async move {
+            match get::<Review>(&api::host_url(&host, &format!("reviews/{}", segment(&id)))).await {
+                Ok(value) => {
+                    review.set(Some(value));
+                    error.set(None);
+                }
+                Err(message) => error.set(Some(message)),
             }
-            Err(message) => error.set(Some(message)),
         }
     }));
     rsx! {
@@ -129,7 +143,7 @@ fn ReviewLoader(
             if value.decision.is_some() {
                 Status { "This review is closed." }
             } else {
-                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, embedded, lead, role, repository, on_close }
+                ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, host: host.clone(), embedded, lead, role, repository, on_close }
             }
         } else { Status { "Loading plan…" } }
     }
@@ -547,6 +561,7 @@ enum ReviewAction {
 
 #[component]
 pub(crate) fn ReviewEditor(
+    #[props(default = "local".to_owned())] host: String,
     initial: Review,
     embedded: bool,
     #[props(default)] lead: String,
@@ -554,6 +569,8 @@ pub(crate) fn ReviewEditor(
     #[props(default)] repository: String,
     #[props(default)] on_close: EventHandler<()>,
 ) -> Element {
+    use_context_provider(|| api::InteractionHost(host.clone()));
+    let queue_host = host.clone();
     let mut review = use_signal(|| initial);
     let mut general = use_signal(|| review.peek().general.clone());
     let mut notes = use_signal(String::new);
@@ -567,8 +584,9 @@ pub(crate) fn ReviewEditor(
     let mut diff = use_signal(|| None::<DiffView>);
     // One queue owns all writes. A blur save must finish before a decision,
     // and cannot replace newer annotations with an older response.
-    let actions = use_coroutine(
-        move |mut queue: UnboundedReceiver<ReviewAction>| async move {
+    let actions = use_coroutine(move |mut queue: UnboundedReceiver<ReviewAction>| {
+        let host = queue_host.clone();
+        async move {
             while let Some(action) = queue.next().await {
                 let foreground = !matches!(action, ReviewAction::SaveGeneral(_));
                 let closes_editor = matches!(action, ReviewAction::SaveAnnotation(_));
@@ -586,7 +604,13 @@ pub(crate) fn ReviewEditor(
                             } else {
                                 annotations.push(annotation);
                             }
-                            put(&current.id, "annotations", &AnnotationsBody { annotations }).await
+                            put(
+                                &host,
+                                &current.id,
+                                "annotations",
+                                &AnnotationsBody { annotations },
+                            )
+                            .await
                         }
                         ReviewAction::DeleteAnnotation(id) => {
                             let annotations = current
@@ -594,19 +618,25 @@ pub(crate) fn ReviewEditor(
                                 .into_iter()
                                 .filter(|item| item.id != id)
                                 .collect();
-                            put(&current.id, "annotations", &AnnotationsBody { annotations }).await
+                            put(
+                                &host,
+                                &current.id,
+                                "annotations",
+                                &AnnotationsBody { annotations },
+                            )
+                            .await
                         }
                         ReviewAction::SaveGeneral(general) => {
-                            put(&current.id, "general", &GeneralBody { general }).await
+                            put(&host, &current.id, "general", &GeneralBody { general }).await
                         }
                         ReviewAction::Decide {
                             approve,
                             general,
                             notes,
                         } => {
-                            put(&current.id, "general", &GeneralBody { general }).await?;
+                            put(&host, &current.id, "general", &GeneralBody { general }).await?;
                             let url = format!(
-                                "/api/reviews/{}/{}",
+                                "reviews/{}/{}",
                                 segment(&current.id),
                                 if approve {
                                     "approve"
@@ -614,6 +644,7 @@ pub(crate) fn ReviewEditor(
                                     "request-changes"
                                 }
                             );
+                            let url = api::host_url(&host, &url);
                             if approve {
                                 send(
                                     Request::post(&url),
@@ -652,8 +683,8 @@ pub(crate) fn ReviewEditor(
                     busy.set(false);
                 }
             }
-        },
-    );
+        }
+    });
     let value = review();
     let latest = value.revisions.last().cloned();
     let n = latest.as_ref().map_or(0, |revision| revision.n);
@@ -714,13 +745,12 @@ pub(crate) fn ReviewEditor(
     let diff_id = value.id.clone();
     let diff_tab = active.clone();
     use_resource(use_reactive(
-        (&diff_id, &diff_tab, &n),
-        move |(id, tab, n)| async move {
+        (&diff_id, &diff_tab, &n, &host),
+        move |(id, tab, n, host)| async move {
             if tab == "changes" {
-                match get::<DiffView>(&format!(
-                    "/api/reviews/{}/diff?from={}&to={n}",
-                    segment(&id),
-                    n - 1
+                match get::<DiffView>(&api::host_url(
+                    &host,
+                    &format!("reviews/{}/diff?from={}&to={n}", segment(&id), n - 1),
                 ))
                 .await
                 {
@@ -867,22 +897,21 @@ pub(crate) fn ReviewEditor(
     }
 }
 
-fn image_url(path: &str) -> String {
-    format!(
-        "/api/attachments/{}",
-        segment(path.rsplit('/').next().unwrap_or_default())
-    )
+fn image_url(host: &str, path: &str) -> String {
+    api::attachment_url(host, path)
 }
 
 #[component]
 fn Images(paths: Vec<String>) -> Element {
+    let host =
+        try_use_context::<api::InteractionHost>().map_or_else(|| "local".to_owned(), |host| host.0);
     rsx! {
         for (index, path) in paths.iter().enumerate() {
             Item {
                 key: "{path}",
                 size: ItemSize::Sm,
                 r#as: {
-                    let url = image_url(path);
+                    let url = image_url(&host, path);
                     move |attributes: Vec<Attribute>| rsx! {
                         a { href: "{url}", target: "_blank", rel: "noopener noreferrer", ..attributes,
                             ItemMedia { variant: ItemMediaVariant::Image,
@@ -927,6 +956,8 @@ fn AnnotationEditor(
     on_save: EventHandler<Annotation>,
     on_close: EventHandler<()>,
 ) -> Element {
+    let host =
+        try_use_context::<api::InteractionHost>().map_or_else(|| "local".to_owned(), |host| host.0);
     let draft = try_use_context::<Draft>().map(|draft| draft.0);
     let mut comment = use_signal(|| annotation.comment.clone());
     let mut images = use_signal(|| annotation.images.clone());
@@ -941,9 +972,10 @@ fn AnnotationEditor(
         }
         uploading.set(true);
         error.set(None);
+        let host = host.clone();
         spawn(async move {
             for file in files {
-                match api::upload_image(&file).await {
+                match api::upload_image_on(&host, &file).await {
                     Ok(path) => images.write().push(path),
                     Err(message) => {
                         error.set(Some(message));
@@ -1022,6 +1054,26 @@ fn AnnotationEditor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote_images() -> Element {
+        use_context_provider(|| api::InteractionHost("netcup".into()));
+        rsx! { Images { paths: vec!["/remote/state/web/attachments/one.png".into()] } }
+    }
+
+    #[test]
+    fn review_attachment_links_target_the_owning_host() {
+        let mut dom = VirtualDom::new(remote_images);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("href=\"/api/hosts/netcup/attachments/one.png\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("src=\"/api/hosts/netcup/attachments/one.png\""),
+            "{html}"
+        );
+    }
 
     fn decision_controls_fixture(props: (bool, bool, bool)) -> Element {
         let busy = use_signal(|| props.0);

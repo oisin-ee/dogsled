@@ -9,6 +9,7 @@ import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { InterviewTool, loadQuestions, registerInterview } from "./interview.ts";
 import { PortalClient } from "./portal-client.ts";
+import { ServeClient } from "./serve-client.ts";
 
 interface Call { method: string; path: string; headers: Record<string, string | string[] | undefined>; body: string }
 
@@ -97,6 +98,27 @@ test("the interview stays in the inbox and returns its deep link without opening
 	assert.equal(updates, 1); assert.equal(result.details.status, "completed");
 	assert.deepEqual(result.details.responses, ANSWER.responses);
 	assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /Which one\?: B/);
+});
+
+test("serve receives interview images, creation and polls without a portal token", async t => {
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-interview-serve-"));
+	const socket = join(directory, "producer.sock");
+	const image = join(directory, "image.png");
+	writeFileSync(image, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+	const p = portal(() => ({ status: 200, body: ANSWER }));
+	await new Promise<void>(resolve => p.server.listen(socket, resolve));
+	t.after(async () => {
+		await new Promise<void>(resolve => { p.server.closeAllConnections(); p.server.close(() => resolve()); });
+		rmSync(directory, { recursive: true, force: true });
+	});
+	const tool = new InterviewTool(new ServeClient({ DOGSLED_STATE: directory }));
+	const form = JSON.stringify({ questions: [{ id: "q1", type: "single", question: "Which?", options: ["A", "B"], media: { type: "image", src: image } }] });
+	const result = await tool.run({ questions: form }, context(), undefined);
+	assert.equal(result.details.status, "completed");
+	assert.deepEqual(p.calls.map(call => [call.method, call.path]), [["GET", "/api/questions"], ["POST", "/api/attachments"], ["POST", "/api/questions"], ["GET", "/api/questions/q-1/answer"]]);
+	assert.ok(p.calls.every(call => call.headers["authorization"] === undefined));
+	assert.equal(JSON.parse(p.calls[2]!.body).questions.questions[0].media.src, "/api/attachments/image.png");
+	assert.match(result.details.url, /\?question=q-1&pane=/);
 });
 
 test("the interview posts the questions with the bearer token", async t => {

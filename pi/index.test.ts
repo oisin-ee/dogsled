@@ -180,6 +180,34 @@ function rig() {
 		} };
 }
 
+test("the registered interview tool uses the session host producer socket", async t => {
+	withPane(t);
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-index-interview-"));
+	const previous = process.env["DOGSLED_STATE"];
+	process.env["DOGSLED_STATE"] = directory;
+	const paths: string[] = [];
+	const server = createHttpServer((request, response) => {
+		request.resume();
+		request.on("end", () => {
+			assert.equal(request.headers["authorization"], undefined);
+			paths.push(request.url ?? "");
+			response.setHeader("content-type", "application/json");
+			response.end(JSON.stringify(request.method === "POST" ? { id: "q-index" } : { id: "q-index", responses: [] }));
+		});
+	});
+	await new Promise<void>(resolve => server.listen(join(directory, "producer.sock"), resolve));
+	t.after(async () => {
+		if (previous === undefined) delete process.env["DOGSLED_STATE"]; else process.env["DOGSLED_STATE"] = previous;
+		await new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); });
+		rmSync(directory, { recursive: true, force: true });
+	});
+	const r = rig();
+	const tool = r.tools.get("interview");
+	const result = await tool.execute("interview", { questions: JSON.stringify({ questions: [] }) }, undefined, undefined, r.ctx);
+	assert.equal(result.details.status, "completed");
+	assert.deepEqual(paths, ["/api/questions", "/api/questions/q-index/answer"]);
+});
+
 test("the extension publishes real activity to its host's serve over the producer socket, with native evidence", async t => {
 	withPane(t);
 	const state = mkdtempSync(join(tmpdir(), "dogsled-activity-"));

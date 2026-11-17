@@ -79,6 +79,10 @@ pub struct AppState {
     token: guard::Token,
     web: Ledger,
     questions: store::Store,
+    /// Only the host's private producer socket and serve-owned IPC bypass portal guards.
+    private_producer: bool,
+    /// One-shot fallback servers own their own interactive lifetime.
+    standalone_interactive: bool,
     stop: CancellationToken,
     leads: Option<Arc<LeadLaunch>>,
     followers: peer_stream::Followers,
@@ -103,6 +107,8 @@ impl AppState {
             token,
             web,
             questions,
+            private_producer: false,
+            standalone_interactive: false,
             stop: CancellationToken::new(),
             leads: None,
             followers: peer_stream::Followers::default(),
@@ -249,6 +255,7 @@ fn router(state: AppState) -> Router {
             state.stop.clone(),
             state.token.clone(),
         )))
+        .merge(producer::owner_routes())
         .merge(inbox::routes())
         .merge(questions::routes())
         .merge(reviews::routes())
