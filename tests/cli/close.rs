@@ -1056,6 +1056,50 @@ fn close_shuts_the_anchor_after_its_last_child_only_when_idle() {
 }
 
 #[test]
+fn remote_prune_applies_nonempty_plan_and_reports_teardown_failures() {
+    for (selector, fail) in [("8103", false), ("netcup", true)] {
+        let (rig, tree) = close_rig(&format!("remote-prune-{fail}"));
+        advance_main(&rig);
+        rig.put_state(
+            &["state", "worktrees", "--put"],
+            &json!([{
+                "repo":rig.dir.join("home/repo"), "path":tree, "branch":"feat/x"
+            }]),
+        );
+        panes(&rig, "working", &tree);
+        rig.peer();
+        let _observer = place::peer_observer(&rig);
+        rig.put("panes.json", &json!({"result":{"panes":[]}}));
+        rig.config(&format!(
+            "remote_command = [{}]\n",
+            json!(env!("CARGO_BIN_EXE_dogsled"))
+        ));
+        // Replace only SSH transport: both host doctor and host prune use the real
+        // CLI, repository checks, teardown, serialization, and client decoding.
+        rig.script(
+            "ssh",
+            "#!/bin/sh\nfor last; do :; done\nexec sh -c \"$last\"\n",
+        );
+        if fail {
+            fs::write(rig.dir.join("hook-fails"), "").unwrap();
+        }
+        let out = rig.run(&["prune", "--yes", "worktrees", "--host", selector]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(if fail { 2 } else { 0 }),
+            "{stdout}\n{stderr}"
+        );
+        assert!(stdout.contains("[remove]"), "{stdout}");
+        assert_eq!(tree.exists(), fail, "{stdout}\n{stderr}");
+        if fail {
+            assert!(stdout.contains("failed: teardown command"), "{stdout}");
+        }
+    }
+}
+
+#[test]
 fn prune_tries_every_entry_and_reports_each_failure() {
     let (rig, tree) = close_rig("prune-continues");
     let repo = rig.dir.join("home/repo").canonicalize().unwrap();
