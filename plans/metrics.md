@@ -182,15 +182,15 @@ Add `Lane::Metrics` to `src/service.rs`. It runs the indexer, then the harvest, 
 
 ### CLI
 
-`dogsled metrics [--window day|week|month] [--group tool|repository|model|host|lead|harness] [--tool NAME] [--json]`
+`dogsled metrics [--window day|week|month] [--group tool|repository|model|host|lead|harness] [--run-group profile|model|harness] [--tool NAME] [--json]`
 
 - Without `--json`: three tables (tools, owner wait, runs) with p50, p95, and max in human units.
 - With `--json`: one `MetricsReport` for this host only. The portal uses this form for peers.
-- Defaults: `--window week`, `--group tool`.
+- Defaults: `--window week`, `--group tool`, `--run-group profile`.
 
 ### API
 
-`GET /api/metrics?window=&group=&tool=` in `src/web/metrics.rs`. It builds the local report and asks every peer with `dogsled metrics --json`, in parallel, with the peer timeout the agents API uses. It merges rows with the same key by adding counts and merging histograms. A failed peer is a `HostCoverage` with its error; the other hosts still show.
+`GET /api/metrics?window=&group=&run_group=&tool=` in `src/web/metrics.rs`. It builds the local report and asks every peer with `dogsled metrics --json`, in parallel, with the peer timeout the agents API uses. It passes `--run-group` to each peer. It merges rows with the same key by adding counts and merging histograms. A failed peer is a `HostCoverage` with its error; the other hosts still show.
 
 ### Portal page
 

@@ -9,7 +9,7 @@ The portal has a Metrics view that shows the fleet's tool calls, owner wait, and
 ## Design
 
 - The data shape is fixed: `portal-types/src/metrics.rs` (`MetricsReport`, `ToolRow`, `WaitRow`, `RunRow`, `Histogram::quantile`). Do not change it. M1 builds the server route in parallel.
-- Route: `GET /api/metrics?window=day|week|month&group=tool|repository|model|host|lead|harness&tool=NAME`. Fetch it like the other calls in `web/src/api.rs` (for example `models`, line 227).
+- Route: `GET /api/metrics?window=day|week|month&group=tool|repository|model|host|lead|harness&run_group=profile|model|harness&tool=NAME`. Fetch it like the other calls in `web/src/api.rs` (for example `models`, line 227).
 - Entry point: a header button beside "New" (`web/src/app.rs` line 498) opens the view in `main`, the same way `composing` opens `NewLead` (lines 397–415 and 574). Opening an agent closes it.
 - Layout: `plans/metrics.squig.json`, variation `one-page` (approved) and the `states` frames. Do not build the `tabs` variation.
 - Histogram counts are a `Vec<u64>` of 62 buckets (changed with the canvas); use `Histogram::quantile`, never the raw buckets.
@@ -20,7 +20,7 @@ The portal has a Metrics view that shows the fleet's tool calls, owner wait, and
 1. Header: window selector (day, week, month) and one badge per `HostCoverage`. A host with `error` shows the error text, not a silent gap (`PRODUCT.md` principle 4).
 2. Tools table: tool, group value (when the group is not `tool`), calls, error % (`errors / (calls − unknown_status − running)`; "—" when the divisor is 0), p50, p95, max. Click a column header to sort. A group selector and a tool filter re-fetch.
 3. Owner wait: one row per `WaitKind` with answered, open, p50, p95.
-4. Runs: one row per group with outcome counts and p50 and p95 of queue wait, spawn, and time to done.
+4. Runs: a run-group selector (profile, model, harness) that re-fetches with `run_group`; one row per group with outcome counts and p50 and p95 of queue wait, spawn, and time to done.
 5. Durations in human units (`850 ms`, `12 s`, `5.7 min`, `1.2 h`).
 6. Loading shows a `Skeleton`; a failed fetch shows the error and a retry button.
 
