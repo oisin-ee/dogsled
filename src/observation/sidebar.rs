@@ -120,7 +120,14 @@ impl Card {
 impl Data {
     /// Groups in board order (to land, attention, running, waiting); newest first within one.
     pub fn from_board(board: &Board, todos: Option<TodoSections>, hosts: Vec<HostRow>) -> Self {
-        let mut cards: Vec<Card> = board.rows.iter().map(Card::from_row).collect();
+        // Holds are resource diagnostics, not agents or jobs. Keep them on the board,
+        // but do not turn them into blocked worker cards in the sidebar.
+        let mut cards: Vec<Card> = board
+            .rows
+            .iter()
+            .filter(|row| row.kind != "hold")
+            .map(Card::from_row)
+            .collect();
         cards.sort_by(|a, b| a.group.cmp(&b.group).then(a.age_ms.cmp(&b.age_ms)));
         Self {
             cards,

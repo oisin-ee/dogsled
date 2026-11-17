@@ -616,6 +616,43 @@ pub mod tests {
         assert_eq!(pills, ["to land", "stalled", "idle", "working"]);
     }
 
+    #[test]
+    fn resource_holds_do_not_become_blocked_agent_cards() {
+        let mut hold = row("job-validity/request", Group::Attention, "held", 0);
+        hold.kind = "hold".into();
+        hold.what = "resource hold".into();
+        let mut place = row("placement", Group::Waiting, "queued", 1);
+        place.kind = "place".into();
+        let board = Board {
+            hosts: vec![],
+            rows: vec![
+                hold,
+                row("blocked-agent", Group::Attention, "blocked", 1),
+                row("failed-job", Group::Attention, "exit 2", 2),
+                row("running-job", Group::Running, "running", 3),
+                row("queued-agent", Group::Waiting, "queued", 0),
+                place,
+            ],
+        };
+        let data = Data::from_board(&board, None, vec![]);
+        let cards: Vec<_> = data
+            .cards
+            .iter()
+            .map(|card| (card.id.as_str(), card.pill.as_str()))
+            .collect();
+        assert_eq!(
+            cards,
+            [
+                ("blocked-agent", "blocked"),
+                ("failed-job", "failed"),
+                ("running-job", "running"),
+                ("queued-agent", "queued"),
+                ("placement", "queued"),
+            ]
+        );
+        assert_eq!(board.rows.len(), 6, "diagnostic board rows stay intact");
+    }
+
     /// The sidebar label is the lifecycle display name the lifecycle owner publishes for
     /// the state, so the two never disagree.
     #[test]
