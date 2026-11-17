@@ -1,7 +1,7 @@
 //! Unified actionable inbox, derived from the existing stores and board snapshot.
 
 use axum::extract::State;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use portal_types::agents::AgentView;
 use portal_types::inbox::{InboxItem, InboxKind, InboxView};
@@ -16,7 +16,95 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn list(State(state): State<AppState>) -> Response {
-    state.projection(|snapshot| snapshot.inbox.clone())
+    let (mut inbox, hosts, headers) = {
+        let current = state.portal.borrow();
+        if let Some(error) = &current.error {
+            return super::observation_error(error);
+        }
+        let Some(snapshot) = &current.snapshot else {
+            return super::observation_error("inbox unavailable");
+        };
+        let (Some(inbox), Some(board)) = (&snapshot.inbox, &snapshot.board) else {
+            return super::observation_error("inbox unavailable");
+        };
+        // The local publication's revision, as every other projection route reports it.
+        let headers = [
+            ("x-observation-version", snapshot.version.to_string()),
+            ("x-observation-epoch", snapshot.epoch.clone()),
+            ("x-observation-revision", snapshot.revision.to_string()),
+            ("cache-control", "no-store".to_owned()),
+        ];
+        (inbox.clone(), board.hosts.clone(), headers)
+    };
+    inbox.items.retain(|item| item.host == crate::hosts::LOCAL);
+    let mut peers = tokio::task::JoinSet::new();
+    for host in hosts
+        .into_iter()
+        .filter(|host| host.label != crate::hosts::LOCAL)
+    {
+        if !host.reachable {
+            inbox.gaps.push(portal_types::inbox::HostGap {
+                host: host.label,
+                error: host.reason.unwrap_or_else(|| "host unreachable".into()),
+            });
+            continue;
+        }
+        let state = state.clone();
+        peers.spawn_blocking(move || {
+            let result = super::agents::peer_call(
+                &state,
+                &host.label,
+                "",
+                &super::agents::PeerOperation::Inbox,
+            )
+            .and_then(|reply| {
+                if reply.status != 200 {
+                    return Err(crate::error::Error::Invalid("inbox unavailable".into()));
+                }
+                Ok(serde_json::from_value::<InboxView>(reply.body)?)
+            });
+            (host.label, result)
+        });
+    }
+    while let Some(result) = peers.join_next().await {
+        match result {
+            Ok((host, Ok(mut peer))) => {
+                peer.items.retain(|item| item.host == crate::hosts::LOCAL);
+                for item in &mut peer.items {
+                    item.host.clone_from(&host);
+                }
+                // Each peer contributes only its local items, never another peer's rows.
+                inbox.items.extend(peer.items);
+                inbox.gaps.extend(peer.gaps.into_iter().map(|mut gap| {
+                    gap.host.clone_from(&host);
+                    gap
+                }));
+            }
+            Ok((host, Err(error))) => inbox.gaps.push(portal_types::inbox::HostGap {
+                host,
+                error: error.to_string(),
+            }),
+            Err(error) => return super::observation_error(&error.to_string()),
+        }
+    }
+    inbox.count = inbox.items.len();
+    (headers, axum::Json(inbox)).into_response()
+}
+
+/// Select the owning serve's publication, including an explicit unavailable result.
+pub(super) async fn published(
+    client: crate::observation::ipc::Client,
+) -> crate::error::Result<InboxView> {
+    let published = tokio::task::spawn_blocking(move || {
+        client.current(&crate::observation::ipc::Select::views(["portal"]))
+    })
+    .await
+    .map_err(|error| crate::error::Error::Invalid(error.to_string()))??;
+    let snapshot: portal_types::PortalSnapshot =
+        crate::observation::read::view(&published, "portal")?;
+    snapshot
+        .inbox
+        .ok_or_else(|| crate::error::Error::Invalid("inbox observation unavailable".into()))
 }
 
 pub(crate) fn view(
@@ -54,6 +142,7 @@ pub(crate) fn view(
     {
         let (agent_title, repository) = metadata(&review.pane);
         items.push(InboxItem {
+            host: crate::hosts::LOCAL.into(),
             kind: InboxKind::Review,
             id: review.id.clone(),
             revision: review.revisions.len() as u64,
@@ -72,22 +161,12 @@ pub(crate) fn view(
     for question in questions.iter().filter(|question| present(&question.pane)) {
         let (agent_title, repository) = metadata(&question.pane);
         items.push(InboxItem {
+            host: crate::hosts::LOCAL.into(),
             kind: InboxKind::Question,
             id: question.id.clone(),
             revision: 0,
             pane: question.pane.clone(),
-            title: question
-                .questions
-                .title
-                .clone()
-                .or_else(|| {
-                    question
-                        .questions
-                        .questions
-                        .first()
-                        .map(|question| question.question.clone())
-                })
-                .unwrap_or_else(|| "Question".into()),
+            title: question_title(question),
             agent_title,
             repository,
             age_ms: now.saturating_sub(question.created_ms),
@@ -99,6 +178,7 @@ pub(crate) fn view(
         };
         let (agent_title, repository) = metadata(&agent.pane);
         items.push(InboxItem {
+            host: agent.host.clone(),
             kind: InboxKind::Prompt,
             id: agent.pane.clone(),
             revision: 0,
@@ -111,6 +191,7 @@ pub(crate) fn view(
     }
     for row in rows.into_iter().filter(|row| row.unseen) {
         items.push(InboxItem {
+            host: row.host.clone(),
             kind: InboxKind::UnseenWorker,
             id: row.id.clone(),
             revision: 0,
@@ -124,7 +205,23 @@ pub(crate) fn view(
     InboxView {
         count: items.len(),
         items,
+        gaps: Vec::new(),
     }
+}
+
+fn question_title(pending: &Pending) -> String {
+    pending
+        .questions
+        .title
+        .clone()
+        .or_else(|| {
+            pending
+                .questions
+                .questions
+                .first()
+                .map(|question| question.question.clone())
+        })
+        .unwrap_or_else(|| "Question".into())
 }
 
 fn review_title(review: &Review) -> String {

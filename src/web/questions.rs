@@ -39,7 +39,7 @@ async fn create(
     headers: HeaderMap,
     Json(body): Json<AskBody>,
 ) -> Response {
-    if !crate::web::guard::bearer_allowed(&headers, &state.token) {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
     match state.questions.create(body).await {
@@ -49,9 +49,13 @@ async fn create(
 }
 
 /// The questions that wait for an answer, oldest first.
-async fn list(State(state): State<AppState>) -> Response {
+pub(super) async fn list(State(state): State<AppState>) -> Response {
     match state.questions.list().await {
-        Ok(pending) => Json(PendingList { pending }).into_response(),
+        Ok(pending) => Json(PendingList {
+            pending,
+            gaps: Vec::new(),
+        })
+        .into_response(),
         Err(error) => failed(&error),
     }
 }
@@ -67,7 +71,7 @@ async fn answer_wait(
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Response {
-    if !crate::web::guard::bearer_allowed(&headers, &state.token) {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
     let limit = match poll_limit(query.as_deref()) {
@@ -86,13 +90,13 @@ async fn answer_wait(
 }
 
 /// The owner's answers of a question.
-async fn answer(
+pub(super) async fn answer(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     headers: HeaderMap,
     Json(body): Json<AnswerBody>,
 ) -> Response {
-    if !origin_allowed(&headers, state.port) {
+    if !state.private_producer && !origin_allowed(&headers, state.port) {
         return refused("the request needs the portal origin");
     }
     match state.questions.answer(&id, body.responses).await {
@@ -104,13 +108,13 @@ async fn answer(
 }
 
 /// Reject an interview without submitting any draft answers.
-async fn reject(
+pub(super) async fn reject(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     headers: HeaderMap,
     Json(body): Json<Rejection>,
 ) -> Response {
-    if !origin_allowed(&headers, state.port) {
+    if !state.private_producer && !origin_allowed(&headers, state.port) {
         return refused("the request needs the portal origin");
     }
     match state.questions.reject(&id, body).await {
@@ -127,7 +131,7 @@ async fn withdraw(
     RoutePath(id): RoutePath<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !crate::web::guard::bearer_allowed(&headers, &state.token) {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
     match state.questions.withdraw_pending(&id).await {

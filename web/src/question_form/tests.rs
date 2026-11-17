@@ -1,6 +1,26 @@
 use super::*;
 use serde_json::json;
 
+fn remote_image_form() -> Element {
+    let pending: Pending = serde_json::from_value(json!({
+        "host":"netcup", "id":"remote-question", "pane":"same-pane", "session":"session", "cwd":"/repo", "created_ms":0,
+        "questions":{"questions":[{"id":"q","type":"info","question":"Screenshot", "media":{"type":"image","src":"/api/attachments/one.png"}}]}
+    })).unwrap();
+    rsx! { AskForm { pending, elapsed_ms: 0, on_done: |_| {} } }
+}
+
+#[test]
+fn remote_question_images_use_the_owning_host() {
+    let mut dom = VirtualDom::new(remote_image_form);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(
+        html.contains("/api/hosts/netcup/attachments/one.png"),
+        "{html}"
+    );
+    assert!(!html.contains("src=\"/api/attachments/"), "{html}");
+}
+
 fn question(kind: &str) -> Result<Question, serde_json::Error> {
     serde_json::from_value(json!({
         "id": "ui", "type": kind, "question": "What renders the web UI?",

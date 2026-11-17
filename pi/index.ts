@@ -12,7 +12,6 @@ import { Observation, type Observed } from "./observation.ts";
 import { WorkPanel, WorkDetail, runWorkAction, type WorkAction, type WorkCursor, type WorkData, type WorkTab } from "./work-panel.ts";
 import { registerInterview } from "./interview.ts";
 import { registerPlanMode } from "./plan-mode.ts";
-import { PortalClient } from "./portal-client.ts";
 import { registerActivity } from "./activity.ts";
 import { registerSettings } from "./settings.ts";
 import { ServeClient } from "./serve-client.ts";
@@ -64,10 +63,9 @@ export default function dogsled(pi: ExtensionAPI) {
 	const serve = new ServeClient();
 	registerActivity(pi, serve, owner);
 	registerSettings(pi, serve, owner);
-	// The portal owns the interactive parts of Pi: the interview form and the plan review.
-	const portal = new PortalClient();
-	const planMode = registerPlanMode(pi, todo.approve, portal);
-	const interviews = registerInterview(pi, portal);
+	// The host's serve also owns interviews, reviews, and their wake-ups.
+	const planMode = registerPlanMode(pi, todo.approve, serve);
+	const interviews = registerInterview(pi, serve);
 	// One handler owns the tool call: the unit bridge first, then the plan-mode gate.
 	pi.on("tool_call", async (event, ctx) => {
 		const result = await units.call(event, ctx);

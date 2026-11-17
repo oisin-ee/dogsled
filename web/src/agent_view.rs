@@ -36,11 +36,6 @@ use crate::notice::{Alert, Status};
 use crate::question_form::QuestionForm;
 use crate::review_view::ReviewView;
 
-const BASE: &str = match option_env!("DOGSLED_API") {
-    Some(base) => base,
-    None => "",
-};
-
 /// A message draft shared with the review view when its provider is present.
 #[derive(Clone, Copy)]
 pub struct Draft(pub Signal<String>);
@@ -375,16 +370,18 @@ fn AgentSession(
         }
     });
 
+    let pending_host = host.clone();
     let pending_address = address.clone();
     let inbox_ids = use_memo(use_reactive(&inbox, move |inbox| {
         agent_inbox_ids(&inbox, &pending_address)
     }));
     use_resource(move || {
         let _ = inbox_ids();
+        let host = pending_host.clone();
         async move {
             let (review_result, question_result) = futures_util::join!(
-                pending_list::<ReviewList>("reviews"),
-                pending_list::<PendingList>("questions")
+                pending_list::<ReviewList>(&host, "reviews"),
+                pending_list::<PendingList>(&host, "questions")
             );
             let mut errors = Vec::new();
             match review_result {
@@ -392,7 +389,12 @@ fn AgentSession(
                 Err(message) => errors.push(message),
             }
             match question_result {
-                Ok(list) => questions.set(Some(list.pending)),
+                Ok(mut list) => {
+                    for question in &mut list.pending {
+                        question.host.clone_from(&host);
+                    }
+                    questions.set(Some(list.pending));
+                }
                 Err(message) => errors.push(message),
             }
             pending_error.set((!errors.is_empty()).then(|| errors.join(" · ")));
@@ -590,8 +592,8 @@ fn AgentSession(
         &pane,
         review.as_deref(),
         question.as_deref(),
-        reviews().filter(|_| host == "local").as_deref(),
-        questions().filter(|_| host == "local").as_deref(),
+        reviews().as_deref(),
+        questions().as_deref(),
         current.as_ref().is_some_and(is_blocked),
     );
     let identity = pending
@@ -820,7 +822,7 @@ fn AgentSession(
             if plan_open {
                 div { class: "pending-review",
                     if let Some(RequestTab::Review(id)) = &pending {
-                        ReviewView { review_id: id.clone(),
+                        ReviewView { host: address.host.clone(), review_id: id.clone(),
                             revision: inbox.iter().find(|item| item.selection.host == address.host && item.selection.pane == address.pane && item.selection.kind == crate::app::InboxKind::Review && item.selection.id == *id).map_or(0, |item| item.revision),
                             embedded: true,
                             lead: title.clone(), role: role.to_owned(),
@@ -972,8 +974,8 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.trim().is_empty()).then_some(value)
 }
 
-async fn pending_list<T: DeserializeOwned>(kind: &str) -> Result<T, String> {
-    let response = Request::get(&format!("{BASE}/api/{kind}"))
+async fn pending_list<T: DeserializeOwned>(host: &str, kind: &str) -> Result<T, String> {
+    let response = Request::get(&api::host_url(host, kind))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -2391,6 +2393,7 @@ mod tests {
     #[test]
     fn pending_items_follow_precedence_and_explicit_links() -> Result<(), serde_json::Error> {
         let reviews = vec![ReviewSummary {
+            host: "local".into(),
             id: "plan".to_owned(),
             pane: "pane".to_owned(),
             session: String::new(),

@@ -134,13 +134,36 @@ struct InboxState {
     received_ms: u64,
 }
 
+/// Pane ids can collide across hosts. Only an unambiguous item id resolves a Pi link.
+fn resolve_link(
+    requested: &InboxSelection,
+    items: &[InboxItem],
+) -> Result<Option<InboxSelection>, String> {
+    let mut matches = items
+        .iter()
+        .filter(|item| item.selection.kind == requested.kind && item.selection.id == requested.id);
+    let found = matches.next().map(|item| item.selection.clone());
+    if matches.next().is_some() {
+        return Err("This item id exists on more than one host. Select the item from its host's inbox instead.".into());
+    }
+    Ok(found)
+}
+
 impl InboxState {
     fn update(&mut self, result: Result<InboxView, String>, now: u64) {
         match result {
             Ok(view) => {
                 self.snapshot = Some(view);
                 self.received_ms = now;
-                self.error = None;
+                self.error = self.snapshot.as_ref().and_then(|view| {
+                    (!view.gaps.is_empty()).then(|| {
+                        view.gaps
+                            .iter()
+                            .map(|gap| format!("{}: {}", gap.host, gap.error))
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    })
+                });
             }
             Err(message) => self.error = Some(message),
         }
@@ -162,7 +185,7 @@ impl InboxState {
                     .iter()
                     .map(|item| InboxItem {
                         selection: InboxSelection {
-                            host: "local".into(),
+                            host: item.host.clone(),
                             kind: item.kind.into(),
                             id: item.id.clone(),
                             pane: item.pane.clone(),
@@ -375,20 +398,33 @@ pub fn App() -> Element {
         board,
         board_error,
     });
-    let inbox_state = use_memo(move || publication.read().inbox.clone());
+    let mut inbox_state = use_signal(InboxState::default);
+    use_future(move || async move {
+        loop {
+            let result = api::inbox().await;
+            inbox_state.write().update(result, clock_ms());
+            sleep(RETRY).await;
+        }
+    });
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
     let mut selected = use_context_provider(|| {
         Signal::new(
             link.pane
                 .clone()
+                .filter(|_| {
+                    link.host.is_some() || (link.review.is_none() && link.question.is_none())
+                })
                 .map(|pane| portal_types::agents::AgentAddress {
                     host: link.host.clone().unwrap_or_else(|| "local".into()),
                     pane,
                 }),
         )
     });
-    let mut selection = use_context_provider(|| Signal::new(link.selection()));
+    let mut selection =
+        use_context_provider(|| Signal::new(link.selection().filter(|_| link.host.is_some())));
+    let mut linked = use_signal(|| link.host.is_some());
+    let mut link_error = use_signal(|| None::<String>);
     use_context_provider(|| Draft(Signal::new(String::new())));
     let conversation = use_context_provider(|| NewConversation {
         open: Signal::new(false),
@@ -449,19 +485,36 @@ pub fn App() -> Element {
         items
     });
     use_effect(move || {
-        if let Some(mut current) = selection()
-            && current.pane.is_empty()
-            && let Some(item) = inbox()
-                .iter()
-                .find(|item| item.selection.kind == current.kind && item.selection.id == current.id)
-        {
-            current.pane.clone_from(&item.selection.pane);
-            current.host.clone_from(&item.selection.host);
-            selected.set(Some(portal_types::agents::AgentAddress {
-                host: current.host.clone(),
-                pane: current.pane.clone(),
-            }));
-            selection.set(Some(current));
+        if linked() {
+            return;
+        }
+        let Some(requested) = link.selection() else {
+            linked.set(true);
+            return;
+        };
+        let state = inbox_state.read();
+        if state.snapshot.is_none() {
+            return;
+        }
+        match resolve_link(&requested, &inbox()) {
+            Ok(Some(current)) => {
+                selected.set(Some(portal_types::agents::AgentAddress {
+                    host: current.host.clone(),
+                    pane: current.pane.clone(),
+                }));
+                selection.set(Some(current));
+                link_error.set(None);
+                linked.set(true);
+            }
+            Ok(None) => link_error.set(Some(state.error.as_ref().map_or_else(
+                || "This question or review is no longer pending.".to_owned(),
+                |error| format!("Cannot find this item while a host is unavailable: {error}"),
+            ))),
+            Err(error) => {
+                selected.set(None);
+                selection.set(None);
+                link_error.set(Some(error));
+            }
         }
     });
 
@@ -571,7 +624,7 @@ pub fn App() -> Element {
                     }
                 }
             }
-            InboxSidebar { count: state.count(), loading: state.snapshot.is_none(), error: state.error.clone(),
+            InboxSidebar { count: state.count(), loading: state.snapshot.is_none(), error: link_error().or(state.error.clone()),
                 items: items.clone(), elapsed_ms, agents: agents(), reachable: agent_error().is_none() }
             if width() >= 1100 { {navigation.clone()} } else {
                 TabContent { class: "console-agents-tab", value: "agents", index: 0usize, {navigation.clone()} }
@@ -667,7 +720,7 @@ pub(crate) fn InboxList(
                     let options = agents.iter().find(|agent| agent.host == item.selection.host && agent.pane == item.selection.pane)
                         .and_then(|agent| agent.blocked.as_ref()).map(|prompt| prompt.options.clone()).unwrap_or_default();
                     rsx! {
-                        div { class: "inbox-row", key: "{kind:?}:{item.selection.id}", "data-open": open,
+                        div { class: "inbox-row", key: "{item.selection.host}:{kind:?}:{item.selection.id}", "data-open": open,
                             Button { class: "inbox-item", variant: ButtonVariant::Ghost, r#type: "button",
                                 aria_current: open.then_some("true"),
                                 onclick: {
@@ -943,6 +996,29 @@ mod shell_tests {
     }
 
     #[test]
+    fn an_unreachable_host_keeps_a_visible_gap_instead_of_an_empty_inbox() {
+        let mut state = InboxState::default();
+        state.update(
+            Ok(InboxView {
+                count: 0,
+                items: Vec::new(),
+                gaps: vec![portal_types::inbox::HostGap {
+                    host: "netcup".into(),
+                    error: "unreachable".into(),
+                }],
+            }),
+            1,
+        );
+        assert_eq!(state.count(), None);
+        assert!(
+            state
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("netcup: unreachable"))
+        );
+    }
+
+    #[test]
     fn inbox_sorts_newest_first_and_does_not_report_zero_on_initial_failure()
     -> Result<(), serde_json::Error> {
         let mut state = InboxState::default();
@@ -978,6 +1054,36 @@ mod shell_tests {
         ] {
             assert_eq!(InboxKind::from(server), shell);
         }
+    }
+
+    #[test]
+    fn deep_links_resolve_by_item_id_and_reject_cross_host_collisions() {
+        let requested = InboxSelection {
+            host: "local".into(),
+            kind: InboxKind::Review,
+            id: "review".into(),
+            pane: "same-pane".into(),
+        };
+        let item = |host: &str| InboxItem {
+            selection: InboxSelection {
+                host: host.into(),
+                kind: InboxKind::Review,
+                id: "review".into(),
+                pane: "same-pane".into(),
+            },
+            revision: 1,
+            title: "Plan".into(),
+            agent_title: None,
+            repository: None,
+            age_ms: 0,
+        };
+        let peer = item("netcup");
+        assert_eq!(
+            resolve_link(&requested, &[peer.clone()]),
+            Ok(Some(peer.selection.clone()))
+        );
+        assert!(resolve_link(&requested, &[peer, item("local")]).is_err());
+        assert_eq!(resolve_link(&requested, &[]), Ok(None));
     }
 
     #[test]

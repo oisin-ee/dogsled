@@ -93,6 +93,16 @@ fn decisions_channel(web: &Ledger) -> broadcast::Sender<Delivery> {
         .clone()
 }
 
+/// Wake legacy portal decision streams after serve commits an owner action.
+pub(super) fn notify(web: &Ledger, body: &serde_json::Value) {
+    if let Ok(review) = serde_json::from_value::<Review>(body.clone()) {
+        let _ = decisions_channel(web).send(Delivery {
+            session: review.session.clone(),
+            event: decision_event(&review),
+        });
+    }
+}
+
 /// The result of work that reads or writes the portal's own files.
 ///
 /// The files live on disk, so the work runs on a blocking thread and never
@@ -110,7 +120,7 @@ async fn blocking<T: Send + 'static, E: Into<Error> + Send + 'static>(
 }
 
 /// The reviews the portal holds, newest first.
-async fn list(State(state): State<AppState>) -> Response {
+pub(super) async fn list(State(state): State<AppState>) -> Response {
     let web = state.web.clone();
     let records = match blocking(move || load_all(&web)).await {
         Ok(records) => records,
@@ -123,11 +133,18 @@ async fn list(State(state): State<AppState>) -> Response {
             .then_with(|| right.review.id.cmp(&left.review.id))
     });
     let reviews = records.iter().map(summary).collect();
-    Json(ReviewList { reviews }).into_response()
+    Json(ReviewList {
+        reviews,
+        gaps: Vec::new(),
+    })
+    .into_response()
 }
 
 /// One review, with its revisions and annotations.
-async fn show(State(state): State<AppState>, RoutePath(id): RoutePath<String>) -> Response {
+pub(super) async fn show(
+    State(state): State<AppState>,
+    RoutePath(id): RoutePath<String>,
+) -> Response {
     let owned = id.clone();
     let web = state.web.clone();
     let found = blocking(move || load(&web, &owned)).await;
@@ -139,7 +156,7 @@ async fn show(State(state): State<AppState>, RoutePath(id): RoutePath<String>) -
 }
 
 /// The line diff between two revisions of a review.
-async fn diff(
+pub(super) async fn diff(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     RawQuery(query): RawQuery,
@@ -180,7 +197,7 @@ async fn submit(
     headers: HeaderMap,
     Json(body): Json<SubmitBody>,
 ) -> Response {
-    if !crate::web::guard::bearer_allowed(&headers, &state.token) {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
     match submit_plan(&state.web, body).await {
@@ -190,7 +207,7 @@ async fn submit(
 }
 
 /// The draft annotations of a review. The body holds the whole list.
-async fn annotations(
+pub(super) async fn annotations(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     Json(body): Json<AnnotationsBody>,
@@ -233,7 +250,7 @@ async fn annotations(
 }
 
 /// The comment on the plan as a whole.
-async fn general(
+pub(super) async fn general(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     Json(body): Json<GeneralBody>,
@@ -259,7 +276,7 @@ async fn general(
 }
 
 /// The owner approves the plan. The decision goes to the session.
-async fn approve(
+pub(super) async fn approve(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
     body: Option<Json<ApproveBody>>,
@@ -295,7 +312,7 @@ async fn approve(
 }
 
 /// The owner asks for changes. The decision goes to the session.
-async fn request_changes(
+pub(super) async fn request_changes(
     State(state): State<AppState>,
     RoutePath(id): RoutePath<String>,
 ) -> Response {
@@ -330,7 +347,7 @@ async fn request_changes(
 }
 
 /// An image the owner added to an annotation. The body is the image itself.
-async fn attachment(State(state): State<AppState>, body: Body) -> Response {
+pub(super) async fn attachment(State(state): State<AppState>, body: Body) -> Response {
     let Ok(bytes) = axum::body::to_bytes(body, MAX_ATTACHMENT_BYTES + 1).await else {
         return too_large();
     };
@@ -355,7 +372,7 @@ async fn attachment(State(state): State<AppState>, body: Body) -> Response {
 }
 
 /// An image the owner added to an annotation.
-async fn attachment_file(
+pub(super) async fn attachment_file(
     State(state): State<AppState>,
     RoutePath(name): RoutePath<String>,
 ) -> Response {
@@ -390,7 +407,7 @@ async fn decisions(
     RoutePath(session): RoutePath<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !crate::web::guard::bearer_allowed(&headers, &state.token) {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
     let stream = match decision_stream(&state.web, session).await {
@@ -408,7 +425,7 @@ async fn ack(
     RoutePath(review_id): RoutePath<String>,
     headers: HeaderMap,
 ) -> Response {
-    if !crate::web::guard::bearer_allowed(&headers, &state.token) {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
     match acknowledge(&state.web, review_id.clone()).await {
@@ -769,6 +786,7 @@ fn decision_frame(event: DecisionEvent) -> Event {
 /// The summary of a review, for the list.
 fn summary(record: &Record) -> ReviewSummary {
     ReviewSummary {
+        host: crate::hosts::LOCAL.into(),
         id: record.review.id.clone(),
         pane: record.review.pane.clone(),
         session: record.review.session.clone(),
@@ -841,7 +859,7 @@ fn image_extension(bytes: &[u8]) -> Option<&'static str> {
 }
 
 /// The type the browser reads an image with.
-fn image_type(name: &str) -> &'static str {
+pub(super) fn image_type(name: &str) -> &'static str {
     match name.rsplit('.').next() {
         Some("jpg") => "image/jpeg",
         Some("webp") => "image/webp",

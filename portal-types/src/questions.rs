@@ -520,6 +520,8 @@ pub struct QuestionSet {
 /// A question that waits for an answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
+    #[serde(default = "crate::inbox::local_host")]
+    pub host: String,
     pub id: String,
     pub pane: String,
     pub session: String,
@@ -591,6 +593,8 @@ pub struct PendingId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingList {
     pub pending: Vec<Pending>,
+    #[serde(default)]
+    pub gaps: Vec<crate::inbox::HostGap>,
 }
 
 #[cfg(test)]

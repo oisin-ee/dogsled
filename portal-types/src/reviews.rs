@@ -162,6 +162,8 @@ pub struct Submitted {
 /// One row of `GET /api/reviews`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSummary {
+    #[serde(default = "crate::inbox::local_host")]
+    pub host: String,
     pub id: String,
     pub pane: String,
     pub session: String,
@@ -176,6 +178,8 @@ pub struct ReviewSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewList {
     pub reviews: Vec<ReviewSummary>,
+    #[serde(default)]
+    pub gaps: Vec<crate::inbox::HostGap>,
 }
 
 /// Body of `PUT /api/reviews/{id}/annotations`: the whole draft list.

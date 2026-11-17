@@ -1,13 +1,13 @@
 // The client for Pi's producer endpoint: `dogsled serve` answers it on `producer.sock` in
-// the state directory on every host. A Pi session publishes its live activity and model
-// settings there, and receives settings changes, whether or not its host runs the portal.
+// the state directory on every host. Pi publishes activity, settings, interviews and reviews
+// there, and receives settings changes, answers and decisions without a local portal.
 // The socket is private to the user (mode 0600), so requests carry no bearer token.
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { PortalClient, stateDirectory } from "./portal-client.ts";
+import { PortalClient, stateDirectory, type RequestOptions } from "./portal-client.ts";
 
 const SOCKET = "producer.sock";
 
@@ -51,11 +51,15 @@ export class ServeClient extends PortalClient {
 		this.socket = socket;
 	}
 
-	override async request(method: string, path: string, options: { body?: unknown; signal?: AbortSignal | undefined; accept?: string } = {}): Promise<Response> {
+	override async request(method: string, path: string, options: RequestOptions = {}): Promise<Response> {
 		const headers: Record<string, string> = { host: "localhost" };
 		if (options.accept) headers["accept"] = options.accept;
-		let payload: string | undefined;
-		if (options.body !== undefined) {
+		let payload: string | Uint8Array | undefined;
+		if (options.bytes !== undefined) {
+			payload = options.bytes;
+			headers["content-type"] = "application/octet-stream";
+			headers["content-length"] = String(payload.byteLength);
+		} else if (options.body !== undefined) {
 			payload = JSON.stringify(options.body);
 			headers["content-type"] = "application/json";
 			headers["content-length"] = String(Buffer.byteLength(payload));

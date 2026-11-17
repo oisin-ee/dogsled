@@ -37,13 +37,6 @@ use crate::components::{
 };
 use crate::notice::{Alert, Status};
 
-/// Where the API lives. Empty means the page's own origin; a dev build can
-/// set `DOGSLED_API` at compile time.
-const BASE: &str = match option_env!("DOGSLED_API") {
-    Some(base) => base,
-    None => "",
-};
-
 /// The values the owner has chosen or typed, by question id.
 type Values = Signal<BTreeMap<String, Value>>;
 
@@ -63,7 +56,7 @@ pub(crate) fn keyed_form(
     on_done: EventHandler<String>,
 ) -> Element {
     crate::keyed(rsx! {
-        AskForm { key: "{question.id}", elapsed_ms, pending: question, on_done }
+        AskForm { key: "{question.host}:{question.id}", elapsed_ms, pending: question, on_done }
     })
 }
 
@@ -76,13 +69,16 @@ enum Sent {
 }
 
 /// Send the answers of one question.
-async fn send_answer(id: &str, responses: Vec<ResponseItem>) -> Result<Sent, String> {
-    let response = Request::post(&format!("{BASE}/api/questions/{id}/answer"))
-        .json(&AnswerBody { responses })
-        .map_err(|error| error.to_string())?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+async fn send_answer(host: &str, id: &str, responses: Vec<ResponseItem>) -> Result<Sent, String> {
+    let response = Request::post(&crate::api::host_url(
+        host,
+        &format!("questions/{}/answer", crate::api::encode(id)),
+    ))
+    .json(&AnswerBody { responses })
+    .map_err(|error| error.to_string())?
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
     match response.status() {
         200..=299 => Ok(Sent::Saved),
         409 | 410 => Ok(Sent::Closed),
@@ -91,13 +87,16 @@ async fn send_answer(id: &str, responses: Vec<ResponseItem>) -> Result<Sent, Str
 }
 
 /// Reject the form separately from its draft answers.
-async fn send_rejection(id: &str, reason: String) -> Result<Sent, String> {
-    let response = Request::post(&format!("{BASE}/api/questions/{id}/reject"))
-        .json(&Rejection { reason })
-        .map_err(|error| error.to_string())?
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+async fn send_rejection(host: &str, id: &str, reason: String) -> Result<Sent, String> {
+    let response = Request::post(&crate::api::host_url(
+        host,
+        &format!("questions/{}/reject", crate::api::encode(id)),
+    ))
+    .json(&Rejection { reason })
+    .map_err(|error| error.to_string())?
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
     match response.status() {
         200..=299 => Ok(Sent::Saved),
         409 | 410 => Ok(Sent::Closed),
@@ -138,6 +137,9 @@ pub(crate) fn AskForm(
     #[props(default)] elapsed_ms: u64,
     on_done: EventHandler<String>,
 ) -> Element {
+    use_context_provider(|| crate::api::InteractionHost(pending.host.clone()));
+    let host = pending.host.clone();
+    let reject_host = host.clone();
     let values: Values = use_signal(|| initial_values(&pending.questions.questions));
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
@@ -165,9 +167,10 @@ pub(crate) fn AskForm(
                 busy.set(true);
                 error.set(None);
                 let id = id.clone();
+                let host = host.clone();
                 let responses = collect_responses(&questions, &values.read());
                 spawn(async move {
-                    match send_answer(&id, responses).await {
+                    match send_answer(&host, &id, responses).await {
                         Ok(Sent::Saved | Sent::Closed) => on_done.call(id),
                         Err(message) => {
                             error.set(Some(message));
@@ -211,9 +214,10 @@ pub(crate) fn AskForm(
                                         busy.set(true);
                                         error.set(None);
                                         let id = reject_id.clone();
+                                        let host = reject_host.clone();
                                         let reason = rejection_reason();
                                         spawn(async move {
-                                            match send_rejection(&id, reason).await {
+                                            match send_rejection(&host, &id, reason).await {
                                                 Ok(Sent::Saved | Sent::Closed) => on_done.call(id),
                                                 Err(message) => { error.set(Some(message)); busy.set(false); }
                                             }
@@ -569,9 +573,13 @@ fn QuestionField(form: String, number: usize, question: Question, values: Values
 /// question shows.
 #[component]
 fn MediaView(media: Media) -> Element {
+    let host = try_use_context::<crate::api::InteractionHost>()
+        .map_or_else(|| "local".to_owned(), |host| host.0);
     rsx! {
         match &media {
-            Media::Image { src, alt, caption, .. } => rsx! {
+            Media::Image { src, alt, caption, .. } => {
+                let src = if src.starts_with("/api/attachments/") { crate::api::attachment_url(&host, src) } else { src.clone() };
+                rsx! {
                 Item { variant: ItemVariant::Outline,
                     ItemContent {
                         AspectRatio { ratio: 16.0 / 9.0, img { src: "{src}", alt: alt.clone().unwrap_or_default() } }
@@ -579,6 +587,7 @@ fn MediaView(media: Media) -> Element {
                             ItemDescription { "{caption}" }
                         }
                     }
+                }
                 }
             },
             Media::Table { table, caption, .. } => rsx! {

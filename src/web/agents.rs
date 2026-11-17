@@ -77,6 +77,8 @@ pub(crate) enum PeerOperation {
     Activity,
     Settings,
     ChangeSettings(portal_types::models::SettingsChange),
+    Interactive(super::producer::Interactive),
+    Inbox,
     Register(portal_types::agents::RegisterProducer),
     Publish(portal_types::agents::PublishActivity),
 }
@@ -93,7 +95,22 @@ pub(crate) fn peer_command(
     input: &str,
     ledger: crate::ledger::Ledger,
 ) -> crate::error::Result<PeerReply> {
-    let operation: PeerOperation = serde_json::from_str(input)?;
+    use std::io::Read as _;
+    let operation: PeerOperation = if input == "-" {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(super::producer::INTERACTIVE_LIMIT as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > super::producer::INTERACTIVE_LIMIT {
+            return Err(crate::error::Error::Invalid(
+                "peer command too large".into(),
+            ));
+        }
+        serde_json::from_slice(&bytes)?
+    } else {
+        serde_json::from_str(input)?
+    };
     let state = AppState::new(
         tokio::sync::watch::channel(super::PortalState::default()).1,
         7465,
@@ -217,13 +234,19 @@ fn event_reply(publication: &DetailFrame, pane: &str) -> crate::error::Result<Pe
 }
 
 /// Execute on the named peer, with the same serve-owned read boundary as local HTTP.
-async fn peer_read(
+pub(super) async fn peer_read(
     state: AppState,
     pane: String,
     operation: PeerOperation,
 ) -> crate::error::Result<PeerReply> {
     let client = ipc::Client::at(&state.web.dir);
     let response = match operation {
+        PeerOperation::Interactive(command) => {
+            return tokio::task::spawn_blocking(move || client.interactive(command))
+                .await
+                .map_err(|error| crate::error::Error::Invalid(error.to_string()))?;
+        }
+        PeerOperation::Inbox => Json(super::inbox::published(client).await?).into_response(),
         PeerOperation::Conversation => {
             detail_response(
                 state,
@@ -312,7 +335,7 @@ fn activity_command(
     }
 }
 
-fn peer_call(
+pub(super) fn peer_call(
     state: &AppState,
     host: &str,
     pane: &str,
@@ -331,15 +354,44 @@ fn peer_call(
     )?;
     let target = fleet.find(host)?;
     let started = Instant::now();
-    let mut reply: PeerReply = fleet.remote(
-        target,
-        &[
+    let input = serde_json::to_vec(operation)?;
+    // Linux limits each argv entry to 128 KiB. Images and large annotations use
+    // the same bounded stdin transport as other host commands.
+    let mut reply: PeerReply = if input.len() <= 64 * 1024 {
+        fleet.remote(
+            target,
+            &[
+                "agent-detail".into(),
+                pane.into(),
+                "--input".into(),
+                String::from_utf8(input)
+                    .map_err(|error| crate::error::Error::Invalid(error.to_string()))?,
+            ],
+        )?
+    } else {
+        let args = [
             "agent-detail".into(),
             pane.into(),
             "--input".into(),
-            serde_json::to_string(operation)?,
-        ],
-    )?;
+            "-".into(),
+        ];
+        let timeout = launch
+            .shell
+            .budget()
+            .with_limit("ssh", crate::budget::CALL_LIMIT)?;
+        let output = launch.shell.run_input_bounded(
+            "ssh",
+            &fleet.remote_argv(target, &args),
+            &input,
+            timeout,
+        )?;
+        if !output.ok() {
+            return Err(crate::error::Error::Invalid(format!(
+                "host {host}: peer command failed"
+            )));
+        }
+        serde_json::from_str(&output.stdout)?
+    };
     if reply.status == 200 && matches!(operation, PeerOperation::Activity) {
         let mut view: portal_types::agents::ActivityView =
             serde_json::from_value(reply.body.clone())?;
