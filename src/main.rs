@@ -43,6 +43,7 @@ mod loss;
 mod loss_tests;
 mod machines;
 mod mcp;
+mod metrics;
 mod node;
 mod observation;
 mod plan;
@@ -239,6 +240,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     );
     match cli.command {
         Command::Quota(args) => quota_command(&ledger, &args, cli.json)?,
+        Command::Metrics(args) => metrics_command(&ledger, &args, cli.json)?,
         Command::Repo(cli::RepoCommand::List) => {
             repo_command(&observation::ipc::Client::at(&ledger.dir), cli.json)?;
         }
@@ -583,6 +585,18 @@ fn legacy_continue(ledger: &Ledger, shell: &System, ask: Ask, json: bool) -> Res
     let sent = continuation::legacy(ledger, shell, &ask.target, &ask.kind, &text, now_ms())?;
     print(json, &sent, || sent.line())?;
     Ok(())
+}
+
+/// The metrics command reads this host only; the portal aggregates peers.
+fn metrics_command(ledger: &Ledger, args: &cli::MetricsArgs, json: bool) -> Result<()> {
+    let options = metrics::Options::parse(
+        &args.window,
+        &args.group,
+        &args.run_group,
+        args.tool.as_deref(),
+    )?;
+    let report = metrics::local(ledger, &options)?;
+    print(json, &report, || metrics::report::render(&report))
 }
 
 /// The quota command: this host's share of the fleet's capacity.

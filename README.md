@@ -111,6 +111,8 @@ Both commands close their server after the interaction ends.
 dogsled serve                     # local measurements every 10 seconds
 dogsled serve --interval 20        # change the interval, in seconds
 dogsled serve --once               # publish and run each action lane once
+dogsled metrics --window week     # local tool calls, owner waits, and runs
+dogsled metrics --json            # local metrics report for fleet aggregation
 dogsled status                    # hosts, agents, and reservations
 dogsled status --json
 dogsled status --line              # one line for the tab row

@@ -7,6 +7,7 @@ pub mod assets;
 pub mod board;
 pub mod guard;
 pub mod inbox;
+mod metrics;
 pub mod oneshot;
 mod peer_stream;
 pub mod producer;
@@ -244,6 +245,7 @@ fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(activity::router())
         .merge(settings::router())
+        .merge(metrics::router())
         .merge(producer::router().with_state(producer::Producer::portal(
             &state.web.dir,
             state.stop.clone(),
