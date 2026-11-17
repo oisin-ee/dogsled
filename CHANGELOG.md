@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.38.0](https://github.com/oisin-ee/dogsled/compare/v0.37.3...v0.38.0) (2026-11-17)
+
+
+### Features
+
+* **metrics:** index transcripts and report fleet metrics ([88389c2](https://github.com/oisin-ee/dogsled/commit/88389c2e7a50726ae77c01b5566c4ee72ce048f0))
+* **metrics:** index transcripts and report fleet metrics ([aed76e8](https://github.com/oisin-ee/dogsled/commit/aed76e880a4282facca07c3458a7952342aab643))
+* **portal-types:** metrics plan and report wire types ([62c7222](https://github.com/oisin-ee/dogsled/commit/62c7222c19afb06c3c2d0710e60a2e8e3ebb621e))
+* **portal-types:** metrics report wire types ([4d32e5e](https://github.com/oisin-ee/dogsled/commit/4d32e5e6633794202f000b3726e3928f8ab741c5))
+
+
+### Bug Fixes
+
+* **lifecycle:** bound command capture and report lead ownership ([#352](https://github.com/oisin-ee/dogsled/issues/352)) ([02eac9f](https://github.com/oisin-ee/dogsled/commit/02eac9fb54c7f32682abbd5ce29456df6af92f2d))
+* **metrics:** name peer hosts by their label ([df137ce](https://github.com/oisin-ee/dogsled/commit/df137ce78461a25660d6030f333d76c708a0dfb1))
+* **portal-types:** ten histogram buckets per decade ([61fb5c2](https://github.com/oisin-ee/dogsled/commit/61fb5c20aced5e78e4c8ff0c1e66de701cce98d5))
+* **serve:** own Pi's interviews and plan reviews on every host ([e1a09f0](https://github.com/oisin-ee/dogsled/commit/e1a09f0460cce8578dd42fa7bad8402d7fb86bcd))
+* **skill:** keep land.md to the checks the global rules require ([1e1ce05](https://github.com/oisin-ee/dogsled/commit/1e1ce05221fb057673bac4606808d1b54782d8d9))
+* **skill:** keep land.md to the checks the global rules require ([02d3b75](https://github.com/oisin-ee/dogsled/commit/02d3b7524bae4c8be17844c7a4a8f7176ea5b419))
+* **ssh:** retain safe response decode diagnostics ([#357](https://github.com/oisin-ee/dogsled/issues/357)) ([051e2b5](https://github.com/oisin-ee/dogsled/commit/051e2b532852e05304d76abe2065d292bfc096aa))
+* **temp:** own fixture state and sweep orphaned scratch ([#350](https://github.com/oisin-ee/dogsled/issues/350)) ([de3d31c](https://github.com/oisin-ee/dogsled/commit/de3d31cd6fc0003b5c15a0b886005d32c8f823e2))
+
 ## [0.37.3](https://github.com/oisin-ee/dogsled/compare/v0.37.2...v0.37.3) (2026-11-17)
 
 
