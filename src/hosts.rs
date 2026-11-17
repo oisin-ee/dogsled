@@ -660,11 +660,17 @@ impl<'a> Fleet<'a> {
             }
             .with_diagnostic(diagnostic));
         }
-        serde_json::from_str(&out.stdout).map_err(|_| {
+        serde_json::from_str(&out.stdout).map_err(|error| {
+            // Error text can quote peer values. Only structural parser metadata and
+            // the compile-time response type may reach ordinary errors and records.
+            let expected: String = std::any::type_name::<T>().chars().take(128).collect();
+            record_ssh_detail(&host.label, &format!("response decode: {error}"));
             Error::Parse {
                 origin: format!("{} host {operation:?}", host.label),
-                detail: "response is not valid for this operation; untrusted detail withheld"
-                    .into(),
+                detail: format!(
+                    "JSON {:?} at line {}, column {}; {} bytes; expected {expected}; exit {}; untrusted detail withheld",
+                    error.classify(), error.line(), error.column(), out.stdout.len(), out.status,
+                ),
             }
             .with_diagnostic(crate::diagnostic::Diagnostic::remote(
                 None,
@@ -1069,6 +1075,44 @@ mod tests {
         assert!(diagnostic.status.is_none());
         assert!(!error.to_string().contains("TASK_SECRET"));
         assert!(!format!("{error:?}").contains("TASK_SECRET"));
+    }
+
+    #[test]
+    fn malformed_peer_response_keeps_safe_decode_context() {
+        let host = Host {
+            id: "peer".into(),
+            label: "peer".into(),
+            target: Some("peer".into()),
+        };
+        for (stdout, category) in [
+            ("", "Eof"),
+            ("SECRET_BANNER", "Syntax"),
+            (r#"{"results":"SECRET_VALUE"}"#, "Data"),
+            (
+                r#"{"results":[],"failures":[],"SECRET_FIELD":null} trailing"#,
+                "Syntax",
+            ),
+        ] {
+            let out = crate::shell::Output {
+                status: 0,
+                stdout: stdout.into(),
+                stderr: "SECRET_STDERR".into(),
+            };
+            let error =
+                Fleet::parse_remote::<crate::cleanup::Applied>(&host, &["prune".into()], &out)
+                    .unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains(&format!("JSON {category}")), "{text}");
+            assert!(text.contains("line ") && text.contains("column "), "{text}");
+            assert!(text.contains(&format!("{} bytes", stdout.len())), "{text}");
+            assert!(
+                text.contains("cleanup::Applied") && text.contains("exit 0"),
+                "{text}"
+            );
+            assert!(!text.contains("SECRET"), "{text}");
+            assert!(!format!("{error:?}").contains("SECRET"));
+            assert!(text.len() < 512, "{text}");
+        }
     }
 
     fn debug_dir() -> std::path::PathBuf {
