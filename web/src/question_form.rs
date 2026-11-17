@@ -51,15 +51,20 @@ type Values = Signal<BTreeMap<String, Value>>;
 pub fn QuestionForm(question: Pending, on_done: EventHandler<String>) -> Element {
     let mut now = use_signal(clock_ms);
     use_interval(Duration::from_secs(2), move |()| now.set(clock_ms()));
+    let elapsed_ms = now().saturating_sub(question.created_ms);
+    keyed_form(question, elapsed_ms, on_done)
+}
 
-    rsx! {
-        AskForm {
-            key: "{question.id}",
-            elapsed_ms: now().saturating_sub(question.created_ms),
-            pending: question,
-            on_done,
-        }
-    }
+/// The form of one question. Each question owns its answers and its sending state, so a
+/// different question mounts a fresh form.
+pub(crate) fn keyed_form(
+    question: Pending,
+    elapsed_ms: u64,
+    on_done: EventHandler<String>,
+) -> Element {
+    crate::keyed(rsx! {
+        AskForm { key: "{question.id}", elapsed_ms, pending: question, on_done }
+    })
 }
 
 /// What the portal did with an answer.

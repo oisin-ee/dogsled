@@ -17,6 +17,9 @@ pub fn view(
 ) -> BoardView {
     // Portal joins use pane identity, not the CLI promise that the pane can be opened.
     let mut board = board.clone();
+    // Unattached resource holds are diagnostics for the CLI board and doctor. The portal
+    // never shows them, and across a fleet they were most of every portal event.
+    board.rows.retain(|row| row.kind != HOLD);
     for row in &mut board.rows {
         if row.state == "closed"
             && let Some(item) = items.iter().find(|item| item.id == row.id)
@@ -30,6 +33,9 @@ pub fn view(
         generated_ms,
     }
 }
+
+/// The board row kind of a resource hold that belongs to no work row.
+const HOLD: &str = "hold";
 
 /// Group the rows by repository.
 ///
@@ -324,6 +330,24 @@ mod tests {
         assert_eq!(groups[0].todos.len(), 0);
         assert_eq!(groups[1].repository, None);
         assert_eq!(groups[1].todos[0].pane, "pane-gone");
+    }
+
+    #[test]
+    fn the_portal_board_omits_unattached_resource_holds() {
+        let mut hold = row("job-validity/r-1", None, None);
+        hold.kind = HOLD.into();
+        let board = board::Board {
+            hosts: Vec::new(),
+            rows: vec![row("a", Some("pane-a"), None), hold],
+        };
+        let view = view(&board, &[], &[], 7);
+        let names: Vec<&str> = view
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.rows)
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(names, ["a"], "hold rows stay out of the portal");
     }
 
     #[test]

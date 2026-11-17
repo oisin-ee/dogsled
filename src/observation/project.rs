@@ -512,6 +512,20 @@ fn sidebar_views(
 
 fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option<Vec<AgentView>> {
     let mut agents = local.agents.clone()?;
+    // Each host publishes how far its launch for a pane got, so a reader can tell a launched
+    // worker from a lead even when no ledger row names the pane.
+    let launches = reports
+        .iter()
+        .find(|report| report.host.is_local())
+        .and_then(|report| report.probe.as_ref())
+        .map(|probe| probe.agent_panes.as_slice())
+        .unwrap_or_default();
+    for agent in &mut agents {
+        agent.launch = launches
+            .iter()
+            .find(|launched| launched.pane == agent.pane)
+            .and_then(|launched| launched.launch_progress.clone());
+    }
     for report in reports.iter().filter(|report| !report.host.is_local()) {
         if let Some(probe) = &report.probe {
             agents.extend(probe.agent_panes.iter().map(|agent| AgentView {
@@ -528,6 +542,7 @@ fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option
                 cwd: agent.cwd.clone(),
                 repository: agent.repository.clone(),
                 blocked: None,
+                launch: agent.launch_progress.clone(),
             }));
         }
     }

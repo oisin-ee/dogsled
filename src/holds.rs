@@ -429,6 +429,23 @@ fn text<'a>(value: &'a Value, path: &str) -> &'a str {
 
 type Owners = BTreeMap<String, (String, String)>;
 
+/// An item belongs to its owner pane. A lead has no owner: its request validity belongs to
+/// the lead's own pane. A lead still allocating has no pane yet, so its validity stays
+/// unattributed.
+fn item_and_lead_owners(ledger: &Ledger, host: &str, owners: &mut Owners) -> Result<()> {
+    for item in crate::items::list(ledger)? {
+        owners
+            .entry(item.id)
+            .or_insert_with(|| (item.owner_pane, host.into()));
+    }
+    for lead in crate::lead_store::list(ledger)? {
+        if let Some(pane) = lead.pane {
+            owners.entry(lead.id).or_insert((pane, host.into()));
+        }
+    }
+    Ok(())
+}
+
 fn owner_panes<'a>(
     ledger: &Ledger,
     host: &str,
@@ -468,11 +485,7 @@ fn owner_panes<'a>(
             );
         }
     }
-    for item in crate::items::list(ledger)? {
-        owners
-            .entry(item.id)
-            .or_insert_with(|| (item.owner_pane, host.into()));
-    }
+    item_and_lead_owners(ledger, host, &mut owners)?;
     for id in crate::host_store::landing(ledger)?.keys() {
         if !owners.contains_key(id)
             && let Some(custody) = crate::custody::get(ledger, id)?

@@ -66,8 +66,11 @@ pub(crate) fn exists_in(tx: &Transaction<'_>, id: &str) -> Result<bool> {
 
 pub(crate) fn insert(ledger: &Ledger, record: &Record) -> Result<()> {
     crate::jobs::validate_id(&record.id)?;
-    if record.name != format!("lead-{}", record.id) {
-        return Err(Error::Invalid("lead name must be lead-<request-id>".into()));
+    if !crate::leads::valid_name(&record.name) {
+        return Err(Error::Invalid(format!(
+            "lead name {} is not a Herdr agent name",
+            record.name
+        )));
     }
     store::write(ledger, |tx| {
         if exists_in(tx, &record.id)? {

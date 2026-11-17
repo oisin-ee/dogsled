@@ -801,6 +801,14 @@ fn reasoning_and_call_lines_accept_the_exact_byte_bounds_and_reject_overflow() {
         panic!("snapshot")
     };
     state.reasoning = None;
+    state.phase = LivePhase::Compacting;
+    assert!(
+        validate_publication(&body).is_ok(),
+        "a compaction runs with no tool open"
+    );
+    let ProducerPayload::Snapshot { state } = &mut body.payload else {
+        panic!("snapshot")
+    };
     state.phase = LivePhase::ToolRunning;
     state.active_tools.push(ActiveTool {
         call_id: "call".into(),

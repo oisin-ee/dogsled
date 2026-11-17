@@ -137,8 +137,7 @@ impl From<Failure> for crate::error::Error {
     }
 }
 
-/// A request ID short enough that `lead-<id>` is a Herdr agent name: at most 32 characters
-/// of `[a-z0-9_-]`, starting with a letter.
+/// A short request ID of `[a-z0-9-]`, starting with a letter.
 pub(crate) fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -164,18 +163,68 @@ fn base36(mut value: u64) -> String {
     String::from_utf8(digits).unwrap_or_default()
 }
 
-fn agent_name(id: &str) -> crate::error::Result<String> {
-    let name = format!("lead-{id}");
-    if name.len() > 32
-        || !name
+/// Herdr agent names are at most this many bytes of `[a-z0-9_-]`.
+const NAME_LIMIT: usize = 32;
+/// Room kept at the end of a name for a `-<n>` suffix that makes it unique.
+const SUFFIX_ROOM: usize = 3;
+/// Prompt words that say nothing about a lead's task.
+const FILLER: [&str; 30] = [
+    "a", "an", "and", "are", "as", "at", "be", "can", "could", "do", "for", "from", "hi", "i",
+    "in", "is", "it", "let", "lets", "me", "my", "of", "on", "or", "please", "the", "this", "to",
+    "we", "you",
+];
+/// A lead name never looks like a managed unit's generated `u-` name.
+const UNIT_PREFIX: &str = "u-";
+
+/// Whether `name` is a Herdr agent name.
+pub(crate) fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= NAME_LIMIT
+        && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-    {
-        return Err(crate::error::Error::Invalid(format!(
-            "{name} is not a Herdr agent name"
-        )));
+}
+
+/// Lowercase ASCII words of `text`.
+fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+/// A readable Herdr agent name: the repository, then the first words of the prompt, such as
+/// `zoomies-fix-login-redirect`. A name that `taken` reports gets the next free `-<n>`.
+fn readable_name(
+    repo: &str,
+    prompt: &str,
+    taken: &dyn Fn(&str) -> bool,
+) -> Result<String, Failure> {
+    let repository = repo.rsplit('/').next().unwrap_or(repo);
+    let mut base = words(repository).collect::<Vec<_>>().join("-");
+    if base.is_empty() || base.starts_with(UNIT_PREFIX) {
+        base.insert_str(0, if base.is_empty() { "lead" } else { "lead-" });
     }
-    Ok(name)
+    base.truncate(NAME_LIMIT - SUFFIX_ROOM);
+    for word in words(prompt)
+        .filter(|word| !FILLER.contains(&word.as_str()))
+        .take(3)
+    {
+        if base.len() + 1 + word.len() > NAME_LIMIT - SUFFIX_ROOM {
+            break;
+        }
+        base.push('-');
+        base.push_str(&word);
+    }
+    let base = base.trim_end_matches('-').to_owned();
+    std::iter::once(base.clone())
+        .chain((2..100).map(|n| format!("{base}-{n}")))
+        .find(|name| valid_name(name) && !taken(name))
+        .ok_or_else(|| {
+            failure(
+                FailureKind::Invalid,
+                crate::error::Error::Invalid(format!("no free Herdr agent name for {base}")),
+            )
+        })
 }
 
 /// Start one ownerless Pi lead on the roomiest reachable fleet host.
@@ -210,7 +259,7 @@ fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<St
         discovered = crate::herdr_socket::Client::discover().map_err(unavailable)?;
         &discovered
     };
-    herdr.agent_list().map_err(unavailable)?;
+    let agents = herdr.agent_list().map_err(unavailable)?;
     let context = &CreateContext {
         herdr: Some(herdr),
         ..*context
@@ -218,7 +267,12 @@ fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<St
     let repository = checkout::ensure(context, &delivery.repo)
         .map_err(|error| failure(FailureKind::Launch, error))?;
     let id = delivery.id.clone();
-    let name = agent_name(&id).map_err(|error| failure(FailureKind::Invalid, error))?;
+    let leads = crate::lead_store::list(context.ledger).map_err(unavailable)?;
+    // The store keeps every lead's name unique, closed leads included.
+    let name = readable_name(&delivery.repo, &delivery.prompt, &|name| {
+        agents.iter().any(|agent| agent["name"] == name)
+            || leads.iter().any(|lead| lead.name == name)
+    })?;
     let validity = delivery.validity;
     let now = crate::ledger::now_ms();
     let mut record = Record {
@@ -328,6 +382,8 @@ fn launch(
         "pi",
         "--pane",
         &pane,
+        "--timeout",
+        crate::launch::START_TIMEOUT_MS,
     ]
     .map(str::to_owned)
     .to_vec();
@@ -371,13 +427,18 @@ pub(crate) fn on_pane(
         .find(|lead| protects_pane(lead, pane, terminal)))
 }
 
-/// The open lead an explicit command names, by its generated name or its pane.
+/// The open lead an explicit command names: by its name, its pane, or `lead-<id>`. The
+/// alias is stable, and it was the name of every lead started before readable names.
 pub(crate) fn resolve_local(
     ledger: &crate::ledger::Ledger,
     target: &str,
 ) -> crate::error::Result<Option<Record>> {
+    let id = target.strip_prefix("lead-");
     Ok(crate::lead_store::list(ledger)?.into_iter().find(|lead| {
-        lead.closed_ms.is_none() && (lead.name == target || lead.pane.as_deref() == Some(target))
+        lead.closed_ms.is_none()
+            && (lead.name == target
+                || lead.pane.as_deref() == Some(target)
+                || id == Some(lead.id.as_str()))
     }))
 }
 

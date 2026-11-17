@@ -46,7 +46,7 @@ fn a_profile_sets_the_exact_pi_argv_and_the_task_is_an_argument_or_a_file() {
     assert_eq!(
         line,
         format!(
-            "agent start rev --kind pi --pane w2:p1 -- --name rev --model alias/sol --thinking medium --append-system-prompt {} --append-system-prompt {contract} @{task}",
+            "agent start rev --kind pi --pane w2:p1 --timeout 120000 -- --name rev --model alias/sol --thinking medium --append-system-prompt {} --append-system-prompt {contract} @{task}",
             prompt.display()
         )
     );
@@ -191,7 +191,7 @@ fn a_multiline_task_goes_through_a_file() {
     assert_eq!(
         line,
         format!(
-            "agent start multi --kind pi --pane w2:p1 -- --name multi --append-system-prompt {contract} @{task}"
+            "agent start multi --kind pi --pane w2:p1 --timeout 120000 -- --name multi --append-system-prompt {contract} @{task}"
         )
     );
     assert_eq!(fs::read_to_string(task).unwrap(), "Line one.\nLine two.\n");

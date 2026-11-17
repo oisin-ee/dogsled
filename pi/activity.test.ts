@@ -102,6 +102,27 @@ test("agent_end is not settlement; interrupted settlement clears tools and block
   assert.equal(phase(r.reduce({ type: "agent_start" })), "working");
 });
 
+test("compaction is its own phase until it ends, fails, or a run starts", () => {
+  const r = new ActivityReducer(true);
+  r.reduce({ type: "agent_start" });
+  r.reduce({ type: "agent_end" });
+  assert.deepEqual(r.reduce({ type: "compaction", running: true }), {
+    kind: "snapshot",
+    state: { phase: "compacting", active_tools: [] },
+  });
+  assert.equal(phase(r.reduce({ type: "compaction", running: false })), "working");
+  r.reduce({ type: "compaction", running: true });
+  assert.equal(phase(r.reduce({ type: "settled" })), "idle");
+  r.reduce({ type: "compaction", running: true });
+  assert.equal(phase(r.reduce({ type: "agent_start" })), "working");
+  const resyncing = new ActivityReducer(false);
+  assert.equal(phase(resyncing.reduce({ type: "compaction", running: true })), "compacting");
+  assert.deepEqual(resyncing.reduce({ type: "compaction", running: false }), {
+    kind: "unavailable",
+    reason: "resyncing",
+  });
+});
+
 test("startup while busy stays resyncing until verified settlement", () => {
   const r = new ActivityReducer(false);
   for (const event of [

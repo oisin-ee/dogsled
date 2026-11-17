@@ -94,9 +94,10 @@ pub fn AgentView(
     lead: Option<crate::board::NavigationRow>,
     inbox: Vec<crate::app::InboxItem>,
 ) -> Element {
-    rsx! {
+    // Every session hook reads its own agent, so another agent mounts a fresh session.
+    crate::keyed(rsx! {
         AgentSession { key: "{host}:{pane}", host, pane, review, question, agent_count, lead, inbox }
-    }
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,7 +257,7 @@ fn AgentSession(
             }
             match result {
                 Ok(value) => {
-                    settings.set(Some(value));
+                    settings.set(value);
                     settings_load_error.set(None);
                 }
                 Err(error) => {
@@ -431,8 +432,16 @@ fn AgentSession(
                         detail_session.set(Some(event.session.clone()));
                     }
                     revisions.clone_from(&event.revisions);
+                    let refresh_settings = settings_due(
+                        latest_event.peek().as_ref(),
+                        &event,
+                        &parts,
+                        session_changed,
+                    );
                     latest_event.set(Some(event));
-                    settings_trigger += 1;
+                    if refresh_settings {
+                        settings_trigger += 1;
+                    }
                     if parts.conversation {
                         conversation_trigger += 1;
                     }
@@ -550,7 +559,7 @@ fn AgentSession(
         .collect();
     let files_count = crate::files::path_count(files.read().as_ref())
         .map_or_else(String::new, |paths| paths.to_string());
-    let worker_count = worker_rows.len();
+    let worker_count = crate::workers::active_count(&worker_rows);
     let working_count = crate::workers::working_count(&worker_rows);
     let todo_count: usize = todos
         .iter()
@@ -875,6 +884,20 @@ struct ChangedParts {
     conversation: bool,
     screen: bool,
     files: bool,
+}
+
+/// Pi settings change with the session, or when a model or thinking change lands in the
+/// transcript. A working turn rewrites the transcript constantly, so those changes wait
+/// for its state change instead of reading settings again on every streamed event.
+fn settings_due(
+    previous: Option<&wire::AgentEvent>,
+    event: &wire::AgentEvent,
+    parts: &ChangedParts,
+    session_changed: bool,
+) -> bool {
+    session_changed
+        || previous.is_none_or(|previous| previous.state != event.state)
+        || (parts.conversation && event.state.as_deref() != Some("working"))
 }
 
 fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
@@ -1493,6 +1516,7 @@ fn activity_label(
             wire::LivePhase::Working => "Working…".into(),
             wire::LivePhase::Thinking => "Thinking…".into(),
             wire::LivePhase::Responding => "Responding…".into(),
+            wire::LivePhase::Compacting => "Auto-compacting…".into(),
             wire::LivePhase::ToolRunning => {
                 let names = state
                     .active_tools
@@ -1860,6 +1884,7 @@ mod tests {
             cwd: None,
             repository: None,
             blocked: None,
+            launch: None,
         }
     }
 
@@ -2046,6 +2071,38 @@ mod tests {
             screen,
             files,
         }
+    }
+
+    #[test]
+    fn settings_are_read_on_session_or_state_changes_not_every_working_event() {
+        let working = event(4, 8, "working");
+        let changed = parts(true, false, false);
+        let unchanged = parts(false, false, false);
+        assert!(
+            settings_due(None, &working, &unchanged, false),
+            "first event"
+        );
+        assert!(
+            settings_due(Some(&working), &working, &unchanged, true),
+            "new session"
+        );
+        assert!(
+            !settings_due(Some(&working), &working, &changed, false),
+            "a streamed transcript change while working"
+        );
+        let idle = event(5, 8, "idle");
+        assert!(
+            settings_due(Some(&working), &idle, &unchanged, false),
+            "turn ended"
+        );
+        assert!(
+            settings_due(Some(&idle), &idle, &changed, false),
+            "a model change at the prompt lands in the transcript"
+        );
+        assert!(
+            !settings_due(Some(&idle), &idle, &unchanged, false),
+            "nothing changed"
+        );
     }
 
     #[test]
@@ -2318,6 +2375,7 @@ mod tests {
             cwd: None,
             repository: None,
             blocked: None,
+            launch: None,
         };
         assert!(!is_blocked(&agent));
         agent.blocked = Some(BlockedPrompt {
