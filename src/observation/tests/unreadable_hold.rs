@@ -51,11 +51,10 @@ fn lead_validity_is_owned_by_its_pane_and_publishes_no_gap() {
     let node = crate::node::Node::new(&shell, &ledger, &policy, "/home");
     let validity = crate::jobs::issue_unowned_validity(&ledger, "lead-request").unwrap();
     let now = validity.created_ms;
-    crate::lead_store::insert(&ledger, &lead("lead-request", None, validity)).unwrap();
     let mut collector = collect::Collector::default();
     let allocating = collector.collect(&node, now);
     allocating.sample.unwrap();
-    // Before the lead has a pane nothing proves its owner, which stays a reported gap.
+    // Without a matching lead record, validity still has no proved owner.
     assert_eq!(
         allocating
             .input
@@ -66,12 +65,30 @@ fn lead_validity_is_owned_by_its_pane_and_publishes_no_gap() {
         ["holds/job-validity/lead-request"]
     );
 
+    // An exact lead record proves that the absent parent is intentional, even
+    // during allocation. Keep its validity without inventing a pane or releasing it.
+    let mut recorded = lead("lead-request", None, validity);
+    recorded.phase = crate::leads::Phase::Recorded;
+    crate::lead_store::insert(&ledger, &recorded).unwrap();
+    let recorded = collector.collect(&node, now + 1);
+    recorded.sample.unwrap();
+    assert_eq!(recorded.input.gaps, []);
+    let retained = &recorded.input.local["host"]["holds"][0];
+    assert_eq!(retained["code"], "lead_validity");
+    assert_eq!(retained["resource"], "job-validity/lead-request");
+    assert!(retained["owner_pane"].is_null());
+    assert_eq!(
+        crate::jobs::request_validity(&ledger, "lead-request").unwrap(),
+        Some(validity)
+    );
+
     crate::lead_store::update(&ledger, "lead-request", |saved| {
         saved.pane = Some("w1:p1".into());
+        saved.phase = crate::leads::Phase::Ready;
         Ok(())
     })
     .unwrap();
-    let ready = collector.collect(&node, now + 1);
+    let ready = collector.collect(&node, now + 2);
     ready.sample.unwrap();
     assert_eq!(ready.input.gaps, []);
     let holds: Vec<crate::holds::Hold> =
