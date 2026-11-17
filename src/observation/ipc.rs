@@ -156,6 +156,8 @@ pub(crate) struct Server {
         super::live_activity::ActivityFeed,
     )>,
     dirty: Option<crate::service::wake::Dirty>,
+    /// Pi's producer endpoint, answered beside the observation socket.
+    producer: Option<(PathBuf, tokio_util::sync::CancellationToken)>,
 }
 
 impl Server {
@@ -180,6 +182,7 @@ impl Server {
             details: super::details::Interests::default(),
             activity: None,
             dirty: None,
+            producer: None,
         })
     }
 
@@ -240,6 +243,30 @@ impl Server {
                 return Err(error);
             }
         };
+        // Every host answers Pi's producer routes here, whether or not it runs the portal.
+        let producer = crate::web::producer::bind(&self.state).and_then(|(socket, listener)| {
+            let _entered = runtime.enter();
+            match tokio::net::UnixListener::from_std(listener) {
+                Ok(listener) => Ok((socket, listener)),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&socket);
+                    Err(error.into())
+                }
+            }
+        });
+        let (producer_path, producer_listener) = match producer {
+            Ok(ready) => ready,
+            Err(error) => {
+                let _ = std::fs::remove_file(path);
+                return Err(error);
+            }
+        };
+        let producer_stop = tokio_util::sync::CancellationToken::new();
+        runtime.spawn(crate::web::producer::run(
+            producer_listener,
+            crate::web::producer::Producer::serve(&self.state, producer_stop.clone()),
+        ));
+        self.producer = Some((producer_path, producer_stop));
         let (stop, stopped) = oneshot::channel();
         let interests = self.interests.clone();
         let dirty = self.dirty.clone();
@@ -261,9 +288,15 @@ impl Drop for Server {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
+        if let Some((_, stop)) = &self.producer {
+            stop.cancel();
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
             let _ = std::fs::remove_file(&self.path);
+        }
+        if let Some((path, _)) = self.producer.take() {
+            let _ = std::fs::remove_file(path);
         }
         // Release copies inherited by a concurrent fork before exec, as Ledger's lock does.
         let _ = self.lock.unlock();

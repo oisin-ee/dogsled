@@ -9,6 +9,7 @@ pub mod guard;
 pub mod inbox;
 pub mod oneshot;
 mod peer_stream;
+pub mod producer;
 pub mod questions;
 pub mod reviews;
 pub mod settings;
@@ -243,6 +244,11 @@ fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(activity::router())
         .merge(settings::router())
+        .merge(producer::router().with_state(producer::Producer::portal(
+            &state.web.dir,
+            state.stop.clone(),
+            state.token.clone(),
+        )))
         .merge(inbox::routes())
         .merge(questions::routes())
         .merge(reviews::routes())
