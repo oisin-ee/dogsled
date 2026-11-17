@@ -20,6 +20,8 @@ pub struct Reservation {
 pub struct Ledger {
     pub dir: PathBuf,
     pub budget: crate::budget::Budget,
+    #[cfg(test)]
+    pub(crate) temporary: Option<std::sync::Arc<crate::temporary::Directory>>,
 }
 
 /// An owned kernel lock. Explicit unlock also releases copies inherited at fork.
@@ -72,6 +74,19 @@ impl Ledger {
         Self {
             dir,
             budget: crate::budget::Budget::default(),
+            #[cfg(test)]
+            temporary: None,
+        }
+    }
+
+    /// Test state belongs to the last ledger clone, including child ledgers.
+    #[cfg(test)]
+    pub(crate) fn temporary() -> Self {
+        let owner = std::sync::Arc::new(crate::temporary::Directory::new().unwrap());
+        Self {
+            dir: owner.path().join("state"),
+            budget: crate::budget::Budget::default(),
+            temporary: Some(owner),
         }
     }
 
@@ -79,6 +94,8 @@ impl Ledger {
         Self {
             dir: self.dir.join(name),
             budget: self.budget,
+            #[cfg(test)]
+            temporary: self.temporary.clone(),
         }
     }
 
@@ -140,8 +157,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn temporary_state_lives_until_the_last_child_ledger() {
+        let ledger = Ledger::temporary();
+        let child = ledger.child("child");
+        let path = ledger.dir.clone();
+        fs::create_dir_all(&child.dir).unwrap();
+        drop(ledger);
+        assert!(path.exists());
+        drop(child);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn reservation_expiry_uses_injected_time() {
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         crate::job_store::put_reservations(
             &ledger,
             &[Reservation {
@@ -159,7 +188,7 @@ mod tests {
 
     #[test]
     fn lock_serializes_concurrent_writers_without_lost_updates() {
-        let ledger = Ledger::new(std::env::temp_dir().join(new_id()));
+        let ledger = Ledger::temporary();
         let barrier = std::sync::Barrier::new(8);
         let counter = AtomicU64::new(0);
         std::thread::scope(|scope| {

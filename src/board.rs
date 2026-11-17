@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn board_todo_intake_roundtrips_sections_and_drops_closed_or_invalid_panes() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let host = host("local", "local", vec![agent("w1:p1", "pi", "working")]);
         let snapshot = crate::node::Snapshot {
             sampled_ms: NOW,
@@ -1414,7 +1414,7 @@ mod tests {
         Dock {
             shell,
             socket,
-            ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+            ledger: Ledger::temporary(),
         }
     }
 
@@ -1703,7 +1703,7 @@ mod tests {
                 panic!("a child pane must not reach Herdr: {args:?}")
             }
         }
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         crate::launch_store::put_progress_value(&ledger, "r-1-1-0",
                 &serde_json::json!({
                     "request":{"id":"r-1-1-0","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
@@ -1744,7 +1744,7 @@ mod tests {
                 })
             }
         }
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         crate::launch_store::put_progress_value(&ledger, "child", &serde_json::json!({
             "request":{"id":"child","action":{"type":"agent","kind":"pi","name":"worker","message":"go"},
                 "host":"local","cwd":"/checkout","owner":"w1:p1"},
@@ -1990,7 +1990,7 @@ mod tests {
 
     #[test]
     fn portal_metadata_maps_owner_title_and_latest_inbox_state() -> Result<()> {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let status = status(
             vec![host("local", "local", vec![agent("worker", "pi", "idle")])],
             vec![item("child", "local", "worker")],

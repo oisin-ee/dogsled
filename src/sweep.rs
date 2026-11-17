@@ -800,7 +800,7 @@ mod liveness_tests {
 
     #[test]
     fn old_running_snapshot_closes_done_child_but_free_service_lock_skips_it() {
-        let ledger = crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = crate::ledger::Ledger::temporary();
         let shell = Fake::new();
         let policy = crate::config::Policy::default();
         let fleet = Fleet::cold(

@@ -793,7 +793,7 @@ mod tests {
             policy.quota.management_url = Some("https://proxy.example".into());
             Self {
                 shell: HttpShell::new(),
-                ledger: Ledger::new(std::env::temp_dir().join(crate::ledger::new_id())),
+                ledger: Ledger::temporary(),
                 policy,
                 peers: vec![peer_argv()],
             }

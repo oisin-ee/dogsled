@@ -1366,7 +1366,7 @@ mod tests {
 
     #[test]
     fn spent_close_budget_records_the_original_failure() {
-        let mut ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let mut ledger = Ledger::temporary();
         let item = crate::items::Item {
             id: "child".into(),
             host: "local".into(),

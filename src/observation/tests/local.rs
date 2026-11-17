@@ -14,7 +14,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         std::fs::create_dir_all(&ledger.dir).unwrap();
         let transcript = ledger.dir.join("session.jsonl");
         std::fs::write(

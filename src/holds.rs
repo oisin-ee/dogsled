@@ -1354,7 +1354,7 @@ mod tests {
     }
 
     fn fixture() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
 
     /// The bytes of every file under `path`, after this thread closes its cached store

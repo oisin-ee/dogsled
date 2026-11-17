@@ -660,7 +660,7 @@ mod tests {
     use crate::work::Action;
 
     fn ledger() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
 
     #[test]

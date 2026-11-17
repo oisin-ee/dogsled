@@ -759,7 +759,7 @@ mod tests {
     /// The local handoff keeps the native `done` provenance on the item it writes.
     #[test]
     fn the_local_handoff_keeps_the_native_done_provenance() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let item = Item {
             id: "launch".into(),
             host: "local".into(),

@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::ffi::OsStrExt as _;
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -587,19 +587,11 @@ impl Snapshot {
 
 /// Owns all disposable indexes, outside the checkout. The live index is never opened for writing.
 #[derive(Debug)]
-struct Scratch(PathBuf);
+struct Scratch(crate::temporary::Directory);
 
 impl Scratch {
     fn new() -> Result<Self> {
-        let dir = std::env::temp_dir().join(format!("dogsled-recovery-{}", random_id()?));
-        fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        Ok(Self(dir))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        Ok(Self(crate::temporary::Directory::new()?))
     }
 }
 
@@ -3017,11 +3009,7 @@ mod tests {
     #[test]
     fn unsupported_socket_refuses() {
         // Keep the socket inside the checkout without macOS's long $TMPDIR.
-        let scratch = Scratch(Path::new("/tmp").join(format!("ds-{}", random_id().unwrap())));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&scratch.0)
-            .unwrap();
+        let scratch = Scratch::new().unwrap();
         let repo = Repo::new_in(scratch, true);
         let socket = repo.path.join("socket");
         assert!(socket.as_os_str().as_bytes().len() < 100);

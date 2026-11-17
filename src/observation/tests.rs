@@ -21,11 +21,13 @@ mod publication {
         server: Option<ipc::Server>,
         client: ipc::Client,
         state: PathBuf,
+        _directory: crate::temporary::Directory,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let state = std::env::temp_dir().join(crate::ledger::new_id());
+            let directory = crate::temporary::Directory::new().unwrap();
+            let state = directory.path().to_owned();
             let publisher = Publisher::new().unwrap();
             let mut server = ipc::Server::new(&state).unwrap();
             server.bind(publisher.subscribe()).unwrap();
@@ -35,6 +37,7 @@ mod publication {
                 server: Some(server),
                 client,
                 state,
+                _directory: directory,
             }
         }
 

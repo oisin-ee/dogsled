@@ -1175,7 +1175,7 @@ mod tests {
             "version",
             "contradiction",
         ] {
-            let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+            let ledger = Ledger::temporary();
             let original = request();
             seed(&ledger, &original);
             let mut changed = original.clone();
@@ -1233,7 +1233,7 @@ mod tests {
 
     #[test]
     fn absent_claim_needs_an_existing_matching_fence() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let request = request();
         seed(&ledger, &request);
         crate::preparation_store::put_pending(&ledger, &[]).unwrap();
@@ -1262,7 +1262,7 @@ mod tests {
 
     #[test]
     fn disposition_releases_only_the_matching_preparation_claim() {
-        let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+        let ledger = Ledger::temporary();
         let request = request();
         crate::preparation_store::receipts::put(
             &ledger,

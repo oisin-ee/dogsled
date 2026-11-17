@@ -5,6 +5,9 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "../src/temporary.rs"]
+mod temporary;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -219,9 +222,8 @@ fn release_triple() -> Option<&'static str> {
 
 /// A plugin checkout and a local release of `version` holding a stub binary.
 /// `corrupt` publishes a checksum that does not match the archive.
-fn fetch_fixture(name: &str, triple: &str, corrupt: bool) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("dogsled-fetch-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+fn fetch_fixture(triple: &str, corrupt: bool) -> (temporary::Directory, PathBuf, PathBuf) {
+    let dir = temporary::Directory::new().unwrap();
     let plugin = dir.join("plugin-root");
     std::fs::create_dir_all(plugin.join("plugin")).unwrap();
     std::fs::copy(
@@ -269,7 +271,8 @@ fn fetch_fixture(name: &str, triple: &str, corrupt: bool) -> (PathBuf, PathBuf) 
         format!("{digest} *{archive}\n"),
     )
     .unwrap();
-    (plugin, dir.join("releases"))
+    let releases = dir.join("releases");
+    (dir, plugin, releases)
 }
 
 /// First match for `name` on the test process's own PATH.
@@ -328,7 +331,7 @@ fn herdr_build_installs_the_verified_release_of_the_manifest_version() {
     let Some(triple) = release_triple() else {
         return;
     };
-    let (plugin, releases) = fetch_fixture("ok", triple, false);
+    let (_directory, plugin, releases) = fetch_fixture(triple, false);
     let output = run_fetch(&plugin, &releases);
     assert!(output.status.success(), "{output:?}");
     let installed = Command::new(plugin.join("bin/dogsled")).output().unwrap();
@@ -343,7 +346,7 @@ fn herdr_build_refuses_a_release_whose_checksum_does_not_match() {
     let Some(triple) = release_triple() else {
         return;
     };
-    let (plugin, releases) = fetch_fixture("bad-sum", triple, true);
+    let (_directory, plugin, releases) = fetch_fixture(triple, true);
     let output = run_fetch(&plugin, &releases);
     assert!(!output.status.success());
     assert!(

@@ -287,8 +287,7 @@ mod tests {
 
     impl Fixture {
         fn new(script: String) -> Self {
-            let web =
-                crate::ledger::Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+            let web = crate::ledger::Ledger::temporary();
             std::fs::create_dir_all(&web.dir).unwrap();
             let config_path = web.dir.join("config.toml");
             std::fs::write(&config_path, "remote_command = ['dogsled']\n").unwrap();

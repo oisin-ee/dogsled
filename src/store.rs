@@ -331,7 +331,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn ledger() -> Ledger {
-        Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()))
+        Ledger::temporary()
     }
 
     fn item(id: &str) -> Item {

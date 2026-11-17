@@ -2754,7 +2754,7 @@ mod release_retry_tests {
 
     impl Rig {
         fn new() -> Self {
-            let ledger = Ledger::new(std::env::temp_dir().join(crate::ledger::new_id()));
+            let ledger = Ledger::temporary();
             let shell = Fake::new();
             let policy = crate::config::Policy::default();
             let peer = Host {
