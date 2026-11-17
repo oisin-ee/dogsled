@@ -1,0 +1,6264 @@
+{
+  "fileName": "metrics",
+  "look": {
+    "theme": "internet-blue",
+    "paper": "subtle",
+    "font": "hand",
+    "grid": true
+  },
+  "nodes": {
+    "a-label": {
+      "seed": 1,
+      "id": "a-label",
+      "w": 1440,
+      "h": 28,
+      "fontSize": 18,
+      "text": "A · One page · Metrics, week · 1440×900",
+      "x": 0,
+      "y": -40,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-frame": {
+      "seed": 1,
+      "id": "a-frame",
+      "w": 1440,
+      "h": 900,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "a-top": {
+      "seed": 1,
+      "id": "a-top",
+      "w": 1440,
+      "h": 44,
+      "shape": "rect",
+      "fill": "light",
+      "x": 0,
+      "y": 0,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-brand": {
+      "seed": 1,
+      "id": "a-brand",
+      "w": 120,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Dogsled",
+      "x": 16,
+      "y": 12,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-h0": {
+      "seed": 1,
+      "id": "a-h0",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "local",
+      "x": 900,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-hp0": {
+      "seed": 1,
+      "id": "a-hp0",
+      "w": 56,
+      "h": 10,
+      "x": 978,
+      "y": 17,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "progress",
+      "props": {
+        "value": 46,
+        "showValue": false
+      }
+    },
+    "a-hl0": {
+      "seed": 1,
+      "id": "a-hl0",
+      "w": 38,
+      "h": 19,
+      "fontSize": 12,
+      "text": "6/12",
+      "x": 1038,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-h1": {
+      "seed": 1,
+      "id": "a-h1",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "netcup",
+      "x": 1080,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-hp1": {
+      "seed": 1,
+      "id": "a-hp1",
+      "w": 56,
+      "h": 10,
+      "x": 1158,
+      "y": 17,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "progress",
+      "props": {
+        "value": 34,
+        "showValue": false
+      }
+    },
+    "a-hl1": {
+      "seed": 1,
+      "id": "a-hl1",
+      "w": 38,
+      "h": 19,
+      "fontSize": 12,
+      "text": "5/16",
+      "x": 1218,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-h2": {
+      "seed": 1,
+      "id": "a-h2",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "momokaya-2",
+      "x": 1260,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-hp2": {
+      "seed": 1,
+      "id": "a-hp2",
+      "w": 56,
+      "h": 10,
+      "x": 1338,
+      "y": 17,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "progress",
+      "props": {
+        "value": 0,
+        "showValue": false
+      }
+    },
+    "a-hl2": {
+      "seed": 1,
+      "id": "a-hl2",
+      "w": 38,
+      "h": 19,
+      "fontSize": 12,
+      "text": "—/7",
+      "x": 1398,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-inbox": {
+      "seed": 1,
+      "id": "a-inbox",
+      "w": 280,
+      "h": 856,
+      "shape": "rect",
+      "fill": "light",
+      "x": 0,
+      "y": 44,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-inbox-t": {
+      "seed": 1,
+      "id": "a-inbox-t",
+      "w": 180,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Waiting on you",
+      "x": 16,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-inbox-n": {
+      "seed": 1,
+      "id": "a-inbox-n",
+      "w": 36,
+      "h": 24,
+      "x": 228,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "2",
+        "variant": "filled",
+        "dot": false
+      }
+    },
+    "a-inbox-0": {
+      "seed": 1,
+      "id": "a-inbox-0",
+      "w": 248,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Question · Metrics: first slice",
+      "x": 16,
+      "y": 112,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-inbox-sep0": {
+      "seed": 1,
+      "id": "a-inbox-sep0",
+      "w": 280,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 0,
+      "y": 152,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-inbox-1": {
+      "seed": 1,
+      "id": "a-inbox-1",
+      "w": 248,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Blocked · M2: portal Metrics page",
+      "x": 16,
+      "y": 168,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-inbox-sep1": {
+      "seed": 1,
+      "id": "a-inbox-sep1",
+      "w": 280,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 0,
+      "y": 208,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-agents": {
+      "seed": 1,
+      "id": "a-agents",
+      "w": 248,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 280,
+      "y": 44,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-agents-t": {
+      "seed": 1,
+      "id": "a-agents-t",
+      "w": 70,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Agents",
+      "x": 296,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-metrics-btn": {
+      "seed": 1,
+      "id": "a-metrics-btn",
+      "w": 90,
+      "h": 32,
+      "x": 368,
+      "y": 54,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "button",
+      "props": {
+        "label": "Metrics",
+        "variant": "filled",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      }
+    },
+    "a-new-btn": {
+      "seed": 1,
+      "id": "a-new-btn",
+      "w": 56,
+      "h": 32,
+      "x": 464,
+      "y": 54,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "button",
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      }
+    },
+    "a-agent-0": {
+      "seed": 1,
+      "id": "a-agent-0",
+      "w": 220,
+      "h": 20,
+      "fontSize": 13,
+      "text": "dogsled · metrics lead",
+      "x": 296,
+      "y": 112,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-agent-1": {
+      "seed": 1,
+      "id": "a-agent-1",
+      "w": 220,
+      "h": 20,
+      "fontSize": 13,
+      "text": "rondo · onboarding",
+      "x": 296,
+      "y": 152,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-agent-2": {
+      "seed": 1,
+      "id": "a-agent-2",
+      "w": 220,
+      "h": 20,
+      "fontSize": 13,
+      "text": "squig-kit · export",
+      "x": 296,
+      "y": 192,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-title": {
+      "seed": 1,
+      "id": "a-title",
+      "w": 200,
+      "h": 32,
+      "fontSize": 20,
+      "text": "Metrics",
+      "x": 552,
+      "y": 60,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-window": {
+      "seed": 1,
+      "id": "a-window",
+      "w": 240,
+      "h": 32,
+      "x": 1176,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "button-group",
+      "props": {
+        "labels": "Day, Week, Month",
+        "active": 2
+      }
+    },
+    "a-cov0": {
+      "seed": 1,
+      "id": "a-cov0",
+      "w": 170,
+      "h": 24,
+      "x": 552,
+      "y": 100,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "local · indexed 1 min ago",
+        "variant": "outline",
+        "dot": true
+      }
+    },
+    "a-cov1": {
+      "seed": 1,
+      "id": "a-cov1",
+      "w": 180,
+      "h": 24,
+      "x": 730,
+      "y": 100,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "netcup · indexed 2 min ago",
+        "variant": "outline",
+        "dot": true
+      }
+    },
+    "a-cov2": {
+      "seed": 1,
+      "id": "a-cov2",
+      "w": 220,
+      "h": 24,
+      "x": 918,
+      "y": 100,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "momokaya-2 · unreachable: timeout",
+        "variant": "filled",
+        "dot": true
+      }
+    },
+    "a-tools-t": {
+      "seed": 1,
+      "id": "a-tools-t",
+      "w": 200,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Tool calls",
+      "x": 552,
+      "y": 140,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-s": {
+      "seed": 1,
+      "id": "a-tools-s",
+      "w": 360,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Showing 10 of 31 tools · sorted by calls",
+      "x": 552,
+      "y": 162,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-group": {
+      "seed": 1,
+      "id": "a-group",
+      "w": 170,
+      "h": 40,
+      "x": 1036,
+      "y": 140,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "select",
+      "props": {
+        "label": "Group",
+        "showLabel": false,
+        "value": "Group: tool"
+      }
+    },
+    "a-filter": {
+      "seed": 1,
+      "id": "a-filter",
+      "w": 200,
+      "h": 36,
+      "x": 1216,
+      "y": 142,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "search-input",
+      "props": {
+        "placeholder": "Filter tools",
+        "shape": "rounded",
+        "clear": false,
+        "kbd": true
+      }
+    },
+    "a-tools-hd0": {
+      "seed": 1,
+      "id": "a-tools-hd0",
+      "w": 284,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Tool",
+      "x": 560,
+      "y": 194,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-hd1": {
+      "seed": 1,
+      "id": "a-tools-hd1",
+      "w": 84,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Calls ▾",
+      "x": 860,
+      "y": 194,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-hd2": {
+      "seed": 1,
+      "id": "a-tools-hd2",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Error %",
+      "x": 960,
+      "y": 194,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-hd3": {
+      "seed": 1,
+      "id": "a-tools-hd3",
+      "w": 100,
+      "h": 19,
+      "fontSize": 12,
+      "text": "p50",
+      "x": 1052,
+      "y": 194,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-hd4": {
+      "seed": 1,
+      "id": "a-tools-hd4",
+      "w": 100,
+      "h": 19,
+      "fontSize": 12,
+      "text": "p95",
+      "x": 1168,
+      "y": 194,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-hd5": {
+      "seed": 1,
+      "id": "a-tools-hd5",
+      "w": 124,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Max",
+      "x": 1284,
+      "y": 194,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-tools-hdsep": {
+      "seed": 1,
+      "id": "a-tools-hdsep",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 216,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "a-tools-r0c0": {
+      "seed": 1,
+      "id": "a-tools-r0c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "bash",
+      "x": 560,
+      "y": 220,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r0c1": {
+      "seed": 1,
+      "id": "a-tools-r0c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "13,095",
+      "x": 860,
+      "y": 220,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r0c2": {
+      "seed": 1,
+      "id": "a-tools-r0c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4.5%",
+      "x": 960,
+      "y": 220,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r0c3": {
+      "seed": 1,
+      "id": "a-tools-r0c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.8 s",
+      "x": 1052,
+      "y": 220,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r0c4": {
+      "seed": 1,
+      "id": "a-tools-r0c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "12.7 s",
+      "x": 1168,
+      "y": 220,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r0c5": {
+      "seed": 1,
+      "id": "a-tools-r0c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "19 min",
+      "x": 1284,
+      "y": 220,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep0": {
+      "seed": 1,
+      "id": "a-tools-sep0",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 242,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r1c0": {
+      "seed": 1,
+      "id": "a-tools-r1c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "codemode",
+      "x": 560,
+      "y": 246,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r1c1": {
+      "seed": 1,
+      "id": "a-tools-r1c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "2,470",
+      "x": 860,
+      "y": 246,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r1c2": {
+      "seed": 1,
+      "id": "a-tools-r1c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "3.5%",
+      "x": 960,
+      "y": 246,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r1c3": {
+      "seed": 1,
+      "id": "a-tools-r1c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.9 s",
+      "x": 1052,
+      "y": 246,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r1c4": {
+      "seed": 1,
+      "id": "a-tools-r1c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9.8 s",
+      "x": 1168,
+      "y": 246,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r1c5": {
+      "seed": 1,
+      "id": "a-tools-r1c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "10 min",
+      "x": 1284,
+      "y": 246,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep1": {
+      "seed": 1,
+      "id": "a-tools-sep1",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 268,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r2c0": {
+      "seed": 1,
+      "id": "a-tools-r2c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "hypa_shell",
+      "x": 560,
+      "y": 272,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r2c1": {
+      "seed": 1,
+      "id": "a-tools-r2c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "2,464",
+      "x": 860,
+      "y": 272,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r2c2": {
+      "seed": 1,
+      "id": "a-tools-r2c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1.1%",
+      "x": 960,
+      "y": 272,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r2c3": {
+      "seed": 1,
+      "id": "a-tools-r2c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.5 s",
+      "x": 1052,
+      "y": 272,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r2c4": {
+      "seed": 1,
+      "id": "a-tools-r2c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "26.8 s",
+      "x": 1168,
+      "y": 272,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r2c5": {
+      "seed": 1,
+      "id": "a-tools-r2c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "16 min",
+      "x": 1284,
+      "y": 272,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep2": {
+      "seed": 1,
+      "id": "a-tools-sep2",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 294,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r3c0": {
+      "seed": 1,
+      "id": "a-tools-r3c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "read",
+      "x": 560,
+      "y": 298,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r3c1": {
+      "seed": 1,
+      "id": "a-tools-r3c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1,912",
+      "x": 860,
+      "y": 298,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r3c2": {
+      "seed": 1,
+      "id": "a-tools-r3c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.8%",
+      "x": 960,
+      "y": 298,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r3c3": {
+      "seed": 1,
+      "id": "a-tools-r3c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "< 0.1 s",
+      "x": 1052,
+      "y": 298,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r3c4": {
+      "seed": 1,
+      "id": "a-tools-r3c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.8 s",
+      "x": 1168,
+      "y": 298,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r3c5": {
+      "seed": 1,
+      "id": "a-tools-r3c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "53 s",
+      "x": 1284,
+      "y": 298,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep3": {
+      "seed": 1,
+      "id": "a-tools-sep3",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 320,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r4c0": {
+      "seed": 1,
+      "id": "a-tools-r4c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "todo",
+      "x": 560,
+      "y": 324,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r4c1": {
+      "seed": 1,
+      "id": "a-tools-r4c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "906",
+      "x": 860,
+      "y": 324,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r4c2": {
+      "seed": 1,
+      "id": "a-tools-r4c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9.5%",
+      "x": 960,
+      "y": 324,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r4c3": {
+      "seed": 1,
+      "id": "a-tools-r4c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.1 s",
+      "x": 1052,
+      "y": 324,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r4c4": {
+      "seed": 1,
+      "id": "a-tools-r4c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "3.9 s",
+      "x": 1168,
+      "y": 324,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r4c5": {
+      "seed": 1,
+      "id": "a-tools-r4c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "62 s",
+      "x": 1284,
+      "y": 324,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep4": {
+      "seed": 1,
+      "id": "a-tools-sep4",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 346,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r5c0": {
+      "seed": 1,
+      "id": "a-tools-r5c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "mcp__dogsled__send",
+      "x": 560,
+      "y": 350,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r5c1": {
+      "seed": 1,
+      "id": "a-tools-r5c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "575",
+      "x": 860,
+      "y": 350,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r5c2": {
+      "seed": 1,
+      "id": "a-tools-r5c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "8.0%",
+      "x": 960,
+      "y": 350,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r5c3": {
+      "seed": 1,
+      "id": "a-tools-r5c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.9 s",
+      "x": 1052,
+      "y": 350,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r5c4": {
+      "seed": 1,
+      "id": "a-tools-r5c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "6.0 s",
+      "x": 1168,
+      "y": 350,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r5c5": {
+      "seed": 1,
+      "id": "a-tools-r5c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "10 min",
+      "x": 1284,
+      "y": 350,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep5": {
+      "seed": 1,
+      "id": "a-tools-sep5",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 372,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r6c0": {
+      "seed": 1,
+      "id": "a-tools-r6c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "mcp__dogsled__spawn",
+      "x": 560,
+      "y": 376,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r6c1": {
+      "seed": 1,
+      "id": "a-tools-r6c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "247",
+      "x": 860,
+      "y": 376,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r6c2": {
+      "seed": 1,
+      "id": "a-tools-r6c2",
+      "w": 64,
+      "h": 22,
+      "x": 972,
+      "y": 374,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "19.8%",
+        "variant": "filled",
+        "dot": false
+      }
+    },
+    "a-tools-r6c3": {
+      "seed": 1,
+      "id": "a-tools-r6c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.5 s",
+      "x": 1052,
+      "y": 376,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r6c4": {
+      "seed": 1,
+      "id": "a-tools-r6c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "5.6 s",
+      "x": 1168,
+      "y": 376,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r6c5": {
+      "seed": 1,
+      "id": "a-tools-r6c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "3.9 min",
+      "x": 1284,
+      "y": 376,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep6": {
+      "seed": 1,
+      "id": "a-tools-sep6",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 398,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r7c0": {
+      "seed": 1,
+      "id": "a-tools-r7c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "mcp__dogsled__close",
+      "x": 560,
+      "y": 402,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r7c1": {
+      "seed": 1,
+      "id": "a-tools-r7c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "195",
+      "x": 860,
+      "y": 402,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r7c2": {
+      "seed": 1,
+      "id": "a-tools-r7c2",
+      "w": 64,
+      "h": 22,
+      "x": 972,
+      "y": 400,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "73.3%",
+        "variant": "filled",
+        "dot": false
+      }
+    },
+    "a-tools-r7c3": {
+      "seed": 1,
+      "id": "a-tools-r7c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "34 s",
+      "x": 1052,
+      "y": 402,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r7c4": {
+      "seed": 1,
+      "id": "a-tools-r7c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "60 s",
+      "x": 1168,
+      "y": 402,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r7c5": {
+      "seed": 1,
+      "id": "a-tools-r7c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "17 min",
+      "x": 1284,
+      "y": 402,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep7": {
+      "seed": 1,
+      "id": "a-tools-sep7",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 424,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r8c0": {
+      "seed": 1,
+      "id": "a-tools-r8c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "interview",
+      "x": 560,
+      "y": 428,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r8c1": {
+      "seed": 1,
+      "id": "a-tools-r8c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "109",
+      "x": 860,
+      "y": 428,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r8c2": {
+      "seed": 1,
+      "id": "a-tools-r8c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1.8%",
+      "x": 960,
+      "y": 428,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r8c3": {
+      "seed": 1,
+      "id": "a-tools-r8c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "< 0.1 s",
+      "x": 1052,
+      "y": 428,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r8c4": {
+      "seed": 1,
+      "id": "a-tools-r8c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "36 min",
+      "x": 1168,
+      "y": 428,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r8c5": {
+      "seed": 1,
+      "id": "a-tools-r8c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "15.6 h",
+      "x": 1284,
+      "y": 428,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep8": {
+      "seed": 1,
+      "id": "a-tools-sep8",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 450,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-tools-r9c0": {
+      "seed": 1,
+      "id": "a-tools-r9c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "ci_watch",
+      "x": 560,
+      "y": 454,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r9c1": {
+      "seed": 1,
+      "id": "a-tools-r9c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "101",
+      "x": 860,
+      "y": 454,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r9c2": {
+      "seed": 1,
+      "id": "a-tools-r9c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "5.0%",
+      "x": 960,
+      "y": 454,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r9c3": {
+      "seed": 1,
+      "id": "a-tools-r9c3",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "5.7 min",
+      "x": 1052,
+      "y": 454,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r9c4": {
+      "seed": 1,
+      "id": "a-tools-r9c4",
+      "w": 100,
+      "h": 20,
+      "fontSize": 13,
+      "text": "30 min",
+      "x": 1168,
+      "y": 454,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-r9c5": {
+      "seed": 1,
+      "id": "a-tools-r9c5",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "48 min",
+      "x": 1284,
+      "y": 454,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-tools-sep9": {
+      "seed": 1,
+      "id": "a-tools-sep9",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 476,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-wait-t": {
+      "seed": 1,
+      "id": "a-wait-t",
+      "w": 300,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Waiting on you",
+      "x": 552,
+      "y": 494,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-wait-hd0": {
+      "seed": 1,
+      "id": "a-wait-hd0",
+      "w": 284,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Kind",
+      "x": 560,
+      "y": 524,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-wait-hd1": {
+      "seed": 1,
+      "id": "a-wait-hd1",
+      "w": 124,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Answered",
+      "x": 860,
+      "y": 524,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-wait-hd2": {
+      "seed": 1,
+      "id": "a-wait-hd2",
+      "w": 124,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Open",
+      "x": 1000,
+      "y": 524,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-wait-hd3": {
+      "seed": 1,
+      "id": "a-wait-hd3",
+      "w": 124,
+      "h": 19,
+      "fontSize": 12,
+      "text": "p50",
+      "x": 1140,
+      "y": 524,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-wait-hd4": {
+      "seed": 1,
+      "id": "a-wait-hd4",
+      "w": 128,
+      "h": 19,
+      "fontSize": 12,
+      "text": "p95",
+      "x": 1280,
+      "y": 524,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-wait-hdsep": {
+      "seed": 1,
+      "id": "a-wait-hdsep",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 546,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "a-wait-r0c0": {
+      "seed": 1,
+      "id": "a-wait-r0c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Questions",
+      "x": 560,
+      "y": 550,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r0c1": {
+      "seed": 1,
+      "id": "a-wait-r0c1",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "109",
+      "x": 860,
+      "y": 550,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r0c2": {
+      "seed": 1,
+      "id": "a-wait-r0c2",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1",
+      "x": 1000,
+      "y": 550,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r0c3": {
+      "seed": 1,
+      "id": "a-wait-r0c3",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4 min",
+      "x": 1140,
+      "y": 550,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r0c4": {
+      "seed": 1,
+      "id": "a-wait-r0c4",
+      "w": 128,
+      "h": 20,
+      "fontSize": 13,
+      "text": "36 min",
+      "x": 1280,
+      "y": 550,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-sep0": {
+      "seed": 1,
+      "id": "a-wait-sep0",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 572,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-wait-r1c0": {
+      "seed": 1,
+      "id": "a-wait-r1c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Plan reviews",
+      "x": 560,
+      "y": 576,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r1c1": {
+      "seed": 1,
+      "id": "a-wait-r1c1",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "6",
+      "x": 860,
+      "y": 576,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r1c2": {
+      "seed": 1,
+      "id": "a-wait-r1c2",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0",
+      "x": 1000,
+      "y": 576,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r1c3": {
+      "seed": 1,
+      "id": "a-wait-r1c3",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "11 min",
+      "x": 1140,
+      "y": 576,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r1c4": {
+      "seed": 1,
+      "id": "a-wait-r1c4",
+      "w": 128,
+      "h": 20,
+      "fontSize": 13,
+      "text": "52 min",
+      "x": 1280,
+      "y": 576,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-sep1": {
+      "seed": 1,
+      "id": "a-wait-sep1",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 598,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-wait-r2c0": {
+      "seed": 1,
+      "id": "a-wait-r2c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Ask",
+      "x": 560,
+      "y": 602,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r2c1": {
+      "seed": 1,
+      "id": "a-wait-r2c1",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "14",
+      "x": 860,
+      "y": 602,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r2c2": {
+      "seed": 1,
+      "id": "a-wait-r2c2",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0",
+      "x": 1000,
+      "y": 602,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r2c3": {
+      "seed": 1,
+      "id": "a-wait-r2c3",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "7 min",
+      "x": 1140,
+      "y": 602,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r2c4": {
+      "seed": 1,
+      "id": "a-wait-r2c4",
+      "w": 128,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1.4 h",
+      "x": 1280,
+      "y": 602,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-sep2": {
+      "seed": 1,
+      "id": "a-wait-sep2",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 624,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-wait-r3c0": {
+      "seed": 1,
+      "id": "a-wait-r3c0",
+      "w": 284,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Blocked",
+      "x": 560,
+      "y": 628,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r3c1": {
+      "seed": 1,
+      "id": "a-wait-r3c1",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9",
+      "x": 860,
+      "y": 628,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r3c2": {
+      "seed": 1,
+      "id": "a-wait-r3c2",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1",
+      "x": 1000,
+      "y": 628,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r3c3": {
+      "seed": 1,
+      "id": "a-wait-r3c3",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "18 min",
+      "x": 1140,
+      "y": 628,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-r3c4": {
+      "seed": 1,
+      "id": "a-wait-r3c4",
+      "w": 128,
+      "h": 20,
+      "fontSize": 13,
+      "text": "2.1 h",
+      "x": 1280,
+      "y": 628,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-wait-sep3": {
+      "seed": 1,
+      "id": "a-wait-sep3",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 650,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-runs-t": {
+      "seed": 1,
+      "id": "a-runs-t",
+      "w": 300,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Agent runs",
+      "x": 552,
+      "y": 668,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-rgroup": {
+      "seed": 1,
+      "id": "a-rgroup",
+      "w": 200,
+      "h": 36,
+      "x": 1216,
+      "y": 662,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "type": "component",
+      "kind": "select",
+      "props": {
+        "label": "Group",
+        "showLabel": false,
+        "value": "Group: profile"
+      }
+    },
+    "a-runs-hd0": {
+      "seed": 1,
+      "id": "a-runs-hd0",
+      "w": 124,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Profile",
+      "x": 560,
+      "y": 706,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-runs-hd1": {
+      "seed": 1,
+      "id": "a-runs-hd1",
+      "w": 214,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Done · ask · blocked · closed",
+      "x": 700,
+      "y": 706,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-runs-hd2": {
+      "seed": 1,
+      "id": "a-runs-hd2",
+      "w": 114,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Running",
+      "x": 930,
+      "y": 706,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-runs-hd3": {
+      "seed": 1,
+      "id": "a-runs-hd3",
+      "w": 102,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Queue p50",
+      "x": 1060,
+      "y": 706,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-runs-hd4": {
+      "seed": 1,
+      "id": "a-runs-hd4",
+      "w": 102,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Spawn p50",
+      "x": 1178,
+      "y": 706,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-runs-hd5": {
+      "seed": 1,
+      "id": "a-runs-hd5",
+      "w": 112,
+      "h": 19,
+      "fontSize": 12,
+      "text": "To done p50",
+      "x": 1296,
+      "y": 706,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "a-runs-hdsep": {
+      "seed": 1,
+      "id": "a-runs-hdsep",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 728,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "a-runs-r0c0": {
+      "seed": 1,
+      "id": "a-runs-r0c0",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "writer",
+      "x": 560,
+      "y": 732,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r0c1": {
+      "seed": 1,
+      "id": "a-runs-r0c1",
+      "w": 214,
+      "h": 20,
+      "fontSize": 13,
+      "text": "41 · 3 · 5 · 2",
+      "x": 700,
+      "y": 732,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r0c2": {
+      "seed": 1,
+      "id": "a-runs-r0c2",
+      "w": 114,
+      "h": 20,
+      "fontSize": 13,
+      "text": "2",
+      "x": 930,
+      "y": 732,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r0c3": {
+      "seed": 1,
+      "id": "a-runs-r0c3",
+      "w": 102,
+      "h": 20,
+      "fontSize": 13,
+      "text": "40 s",
+      "x": 1060,
+      "y": 732,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r0c4": {
+      "seed": 1,
+      "id": "a-runs-r0c4",
+      "w": 102,
+      "h": 20,
+      "fontSize": 13,
+      "text": "18 s",
+      "x": 1178,
+      "y": 732,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r0c5": {
+      "seed": 1,
+      "id": "a-runs-r0c5",
+      "w": 112,
+      "h": 20,
+      "fontSize": 13,
+      "text": "52 min",
+      "x": 1296,
+      "y": 732,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-sep0": {
+      "seed": 1,
+      "id": "a-runs-sep0",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 754,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "a-runs-r1c0": {
+      "seed": 1,
+      "id": "a-runs-r1c0",
+      "w": 124,
+      "h": 20,
+      "fontSize": 13,
+      "text": "research",
+      "x": 560,
+      "y": 758,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r1c1": {
+      "seed": 1,
+      "id": "a-runs-r1c1",
+      "w": 214,
+      "h": 20,
+      "fontSize": 13,
+      "text": "12 · 0 · 1 · 0",
+      "x": 700,
+      "y": 758,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r1c2": {
+      "seed": 1,
+      "id": "a-runs-r1c2",
+      "w": 114,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0",
+      "x": 930,
+      "y": 758,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r1c3": {
+      "seed": 1,
+      "id": "a-runs-r1c3",
+      "w": 102,
+      "h": 20,
+      "fontSize": 13,
+      "text": "15 s",
+      "x": 1060,
+      "y": 758,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r1c4": {
+      "seed": 1,
+      "id": "a-runs-r1c4",
+      "w": 102,
+      "h": 20,
+      "fontSize": 13,
+      "text": "16 s",
+      "x": 1178,
+      "y": 758,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-r1c5": {
+      "seed": 1,
+      "id": "a-runs-r1c5",
+      "w": 112,
+      "h": 20,
+      "fontSize": 13,
+      "text": "21 min",
+      "x": 1296,
+      "y": 758,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "a-runs-sep1": {
+      "seed": 1,
+      "id": "a-runs-sep1",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 552,
+      "y": 780,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "a"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-label": {
+      "seed": 1,
+      "id": "b-label",
+      "w": 1440,
+      "h": 28,
+      "fontSize": 18,
+      "text": "B · Tabs, grouped by repository · 1440×900",
+      "x": 1600,
+      "y": -40,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-frame": {
+      "seed": 1,
+      "id": "b-frame",
+      "w": 1440,
+      "h": 900,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 1600,
+      "y": 0,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "b-top": {
+      "seed": 1,
+      "id": "b-top",
+      "w": 1440,
+      "h": 44,
+      "shape": "rect",
+      "fill": "light",
+      "x": 1600,
+      "y": 0,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-brand": {
+      "seed": 1,
+      "id": "b-brand",
+      "w": 120,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Dogsled",
+      "x": 1616,
+      "y": 12,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-h0": {
+      "seed": 1,
+      "id": "b-h0",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "local",
+      "x": 2500,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-hp0": {
+      "seed": 1,
+      "id": "b-hp0",
+      "w": 56,
+      "h": 10,
+      "x": 2578,
+      "y": 17,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "progress",
+      "props": {
+        "value": 46,
+        "showValue": false
+      }
+    },
+    "b-hl0": {
+      "seed": 1,
+      "id": "b-hl0",
+      "w": 38,
+      "h": 19,
+      "fontSize": 12,
+      "text": "6/12",
+      "x": 2638,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-h1": {
+      "seed": 1,
+      "id": "b-h1",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "netcup",
+      "x": 2680,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-hp1": {
+      "seed": 1,
+      "id": "b-hp1",
+      "w": 56,
+      "h": 10,
+      "x": 2758,
+      "y": 17,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "progress",
+      "props": {
+        "value": 34,
+        "showValue": false
+      }
+    },
+    "b-hl1": {
+      "seed": 1,
+      "id": "b-hl1",
+      "w": 38,
+      "h": 19,
+      "fontSize": 12,
+      "text": "5/16",
+      "x": 2818,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-h2": {
+      "seed": 1,
+      "id": "b-h2",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "momokaya-2",
+      "x": 2860,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-hp2": {
+      "seed": 1,
+      "id": "b-hp2",
+      "w": 56,
+      "h": 10,
+      "x": 2938,
+      "y": 17,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "progress",
+      "props": {
+        "value": 0,
+        "showValue": false
+      }
+    },
+    "b-hl2": {
+      "seed": 1,
+      "id": "b-hl2",
+      "w": 38,
+      "h": 19,
+      "fontSize": 12,
+      "text": "—/7",
+      "x": 2998,
+      "y": 13,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-inbox": {
+      "seed": 1,
+      "id": "b-inbox",
+      "w": 280,
+      "h": 856,
+      "shape": "rect",
+      "fill": "light",
+      "x": 1600,
+      "y": 44,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-inbox-t": {
+      "seed": 1,
+      "id": "b-inbox-t",
+      "w": 180,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Waiting on you",
+      "x": 1616,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-inbox-n": {
+      "seed": 1,
+      "id": "b-inbox-n",
+      "w": 36,
+      "h": 24,
+      "x": 1828,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "2",
+        "variant": "filled",
+        "dot": false
+      }
+    },
+    "b-inbox-0": {
+      "seed": 1,
+      "id": "b-inbox-0",
+      "w": 248,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Question · Metrics: first slice",
+      "x": 1616,
+      "y": 112,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-inbox-sep0": {
+      "seed": 1,
+      "id": "b-inbox-sep0",
+      "w": 280,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1600,
+      "y": 152,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-inbox-1": {
+      "seed": 1,
+      "id": "b-inbox-1",
+      "w": 248,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Blocked · M2: portal Metrics page",
+      "x": 1616,
+      "y": 168,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-inbox-sep1": {
+      "seed": 1,
+      "id": "b-inbox-sep1",
+      "w": 280,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1600,
+      "y": 208,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-agents": {
+      "seed": 1,
+      "id": "b-agents",
+      "w": 248,
+      "h": 856,
+      "shape": "rect",
+      "fill": "none",
+      "x": 1880,
+      "y": 44,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-agents-t": {
+      "seed": 1,
+      "id": "b-agents-t",
+      "w": 70,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Agents",
+      "x": 1896,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-metrics-btn": {
+      "seed": 1,
+      "id": "b-metrics-btn",
+      "w": 90,
+      "h": 32,
+      "x": 1968,
+      "y": 54,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "button",
+      "props": {
+        "label": "Metrics",
+        "variant": "filled",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      }
+    },
+    "b-new-btn": {
+      "seed": 1,
+      "id": "b-new-btn",
+      "w": 56,
+      "h": 32,
+      "x": 2064,
+      "y": 54,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "button",
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      }
+    },
+    "b-agent-0": {
+      "seed": 1,
+      "id": "b-agent-0",
+      "w": 220,
+      "h": 20,
+      "fontSize": 13,
+      "text": "dogsled · metrics lead",
+      "x": 1896,
+      "y": 112,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-agent-1": {
+      "seed": 1,
+      "id": "b-agent-1",
+      "w": 220,
+      "h": 20,
+      "fontSize": 13,
+      "text": "rondo · onboarding",
+      "x": 1896,
+      "y": 152,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-agent-2": {
+      "seed": 1,
+      "id": "b-agent-2",
+      "w": 220,
+      "h": 20,
+      "fontSize": 13,
+      "text": "squig-kit · export",
+      "x": 1896,
+      "y": 192,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-title": {
+      "seed": 1,
+      "id": "b-title",
+      "w": 200,
+      "h": 32,
+      "fontSize": 20,
+      "text": "Metrics",
+      "x": 2152,
+      "y": 60,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-window": {
+      "seed": 1,
+      "id": "b-window",
+      "w": 240,
+      "h": 32,
+      "x": 2776,
+      "y": 58,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "button-group",
+      "props": {
+        "labels": "Day, Week, Month",
+        "active": 2
+      }
+    },
+    "b-tabs": {
+      "seed": 1,
+      "id": "b-tabs",
+      "w": 420,
+      "h": 36,
+      "x": 2152,
+      "y": 100,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "tabs",
+      "props": {
+        "labels": "Tool calls, Waiting on you, Agent runs",
+        "active": 1
+      }
+    },
+    "b-cov": {
+      "seed": 1,
+      "id": "b-cov",
+      "w": 268,
+      "h": 24,
+      "x": 2748,
+      "y": 106,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "2 of 3 hosts · momokaya-2 unreachable",
+        "variant": "filled",
+        "dot": true
+      }
+    },
+    "b-group": {
+      "seed": 1,
+      "id": "b-group",
+      "w": 220,
+      "h": 40,
+      "x": 2152,
+      "y": 150,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "select",
+      "props": {
+        "label": "Group",
+        "showLabel": false,
+        "value": "Group: repository"
+      }
+    },
+    "b-filter": {
+      "seed": 1,
+      "id": "b-filter",
+      "w": 220,
+      "h": 36,
+      "x": 2384,
+      "y": 152,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "search-input",
+      "props": {
+        "placeholder": "Filter tools",
+        "shape": "rounded",
+        "clear": false,
+        "kbd": true
+      }
+    },
+    "b-tools-hd0": {
+      "seed": 1,
+      "id": "b-tools-hd0",
+      "w": 324,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Tool · repository",
+      "x": 2160,
+      "y": 210,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-tools-hd1": {
+      "seed": 1,
+      "id": "b-tools-hd1",
+      "w": 84,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Calls ▾",
+      "x": 2500,
+      "y": 210,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-tools-hd2": {
+      "seed": 1,
+      "id": "b-tools-hd2",
+      "w": 76,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Error %",
+      "x": 2600,
+      "y": 210,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-tools-hd3": {
+      "seed": 1,
+      "id": "b-tools-hd3",
+      "w": 88,
+      "h": 19,
+      "fontSize": 12,
+      "text": "p50",
+      "x": 2692,
+      "y": 210,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-tools-hd4": {
+      "seed": 1,
+      "id": "b-tools-hd4",
+      "w": 88,
+      "h": 19,
+      "fontSize": 12,
+      "text": "p95",
+      "x": 2796,
+      "y": 210,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-tools-hd5": {
+      "seed": 1,
+      "id": "b-tools-hd5",
+      "w": 108,
+      "h": 19,
+      "fontSize": 12,
+      "text": "Max",
+      "x": 2900,
+      "y": 210,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "b-tools-hdsep": {
+      "seed": 1,
+      "id": "b-tools-hdsep",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 236,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "b-tools-r0c0": {
+      "seed": 1,
+      "id": "b-tools-r0c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "bash · dogsled",
+      "x": 2160,
+      "y": 240,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r0c1": {
+      "seed": 1,
+      "id": "b-tools-r0c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "6,210",
+      "x": 2500,
+      "y": 240,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r0c2": {
+      "seed": 1,
+      "id": "b-tools-r0c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "3.9%",
+      "x": 2600,
+      "y": 240,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r0c3": {
+      "seed": 1,
+      "id": "b-tools-r0c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.9 s",
+      "x": 2692,
+      "y": 240,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r0c4": {
+      "seed": 1,
+      "id": "b-tools-r0c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "14 s",
+      "x": 2796,
+      "y": 240,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r0c5": {
+      "seed": 1,
+      "id": "b-tools-r0c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "19 min",
+      "x": 2900,
+      "y": 240,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep0": {
+      "seed": 1,
+      "id": "b-tools-sep0",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 266,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r1c0": {
+      "seed": 1,
+      "id": "b-tools-r1c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "bash · rondo",
+      "x": 2160,
+      "y": 270,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r1c1": {
+      "seed": 1,
+      "id": "b-tools-r1c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4,880",
+      "x": 2500,
+      "y": 270,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r1c2": {
+      "seed": 1,
+      "id": "b-tools-r1c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "5.6%",
+      "x": 2600,
+      "y": 270,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r1c3": {
+      "seed": 1,
+      "id": "b-tools-r1c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.7 s",
+      "x": 2692,
+      "y": 270,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r1c4": {
+      "seed": 1,
+      "id": "b-tools-r1c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "11 s",
+      "x": 2796,
+      "y": 270,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r1c5": {
+      "seed": 1,
+      "id": "b-tools-r1c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "12 min",
+      "x": 2900,
+      "y": 270,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep1": {
+      "seed": 1,
+      "id": "b-tools-sep1",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 296,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r2c0": {
+      "seed": 1,
+      "id": "b-tools-r2c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "bash · unattributed",
+      "x": 2160,
+      "y": 300,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r2c1": {
+      "seed": 1,
+      "id": "b-tools-r2c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "2,005",
+      "x": 2500,
+      "y": 300,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r2c2": {
+      "seed": 1,
+      "id": "b-tools-r2c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4.1%",
+      "x": 2600,
+      "y": 300,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r2c3": {
+      "seed": 1,
+      "id": "b-tools-r2c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.6 s",
+      "x": 2692,
+      "y": 300,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r2c4": {
+      "seed": 1,
+      "id": "b-tools-r2c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9.0 s",
+      "x": 2796,
+      "y": 300,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r2c5": {
+      "seed": 1,
+      "id": "b-tools-r2c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "8 min",
+      "x": 2900,
+      "y": 300,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep2": {
+      "seed": 1,
+      "id": "b-tools-sep2",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 326,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r3c0": {
+      "seed": 1,
+      "id": "b-tools-r3c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "codemode · dogsled",
+      "x": 2160,
+      "y": 330,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r3c1": {
+      "seed": 1,
+      "id": "b-tools-r3c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1,402",
+      "x": 2500,
+      "y": 330,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r3c2": {
+      "seed": 1,
+      "id": "b-tools-r3c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "3.0%",
+      "x": 2600,
+      "y": 330,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r3c3": {
+      "seed": 1,
+      "id": "b-tools-r3c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.9 s",
+      "x": 2692,
+      "y": 330,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r3c4": {
+      "seed": 1,
+      "id": "b-tools-r3c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9.1 s",
+      "x": 2796,
+      "y": 330,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r3c5": {
+      "seed": 1,
+      "id": "b-tools-r3c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "10 min",
+      "x": 2900,
+      "y": 330,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep3": {
+      "seed": 1,
+      "id": "b-tools-sep3",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 356,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r4c0": {
+      "seed": 1,
+      "id": "b-tools-r4c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "hypa_shell · rondo",
+      "x": 2160,
+      "y": 360,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r4c1": {
+      "seed": 1,
+      "id": "b-tools-r4c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1,377",
+      "x": 2500,
+      "y": 360,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r4c2": {
+      "seed": 1,
+      "id": "b-tools-r4c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1.2%",
+      "x": 2600,
+      "y": 360,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r4c3": {
+      "seed": 1,
+      "id": "b-tools-r4c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.5 s",
+      "x": 2692,
+      "y": 360,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r4c4": {
+      "seed": 1,
+      "id": "b-tools-r4c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "31 s",
+      "x": 2796,
+      "y": 360,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r4c5": {
+      "seed": 1,
+      "id": "b-tools-r4c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "16 min",
+      "x": 2900,
+      "y": 360,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep4": {
+      "seed": 1,
+      "id": "b-tools-sep4",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 386,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r5c0": {
+      "seed": 1,
+      "id": "b-tools-r5c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "todo · dogsled",
+      "x": 2160,
+      "y": 390,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r5c1": {
+      "seed": 1,
+      "id": "b-tools-r5c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "511",
+      "x": 2500,
+      "y": 390,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r5c2": {
+      "seed": 1,
+      "id": "b-tools-r5c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "11%",
+      "x": 2600,
+      "y": 390,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r5c3": {
+      "seed": 1,
+      "id": "b-tools-r5c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.1 s",
+      "x": 2692,
+      "y": 390,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r5c4": {
+      "seed": 1,
+      "id": "b-tools-r5c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4.2 s",
+      "x": 2796,
+      "y": 390,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r5c5": {
+      "seed": 1,
+      "id": "b-tools-r5c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "62 s",
+      "x": 2900,
+      "y": 390,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep5": {
+      "seed": 1,
+      "id": "b-tools-sep5",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 416,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r6c0": {
+      "seed": 1,
+      "id": "b-tools-r6c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "mcp__dogsled__spawn · dogsled",
+      "x": 2160,
+      "y": 420,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r6c1": {
+      "seed": 1,
+      "id": "b-tools-r6c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "160",
+      "x": 2500,
+      "y": 420,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r6c2": {
+      "seed": 1,
+      "id": "b-tools-r6c2",
+      "w": 64,
+      "h": 22,
+      "x": 2612,
+      "y": 418,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "22%",
+        "variant": "filled",
+        "dot": false
+      }
+    },
+    "b-tools-r6c3": {
+      "seed": 1,
+      "id": "b-tools-r6c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "0.5 s",
+      "x": 2692,
+      "y": 420,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r6c4": {
+      "seed": 1,
+      "id": "b-tools-r6c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "6.1 s",
+      "x": 2796,
+      "y": 420,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r6c5": {
+      "seed": 1,
+      "id": "b-tools-r6c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "3.9 min",
+      "x": 2900,
+      "y": 420,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep6": {
+      "seed": 1,
+      "id": "b-tools-sep6",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 446,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r7c0": {
+      "seed": 1,
+      "id": "b-tools-r7c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "mcp__dogsled__close · dogsled",
+      "x": 2160,
+      "y": 450,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r7c1": {
+      "seed": 1,
+      "id": "b-tools-r7c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "131",
+      "x": 2500,
+      "y": 450,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r7c2": {
+      "seed": 1,
+      "id": "b-tools-r7c2",
+      "w": 64,
+      "h": 22,
+      "x": 2612,
+      "y": 448,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "type": "component",
+      "kind": "badge",
+      "props": {
+        "label": "75%",
+        "variant": "filled",
+        "dot": false
+      }
+    },
+    "b-tools-r7c3": {
+      "seed": 1,
+      "id": "b-tools-r7c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "35 s",
+      "x": 2692,
+      "y": 450,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r7c4": {
+      "seed": 1,
+      "id": "b-tools-r7c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "61 s",
+      "x": 2796,
+      "y": 450,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r7c5": {
+      "seed": 1,
+      "id": "b-tools-r7c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "17 min",
+      "x": 2900,
+      "y": 450,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep7": {
+      "seed": 1,
+      "id": "b-tools-sep7",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 476,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r8c0": {
+      "seed": 1,
+      "id": "b-tools-r8c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "ci_watch · rondo",
+      "x": 2160,
+      "y": 480,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r8c1": {
+      "seed": 1,
+      "id": "b-tools-r8c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "64",
+      "x": 2500,
+      "y": 480,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r8c2": {
+      "seed": 1,
+      "id": "b-tools-r8c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4.7%",
+      "x": 2600,
+      "y": 480,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r8c3": {
+      "seed": 1,
+      "id": "b-tools-r8c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "6.2 min",
+      "x": 2692,
+      "y": 480,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r8c4": {
+      "seed": 1,
+      "id": "b-tools-r8c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "31 min",
+      "x": 2796,
+      "y": 480,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r8c5": {
+      "seed": 1,
+      "id": "b-tools-r8c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "48 min",
+      "x": 2900,
+      "y": 480,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep8": {
+      "seed": 1,
+      "id": "b-tools-sep8",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 506,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r9c0": {
+      "seed": 1,
+      "id": "b-tools-r9c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "ci_watch · dogsled",
+      "x": 2160,
+      "y": 510,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r9c1": {
+      "seed": 1,
+      "id": "b-tools-r9c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "37",
+      "x": 2500,
+      "y": 510,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r9c2": {
+      "seed": 1,
+      "id": "b-tools-r9c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "5.4%",
+      "x": 2600,
+      "y": 510,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r9c3": {
+      "seed": 1,
+      "id": "b-tools-r9c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "4.9 min",
+      "x": 2692,
+      "y": 510,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r9c4": {
+      "seed": 1,
+      "id": "b-tools-r9c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "22 min",
+      "x": 2796,
+      "y": 510,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r9c5": {
+      "seed": 1,
+      "id": "b-tools-r9c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "40 min",
+      "x": 2900,
+      "y": 510,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep9": {
+      "seed": 1,
+      "id": "b-tools-sep9",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 536,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r10c0": {
+      "seed": 1,
+      "id": "b-tools-r10c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "interview · dogsled",
+      "x": 2160,
+      "y": 540,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r10c1": {
+      "seed": 1,
+      "id": "b-tools-r10c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "71",
+      "x": 2500,
+      "y": 540,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r10c2": {
+      "seed": 1,
+      "id": "b-tools-r10c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "1.4%",
+      "x": 2600,
+      "y": 540,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r10c3": {
+      "seed": 1,
+      "id": "b-tools-r10c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "< 0.1 s",
+      "x": 2692,
+      "y": 540,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r10c4": {
+      "seed": 1,
+      "id": "b-tools-r10c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "41 min",
+      "x": 2796,
+      "y": 540,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r10c5": {
+      "seed": 1,
+      "id": "b-tools-r10c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "15.6 h",
+      "x": 2900,
+      "y": 540,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep10": {
+      "seed": 1,
+      "id": "b-tools-sep10",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 566,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "b-tools-r11c0": {
+      "seed": 1,
+      "id": "b-tools-r11c0",
+      "w": 324,
+      "h": 20,
+      "fontSize": 13,
+      "text": "interview · rondo",
+      "x": 2160,
+      "y": 570,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "left",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r11c1": {
+      "seed": 1,
+      "id": "b-tools-r11c1",
+      "w": 84,
+      "h": 20,
+      "fontSize": 13,
+      "text": "38",
+      "x": 2500,
+      "y": 570,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r11c2": {
+      "seed": 1,
+      "id": "b-tools-r11c2",
+      "w": 76,
+      "h": 20,
+      "fontSize": 13,
+      "text": "2.6%",
+      "x": 2600,
+      "y": 570,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r11c3": {
+      "seed": 1,
+      "id": "b-tools-r11c3",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "< 0.1 s",
+      "x": 2692,
+      "y": 570,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r11c4": {
+      "seed": 1,
+      "id": "b-tools-r11c4",
+      "w": 88,
+      "h": 20,
+      "fontSize": 13,
+      "text": "28 min",
+      "x": 2796,
+      "y": 570,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-r11c5": {
+      "seed": 1,
+      "id": "b-tools-r11c5",
+      "w": 108,
+      "h": 20,
+      "fontSize": 13,
+      "text": "6.0 h",
+      "x": 2900,
+      "y": 570,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "align": "right",
+      "fixedW": true,
+      "type": "text"
+    },
+    "b-tools-sep11": {
+      "seed": 1,
+      "id": "b-tools-sep11",
+      "w": 864,
+      "h": 1,
+      "shape": "rect",
+      "fill": "none",
+      "x": 2152,
+      "y": 596,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "b"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-label": {
+      "seed": 1,
+      "id": "s-label",
+      "w": 912,
+      "h": 28,
+      "fontSize": 18,
+      "text": "States · main area only · 912 wide",
+      "x": 3200,
+      "y": -40,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "s-load": {
+      "seed": 1,
+      "id": "s-load",
+      "w": 912,
+      "h": 300,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 3200,
+      "y": 0,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "s-load-t": {
+      "seed": 1,
+      "id": "s-load-t",
+      "w": 400,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Loading",
+      "x": 3224,
+      "y": 16,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "s-sk0": {
+      "seed": 1,
+      "id": "s-sk0",
+      "w": 864,
+      "h": 20,
+      "shape": "rect",
+      "fill": "light",
+      "x": 3224,
+      "y": 56,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-sk1": {
+      "seed": 1,
+      "id": "s-sk1",
+      "w": 744,
+      "h": 20,
+      "shape": "rect",
+      "fill": "light",
+      "x": 3224,
+      "y": 92,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-sk2": {
+      "seed": 1,
+      "id": "s-sk2",
+      "w": 624,
+      "h": 20,
+      "shape": "rect",
+      "fill": "light",
+      "x": 3224,
+      "y": 128,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-sk3": {
+      "seed": 1,
+      "id": "s-sk3",
+      "w": 864,
+      "h": 20,
+      "shape": "rect",
+      "fill": "light",
+      "x": 3224,
+      "y": 164,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-sk4": {
+      "seed": 1,
+      "id": "s-sk4",
+      "w": 744,
+      "h": 20,
+      "shape": "rect",
+      "fill": "light",
+      "x": 3224,
+      "y": 200,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-sk5": {
+      "seed": 1,
+      "id": "s-sk5",
+      "w": 624,
+      "h": 20,
+      "shape": "rect",
+      "fill": "light",
+      "x": 3224,
+      "y": 236,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "light",
+      "type": "shape"
+    },
+    "s-err": {
+      "seed": 1,
+      "id": "s-err",
+      "w": 912,
+      "h": 220,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 3200,
+      "y": 340,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "s-err-t": {
+      "seed": 1,
+      "id": "s-err-t",
+      "w": 400,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Fetch failed",
+      "x": 3224,
+      "y": 356,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "s-alert": {
+      "seed": 1,
+      "id": "s-alert",
+      "w": 640,
+      "h": 68,
+      "x": 3224,
+      "y": 396,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "type": "component",
+      "kind": "alert",
+      "props": {
+        "title": "Metrics unavailable: dogsled web cannot read metrics.db",
+        "variant": "error",
+        "description": true
+      }
+    },
+    "s-retry": {
+      "seed": 1,
+      "id": "s-retry",
+      "w": 100,
+      "h": 36,
+      "x": 3224,
+      "y": 484,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "type": "component",
+      "kind": "button",
+      "props": {
+        "label": "Retry",
+        "variant": "outline",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      }
+    },
+    "s-empty": {
+      "seed": 1,
+      "id": "s-empty",
+      "w": 912,
+      "h": 220,
+      "shape": "rect",
+      "fill": "paper",
+      "x": 3200,
+      "y": 600,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "stroke": "heavy",
+      "type": "shape"
+    },
+    "s-empty-t": {
+      "seed": 1,
+      "id": "s-empty-t",
+      "w": 400,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Empty window",
+      "x": 3224,
+      "y": 616,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "s-empty-b": {
+      "seed": 1,
+      "id": "s-empty-b",
+      "w": 760,
+      "h": 22,
+      "fontSize": 14,
+      "text": "No tool calls in the last day on local or netcup. momokaya-2 is unreachable: timeout.",
+      "x": 3224,
+      "y": 660,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "fixedW": true,
+      "type": "text"
+    },
+    "s-empty-w": {
+      "seed": 1,
+      "id": "s-empty-w",
+      "w": 240,
+      "h": 32,
+      "x": 3224,
+      "y": 704,
+      "groupIds": [
+        "metrics",
+        "desktop",
+        "s"
+      ],
+      "type": "component",
+      "kind": "button-group",
+      "props": {
+        "labels": "Day, Week, Month",
+        "active": 1
+      }
+    },
+    "title": {
+      "seed": 1,
+      "id": "title",
+      "w": 2400,
+      "h": 40,
+      "fontSize": 24,
+      "text": "Metrics page — desktop (plans/metrics.md, plans/briefs/metrics-m2.md)",
+      "x": 0,
+      "y": -200,
+      "groupIds": [
+        "metrics"
+      ],
+      "fixedW": true,
+      "bold": true,
+      "type": "text"
+    },
+    "k_aHyDeq": {
+      "seed": 151450911,
+      "id": "k_aHyDeq",
+      "w": 1440,
+      "h": 63.89999999999999,
+      "fontSize": 18,
+      "text": "A · one page (recommended). Everything in one glance on the big monitor: tools, then owner wait, then runs. Error % of 15% or more is bold. Click a column header to sort. Group and filter apply to the tools table only. Tool rows are the real 7-day local sample; owner-wait and run numbers are placeholders.",
+      "type": "text",
+      "x": 0,
+      "y": 940,
+      "fixedW": true,
+      "boxed": true,
+      "boxFill": "light"
+    },
+    "eDul52E4": {
+      "seed": 1592988321,
+      "id": "eDul52E4",
+      "w": 1440,
+      "h": 63.89999999999999,
+      "fontSize": 18,
+      "text": "B · tabs. Each section gets the full height, so grouped rows (tool × repository) fit without scrolling. Trade-off: owner wait and runs are one click away, and host coverage collapses to one badge. All numbers in B are placeholders.",
+      "type": "text",
+      "x": 1600,
+      "y": 940,
+      "fixedW": true,
+      "boxed": true,
+      "boxFill": "light"
+    },
+    "UU6D_ikg": {
+      "seed": 448259226,
+      "id": "UU6D_ikg",
+      "w": 912,
+      "h": 39.6,
+      "fontSize": 18,
+      "text": "States apply to both directions. A failed host never hides silently: it shows as a filled badge with its error (PRODUCT.md principle 4).",
+      "type": "text",
+      "x": 3200,
+      "y": 860,
+      "fixedW": true,
+      "boxed": true,
+      "boxFill": "light"
+    }
+  },
+  "order": [
+    "a-label",
+    "a-frame",
+    "a-top",
+    "a-brand",
+    "a-h0",
+    "a-hp0",
+    "a-hl0",
+    "a-h1",
+    "a-hp1",
+    "a-hl1",
+    "a-h2",
+    "a-hp2",
+    "a-hl2",
+    "a-inbox",
+    "a-inbox-t",
+    "a-inbox-n",
+    "a-inbox-0",
+    "a-inbox-sep0",
+    "a-inbox-1",
+    "a-inbox-sep1",
+    "a-agents",
+    "a-agents-t",
+    "a-metrics-btn",
+    "a-new-btn",
+    "a-agent-0",
+    "a-agent-1",
+    "a-agent-2",
+    "a-title",
+    "a-window",
+    "a-cov0",
+    "a-cov1",
+    "a-cov2",
+    "a-tools-t",
+    "a-tools-s",
+    "a-group",
+    "a-filter",
+    "a-tools-hd0",
+    "a-tools-hd1",
+    "a-tools-hd2",
+    "a-tools-hd3",
+    "a-tools-hd4",
+    "a-tools-hd5",
+    "a-tools-hdsep",
+    "a-tools-r0c0",
+    "a-tools-r0c1",
+    "a-tools-r0c2",
+    "a-tools-r0c3",
+    "a-tools-r0c4",
+    "a-tools-r0c5",
+    "a-tools-sep0",
+    "a-tools-r1c0",
+    "a-tools-r1c1",
+    "a-tools-r1c2",
+    "a-tools-r1c3",
+    "a-tools-r1c4",
+    "a-tools-r1c5",
+    "a-tools-sep1",
+    "a-tools-r2c0",
+    "a-tools-r2c1",
+    "a-tools-r2c2",
+    "a-tools-r2c3",
+    "a-tools-r2c4",
+    "a-tools-r2c5",
+    "a-tools-sep2",
+    "a-tools-r3c0",
+    "a-tools-r3c1",
+    "a-tools-r3c2",
+    "a-tools-r3c3",
+    "a-tools-r3c4",
+    "a-tools-r3c5",
+    "a-tools-sep3",
+    "a-tools-r4c0",
+    "a-tools-r4c1",
+    "a-tools-r4c2",
+    "a-tools-r4c3",
+    "a-tools-r4c4",
+    "a-tools-r4c5",
+    "a-tools-sep4",
+    "a-tools-r5c0",
+    "a-tools-r5c1",
+    "a-tools-r5c2",
+    "a-tools-r5c3",
+    "a-tools-r5c4",
+    "a-tools-r5c5",
+    "a-tools-sep5",
+    "a-tools-r6c0",
+    "a-tools-r6c1",
+    "a-tools-r6c2",
+    "a-tools-r6c3",
+    "a-tools-r6c4",
+    "a-tools-r6c5",
+    "a-tools-sep6",
+    "a-tools-r7c0",
+    "a-tools-r7c1",
+    "a-tools-r7c2",
+    "a-tools-r7c3",
+    "a-tools-r7c4",
+    "a-tools-r7c5",
+    "a-tools-sep7",
+    "a-tools-r8c0",
+    "a-tools-r8c1",
+    "a-tools-r8c2",
+    "a-tools-r8c3",
+    "a-tools-r8c4",
+    "a-tools-r8c5",
+    "a-tools-sep8",
+    "a-tools-r9c0",
+    "a-tools-r9c1",
+    "a-tools-r9c2",
+    "a-tools-r9c3",
+    "a-tools-r9c4",
+    "a-tools-r9c5",
+    "a-tools-sep9",
+    "a-wait-t",
+    "a-wait-hd0",
+    "a-wait-hd1",
+    "a-wait-hd2",
+    "a-wait-hd3",
+    "a-wait-hd4",
+    "a-wait-hdsep",
+    "a-wait-r0c0",
+    "a-wait-r0c1",
+    "a-wait-r0c2",
+    "a-wait-r0c3",
+    "a-wait-r0c4",
+    "a-wait-sep0",
+    "a-wait-r1c0",
+    "a-wait-r1c1",
+    "a-wait-r1c2",
+    "a-wait-r1c3",
+    "a-wait-r1c4",
+    "a-wait-sep1",
+    "a-wait-r2c0",
+    "a-wait-r2c1",
+    "a-wait-r2c2",
+    "a-wait-r2c3",
+    "a-wait-r2c4",
+    "a-wait-sep2",
+    "a-wait-r3c0",
+    "a-wait-r3c1",
+    "a-wait-r3c2",
+    "a-wait-r3c3",
+    "a-wait-r3c4",
+    "a-wait-sep3",
+    "a-runs-t",
+    "a-rgroup",
+    "a-runs-hd0",
+    "a-runs-hd1",
+    "a-runs-hd2",
+    "a-runs-hd3",
+    "a-runs-hd4",
+    "a-runs-hd5",
+    "a-runs-hdsep",
+    "a-runs-r0c0",
+    "a-runs-r0c1",
+    "a-runs-r0c2",
+    "a-runs-r0c3",
+    "a-runs-r0c4",
+    "a-runs-r0c5",
+    "a-runs-sep0",
+    "a-runs-r1c0",
+    "a-runs-r1c1",
+    "a-runs-r1c2",
+    "a-runs-r1c3",
+    "a-runs-r1c4",
+    "a-runs-r1c5",
+    "a-runs-sep1",
+    "b-label",
+    "b-frame",
+    "b-top",
+    "b-brand",
+    "b-h0",
+    "b-hp0",
+    "b-hl0",
+    "b-h1",
+    "b-hp1",
+    "b-hl1",
+    "b-h2",
+    "b-hp2",
+    "b-hl2",
+    "b-inbox",
+    "b-inbox-t",
+    "b-inbox-n",
+    "b-inbox-0",
+    "b-inbox-sep0",
+    "b-inbox-1",
+    "b-inbox-sep1",
+    "b-agents",
+    "b-agents-t",
+    "b-metrics-btn",
+    "b-new-btn",
+    "b-agent-0",
+    "b-agent-1",
+    "b-agent-2",
+    "b-title",
+    "b-window",
+    "b-tabs",
+    "b-cov",
+    "b-group",
+    "b-filter",
+    "b-tools-hd0",
+    "b-tools-hd1",
+    "b-tools-hd2",
+    "b-tools-hd3",
+    "b-tools-hd4",
+    "b-tools-hd5",
+    "b-tools-hdsep",
+    "b-tools-r0c0",
+    "b-tools-r0c1",
+    "b-tools-r0c2",
+    "b-tools-r0c3",
+    "b-tools-r0c4",
+    "b-tools-r0c5",
+    "b-tools-sep0",
+    "b-tools-r1c0",
+    "b-tools-r1c1",
+    "b-tools-r1c2",
+    "b-tools-r1c3",
+    "b-tools-r1c4",
+    "b-tools-r1c5",
+    "b-tools-sep1",
+    "b-tools-r2c0",
+    "b-tools-r2c1",
+    "b-tools-r2c2",
+    "b-tools-r2c3",
+    "b-tools-r2c4",
+    "b-tools-r2c5",
+    "b-tools-sep2",
+    "b-tools-r3c0",
+    "b-tools-r3c1",
+    "b-tools-r3c2",
+    "b-tools-r3c3",
+    "b-tools-r3c4",
+    "b-tools-r3c5",
+    "b-tools-sep3",
+    "b-tools-r4c0",
+    "b-tools-r4c1",
+    "b-tools-r4c2",
+    "b-tools-r4c3",
+    "b-tools-r4c4",
+    "b-tools-r4c5",
+    "b-tools-sep4",
+    "b-tools-r5c0",
+    "b-tools-r5c1",
+    "b-tools-r5c2",
+    "b-tools-r5c3",
+    "b-tools-r5c4",
+    "b-tools-r5c5",
+    "b-tools-sep5",
+    "b-tools-r6c0",
+    "b-tools-r6c1",
+    "b-tools-r6c2",
+    "b-tools-r6c3",
+    "b-tools-r6c4",
+    "b-tools-r6c5",
+    "b-tools-sep6",
+    "b-tools-r7c0",
+    "b-tools-r7c1",
+    "b-tools-r7c2",
+    "b-tools-r7c3",
+    "b-tools-r7c4",
+    "b-tools-r7c5",
+    "b-tools-sep7",
+    "b-tools-r8c0",
+    "b-tools-r8c1",
+    "b-tools-r8c2",
+    "b-tools-r8c3",
+    "b-tools-r8c4",
+    "b-tools-r8c5",
+    "b-tools-sep8",
+    "b-tools-r9c0",
+    "b-tools-r9c1",
+    "b-tools-r9c2",
+    "b-tools-r9c3",
+    "b-tools-r9c4",
+    "b-tools-r9c5",
+    "b-tools-sep9",
+    "b-tools-r10c0",
+    "b-tools-r10c1",
+    "b-tools-r10c2",
+    "b-tools-r10c3",
+    "b-tools-r10c4",
+    "b-tools-r10c5",
+    "b-tools-sep10",
+    "b-tools-r11c0",
+    "b-tools-r11c1",
+    "b-tools-r11c2",
+    "b-tools-r11c3",
+    "b-tools-r11c4",
+    "b-tools-r11c5",
+    "b-tools-sep11",
+    "s-label",
+    "s-load",
+    "s-load-t",
+    "s-sk0",
+    "s-sk1",
+    "s-sk2",
+    "s-sk3",
+    "s-sk4",
+    "s-sk5",
+    "s-err",
+    "s-err-t",
+    "s-alert",
+    "s-retry",
+    "s-empty",
+    "s-empty-t",
+    "s-empty-b",
+    "s-empty-w",
+    "title",
+    "k_aHyDeq",
+    "eDul52E4",
+    "UU6D_ikg"
+  ],
+  "variations": [
+    {
+      "id": "one-page",
+      "title": "A · One page",
+      "description": "Tools, owner wait, and runs in one view (recommended).",
+      "nodeIds": [
+        "a-label",
+        "a-frame",
+        "a-top",
+        "a-brand",
+        "a-h0",
+        "a-hp0",
+        "a-hl0",
+        "a-h1",
+        "a-hp1",
+        "a-hl1",
+        "a-h2",
+        "a-hp2",
+        "a-hl2",
+        "a-inbox",
+        "a-inbox-t",
+        "a-inbox-n",
+        "a-inbox-0",
+        "a-inbox-sep0",
+        "a-inbox-1",
+        "a-inbox-sep1",
+        "a-agents",
+        "a-agents-t",
+        "a-metrics-btn",
+        "a-new-btn",
+        "a-agent-0",
+        "a-agent-1",
+        "a-agent-2",
+        "a-title",
+        "a-window",
+        "a-cov0",
+        "a-cov1",
+        "a-cov2",
+        "a-tools-t",
+        "a-tools-s",
+        "a-group",
+        "a-filter",
+        "a-tools-hd0",
+        "a-tools-hd1",
+        "a-tools-hd2",
+        "a-tools-hd3",
+        "a-tools-hd4",
+        "a-tools-hd5",
+        "a-tools-hdsep",
+        "a-tools-r0c0",
+        "a-tools-r0c1",
+        "a-tools-r0c2",
+        "a-tools-r0c3",
+        "a-tools-r0c4",
+        "a-tools-r0c5",
+        "a-tools-sep0",
+        "a-tools-r1c0",
+        "a-tools-r1c1",
+        "a-tools-r1c2",
+        "a-tools-r1c3",
+        "a-tools-r1c4",
+        "a-tools-r1c5",
+        "a-tools-sep1",
+        "a-tools-r2c0",
+        "a-tools-r2c1",
+        "a-tools-r2c2",
+        "a-tools-r2c3",
+        "a-tools-r2c4",
+        "a-tools-r2c5",
+        "a-tools-sep2",
+        "a-tools-r3c0",
+        "a-tools-r3c1",
+        "a-tools-r3c2",
+        "a-tools-r3c3",
+        "a-tools-r3c4",
+        "a-tools-r3c5",
+        "a-tools-sep3",
+        "a-tools-r4c0",
+        "a-tools-r4c1",
+        "a-tools-r4c2",
+        "a-tools-r4c3",
+        "a-tools-r4c4",
+        "a-tools-r4c5",
+        "a-tools-sep4",
+        "a-tools-r5c0",
+        "a-tools-r5c1",
+        "a-tools-r5c2",
+        "a-tools-r5c3",
+        "a-tools-r5c4",
+        "a-tools-r5c5",
+        "a-tools-sep5",
+        "a-tools-r6c0",
+        "a-tools-r6c1",
+        "a-tools-r6c2",
+        "a-tools-r6c3",
+        "a-tools-r6c4",
+        "a-tools-r6c5",
+        "a-tools-sep6",
+        "a-tools-r7c0",
+        "a-tools-r7c1",
+        "a-tools-r7c2",
+        "a-tools-r7c3",
+        "a-tools-r7c4",
+        "a-tools-r7c5",
+        "a-tools-sep7",
+        "a-tools-r8c0",
+        "a-tools-r8c1",
+        "a-tools-r8c2",
+        "a-tools-r8c3",
+        "a-tools-r8c4",
+        "a-tools-r8c5",
+        "a-tools-sep8",
+        "a-tools-r9c0",
+        "a-tools-r9c1",
+        "a-tools-r9c2",
+        "a-tools-r9c3",
+        "a-tools-r9c4",
+        "a-tools-r9c5",
+        "a-tools-sep9",
+        "a-wait-t",
+        "a-wait-hd0",
+        "a-wait-hd1",
+        "a-wait-hd2",
+        "a-wait-hd3",
+        "a-wait-hd4",
+        "a-wait-hdsep",
+        "a-wait-r0c0",
+        "a-wait-r0c1",
+        "a-wait-r0c2",
+        "a-wait-r0c3",
+        "a-wait-r0c4",
+        "a-wait-sep0",
+        "a-wait-r1c0",
+        "a-wait-r1c1",
+        "a-wait-r1c2",
+        "a-wait-r1c3",
+        "a-wait-r1c4",
+        "a-wait-sep1",
+        "a-wait-r2c0",
+        "a-wait-r2c1",
+        "a-wait-r2c2",
+        "a-wait-r2c3",
+        "a-wait-r2c4",
+        "a-wait-sep2",
+        "a-wait-r3c0",
+        "a-wait-r3c1",
+        "a-wait-r3c2",
+        "a-wait-r3c3",
+        "a-wait-r3c4",
+        "a-wait-sep3",
+        "a-runs-t",
+        "a-rgroup",
+        "a-runs-hd0",
+        "a-runs-hd1",
+        "a-runs-hd2",
+        "a-runs-hd3",
+        "a-runs-hd4",
+        "a-runs-hd5",
+        "a-runs-hdsep",
+        "a-runs-r0c0",
+        "a-runs-r0c1",
+        "a-runs-r0c2",
+        "a-runs-r0c3",
+        "a-runs-r0c4",
+        "a-runs-r0c5",
+        "a-runs-sep0",
+        "a-runs-r1c0",
+        "a-runs-r1c1",
+        "a-runs-r1c2",
+        "a-runs-r1c3",
+        "a-runs-r1c4",
+        "a-runs-r1c5",
+        "a-runs-sep1"
+      ]
+    },
+    {
+      "id": "tabs",
+      "title": "B · Tabs",
+      "description": "One section per tab; grouped rows get full height.",
+      "nodeIds": [
+        "b-label",
+        "b-frame",
+        "b-top",
+        "b-brand",
+        "b-h0",
+        "b-hp0",
+        "b-hl0",
+        "b-h1",
+        "b-hp1",
+        "b-hl1",
+        "b-h2",
+        "b-hp2",
+        "b-hl2",
+        "b-inbox",
+        "b-inbox-t",
+        "b-inbox-n",
+        "b-inbox-0",
+        "b-inbox-sep0",
+        "b-inbox-1",
+        "b-inbox-sep1",
+        "b-agents",
+        "b-agents-t",
+        "b-metrics-btn",
+        "b-new-btn",
+        "b-agent-0",
+        "b-agent-1",
+        "b-agent-2",
+        "b-title",
+        "b-window",
+        "b-tabs",
+        "b-cov",
+        "b-group",
+        "b-filter",
+        "b-tools-hd0",
+        "b-tools-hd1",
+        "b-tools-hd2",
+        "b-tools-hd3",
+        "b-tools-hd4",
+        "b-tools-hd5",
+        "b-tools-hdsep",
+        "b-tools-r0c0",
+        "b-tools-r0c1",
+        "b-tools-r0c2",
+        "b-tools-r0c3",
+        "b-tools-r0c4",
+        "b-tools-r0c5",
+        "b-tools-sep0",
+        "b-tools-r1c0",
+        "b-tools-r1c1",
+        "b-tools-r1c2",
+        "b-tools-r1c3",
+        "b-tools-r1c4",
+        "b-tools-r1c5",
+        "b-tools-sep1",
+        "b-tools-r2c0",
+        "b-tools-r2c1",
+        "b-tools-r2c2",
+        "b-tools-r2c3",
+        "b-tools-r2c4",
+        "b-tools-r2c5",
+        "b-tools-sep2",
+        "b-tools-r3c0",
+        "b-tools-r3c1",
+        "b-tools-r3c2",
+        "b-tools-r3c3",
+        "b-tools-r3c4",
+        "b-tools-r3c5",
+        "b-tools-sep3",
+        "b-tools-r4c0",
+        "b-tools-r4c1",
+        "b-tools-r4c2",
+        "b-tools-r4c3",
+        "b-tools-r4c4",
+        "b-tools-r4c5",
+        "b-tools-sep4",
+        "b-tools-r5c0",
+        "b-tools-r5c1",
+        "b-tools-r5c2",
+        "b-tools-r5c3",
+        "b-tools-r5c4",
+        "b-tools-r5c5",
+        "b-tools-sep5",
+        "b-tools-r6c0",
+        "b-tools-r6c1",
+        "b-tools-r6c2",
+        "b-tools-r6c3",
+        "b-tools-r6c4",
+        "b-tools-r6c5",
+        "b-tools-sep6",
+        "b-tools-r7c0",
+        "b-tools-r7c1",
+        "b-tools-r7c2",
+        "b-tools-r7c3",
+        "b-tools-r7c4",
+        "b-tools-r7c5",
+        "b-tools-sep7",
+        "b-tools-r8c0",
+        "b-tools-r8c1",
+        "b-tools-r8c2",
+        "b-tools-r8c3",
+        "b-tools-r8c4",
+        "b-tools-r8c5",
+        "b-tools-sep8",
+        "b-tools-r9c0",
+        "b-tools-r9c1",
+        "b-tools-r9c2",
+        "b-tools-r9c3",
+        "b-tools-r9c4",
+        "b-tools-r9c5",
+        "b-tools-sep9",
+        "b-tools-r10c0",
+        "b-tools-r10c1",
+        "b-tools-r10c2",
+        "b-tools-r10c3",
+        "b-tools-r10c4",
+        "b-tools-r10c5",
+        "b-tools-sep10",
+        "b-tools-r11c0",
+        "b-tools-r11c1",
+        "b-tools-r11c2",
+        "b-tools-r11c3",
+        "b-tools-r11c4",
+        "b-tools-r11c5",
+        "b-tools-sep11"
+      ]
+    },
+    {
+      "id": "states",
+      "title": "States",
+      "description": "Loading, fetch failed, and empty window.",
+      "nodeIds": [
+        "s-label",
+        "s-load",
+        "s-load-t",
+        "s-sk0",
+        "s-sk1",
+        "s-sk2",
+        "s-sk3",
+        "s-sk4",
+        "s-sk5",
+        "s-err",
+        "s-err-t",
+        "s-alert",
+        "s-retry",
+        "s-empty",
+        "s-empty-t",
+        "s-empty-b",
+        "s-empty-w"
+      ]
+    }
+  ],
+  "comments": [],
+  "app": "squig",
+  "version": 1
+}

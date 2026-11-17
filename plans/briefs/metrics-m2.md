@@ -11,6 +11,8 @@ The portal has a Metrics view that shows the fleet's tool calls, owner wait, and
 - The data shape is fixed: `portal-types/src/metrics.rs` (`MetricsReport`, `ToolRow`, `WaitRow`, `RunRow`, `Histogram::quantile`). Do not change it. M1 builds the server route in parallel.
 - Route: `GET /api/metrics?window=day|week|month&group=tool|repository|model|host|lead|harness&tool=NAME`. Fetch it like the other calls in `web/src/api.rs` (for example `models`, line 227).
 - Entry point: a header button beside "New" (`web/src/app.rs` line 498) opens the view in `main`, the same way `composing` opens `NewLead` (lines 397–415 and 574). Opening an agent closes it.
+- Layout: `plans/metrics.squig.json`, variation `one-page` (approved) and the `states` frames. Do not build the `tabs` variation.
+- Histogram counts are a `Vec<u64>` of 62 buckets (changed with the canvas); use `Histogram::quantile`, never the raw buckets.
 - Look: follow `.impeccable/surfaces/web.md` and `DESIGN.md`. Use the components in `web/src/components/` (`tabs`, `select`, `card`, `badge`, `skeleton`).
 
 ## The view
