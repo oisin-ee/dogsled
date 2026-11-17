@@ -66,6 +66,7 @@ CREATE TABLE transcripts (
   file_id TEXT NOT NULL,            -- device and inode; a change means a new file
   offset INTEGER NOT NULL CHECK (offset >= 0),  -- end of the last complete line read
   session TEXT,                     -- the harness session ID, from the file
+  model TEXT,                       -- decoder cursor: the Codex model in effect at offset
   cwd TEXT,                         -- from the session header or first entry
   repository TEXT,                  -- owner/name from the cwd's origin remote, else NULL
   pane TEXT,                        -- set when observation binds this transcript to a pane
@@ -117,10 +118,10 @@ CREATE TABLE runs (
 One pass:
 
 1. List transcript files under each harness root, with the roots that `transcript::resolve` uses. Skip files not modified in the last 30 days.
-2. For each file, compare `file_id` and length with its `transcripts` row. A new `file_id` or a shorter file deletes the row (its calls cascade) and reads from 0. Otherwise read from `offset` to the last complete line.
+2. For each file, compare `file_id` and length with its `transcripts` row. A new `file_id` or a shorter file deletes the row (its calls cascade) and reads from 0 with `model` NULL. Otherwise read from `offset` to the last complete line, starting with the stored `model`.
 3. Decode each line with the per-harness entry rules that `src/activity.rs` uses for conversations. Move those rules into one decoder that both callers use; do not write a second parser.
 4. A call entry inserts a row with `ended_ms` NULL. A result entry with the same call ID sets `ended_ms` and `error`. `error` follows the `ToolStatus` rule in `src/activity.rs`. That rule marks every Codex `function_call_output` as completed, so a Codex call has `error` NULL. The error rate divides by calls with a known status only.
-5. Write the rows and the new `offset` in one `metrics.db` transaction per file.
+5. Write the rows, the new `offset`, and the current `model` in one `metrics.db` transaction per file. Codex sets the model in `turn_context` lines, not on each call, so a pass that ends between a model change and the next call must keep it. Pi and Claude carry the model on each assistant entry.
 
 Call time per harness:
 

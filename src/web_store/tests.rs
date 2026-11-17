@@ -338,6 +338,22 @@ fn reviews_revisions_annotations_and_images_round_trip_and_clear_updates() -> Re
         },
     };
     write(&ledger, |tx| reviews::put(tx, &record))?;
+    let decided = read(&ledger, |tx| {
+        Ok(tx.query_row(
+            "SELECT decided_ms FROM web_reviews WHERE id='review'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?)
+    })?;
+    write(&ledger, |tx| reviews::put(tx, &record))?;
+    assert_eq!(
+        read(&ledger, |tx| Ok(tx.query_row(
+            "SELECT decided_ms FROM web_reviews WHERE id='review'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?))?,
+        decided
+    );
     assert_eq!(
         serde_json::to_value(read(&ledger, |tx| reviews::get(tx, "review"))?)?,
         json!(record)
@@ -363,6 +379,14 @@ fn reviews_revisions_annotations_and_images_round_trip_and_clear_updates() -> Re
     record.review.decision = None;
     record.delivered = false;
     write(&ledger, |tx| reviews::put(tx, &record))?;
+    assert!(
+        read(&ledger, |tx| Ok(tx.query_row(
+            "SELECT decided_ms FROM web_reviews WHERE id='review'",
+            [],
+            |row| row.get::<_, Option<i64>>(0)
+        )?))?
+        .is_none()
+    );
     assert_eq!(
         serde_json::to_value(read(&ledger, |tx| reviews::get(tx, "review"))?)?,
         json!(record)

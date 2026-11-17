@@ -8,7 +8,7 @@ use crate::ledger::Ledger;
 
 /// The schema version this binary creates. A store with an older version starts again
 /// empty: earlier records are not read or converted.
-const VERSION: i64 = 5;
+const VERSION: i64 = 6;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -607,7 +607,7 @@ mod tests {
         write(&ledger, |tx| {
             let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             assert_eq!(version, VERSION);
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
             assert!(!crate::lead_store::exists_in(tx, "absent")?);
             let columns: Vec<String> = tx
                 .prepare("PRAGMA table_info(leads)")?

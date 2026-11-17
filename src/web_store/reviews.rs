@@ -86,6 +86,20 @@ pub(crate) fn put(tx: &Transaction<'_>, record: &Record) -> Result<()> {
     columns.text("general", Some(&review.general));
     columns.flag("delivered", record.delivered);
     columns.number("latest_ms", review.revisions.last().map(|r| r.submitted_ms))?;
+    let decided_ms = if let Some(decision) = &review.decision {
+        use rusqlite::OptionalExtension as _;
+        let (kind, notes, message) = match decision {
+            Decision::Approved { notes } => ("approved", notes.as_deref(), None),
+            Decision::ChangesRequested { message } => {
+                ("changes_requested", None, Some(message.as_str()))
+            }
+        };
+        tx.query_row("SELECT decided_ms FROM web_reviews WHERE id=?1 AND decision IS ?2 AND notes IS ?3 AND message IS ?4", rusqlite::params![review.id,kind,notes,message], |row| row.get::<_, Option<i64>>(0)).optional()?.flatten().map(rows::unsigned).transpose()?
+            .or_else(|| Some(crate::ledger::now_ms()))
+    } else {
+        None
+    };
+    columns.number("decided_ms", decided_ms)?;
     match &review.decision {
         Some(Decision::Approved { notes }) => {
             columns.text("decision", Some("approved"));
