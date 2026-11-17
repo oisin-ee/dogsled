@@ -343,7 +343,7 @@ impl Observer {
             let db = observer.rig.database();
             db.query_row::<i64, _, _>("SELECT count(*) FROM service_lanes", [], |row| row.get(0))
                 .unwrap()
-                == 7
+                == 8
         });
         observer.wait(|frame| {
             let samples: i64 = observer

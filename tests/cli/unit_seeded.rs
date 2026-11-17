@@ -91,7 +91,7 @@ fn quiet_observer(rig: &Rig) -> Background {
             .query_row("SELECT count(*) FROM service_lanes", [], |row| row.get(0))
             .unwrap()
     };
-    while lanes() < 7 {
+    while lanes() < 8 {
         assert!(
             Instant::now() < deadline,
             "startup lane pass did not finish"
