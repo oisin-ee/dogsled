@@ -5,6 +5,76 @@ use dioxus::prelude::*;
 
 use crate::components::{button::Button, input::Input, label::Label, textarea::Textarea};
 
+fn metrics_report_root() -> Element {
+    use portal_types::metrics::{
+        Histogram, HostCoverage, METRICS_VERSION, MetricsReport, RunGroup, ToolGroup, ToolRow,
+        Window,
+    };
+    let mut duration = Histogram::default();
+    for ms in [850; 10].into_iter().chain([12_000; 9]).chain([342_000]) {
+        duration.record(ms);
+    }
+    let report = MetricsReport {
+        version: METRICS_VERSION,
+        window: Window::Week,
+        tool_group: ToolGroup::Tool,
+        run_group: RunGroup::Profile,
+        until_ms: 180_000,
+        hosts: vec![
+            HostCoverage {
+                host: "local".into(),
+                transcripts: 41,
+                indexed_ms: Some(120_000),
+                error: None,
+            },
+            HostCoverage {
+                host: "netcup".into(),
+                transcripts: 0,
+                indexed_ms: None,
+                error: Some("unreachable: timeout".into()),
+            },
+        ],
+        tools: vec![
+            ToolRow {
+                tool: "bash".into(),
+                group: None,
+                calls: 21,
+                errors: 4,
+                unknown_status: 4,
+                running: 1,
+                duration,
+            },
+            ToolRow {
+                tool: "unknown".into(),
+                group: None,
+                calls: 4,
+                errors: 0,
+                unknown_status: 3,
+                running: 1,
+                duration: Histogram::default(),
+            },
+        ],
+        owner_waits: Vec::new(),
+        runs: Vec::new(),
+    };
+    rsx! { crate::metrics::MetricsReportView { report, now_ms: 180_000 } }
+}
+
+#[test]
+fn metrics_report_excludes_unknown_and_running_calls_and_renders_histogram_p95() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(metrics_report_root));
+    // Four errors out of sixteen known completed calls, not all twenty-one calls.
+    assert!(html.contains("25.0%"), "{html}");
+    assert!(!html.contains("19.0%"), "{html}");
+    // The 19th of 20 durations is in the 12,600 ms bucket, below the maximum.
+    assert!(html.contains("<td>12.6 s</td>"), "{html}");
+    assert!(html.contains("5.7 min"), "{html}");
+    assert!(html.contains("<td>1 s</td>"), "{html}");
+    assert!(html.contains("—"), "{html}");
+    assert!(html.contains("local · indexed 1 min ago"), "{html}");
+    assert!(html.contains("netcup · unreachable: timeout"), "{html}");
+}
+
 fn model_picker_root() -> Element {
     use portal_types::models::{ModelChoice, ModelRef, ThinkingLevel};
     let model = ModelRef {

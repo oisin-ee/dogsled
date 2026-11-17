@@ -395,6 +395,7 @@ pub fn App() -> Element {
         repository: Signal::new(None),
     });
     let mut composing = conversation.open;
+    let mut metrics_open = use_signal(|| false);
     let mut hint = conversation.repository;
     let mut start_new = move || {
         let current = selected.peek().clone();
@@ -408,11 +409,13 @@ pub fn App() -> Element {
         selected.set(None);
         selection.set(None);
         composing.set(true);
+        metrics_open.set(false);
         panel.set(LeadPanel::Chat);
     };
     use_effect(move || {
         if selected().is_some() {
             composing.set(false);
+            metrics_open.set(false);
         }
     });
     use_context_provider(|| Signal::new(Conversations::default()));
@@ -495,6 +498,16 @@ pub fn App() -> Element {
     let navigation = rsx! {
             Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
                 SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" }
+                    Button { class: "console-metrics", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: metrics_open(),
+                        onclick: move |_| {
+                            selected.set(None);
+                            selection.set(None);
+                            composing.set(false);
+                            metrics_open.set(true);
+                            panel.set(LeadPanel::Chat);
+                        },
+                        "Metrics"
+                    }
                     Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
                         onclick: move |_| start_new(),
                         Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
@@ -527,6 +540,7 @@ pub fn App() -> Element {
         document::Stylesheet { href: COMPONENTS_CSS }
         document::Stylesheet { href: CONSOLE_CSS }
         document::Stylesheet { href: MARKDOWN_CSS }
+        document::Stylesheet { href: asset!("/assets/metrics.css") }
         document::Stylesheet { href: asset!("/assets/review.css") }
         SidebarProvider { class: "console-provider",
         Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
@@ -571,6 +585,7 @@ pub fn App() -> Element {
                         let question = pick(InboxKind::Question);
                         rsx! { AgentView { key: "{pane.host}:{pane.pane}", host: pane.host, pane: pane.pane, review, question, agent_count, lead: lead.clone(), inbox: items.clone() } }
                     }
+                    None if metrics_open() => rsx! { crate::metrics::Metrics {} },
                     None if composing() => rsx! { NewLead {} },
                     None => rsx! { div { class: "empty-lead",
                         if width() < 1100 {
