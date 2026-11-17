@@ -721,6 +721,28 @@ fn ended_job_event_is_captured_between_scans_before_reconciliation() {
 }
 
 #[test]
+fn a_job_that_retention_closed_before_any_scan_saw_it_end_still_reaches_its_owner() {
+    let rig = Rig::new();
+    rig.item("job");
+    let reports = rig.reports(1, "working", "working", None);
+    tick(&rig.fleet(), &reports, 1).unwrap();
+    // Retention's release pass closes the item from the ended job record before the
+    // watchdog's next scan, so no scan ever sees the job open and ended.
+    let job: crate::jobs::Job = serde_json::from_value(json!({"id":"child","cmd":["test"],"cwd":"/","host":"local","owner":"owner","pane":"child","state":"idle","exit":0,"signal":null,"reason":null,"started_ms":1,"ended_ms":2,"timeout_ms":null,"idle_timeout_ms":null})).unwrap();
+    crate::items::job_finished(&rig.ledger, &job).unwrap();
+    assert_eq!(
+        crate::items::list(&rig.ledger).unwrap()[0].closed_ms,
+        Some(2)
+    );
+    let mut reports = rig.reports(60_001, "idle", "working", None);
+    reports[0].jobs.push(job);
+    tick(&rig.fleet(), &reports, 60_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+    tick(&rig.fleet(), &reports, 120_001).unwrap();
+    assert_eq!(rig.prompts(), 1);
+}
+
+#[test]
 fn top_level_notification_once_per_stall_and_recovery() {
     let rig = Rig::new();
     for now in [600_001, 660_001, 720_001] {
