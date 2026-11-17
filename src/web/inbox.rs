@@ -195,6 +195,7 @@ mod tests {
             cwd: None,
             repository: None,
             blocked: None,
+            launch: None,
         }
     }
 
@@ -566,6 +567,7 @@ mod tests {
                 question: "Allow?".into(),
                 options: vec![],
             }),
+            launch: None,
         };
         let view = view(&board()?, &[review.clone()], &pending, &[blocked_agent], 20);
         assert_eq!(view.count, 4);

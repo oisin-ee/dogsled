@@ -585,7 +585,7 @@ impl Server {
     #[tool(
         description = "Close a finished child now: its pane, its worktree, and its item. \
         Refuses busy or unsupported work; saves eligible dirty work to a pinned recovery. Saving never completes a task. Dogsled closes finished children at handoff; \
-        use this to end one explicitly. A lead, named by `lead-<id>`, loses only its idle pane.",
+        use this to end one explicitly. A lead, named by its name, its pane, or `lead-<id>`, loses only its idle pane.",
         annotations(destructive_hint = true)
     )]
     async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<String, String> {

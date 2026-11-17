@@ -1131,7 +1131,7 @@ fn resource_holds_are_excluded_from_owned_workers_and_sidebar_summary()
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("2 workers · 1 working"), "{html}");
     assert!(
-        html.contains("Show 2 workers for Ship the portal"),
+        html.contains("Show workers for Ship the portal: 2 workers · 1 working"),
         "{html}"
     );
     assert_eq!(html.matches("class=\"worker-dot\"").count(), 2, "{html}");
@@ -1170,7 +1170,12 @@ fn sidebar_worker_summary_rolls_up_attention_and_keeps_the_lead_active() {
     worker.pane = Some("worker".into());
     worker.title = "Not a sidebar entry".into();
     worker.unseen = true;
+    let mut finished = worker.clone();
+    finished.pane = None;
+    finished.state = "closed".into();
+    finished.unseen = false;
     lead.workers.push(worker);
+    lead.workers.push(finished);
     let repo = crate::board::NavigationRepo {
         repository: Some("owner/repo".into()),
         rows: vec![lead],
@@ -1180,9 +1185,14 @@ fn sidebar_worker_summary_rolls_up_attention_and_keeps_the_lead_active() {
     let mut dom = VirtualDom::new_with_props(worker_sidebar_root, (repo, Vec::new()));
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
+    assert_eq!(
+        html.matches("class=\"worker-dot\"").count(),
+        1,
+        "a finished worker has no dot: {html}"
+    );
     for expected in [
-        "1 workers · 1 working",
-        "Show 1 workers for Ship the portal",
+        "1 workers · 1 working · 1 finished",
+        "Show workers for Ship the portal: 1 workers",
         "data-waiting=true",
         r#"data-state="waiting""#,
         r#"aria-current="true""#,
@@ -1401,6 +1411,73 @@ fn question_root() -> Element {
         questions,
     };
     rsx! { crate::question_form::AskForm { pending, elapsed_ms: 120_000, on_done: |_| {} } }
+}
+
+/// A test's hold on a root's string signal, to change it between renders.
+type SignalHandle = std::rc::Rc<std::cell::Cell<Option<Signal<String>>>>;
+
+fn switching_question_root(handle: SignalHandle) -> Element {
+    use portal_types::questions::{Pending, QuestionSet};
+    let id = use_signal(|| "first".to_owned());
+    handle.set(Some(id));
+    let questions: QuestionSet = match serde_json::from_value(serde_json::json!({
+        "title": "Pick one", "questions": [{"id": "pick", "type": "single", "question": "Which?",
+            "options": ["A", "B"]}]
+    })) {
+        Ok(questions) => questions,
+        Err(error) => return rsx! { "Invalid question fixture: {error}" },
+    };
+    let question = Pending {
+        id: id(),
+        pane: "pane".to_owned(),
+        session: "session".to_owned(),
+        cwd: "/repo".to_owned(),
+        created_ms: 0,
+        questions,
+    };
+    crate::question_form::keyed_form(question, 0, EventHandler::new(|_: String| {}))
+}
+
+/// The mounted scope of the first component whose type name ends with `suffix`.
+fn mounted_scope(dom: &VirtualDom, node: &VNode, suffix: &str) -> Option<ScopeId> {
+    node.dynamic_nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, dynamic)| match dynamic {
+            DynamicNode::Component(component) => {
+                let scope = component.mounted_scope_id(index, node, dom)?;
+                if component.name.ends_with(suffix) {
+                    Some(scope)
+                } else {
+                    mounted_scope(dom, dom.get_scope(scope)?.root_node(), suffix)
+                }
+            }
+            DynamicNode::Fragment(children) => children
+                .iter()
+                .find_map(|child| mounted_scope(dom, child, suffix)),
+            _ => None,
+        })
+}
+
+/// Answering one question and opening the next must not carry the sent form's state (its
+/// disabled buttons and chosen answers) into the next question.
+#[test]
+fn a_different_question_mounts_a_fresh_form() {
+    let handle = SignalHandle::default();
+    let mut dom = VirtualDom::new_with_props(switching_question_root, handle.clone());
+    dom.rebuild_in_place();
+    settle_catalogue(&mut dom);
+    let form = |dom: &VirtualDom| mounted_scope(dom, dom.base_scope().root_node(), "::AskForm");
+    let first = form(&dom).expect("the first question's form is mounted");
+    let mut id = handle.get().expect("question id signal");
+    // Rendering the same question again, as its elapsed clock does, reuses its form.
+    id.set("first".to_owned());
+    settle_catalogue(&mut dom);
+    assert_eq!(form(&dom), Some(first), "the same question keeps its form");
+    id.set("second".to_owned());
+    settle_catalogue(&mut dom);
+    let second = form(&dom).expect("the second question's form is mounted");
+    assert_ne!(second, first, "the next question gets its own form state");
 }
 
 #[test]
@@ -2326,6 +2403,7 @@ fn every_live_phase_uses_only_actual_detail_and_names_all_active_tools() {
         (LivePhase::Working, "Working…"),
         (LivePhase::Thinking, "Thinking…"),
         (LivePhase::Responding, "Responding…"),
+        (LivePhase::Compacting, "Auto-compacting…"),
         (LivePhase::ToolRunning, "Running tools: read, bash"),
     ] {
         let html = render_activity(
@@ -2511,5 +2589,43 @@ fn official_controls_forward_labels_values_and_attributes() {
         ">Send</button>",
     ] {
         assert!(html.contains(expected), "missing {expected:?} in {html}");
+    }
+}
+
+#[component]
+fn KeyProbe(label: String) -> Element {
+    let mounted = use_signal(|| label.clone());
+    rsx! { "{mounted}" }
+}
+
+fn keyed_probe_root(props: (SignalHandle, bool)) -> Element {
+    let label = use_signal(|| "first".to_owned());
+    props.0.set(Some(label));
+    let probe = rsx! { KeyProbe { key: "{label}", label: label() } };
+    if props.1 { crate::keyed(probe) } else { probe }
+}
+
+/// A key on a component's root node does not remount it; `keyed` does.
+#[test]
+fn keyed_content_mounts_fresh_state_for_a_new_key_only() {
+    for (keyed, remounts) in [(true, true), (false, false)] {
+        let handle = SignalHandle::default();
+        let mut dom = VirtualDom::new_with_props(keyed_probe_root, (handle.clone(), keyed));
+        dom.rebuild_in_place();
+        let probe =
+            |dom: &VirtualDom| mounted_scope(dom, dom.base_scope().root_node(), "::KeyProbe");
+        let first = probe(&dom).expect("the probe is mounted");
+        let mut label = handle.get().expect("label signal");
+        label.set("first".to_owned());
+        dom.render_immediate_to_vec();
+        assert_eq!(probe(&dom), Some(first), "the same key keeps its state");
+        label.set("second".to_owned());
+        dom.render_immediate_to_vec();
+        assert_eq!(probe(&dom) != Some(first), remounts, "keyed: {keyed}");
+        assert_eq!(
+            dioxus_ssr::render(&dom),
+            if remounts { "second" } else { "first" },
+            "keyed: {keyed}"
+        );
     }
 }

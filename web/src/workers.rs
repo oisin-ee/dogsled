@@ -82,6 +82,16 @@ pub(crate) fn owned_rows(
     }
 }
 
+/// Workers that have not finished. A finished worker stays in its group until its branch
+/// lands, but it no longer counts as one of the lead's workers.
+pub(crate) fn active_count(rows: &[RowView]) -> usize {
+    rows.iter().filter(|row| !finished(&row.state)).count()
+}
+
+pub(crate) fn finished(state: &str) -> bool {
+    WorkerGroup::from_state(state, false) == WorkerGroup::Finished
+}
+
 pub(crate) fn working_count(rows: &[RowView]) -> usize {
     rows.iter()
         .filter(|row| matches!(row.state.as_str(), "working" | "running"))

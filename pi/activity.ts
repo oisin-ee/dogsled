@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PortalClient } from "./portal-client.ts";
 
-export type Phase = "idle" | "working" | "thinking" | "responding" | "tool_running";
+export type Phase = "idle" | "working" | "thinking" | "responding" | "tool_running" | "compacting";
 export interface ActiveTool {
   call_id: string;
   name: string;
@@ -17,6 +17,7 @@ export type Payload =
   | { kind: "closed" };
 export type ActivityEvent =
   | { type: "agent_start" | "agent_end" | "settled" | "message_end" }
+  | { type: "compaction"; running: boolean }
   | {
       type: "block";
       index: number;
@@ -61,6 +62,7 @@ export class ActivityReducer {
   private tools = new Map<string, ActiveTool>();
   private gap: "resyncing" | "overflow" | undefined;
   private idle: boolean;
+  private compacting = false;
 
   constructor(idle: boolean) {
     this.idle = idle;
@@ -74,36 +76,51 @@ export class ActivityReducer {
       this.tools.clear();
       this.gap = undefined;
       this.idle = true;
-    } else if (!this.gap) {
-      if (event.type === "agent_start" || event.type === "agent_end") this.idle = false;
-      else if (event.type === "message_end") {
-        this.blocks.clear();
-        this.thoughts.clear();
-      } else if (event.type === "block") {
-        this.idle = false;
-        this.blocks.delete(event.index);
-        if (!event.ended) this.blocks.set(event.index, event.phase);
-        if (event.phase === "thinking") {
-          this.thoughts.set(
-            event.index,
-            (this.thoughts.get(event.index) ?? "") + (event.delta ?? ""),
-          );
-        }
-      } else if (event.type === "tool_start") {
-        this.idle = false;
-        this.tools.set(event.tool.call_id, { ...event.tool });
-      } else if (event.type === "tool_end") this.tools.delete(event.id);
-      if (this.blocks.size > 64 || this.thoughts.size > 64 || this.tools.size > 64) {
-        this.gap = "overflow";
-        this.blocks.clear();
-        this.thoughts.clear();
-        this.tools.clear();
-      }
+      this.compacting = false;
+    } else if (event.type === "compaction") {
+      // Pi compacts between turns, so the compaction is the session's whole activity.
+      this.compacting = event.running;
+    } else {
+      // A new run starts only after any compaction ended.
+      if (event.type === "agent_start") this.compacting = false;
+      if (!this.gap) this.step(event);
     }
     return this.snapshot();
   }
 
+  private step(event: ActivityEvent): void {
+    if (event.type === "agent_start" || event.type === "agent_end") this.idle = false;
+    else if (event.type === "message_end") {
+      this.blocks.clear();
+      this.thoughts.clear();
+    } else if (event.type === "block") {
+      this.idle = false;
+      this.blocks.delete(event.index);
+      if (!event.ended) this.blocks.set(event.index, event.phase);
+      if (event.phase === "thinking") {
+        this.thoughts.set(
+          event.index,
+          (this.thoughts.get(event.index) ?? "") + (event.delta ?? ""),
+        );
+      }
+    } else if (event.type === "tool_start") {
+      this.idle = false;
+      this.tools.set(event.tool.call_id, { ...event.tool });
+    } else if (event.type === "tool_end") this.tools.delete(event.id);
+    if (this.blocks.size > 64 || this.thoughts.size > 64 || this.tools.size > 64) {
+      this.gap = "overflow";
+      this.blocks.clear();
+      this.thoughts.clear();
+      this.tools.clear();
+    }
+  }
+
   snapshot(): Payload {
+    // Compaction runs between turns, with no tool or block open, so it is known even when
+    // the turn's own detail is not.
+    if (this.compacting) {
+      return { kind: "snapshot", state: { phase: "compacting", active_tools: [] } };
+    }
     if (this.gap) return { kind: "unavailable", reason: this.gap };
     const active_tools = [...this.tools.values()].map((tool) => ({ ...tool }));
     const phase = active_tools.length
@@ -589,5 +606,15 @@ export function registerActivity(pi: ExtensionAPI, client: Client, pane: string 
   });
   pi.on("tool_execution_end", (event) => {
     runtime?.event({ type: "tool_end", id: event.toolCallId });
+  });
+  // Pi reports every started compaction's end, including a cancel, as one of these outcomes.
+  pi.on("session_before_compact", () => {
+    runtime?.event({ type: "compaction", running: true });
+  });
+  pi.on("session_compact", () => {
+    runtime?.event({ type: "compaction", running: false });
+  });
+  pi.on("session_compact_failed", () => {
+    runtime?.event({ type: "compaction", running: false });
   });
 }

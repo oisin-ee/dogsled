@@ -1326,7 +1326,7 @@ fn agent_places_starts_with_its_task_and_tracks_any_kind() {
     assert_eq!(fs::read_to_string(&task).unwrap(), "literal ' message");
     assert!(
         log.contains(&format!(
-            "agent start worker --kind codex --pane w2:p1 -- -c developer_instructions=\"{CONTRACT}\" Your task is in {task}. Read that file and do the task.\n"
+            "agent start worker --kind codex --pane w2:p1 --timeout 120000 -- -c developer_instructions=\"{CONTRACT}\" Your task is in {task}. Read that file and do the task.\n"
         )),
         "{log}"
     );

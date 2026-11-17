@@ -237,7 +237,7 @@ pub enum Command {
     },
     /// Start a top-level Pi lead in a GitHub repository on the roomiest fleet host. A
     /// lead has no owner, no done/ask/blocked contract, and no capacity cost; it stays open
-    /// until `dogsled close lead-<id>`.
+    /// until `dogsled close <lead-name>`.
     Lead(LeadArgs),
     /// Durable unit request protocol. All operations accept and return JSON.
     #[command(subcommand)]

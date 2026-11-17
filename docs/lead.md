@@ -21,7 +21,9 @@ If that path already exists, Dogsled uses `~/dev/owner-name`. If both paths are 
 
 The selected host keeps the lead record and its Herdr pane. The result includes `host`, `pane`, and `name`.
 Dogsled sends the first prompt once. An uncertain start or lost peer response does not trigger another host selection or delivery.
-A lead stays open until an explicit `dogsled close lead-<id>` request closes its idle pane.
+The lead's name is readable: the repository name, then the first words of the prompt, such as `zoomies-fix-login-redirect`.
+A `-<n>` suffix keeps it unique on its host.
+A lead stays open until an explicit `dogsled close <name>` request closes its idle pane. The pane and `lead-<id>` also name the lead.
 
 ## MCP and HTTP
 

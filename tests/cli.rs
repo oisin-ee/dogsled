@@ -630,8 +630,10 @@ printf '%s %s\n' "${DOGSLED_TEST_ROLE:-actor}" "$*" >> "$RIG/herdr-roles.log"
 # A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
 if test "$1 $2" = 'agent start'; then
   (
-    # A child passes its arguments after `--`; a lead passes none.
+    # A child passes its arguments after `--`; a lead passes none. Herdr's
+    # `--timeout <ms>` sets its start wait and types nothing.
     kind=$5; shift 7
+    if test "$1" = --timeout; then shift 2; fi
     if test "$1" = --; then shift; fi
     typed=$kind
     for arg in "$@"; do
@@ -999,7 +1001,9 @@ esac
         .env("HOME", self.dir.join("home"))
         .env("DOGSLED_BINARY", env!("CARGO_BIN_EXE_dogsled"))
         .env("DOGSLED_CONFIG", self.dir.join("config.toml"))
-        .env("DOGSLED_STATE", self.dir.join("state"));
+        .env("DOGSLED_STATE", self.dir.join("state"))
+        // A timed-out start looks for its agent once, not for a minute.
+        .env("DOGSLED_TEST_ADOPT_WINDOW_MS", "0");
         if let Ok(now) = fs::read_to_string(self.dir.join("clock")) {
             cmd.env("DOGSLED_TEST_NOW_MS", now.trim());
         }

@@ -136,7 +136,8 @@ fn lead_reuses_matching_main_checkout_preserves_branch_and_prompts_once() {
     let (code, started) = lead(&rig, &socket, SLUG, prompt);
     assert_eq!(code, 0, "{started}");
     let name = started["name"].as_str().unwrap().to_owned();
-    assert!(name.starts_with("lead-r-") && name.len() <= 32, "{name}");
+    // A readable name: the repository, then the prompt's first words without filler.
+    assert_eq!(name, "repo-plan-release-keep");
     assert_eq!(started["host"], "local");
     assert_eq!(started["pane"], "w2:p1");
     let log = rig.log("herdr.log");
@@ -150,7 +151,9 @@ fn lead_reuses_matching_main_checkout_preserves_branch_and_prompts_once() {
     assert!(!log.contains("tab create"), "{log}");
     assert_eq!(
         starts(&rig),
-        [format!("agent start {name} --kind pi --pane w2:p1")]
+        [format!(
+            "agent start {name} --kind pi --pane w2:p1 --timeout 120000"
+        )]
     );
     assert_eq!(rig.log("typed.log"), "pi\n");
     assert_eq!(socket.prompts(), [json!({"target":"w2:p1","text":prompt})]);
@@ -444,6 +447,7 @@ fn lead_chooses_roomiest_over_limit_host_and_starts_through_peer_ingress() {
     assert_eq!(code, 0, "{started}");
     assert_eq!(started["host"], "netcup");
     assert_eq!(started["pane"], "w9:p1");
+    assert_eq!(started["name"], "repo-remote-first-prompt");
     assert_eq!(leads(&rig), Vec::<Value>::new());
     assert_eq!(records(&rig, "peer-state")[0]["phase"], "ready");
     assert!(rig.dir.join("peer-home/dev/repo/.git").is_dir());

@@ -317,7 +317,9 @@ impl PortalState {
                     }
                 }
                 self.inbox.update(snapshot.inbox.ok_or_else(missing), now);
-                self.paused = !snapshot.gaps.is_empty();
+                // A delivered snapshot proves the stream is live. Its domain gaps are reported
+                // where each domain is shown, never as a paused stream.
+                self.paused = false;
             }
             Err(message) => {
                 self.paused = true;
@@ -820,7 +822,7 @@ mod shell_tests {
     fn portal_publications_and_status_keep_stream_order() -> Result<(), serde_json::Error> {
         use portal_types::{PortalAvailability, PortalSnapshot, PortalStatus};
 
-        let snapshot = |revision| {
+        let gapped = |revision, gaps| {
             PortalEvent::Snapshot(Box::new(PortalSnapshot {
                 version: portal_types::PORTAL_VERSION,
                 epoch: "serve".to_owned(),
@@ -834,9 +836,10 @@ mod shell_tests {
                 agents: Some(vec![]),
                 inbox: Some(InboxView::default()),
                 repos: Some(portal_types::agents::RepoList::default()),
-                gaps: vec![],
+                gaps,
             }))
         };
+        let snapshot = |revision| gapped(revision, vec![]);
         let disconnected = || {
             PortalEvent::Status(PortalStatus {
                 observation: PortalAvailability::Disconnected,
@@ -872,7 +875,13 @@ mod shell_tests {
         assert_eq!(state.inbox.snapshot, retained.inbox.snapshot);
         assert_eq!(state.inbox.received_ms, 2);
         assert_eq!(state.inbox.count(), None);
-        apply(&mut state, snapshot(4), 4)?;
+        // A domain gap is not a transport pause: the stream still delivered this snapshot.
+        let gap = portal_types::ObservationGap {
+            domain: "holds/job-validity/lead".into(),
+            availability: portal_types::ObservationAvailability::Failed,
+            detail: "resource job-validity/lead has no recorded owner pane".into(),
+        };
+        apply(&mut state, gapped(4, vec![gap]), 4)?;
         assert!(!state.paused);
         assert!(state.board_error.is_none());
         assert!(state.agent_error.is_none());

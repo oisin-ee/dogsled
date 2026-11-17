@@ -55,6 +55,11 @@ pub struct AgentView {
     /// Set only while the agent is blocked and its screen shows a prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<BlockedPrompt>,
+    /// How far the Dogsled launch that owns the pane got: `allocating`, `allocated`,
+    /// `attempted`, `confirmed` or `ambiguous`. A pane no launch started, such as a lead's,
+    /// has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +302,8 @@ pub enum LivePhase {
     Thinking,
     Responding,
     ToolRunning,
+    /// Pi is summarising the session to fit its context window.
+    Compacting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

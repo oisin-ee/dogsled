@@ -135,7 +135,7 @@ fn send(
         Reply::Started { lead }
             if lead.id == delivery.id
                 && lead.host == delivery.host
-                && lead.name == format!("lead-{}", delivery.id)
+                && super::valid_name(&lead.name)
                 && !lead.pane.is_empty() =>
         {
             Ok(lead)
@@ -191,7 +191,6 @@ pub(super) fn peer(context: &CreateContext<'_>, input: &str) -> Result<serde_jso
     let delivery: Delivery = serde_json::from_str(input)?;
     super::checkout::validate(&delivery.repo, &delivery.prompt)?;
     crate::jobs::validate_id(&delivery.id)?;
-    super::agent_name(&delivery.id)?;
     if delivery.version != 1 || delivery.host.is_empty() {
         return Err(Error::Invalid("unsupported lead delivery".into()));
     }
