@@ -10,6 +10,48 @@ fn ledger() -> Ledger {
     Ledger::temporary()
 }
 
+#[test]
+fn ownerless_lead_validity_is_reported_without_a_missing_parent_gap() {
+    for phase in [Phase::Recorded, Phase::Ready] {
+        let ledger = ledger();
+        let mut lead = record("ownerless");
+        lead.phase = phase;
+        lead.validity = crate::jobs::issue_unowned_validity(&ledger, &lead.id).unwrap();
+        crate::lead_store::insert(&ledger, &lead).unwrap();
+        let holds = crate::holds::local(&ledger, "local", crate::ledger::now_ms(), 90_000).unwrap();
+        let held = holds
+            .iter()
+            .find(|hold| hold.resource == "job-validity/ownerless")
+            .unwrap();
+        let saved = crate::jobs::request_validity(&ledger, &lead.id).unwrap();
+        std::fs::remove_dir_all(&ledger.dir).unwrap();
+        assert_eq!(held.code, "lead_validity", "{held:?}");
+        assert_eq!(held.owner, "ownerless lead lead-ownerless");
+        assert!(held.owner_pane.is_none());
+        assert_eq!(
+            saved,
+            Some(lead.validity),
+            "inspection cannot release validity"
+        );
+    }
+}
+
+#[test]
+fn mismatched_lead_validity_still_reports_missing_provenance() {
+    let ledger = ledger();
+    let mut lead = record("mismatched");
+    lead.validity = crate::jobs::issue_unowned_validity(&ledger, &lead.id).unwrap();
+    lead.validity.created_ms += 1;
+    crate::lead_store::insert(&ledger, &lead).unwrap();
+    let holds = crate::holds::local(&ledger, "local", crate::ledger::now_ms(), 90_000).unwrap();
+    std::fs::remove_dir_all(&ledger.dir).unwrap();
+    assert!(
+        holds
+            .iter()
+            .any(|hold| hold.resource == "job-validity/mismatched" && hold.code == "unreadable")
+    );
+}
+
 fn record(id: &str) -> Record {
     Record {
         id: id.into(),
