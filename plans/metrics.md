@@ -84,6 +84,11 @@ CREATE TABLE tool_calls (
   PRIMARY KEY (path, call_id)
 ) STRICT;
 CREATE INDEX tool_calls_started ON tool_calls(started_ms);
+CREATE TABLE input_entries (        -- every input the agent received; see "Input entries"
+  path TEXT NOT NULL REFERENCES transcripts(path) ON DELETE CASCADE,
+  at_ms INTEGER NOT NULL CHECK (at_ms >= 0),
+  PRIMARY KEY (path, at_ms)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE owner_waits (
   id TEXT PRIMARY KEY NOT NULL,     -- question id, review id, or item id + signal event id
   kind TEXT NOT NULL CHECK (kind IN ('question','plan_review','ask','blocked')),
@@ -125,6 +130,18 @@ Calls in one assistant entry share a start time. They run in parallel, so their 
 
 A call with no result after its transcript stops changing for 30 days is dropped by retention. A call with no result in a live transcript is "running" and is not counted in durations.
 
+### Input entries
+
+The indexer stores the timestamp of every input entry in `input_entries`, so the harvest can find the first input after any signal, however many arrive in one pass. An input entry is:
+
+| Harness | Input entry |
+| --- | --- |
+| Pi | a `message` entry with role `user`, or role `custom` with `customType` `dogsled` (an inbox delivery, `pi/inbox.ts` `MESSAGE_TYPE`) |
+| Claude | a `user` line with at least one content block that is not `tool_result` |
+| Codex | a `response_item` whose payload is a `message` with role `user` |
+
+Equal timestamps in one transcript are one row (`INSERT OR IGNORE`).
+
 ### Attribution
 
 - `repository`: the cwd's `origin` remote as `owner/name`, read once per transcript. A cwd under `.worktrees/` resolves to its main checkout's remote.
@@ -138,7 +155,7 @@ Each pass reads `state.db` (read transaction only) and upserts into `metrics.db`
 - `runs` from `items` with kind `agent`, joined to `tickets` on `tickets.request_id = items.id` for `queued_ms` (`src/work.rs`, `item`, sets the item ID from the request ID). Outcome order: `dropped_ms` set is `dropped`; reply done is `done`; open with `signal_kind` is that kind; `closed_ms` set is `closed`; else `running`. A row stays after retention deletes its item.
 - `owner_waits` of kind `question` from `web_questions`: `created_ms` to `answered_ms` (answered or rejected). Withdrawn questions are deleted from `web_questions` and are not counted.
 - `owner_waits` of kind `plan_review` from `web_reviews`: the first revision's `submitted_ms` to `decided_ms` (D5).
-- `owner_waits` of kind `ask` and `blocked` from items with a signal: `signal_recorded_ms` to the first user entry after it in the item's bound transcript. The indexer records that time per transcript as `last_user_ms`.
+- `owner_waits` of kind `ask` and `blocked` from items with a signal: `signal_recorded_ms` to `MIN(at_ms)` in `input_entries` for the transcript whose `item` is that item, with `at_ms > signal_recorded_ms`. No such row leaves the wait open. A later pass that finds the row closes it.
 
 ## Service lane
 
@@ -186,7 +203,7 @@ A "Metrics" page in the portal navigation (`web/src`):
 | Unit | Owns | Depends on | Acceptance |
 | --- | --- | --- | --- |
 | M0 (lead) | `plans/metrics.md`, `portal-types/src/metrics.rs`, `portal-types/src/lib.rs` | none | Plan merged; `cargo test -p portal-types` passes, with a histogram merge and quantile test. |
-| M1 (writer) | `src/metrics/`, `src/activity.rs` decoder move, `src/service.rs` lane, `src/cli.rs` and `src/main.rs` command, `src/web/metrics.rs` and its route, `src/web_store.rs` and `src/web_store/reviews.rs` (D5), `src/store.rs` version, README command list | M0 | `dogsled metrics` on `local` lists tool rows for this week; `curl 127.0.0.1:7465/api/metrics` returns local and `netcup` coverage. Tests below pass. |
+| M1 (writer) | `src/metrics/`, `src/activity.rs` decoder move, `src/service.rs` lane, `src/cli.rs` and `src/main.rs` command, `src/web/metrics.rs` and its route, `src/web_store.rs` and `src/web_store/reviews.rs` (D5), `src/store.rs` version, README command list | M0 | The M1 tests below pass; clippy and fmt are clean. At landing, the lead builds the branch once and checks that `dogsled metrics` lists local tool rows and `/api/metrics` returns local and peer coverage. |
 | M2 (writer) | `web/src/` metrics page and navigation | M0 | The page renders a recorded `MetricsReport` fixture and the live `/api/metrics` response; window, group, and sort change the table. |
 
 M1 and M2 run in parallel: they share only the M0 types.
@@ -201,6 +218,7 @@ Keep to behaviour that can break, on real files and a real `metrics.db`.
 | M1 | One real transcript per harness, indexed once | One row per call with the start, end, and error of the table above. |
 | M1 | A call in one pass, its result appended before the next pass | One row, completed in the second pass; no row read twice. |
 | M1 | A transcript replaced with a new file at the same path | Old rows gone, new rows indexed. |
+| M1 | An `ask` signal, then two input entries indexed in one pass | The wait ends at the first input entry. |
 | M1 | `metrics.db` with an older `user_version` | Tables recreated; the next pass rebuilds rows. |
 
 Checks per unit: `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and the tests of the changed modules. No full suite before release.

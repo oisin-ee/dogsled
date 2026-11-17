@@ -18,7 +18,7 @@ Plan: `plans/metrics.md` (approved). Read it all before you edit. This brief nam
 
 ## Edits
 
-1. `src/metrics/mod.rs`, `store.rs`, `index.rs`, `harvest.rs`, `report.rs`: the store, indexer, harvest, 30-day delete, and the `MetricsReport` builder.
+1. `src/metrics/mod.rs`, `store.rs`, `index.rs`, `harvest.rs`, `report.rs`: the store (including `input_entries`), indexer, harvest, 30-day delete, and the `MetricsReport` builder. The plan's "Input entries" section defines the ask and blocked wait.
 2. `src/activity.rs`: the shared decoder move.
 3. `src/service.rs`: `Lane::Metrics` (index, harvest, delete), recorded in `service_lanes` like the other lanes.
 4. `src/cli.rs`, `src/main.rs`: `dogsled metrics [--window day|week|month] [--group …] [--tool NAME] [--json]`. Tables without `--json`.
@@ -33,9 +33,10 @@ Reads: everything else. Do not edit `web/`, `portal-types/`, or `pi/`.
 
 ## Acceptance
 
-1. `dogsled metrics --window week` (built from this branch, with `dogsled serve` from the same build running once via `serve --once`) lists tool rows for this host, with calls, error %, p50, and p95.
-2. `curl -s 127.0.0.1:7465/api/metrics | jq '.hosts'` from `dogsled web` of this build lists `local` and each peer; an unreachable peer shows its error.
-3. The tests in the plan's "Tests" table for M1 pass.
+1. The tests in the plan's "Tests" table for M1 pass, including the input-entry case.
+2. `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are clean.
+
+Do not build or run a release binary. The lead builds the branch once at landing and checks `dogsled metrics` and `/api/metrics` on the live hosts.
 
 Report the exact commands and their output in your reply.
 
