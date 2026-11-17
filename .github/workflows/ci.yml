@@ -1,14 +1,15 @@
 name: CI
 
+# The full suite is heavy, so it runs only before a release: release-please.yml calls it
+# on the release commit before the tag. A maintainer can also run it by hand. No pull
+# request or push runs it; the moon pre-commit hook runs the cheap checks on the host.
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
   workflow_call:
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
