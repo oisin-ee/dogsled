@@ -199,6 +199,55 @@ fn render(display: &mut Display) -> String {
 }
 
 #[test]
+fn resource_holds_stay_in_diagnostics_not_published_agent_cards() {
+    let fixture = Fixture::new();
+    for (id, owner) in [("mine", OWNER), ("theirs", "other-owner"), ("child", OWNER)] {
+        crate::jobs::issue_request_validity(&fixture.ledger, id, owner, "local").unwrap();
+    }
+    crate::jobs::issue_unowned_validity(&fixture.ledger, "unowned").unwrap();
+    let published = fixture.capture();
+    let status: crate::commands::Status =
+        serde_json::from_value(published.views["status"]["data"].clone()).unwrap();
+    for id in ["mine", "theirs", "child", "unowned"] {
+        assert!(
+            status
+                .holds
+                .iter()
+                .any(|hold| hold.resource == format!("job-validity/{id}"))
+        );
+    }
+    let board: board::Board =
+        serde_json::from_value(published.views["board"]["data"].clone()).unwrap();
+    for id in ["mine", "theirs", "unowned"] {
+        assert!(
+            board
+                .rows
+                .iter()
+                .any(|row| row.kind == "hold" && row.name == format!("job-validity/{id}"))
+        );
+    }
+    let child = board.rows.iter().find(|row| row.id == "child").unwrap();
+    assert!(
+        child
+            .holds
+            .iter()
+            .any(|hold| hold.resource == "job-validity/child")
+    );
+
+    for (owner, expected) in [(OWNER, vec!["child"]), ("other-owner", vec![])] {
+        let data: model::Data =
+            serde_json::from_value(published.views["sidebars"]["data"][owner].clone()).unwrap();
+        let ids: Vec<_> = data.cards.iter().map(|card| card.id.as_str()).collect();
+        assert_eq!(ids, expected);
+        let mut display = Display::new();
+        display.receive(Msg::Publication(Arc::clone(&published)), owner);
+        let text = render(&mut display);
+        assert!(!text.contains("resource hold"), "{text}");
+        assert_eq!(text.contains("child"), owner == OWNER, "{text}");
+    }
+}
+
+#[test]
 fn reader_isolation_renders_publication_without_database_or_observation_capabilities() {
     let mut fixture = Fixture::new();
     let captured = fixture.capture();
