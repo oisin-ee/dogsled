@@ -653,7 +653,10 @@ textarea {
 .console-provider .console-shell .conversation-tool[data-error="true"] .conversation-tool-panel {
   border-color: var(--primary-error-color);
 }
-.console-provider .console-shell .conversation-tool[data-error="true"] :is(.conversation-output, .conversation-tool-outcome) {
+.console-provider
+  .console-shell
+  .conversation-tool[data-error="true"]
+  :is(.conversation-output, .conversation-tool-outcome) {
   color: var(--primary-error-color);
 }
 .console-provider .console-shell .conversation-live-edge {
@@ -964,7 +967,10 @@ textarea {
   padding: 5px 0 6px;
   border: 0;
   border-radius: 0;
-  font: 12px/1.6 "JetBrains Mono", ui-monospace, monospace;
+  font:
+    12px/1.6 "JetBrains Mono",
+    ui-monospace,
+    monospace;
   color: var(--console-text);
 }
 .console-provider .console-shell .files-row [data-slot="item-title"] {
@@ -979,7 +985,10 @@ textarea {
 }
 .console-provider .console-shell .files-row .files-previous {
   margin: 2px 0 0;
-  font: 11px/1.6 "JetBrains Mono", ui-monospace, monospace;
+  font:
+    11px/1.6 "JetBrains Mono",
+    ui-monospace,
+    monospace;
   color: var(--console-muted);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1178,13 +1187,6 @@ textarea {
   flex-wrap: wrap;
   padding-block: 10px;
 }
-.console-provider .console-shell .new-lead-header .model-picker {
-  order: 3;
-  flex-basis: 100%;
-}
-.console-provider .console-shell .new-lead-header .model-combobox {
-  flex: 1;
-}
 .console-provider .console-shell .new-lead-header h1 {
   flex: 1 0 auto;
   font-size: 14px;
@@ -1216,10 +1218,40 @@ textarea {
   min-width: 0;
   max-width: 100%;
 }
-.console-provider .console-shell .model-combobox {
+.console-provider .console-shell .model-select {
   position: relative;
   min-width: 0;
   width: clamp(140px, 18vw, 240px);
+}
+.console-provider .console-shell .model-picker button {
+  width: 100%;
+  min-width: 0;
+}
+.console-provider .console-shell .model-select button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.console-provider .console-shell .model-picker [role="listbox"] {
+  max-height: min(400px, 50dvh);
+  max-width: calc(100vw - 48px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.console-provider .console-shell .model-select [role="listbox"] {
+  width: max-content;
+}
+.console-provider .console-shell .model-option {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.console-provider .console-shell .new-lead-composer .model-picker {
+  margin-bottom: 8px;
+}
+.console-provider .console-shell .new-lead-composer .model-picker [role="listbox"] {
+  top: auto;
+  bottom: calc(100% + 4px);
+  transform-origin: bottom;
 }
 .console-provider .console-shell .thinking-select {
   min-width: 90px;
@@ -1242,12 +1274,12 @@ textarea {
     order: 3;
     flex-basis: 100%;
   }
-  .console-provider .console-shell .model-combobox {
+  .console-provider .console-shell .model-select {
     flex: 1;
   }
 }
 @media (max-width: 600px) {
-  .console-provider .console-shell .model-picker .repo-search,
+  .console-provider .console-shell .model-picker button,
   .console-provider .console-shell .model-readonly,
   .console-provider .console-shell .thinking-select {
     font-size: 1rem;
