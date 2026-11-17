@@ -9,20 +9,39 @@ use serde::{Deserialize, Serialize};
 /// Metrics payload version; independent of [`crate::PORTAL_VERSION`].
 pub const METRICS_VERSION: u32 = 1;
 
-/// The upper bound of each histogram bucket, in milliseconds. One more bucket holds the
-/// durations above the last bound.
-pub const BUCKET_BOUNDS_MS: [u64; 16] = [
-    100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000,
-    1_800_000, 3_600_000, 14_400_000, 86_400_000,
-];
+/// Ten steps per decade, each at most 27% above the last, so a reported percentile is at most
+/// 27% above the true value.
+const DECADE: [u64; 10] = [100, 126, 158, 200, 251, 316, 398, 501, 631, 794];
+
+/// The upper bound of each histogram bucket, in milliseconds: 100 ms to 100,000,000 ms
+/// (27.8 h). One more bucket holds the durations above the last bound.
+pub const BUCKET_BOUNDS_MS: [u64; 61] = bounds();
+
+const fn bounds() -> [u64; 61] {
+    let mut bounds = [0; 61];
+    let mut scale = 1;
+    let mut decade = 0;
+    while decade < 6 {
+        let mut step = 0;
+        while step < 10 {
+            bounds[decade * 10 + step] = DECADE[step] * scale;
+            step += 1;
+        }
+        scale *= 10;
+        decade += 1;
+    }
+    bounds[60] = 100 * scale;
+    bounds
+}
 
 /// The number of buckets: one per bound, and one for the durations above the last bound.
 pub const BUCKETS: usize = BUCKET_BOUNDS_MS.len() + 1;
 
 /// Durations counted in [`BUCKET_BOUNDS_MS`] buckets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Histogram {
-    pub counts: [u64; BUCKETS],
+    /// [`BUCKETS`] counts. A shorter list from a peer counts as zeros in the missing buckets.
+    pub counts: Vec<u64>,
     /// The sum of all durations. Parallel calls overlap, so this is not wall time.
     pub total_ms: u64,
     pub max_ms: u64,
@@ -31,7 +50,7 @@ pub struct Histogram {
 impl Default for Histogram {
     fn default() -> Self {
         Self {
-            counts: [0; BUCKETS],
+            counts: vec![0; BUCKETS],
             total_ms: 0,
             max_ms: 0,
         }
@@ -41,10 +60,10 @@ impl Default for Histogram {
 impl Histogram {
     /// Count one duration.
     pub fn record(&mut self, duration_ms: u64) {
-        let bucket = BUCKET_BOUNDS_MS
-            .iter()
-            .position(|bound| duration_ms <= *bound)
-            .unwrap_or(BUCKET_BOUNDS_MS.len());
+        let bucket = BUCKET_BOUNDS_MS.partition_point(|bound| *bound < duration_ms);
+        if self.counts.len() < BUCKETS {
+            self.counts.resize(BUCKETS, 0);
+        }
         if let Some(count) = self.counts.get_mut(bucket) {
             *count = count.saturating_add(1);
         }
@@ -54,8 +73,11 @@ impl Histogram {
 
     /// Add the durations of `other`.
     pub fn merge(&mut self, other: &Self) {
-        for (count, add) in self.counts.iter_mut().zip(other.counts) {
-            *count = count.saturating_add(add);
+        if self.counts.len() < other.counts.len() {
+            self.counts.resize(other.counts.len(), 0);
+        }
+        for (count, add) in self.counts.iter_mut().zip(&other.counts) {
+            *count = count.saturating_add(*add);
         }
         self.total_ms = self.total_ms.saturating_add(other.total_ms);
         self.max_ms = self.max_ms.max(other.max_ms);
@@ -262,11 +284,28 @@ mod tests {
         merged.merge(&other);
         assert_eq!(merged, all);
         assert_eq!(merged.count(), 9);
-        // The 5th of 9 sorted durations (2,000 ms) is in the 2,500 ms bucket.
-        assert_eq!(merged.quantile(0.5), Some(2_500));
-        // The 9th is in the 14,400,000 ms bucket, capped at the largest duration.
+        // The 5th of 9 sorted durations (2,000 ms) is a bucket bound.
+        assert_eq!(merged.quantile(0.5), Some(2_000));
+        // The 9th is in the 5,010,000 ms bucket, capped at the largest duration.
         assert_eq!(merged.quantile(0.95), Some(4_000_000));
         assert_eq!(merged.quantile(0.0), Some(100));
         assert_eq!(Histogram::default().quantile(0.5), None);
+        // A peer that sends fewer buckets merges as zeros in the rest.
+        let mut short = Histogram {
+            counts: vec![1],
+            total_ms: 50,
+            max_ms: 50,
+        };
+        short.merge(&merged);
+        assert_eq!(short.count(), 10);
+    }
+
+    #[test]
+    fn every_bucket_is_at_most_27_percent_above_the_last() {
+        for pair in BUCKET_BOUNDS_MS.windows(2) {
+            assert!(pair[1] * 100 <= pair[0] * 127, "{pair:?}");
+        }
+        assert_eq!(BUCKET_BOUNDS_MS[0], 100);
+        assert!(BUCKET_BOUNDS_MS[60] >= 86_400_000);
     }
 }

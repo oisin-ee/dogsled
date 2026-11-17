@@ -84,6 +84,10 @@ CREATE TABLE tool_calls (
   PRIMARY KEY (path, call_id)
 ) STRICT;
 CREATE INDEX tool_calls_started ON tool_calls(started_ms);
+CREATE TABLE index_state (          -- one row, written only after a whole pass succeeds
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  indexed_ms INTEGER NOT NULL CHECK (indexed_ms >= 0)
+) STRICT;
 CREATE TABLE input_entries (        -- every input the agent received; see "Input entries"
   path TEXT NOT NULL REFERENCES transcripts(path) ON DELETE CASCADE,
   at_ms INTEGER NOT NULL CHECK (at_ms >= 0),
@@ -159,7 +163,7 @@ Each pass reads `state.db` (read transaction only) and upserts into `metrics.db`
 
 ## Service lane
 
-Add `Lane::Metrics` to `src/service.rs`. It runs the indexer, then the harvest, then the 30-day delete. A failure records the lane error in `service_lanes`, as the other lanes do. The lane writes only `metrics.db`, so it does not wake observation.
+Add `Lane::Metrics` to `src/service.rs`. It runs the indexer, then the harvest, then the 30-day delete. After a whole pass succeeds, it writes `index_state.indexed_ms`, which the report gives as `HostCoverage.indexed_ms`. A failed pass leaves the previous value. A failure records the lane error in `service_lanes`, as the other lanes do. The lane writes only `metrics.db`, so it does not wake observation.
 
 ## Report
 
@@ -167,7 +171,7 @@ Add `Lane::Metrics` to `src/service.rs`. It runs the indexer, then the harvest, 
 
 `portal-types/src/metrics.rs` (M0) holds the report. The server and the portal share it:
 
-- `Histogram`: 17 bucket counts over `BUCKET_BOUNDS_MS` (100 ms to 24 h), `total_ms`, and `max_ms`, with `record`, `merge`, and `quantile`. A quantile is the upper bound of the bucket that holds the rank, capped at `max_ms`.
+- `Histogram`: 62 bucket counts over `BUCKET_BOUNDS_MS` (100 ms to 27.8 h, ten steps per decade), `total_ms`, and `max_ms`, with `record`, `merge`, and `quantile`. A quantile is the upper bound of the bucket that holds the rank, capped at `max_ms`, so it is at most 27% above the true value.
 - `Window` (day, week, month), `ToolGroup` (tool, repository, model, host, lead, harness), and `RunGroup` (profile, model, harness).
 - `MetricsReport`: version, window, groups, `until_ms`, `hosts: Vec<HostCoverage>`, `tools: Vec<ToolRow>`, `owner_waits: Vec<WaitRow>`, `runs: Vec<RunRow>`.
 - `ToolRow`: tool, group, calls, errors, `unknown_status` (Codex), running, duration.
@@ -189,6 +193,8 @@ Add `Lane::Metrics` to `src/service.rs`. It runs the indexer, then the harvest, 
 `GET /api/metrics?window=&group=&tool=` in `src/web/metrics.rs`. It builds the local report and asks every peer with `dogsled metrics --json`, in parallel, with the peer timeout the agents API uses. It merges rows with the same key by adding counts and merging histograms. A failed peer is a `HostCoverage` with its error; the other hosts still show.
 
 ### Portal page
+
+Wireframe: `plans/metrics.squig.json`. The owner approved variation `one-page` (A) and the `states` frames on 2026-11-17. Variation `tabs` (B) was not chosen.
 
 A "Metrics" page in the portal navigation (`web/src`):
 
