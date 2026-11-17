@@ -12,22 +12,42 @@ fn model_picker_root() -> Element {
         id: "test-model".into(),
     };
     rsx! { crate::model_picker::ModelPicker {
-        choices: vec![ModelChoice { model: model.clone(), name: Some("Test model".into()), thinking: vec![ThinkingLevel::Off, ThinkingLevel::High] }],
+        choices: vec![
+            ModelChoice { model: ModelRef { provider: "other".into(), id: "fallback-id".into() }, name: None, thinking: vec![] },
+            ModelChoice { model: model.clone(), name: Some("Test model".into()), thinking: vec![ThinkingLevel::Off, ThinkingLevel::High] },
+            ModelChoice { model: ModelRef { provider: "provider".into(), id: "second".into() }, name: Some("Second model".into()), thinking: vec![] },
+        ],
         selected_model: Some(model), selected_level: Some(ThinkingLevel::High), busy: false, on_change: move |_| {},
     } }
 }
 
 #[test]
-fn model_picker_composes_searchable_model_and_supported_thinking_controls() {
+fn model_picker_composes_grouped_model_select_and_supported_thinking_controls() {
     let mut dom = VirtualDom::prebuilt(model_picker_root);
     settle_catalogue(&mut dom);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains(r#"aria-label="Model""#), "{html}");
-    assert!(html.contains(r#"role="combobox""#), "{html}");
-    assert!(html.contains(r#"name="model""#), "{html}");
+    assert!(html.contains(r#"aria-haspopup="listbox""#), "{html}");
+    assert!(!html.contains("<input"), "{html}");
+    assert!(html.contains(">Test model</span>"), "{html}");
     assert!(html.contains(r#"aria-label="Thinking level""#), "{html}");
-    assert!(html.contains("high"), "{html}");
-    assert!(!html.contains("xhigh"), "{html}");
+    assert!(html.contains(">high</span>"), "{html}");
+    model_select_key(&mut dom, "SelectTrigger", Key::ArrowDown);
+    let html = dioxus_ssr::render(&dom);
+    assert_eq!(html.matches(r#"role="group""#).count(), 2, "{html}");
+    assert!(html.contains(">provider</div>"), "{html}");
+    assert!(html.contains(">other</div>"), "{html}");
+    assert!(html.contains("provider/test-model"), "{html}");
+    assert!(html.contains("other/fallback-id"), "{html}");
+    assert!(html.contains(">fallback-id</div>"), "{html}");
+    assert!(!html.contains("Pi default"), "{html}");
+    picker_select_key(&mut dom, "thinking-select", "SelectTrigger", Key::ArrowDown);
+    let html = dioxus_ssr::render(&dom);
+    let thinking = html.split_once("thinking-select").unwrap().1;
+    assert_eq!(thinking.matches(r#"role="option""#).count(), 2, "{html}");
+    assert!(thinking.contains(">off</div>"), "{html}");
+    assert!(!thinking.contains("Pi default"), "{html}");
+    assert!(!thinking.contains("xhigh"), "{html}");
 }
 
 type ModelChangeHandle =
@@ -54,21 +74,30 @@ fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
 }
 
 #[test]
-fn model_picker_search_requests_a_model_without_optimistically_changing_it() {
+fn model_picker_select_requests_a_model_without_optimistically_changing_it() {
     let handle = ModelChangeHandle::default();
     let mut dom = VirtualDom::new_with_props(changing_model_picker_root, handle.clone());
     dom.rebuild_in_place();
     settle_catalogue(&mut dom);
-    catalogue_query(&mut dom, "Choice 69");
+    model_select_key(&mut dom, "SelectTrigger", Key::ArrowDown);
     let html = dioxus_ssr::render(&dom);
-    assert!(html.contains("Choice 69"), "{html}");
-    assert!(!html.contains("Choice 68"), "{html}");
-    catalogue_key(&mut dom, Key::ArrowDown);
-    catalogue_key(&mut dom, Key::Enter);
+    assert_eq!(html.matches(r#"role="option""#).count(), 70, "{html}");
+    model_select_key(&mut dom, "SelectList", Key::End);
+    model_select_key(&mut dom, "SelectList", Key::Enter);
     let change = handle.get().unwrap().peek().clone().unwrap();
     assert_eq!(change.model.unwrap().pattern(), "provider/model-69");
     assert_eq!(change.thinking, None);
-    assert!(dioxus_ssr::render(&dom).contains(r#"value="provider/model-0""#));
+    assert!(dioxus_ssr::render(&dom).contains(">Choice 0</span>"));
+    picker_select_key(&mut dom, "thinking-select", "SelectTrigger", Key::ArrowDown);
+    picker_select_key(&mut dom, "thinking-select", "SelectList", Key::Home);
+    picker_select_key(&mut dom, "thinking-select", "SelectList", Key::Enter);
+    let change = handle.get().unwrap().peek().clone().unwrap();
+    assert_eq!(change.model, None);
+    assert_eq!(
+        change.thinking,
+        Some(portal_types::models::ThinkingLevel::Off)
+    );
+    assert!(dioxus_ssr::render(&dom).contains(">high</span>"));
 }
 
 #[test]
@@ -142,18 +171,40 @@ fn new_conversation_renders_catalogue_choices_and_pi_defaults() {
     dom.rebuild_in_place();
     settle_catalogue(&mut dom);
     let html = dioxus_ssr::render(&dom);
-    let header = html.split_once("</header>").unwrap().0;
+    let (header, body) = html.split_once("</header>").unwrap();
     assert!(header.contains("New conversation"), "{html}");
-    assert!(header.contains(r#"name="model""#), "{html}");
-    assert!(header.contains(r#"placeholder="Pi default""#), "{html}");
-    assert!(header.contains(">Pi default</span>"), "{html}");
-    catalogue_input_event_for(&dom, "model", "oninput", || {
-        FormData::from(CatalogueInput("reasoning".into()))
-    });
-    settle_catalogue(&mut dom);
+    assert!(!header.contains("model-picker"), "{html}");
+    assert!(header.contains(r#"name="repository""#), "{html}");
+    let composer = body.split_once("new-lead-composer").unwrap().1;
+    assert!(composer.contains(r#"aria-label="Model""#), "{html}");
+    assert!(composer.contains(r#"aria-haspopup="listbox""#), "{html}");
+    assert!(composer.contains(">Pi default</span>"), "{html}");
+    assert!(!composer.contains(r#"role="combobox""#), "{html}");
+    assert!(!composer.contains(r#"name="model""#), "{html}");
+    assert!(
+        composer.find("model-picker") < composer.find("console-composer"),
+        "{html}"
+    );
+    model_select_key(&mut dom, "SelectTrigger", Key::ArrowDown);
     let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(r#"role="group""#), "{html}");
+    assert!(html.contains(">provider</div>"), "{html}");
     assert!(html.contains("Reasoning model"), "{html}");
     assert!(html.contains("provider/reasoning"), "{html}");
+    let default = html.split(r#"role="option""#).nth(1).unwrap();
+    assert!(
+        default
+            .split_once("</div>")
+            .unwrap()
+            .0
+            .contains("aria-selected=true"),
+        "{html}"
+    );
+    model_select_key(&mut dom, "SelectList", Key::End);
+    model_select_key(&mut dom, "SelectList", Key::Enter);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(">Reasoning model</span>"), "{html}");
+    assert!(html.contains(">Pi default</span>"), "{html}");
 }
 
 #[test]
@@ -219,6 +270,7 @@ fn catalogue_component_scopes(
                         || component.name.ends_with("::ComboboxInput")
                         || component.name.ends_with("::Input")
                         || component.name.contains("::ComboboxOption")
+                        || component.name.contains("::Select")
                     {
                         scopes.insert(
                             format!("{}:{:?}:{scope:?}", component.name, node.key),
@@ -303,6 +355,58 @@ fn catalogue_input_event_for<T: 'static>(
     let platform = dioxus::html::PlatformEventData::new(Box::new(factory));
     dioxus::html::set_event_converter(Box::new(CatalogueEventConverter));
     dom.in_runtime(|| listener.call(dioxus::core::Event::new(std::rc::Rc::new(platform), true)));
+}
+
+fn model_select_key(dom: &mut VirtualDom, component: &str, key: Key) {
+    picker_select_key(dom, "model-select", component, key);
+}
+
+fn picker_select_key(dom: &mut VirtualDom, field: &str, component: &str, key: Key) {
+    let suffix = format!("::{component}:");
+    let model_scope = catalogue_scopes(dom)
+        .into_values()
+        .find(|scope| {
+            dom.get_scope(*scope).unwrap().root_node().dynamic_attrs.iter().flatten().any(|attr| {
+                attr.name == "class" && matches!(&attr.value, dioxus::core::AttributeValue::Text(value) if value.split_whitespace().any(|class| class == field))
+            })
+        })
+        .expect("mounted model select");
+    let mut scopes = std::collections::BTreeMap::new();
+    catalogue_component_scopes(
+        dom,
+        dom.get_scope(model_scope).unwrap().root_node(),
+        &mut scopes,
+    );
+    let scope = scopes
+        .into_iter()
+        .find(|(name, _)| name.contains(&suffix))
+        .map(|(_, scope)| scope)
+        .expect("model select keyboard target");
+    fn keyboard_listener(node: &VNode) -> Option<dioxus::core::ListenerCallback> {
+        node.dynamic_attrs
+            .iter()
+            .flatten()
+            .find_map(|attr| match &attr.value {
+                dioxus::core::AttributeValue::Listener(listener) if attr.name == "onkeydown" => {
+                    Some(listener.clone())
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                node.dynamic_nodes.iter().find_map(|node| match node {
+                    DynamicNode::Fragment(children) => children.iter().find_map(keyboard_listener),
+                    _ => None,
+                })
+            })
+    }
+    let listener = keyboard_listener(dom.get_scope(scope).unwrap().root_node())
+        .expect("select keyboard event");
+    let factory: Box<dyn Fn() -> KeyboardData> =
+        Box::new(move || KeyboardData::from(CatalogueKey(key.clone())));
+    let platform = dioxus::html::PlatformEventData::new(Box::new(factory));
+    dioxus::html::set_event_converter(Box::new(CatalogueEventConverter));
+    dom.in_runtime(|| listener.call(dioxus::core::Event::new(std::rc::Rc::new(platform), true)));
+    settle_catalogue(dom);
 }
 
 struct CatalogueInput(String);
