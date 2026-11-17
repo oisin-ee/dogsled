@@ -528,7 +528,12 @@ fn note(fleet: &Fleet, items: &[&Item], reports: &[HostReport], now: u64) -> Str
 
 fn capture_events(state: &mut State, items: &[Item], reports: &[HostReport], now: u64) {
     for item in items {
-        if item.closed_ms.is_some() {
+        // Retention closes a job item as soon as its record ends, which can be before any
+        // scan saw the job end. That end is still news to the owner while its output can be
+        // read; an older closure is history.
+        if item.closed_ms.is_some_and(|closed| {
+            item.kind != "job" || now.saturating_sub(closed) > crate::jobs::LOG_KEEP_MS
+        }) {
             continue;
         }
         if let Some((_, _, _, urgent, signature)) = item_state(item, reports) {
