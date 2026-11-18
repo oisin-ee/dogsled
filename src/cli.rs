@@ -272,9 +272,9 @@ pub enum Command {
     /// that use it, remove the worktree, and end its item. Refuses busy or dirty work. A lead,
     /// by name or pane, loses only its idle pane; its repository and children stay.
     Close {
-        /// The child's Herdr pane (the spawn result's `target`), or a lead's name.
+        /// The child's Herdr pane (the spawn result's `target`), its name or ID, or a lead's name.
         pane: String,
-        /// The child's host. Defaults to the host of the open item for this pane, else local.
+        /// The child's host. Defaults to the host of the open item for this child, else local.
         #[arg(long)]
         host: Option<String>,
     },

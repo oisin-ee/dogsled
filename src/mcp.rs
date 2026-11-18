@@ -18,8 +18,9 @@ use rmcp::{ServerHandler, ServiceExt as _, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// The default tool budget, below the harnesses' 60 s request timeout.
-/// Close uses its setup budget: started blocking work survives client disconnects.
+/// The default tool budget, below the harnesses' default 60 s request timeout.
+/// Close, lead, and `repo_open` use the setup budget; the bundled Pi and Codex configs wait
+/// 660 s for it. Started blocking work also survives client disconnects.
 const CALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What a call needs to build a fleet, kept for the server's life.
@@ -178,7 +179,7 @@ pub struct LeadArgs {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CloseArgs {
-    /// The child's Herdr pane, or a lead's name.
+    /// The child's Herdr pane, its name or ID, or a lead's name.
     pub pane: String,
     #[serde(default)]
     pub host: Option<String>,

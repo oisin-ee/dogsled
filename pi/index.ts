@@ -18,6 +18,8 @@ import { ServeClient } from "./serve-client.ts";
 import { createTodo } from "./todo/src/index.ts";
 
 const REFRESH_MS = 10_000;
+// The server's setup budget (`budget::SETUP_LIMIT`, 600 s) plus a minute for the reply.
+const MCP_TIMEOUT_S = 660;
 
 /** The version this extension ships with; the dogsled binary on PATH must match it. */
 export const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -48,6 +50,9 @@ export default function dogsled(pi: ExtensionAPI) {
 		command: binary,
 		args: ["mcp"],
 		exposure: "direct",
+		// Close, lead, and repo_open run for up to the server's ten-minute setup budget. The
+		// default 60 s request timeout would report them failed while they still run.
+		timeout: MCP_TIMEOUT_S,
 		description: "Use the native done, ask, and blocked tools for turn signals. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Spawn Pi, Claude, and Codex children and jobs on Herdr hosts, and message any agent through its inbox.",
 	});
 
