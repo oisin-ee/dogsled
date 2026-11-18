@@ -98,7 +98,7 @@ release:
 ```toml
 [update]
 mode = "auto"      # "auto" installs, "check" only logs the new version, "off" does nothing
-interval = "1h"
+interval = "15m"
 command = []       # optional updater for a binary from a package manager
 ```
 
@@ -157,13 +157,13 @@ Depends on R2.
 
 ## Decisions
 
-My recommendation comes first in each row.
+Decided by the owner on 2026-11-18.
 
-| # | Decision | Options |
+| # | Decision | Result |
 | --- | --- | --- |
-| D1 | Default `mode` for a new install | `"auto"`, as VS Code and Tailscale's recommended setting / `"check"`, as Sparkle asks first |
-| D2 | Default `interval` | 1 hour. Unauthenticated GitHub API calls allow 60 per hour per address / 15 minutes / 1 day, as Sparkle |
-| D3 | Name of the release channel branch | `release` / `stable` |
+| D1 | Default `mode` for a new install | `"auto"` |
+| D2 | Default `interval` | 15 minutes. That is 4 unauthenticated GitHub API calls per hour per host. The limit is 60 per hour per address. |
+| D3 | Name of the release channel branch | `release` |
 
 ## Out of scope
 
