@@ -82,6 +82,16 @@ Then `serve` finishes its running lanes and exits. Its supervisor starts the new
 The Herdr sidebar replaces its own process with the new build. The pane stays open.
 Running Pi, Claude, and Codex sessions keep the plugin they started with until you restart them.
 
+Herdr's running server keeps its version after you install a newer Herdr, because a restart ends every pane. At each check, Dogsled compares `herdr status client --json` (the `herdr` on `PATH`) with `herdr status server --json`. When the installed Herdr is newer and the server supports live handoff, Dogsled runs:
+
+```sh
+herdr server live-handoff --import-exe <installed herdr> --expected-version <version> --expected-protocol <protocol>
+```
+
+The new server takes over the panes, so shells and agents keep running. If the handoff fails, Herdr keeps the old server and its panes, and the next check tries again. Dogsled never stops or restarts a Herdr server. Dogsled never moves a server to an older Herdr. With `mode = "notify"`, Dogsled prints one line and changes nothing.
+
+If a systemd unit runs `herdr server`, set `ExitType=cgroup` and `Restart=always` in the unit. With the default `ExitType=main`, the old server's exit after a handoff stops the unit, and systemd kills the new server and every pane. With `ExitType=cgroup`, the unit stays active while the new server runs, and `Restart=always` starts a server again after a crash. Add `ExecStop=herdr server stop`: after a handoff, the unit has no main process to signal.
+
 Run an update by hand, or only check:
 
 ```sh
