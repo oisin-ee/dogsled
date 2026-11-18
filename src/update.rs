@@ -76,8 +76,12 @@ pub enum Server {
     Current,
     /// A newer Herdr is installed. This run changes nothing.
     Available { running: String, installed: String },
-    /// A newer Herdr is installed, and the running server cannot hand off its panes.
-    Unsupported { running: String, installed: String },
+    /// A newer Herdr is installed, and a handoff cannot keep the running server's panes.
+    Unsupported {
+        running: String,
+        installed: String,
+        reason: String,
+    },
     /// The server gave its panes to the installed Herdr. Their processes kept running.
     HandedOff { from: String, to: String },
     /// The handoff failed. Herdr keeps the old server and its panes.
@@ -124,8 +128,12 @@ impl Report {
             Server::Available { running, installed } => Some(format!(
                 "herdr {installed} is installed; the server still runs {running}\n"
             )),
-            Server::Unsupported { running, installed } => Some(format!(
-                "herdr {installed} is installed; the {running} server cannot hand off its panes, so restart it when no agent runs\n"
+            Server::Unsupported {
+                running,
+                installed,
+                reason,
+            } => Some(format!(
+                "herdr {installed} is installed; the {running} server stays, because {reason}\n"
             )),
             Server::HandedOff { from, to } => Some(format!(
                 "moved the herdr server from {from} to {to}; its panes kept running\n"
@@ -270,6 +278,47 @@ pub fn run(shell: &dyn Shell, settings: &Update, ledger: &Path, apply: bool) -> 
     })
 }
 
+/// The systemd unit in a `/proc/<pid>/cgroup` file, such as `herdr.service`.
+fn unit(cgroup: &str) -> Option<&str> {
+    cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?
+        .rsplit('/')
+        .next()
+        .filter(|unit| unit.ends_with(".service"))
+}
+
+/// Why a handoff would end the panes of the server at `socket`. A systemd unit with the
+/// default `ExitType=main` stops when the old server exits, and systemd then kills the new
+/// server and every pane. `ExitType=cgroup` keeps the unit active while the new server runs.
+fn supervisor(shell: &dyn Shell, socket: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+        let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+        let pid = getsockopt(&stream, PeerCredentials).ok()?.pid();
+        let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+        let unit = unit(&cgroup)?;
+        let exit = read(
+            shell,
+            "systemctl",
+            &["--user", "show", "--property", "ExitType", "--value", unit],
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        let exit = exit.trim();
+        (exit != "cgroup").then(|| {
+            format!("its systemd unit {unit} has ExitType={exit}, so a handoff would end its panes")
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (shell, socket);
+        None
+    }
+}
+
 fn server(shell: &dyn Shell, apply: bool) -> Server {
     handoff(shell, apply).unwrap_or_else(|error| Server::Failed {
         detail: error.to_string(),
@@ -297,8 +346,17 @@ fn handoff(shell: &dyn Shell, apply: bool) -> Result<Server> {
     if status["running"] != true || !newer {
         return Ok(Server::Current);
     }
-    if status["capabilities"]["live_handoff"] != true {
-        return Ok(Server::Unsupported { running, installed });
+    let reason = if status["capabilities"]["live_handoff"] == true {
+        supervisor(shell, status["socket"].as_str().unwrap_or_default())
+    } else {
+        Some("it cannot hand off its panes".to_owned())
+    };
+    if let Some(reason) = reason {
+        return Ok(Server::Unsupported {
+            running,
+            installed,
+            reason,
+        });
     }
     if !apply {
         return Ok(Server::Available { running, installed });
@@ -668,7 +726,14 @@ mod tests {
         );
         assert_eq!(
             check(&status("0.9.5", false), true),
-            (Server::Unsupported { running, installed }, false)
+            (
+                Server::Unsupported {
+                    running,
+                    installed,
+                    reason: "it cannot hand off its panes".to_owned()
+                },
+                false
+            )
         );
         assert_eq!(
             check(&status("0.9.6", true), true),
@@ -681,6 +746,16 @@ mod tests {
         assert_eq!(
             check(r#"{"running":false,"version":null}"#, true),
             (Server::Current, false)
+        );
+    }
+
+    #[test]
+    fn the_server_unit_comes_from_its_cgroup() {
+        let service = "0::/user.slice/user-1001.slice/user@1001.service/app.slice/herdr.service\n";
+        assert_eq!(unit(service), Some("herdr.service"));
+        assert_eq!(
+            unit("0::/user.slice/user-501.slice/session-3.scope\n"),
+            None
         );
     }
 
