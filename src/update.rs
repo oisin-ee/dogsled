@@ -8,6 +8,10 @@
 //! The harness plugins follow the binary. They update once per binary version, after the
 //! binary is the newest release, and again on the next check when a step failed. Each
 //! harness updates its own plugin with its own command; dogsled never edits their files.
+//!
+//! Herdr's running server keeps its version after a newer Herdr is installed, because a
+//! restart ends every pane. Dogsled moves the server to the installed Herdr with Herdr's
+//! live handoff, which keeps the panes and their processes running.
 
 use crate::config::Update;
 use crate::error::{Error, Result};
@@ -63,6 +67,23 @@ pub struct Plugin {
     pub outcome: Outcome,
 }
 
+/// What happened to the running Herdr server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum Server {
+    /// Herdr is not installed or not running, or the server runs the installed version or a
+    /// newer one.
+    Current,
+    /// A newer Herdr is installed. This run changes nothing.
+    Available { running: String, installed: String },
+    /// A newer Herdr is installed, and the running server cannot hand off its panes.
+    Unsupported { running: String, installed: String },
+    /// The server gave its panes to the installed Herdr. Their processes kept running.
+    HandedOff { from: String, to: String },
+    /// The handoff failed. Herdr keeps the old server and its panes.
+    Failed { detail: String },
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub current: String,
@@ -70,6 +91,7 @@ pub struct Report {
     pub latest: Option<String>,
     pub binary: Binary,
     pub plugins: Vec<Plugin>,
+    pub herdr: Server,
 }
 
 impl Report {
@@ -97,7 +119,20 @@ impl Report {
                 Outcome::Absent => None,
                 Outcome::Failed(error) => Some(format!("{} plugin: {error}\n", plugin.harness)),
             });
-        std::iter::once(head).chain(plugins).collect()
+        let herdr = match &self.herdr {
+            Server::Current => None,
+            Server::Available { running, installed } => Some(format!(
+                "herdr {installed} is installed; the server still runs {running}\n"
+            )),
+            Server::Unsupported { running, installed } => Some(format!(
+                "herdr {installed} is installed; the {running} server cannot hand off its panes, so restart it when no agent runs\n"
+            )),
+            Server::HandedOff { from, to } => Some(format!(
+                "moved the herdr server from {from} to {to}; its panes kept running\n"
+            )),
+            Server::Failed { detail } => Some(format!("herdr handoff: {detail}\n")),
+        };
+        std::iter::once(head).chain(plugins).chain(herdr).collect()
     }
 }
 
@@ -196,6 +231,8 @@ fn install(shell: &dyn Shell, settings: &Update, version: &Version) -> Result<Bi
 /// # Errors
 /// The feed cannot be read, or the installer fails.
 pub fn run(shell: &dyn Shell, settings: &Update, ledger: &Path, apply: bool) -> Result<Report> {
+    // Herdr is checked first: it needs no network, so a feed error does not hold it back.
+    let herdr = server(shell, apply);
     let current = current()?;
     let latest = latest()?;
     let binary = match newer(&current, latest.as_ref()) {
@@ -229,6 +266,62 @@ pub fn run(shell: &dyn Shell, settings: &Update, ledger: &Path, apply: bool) -> 
         latest: latest.map(|version| version.to_string()),
         binary,
         plugins,
+        herdr,
+    })
+}
+
+fn server(shell: &dyn Shell, apply: bool) -> Server {
+    handoff(shell, apply).unwrap_or_else(|error| Server::Failed {
+        detail: error.to_string(),
+    })
+}
+
+/// Hand the running Herdr server to the installed Herdr, when the installed one is newer.
+/// `herdr status client` describes the `herdr` on `PATH`; `herdr status server` describes
+/// the running server. A failed handoff leaves the old server running with its panes.
+fn handoff(shell: &dyn Shell, apply: bool) -> Result<Server> {
+    let Some(client) = read(shell, "herdr", &["status", "client", "--json"])? else {
+        return Ok(Server::Current);
+    };
+    let Some(status) = read(shell, "herdr", &["status", "server", "--json"])? else {
+        return Ok(Server::Current);
+    };
+    let (client, status) = (json(&client)?, json(&status)?);
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+    let (installed, running) = (text(&client["version"]), text(&status["version"]));
+    let parse = |text: &str| Version::parse(text).ok();
+    let newer = matches!(
+        (parse(&installed), parse(&running)),
+        (Some(installed), Some(running)) if installed > running
+    );
+    if status["running"] != true || !newer {
+        return Ok(Server::Current);
+    }
+    if status["capabilities"]["live_handoff"] != true {
+        return Ok(Server::Unsupported { running, installed });
+    }
+    if !apply {
+        return Ok(Server::Available { running, installed });
+    }
+    let binary = text(&client["binary"]);
+    let protocol = client["protocol"].to_string();
+    step(
+        shell,
+        "herdr",
+        &[
+            "server",
+            "live-handoff",
+            "--import-exe",
+            &binary,
+            "--expected-version",
+            &installed,
+            "--expected-protocol",
+            &protocol,
+        ],
+    )?;
+    Ok(Server::HandedOff {
+        from: running,
+        to: installed,
     })
 }
 
@@ -530,6 +623,65 @@ mod tests {
             })
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_newer_installed_herdr_takes_over_the_running_server() {
+        let client = r#"{"version":"0.9.6","protocol":23,"binary":"/i/herdr/0.9.6/herdr"}"#;
+        let status = |version: &str, handoff: bool| {
+            format!(
+                r#"{{"running":true,"version":"{version}","capabilities":{{"live_handoff":{handoff}}}}}"#
+            )
+        };
+        let handoff = "herdr server live-handoff --import-exe /i/herdr/0.9.6/herdr --expected-version 0.9.6 --expected-protocol 23";
+        let check = |status: &str, apply: bool| {
+            let shell = Fake::new();
+            shell
+                .on("herdr status client --json", client)
+                .on("herdr status server --json", status)
+                .on(handoff, "live handoff complete");
+            let outcome = server(&shell, apply);
+            let ran = shell.calls.lock().unwrap().iter().any(|c| c == handoff);
+            (outcome, ran)
+        };
+        let versions = |running: &str| (running.to_owned(), "0.9.6".to_owned());
+        let (running, installed) = versions("0.9.5");
+        assert_eq!(
+            check(&status("0.9.5", true), true),
+            (
+                Server::HandedOff {
+                    from: running.clone(),
+                    to: installed.clone()
+                },
+                true
+            )
+        );
+        assert_eq!(
+            check(&status("0.9.5", true), false),
+            (
+                Server::Available {
+                    running: running.clone(),
+                    installed: installed.clone()
+                },
+                false
+            )
+        );
+        assert_eq!(
+            check(&status("0.9.5", false), true),
+            (Server::Unsupported { running, installed }, false)
+        );
+        assert_eq!(
+            check(&status("0.9.6", true), true),
+            (Server::Current, false)
+        );
+        assert_eq!(
+            check(&status("0.9.7", true), true),
+            (Server::Current, false)
+        );
+        assert_eq!(
+            check(r#"{"running":false,"version":null}"#, true),
+            (Server::Current, false)
+        );
     }
 
     #[test]

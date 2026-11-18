@@ -174,11 +174,27 @@ Decided by the owner on 2026-11-18.
 | D1 | Default `mode` for a new install | `"auto"` |
 | D2 | Default `interval` | 15 minutes. That is 4 unauthenticated GitHub API calls per hour per host. The limit is 60 per hour per address. |
 | D3 | Name of the release channel branch | `release` |
+| D4 | A newer Herdr is installed while its old server runs | Dogsled moves the server to the installed Herdr with live handoff, so sessions continue. It never stops the server. |
+
+### Herdr server handoff (D4)
+
+- `herdr status client --json` gives the installed `version`, `protocol`, and `binary`. `herdr status server --json`
+  gives the running `version` and `capabilities.live_handoff`.
+- `herdr server live-handoff` without `--import-exe` starts the running server's own binary again. Dogsled passes
+  the installed binary, version, and protocol.
+- Evidence on netcup, 2026-11-18, herdr 0.9.4 to 0.9.5, systemd 260: the pane process kept its pid, and a
+  second check did nothing. A handoff with a wrong `--expected-version` exits 1 and keeps the old server and panes.
+- systemd: with `ExitType=main`, systemd kills the new server and every pane after the old server exits
+  (herdrdev/herdr#4972, reproduced). `ExitType=cgroup` with `Restart=always` keeps the panes, and a crash of the
+  new server still restarts the unit.
+- macOS: the new server's parent is launchd, so macOS apps that bind consent to a signed parent app ask again
+  (herdrdev/herdr#808).
 
 ## Out of scope
 
 - dotfiles. It decides how its hosts install Dogsled. That plan is in the dotfiles repository.
-- Herdr, Pi, Claude, and Codex updates themselves.
+- Installing Herdr, Pi, Claude, and Codex. The tool that installed each one updates it. Dogsled only moves a running
+  Herdr server to the Herdr that is already installed.
 - Release creation and its CI gate.
 
 ## Risks
