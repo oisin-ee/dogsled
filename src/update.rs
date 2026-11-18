@@ -180,6 +180,8 @@ fn install(shell: &dyn Shell, settings: &Update, version: &Version) -> Result<Bi
             crate::shell::checked(program, rest, shell.run_bounded(program, rest, STEP_LIMIT)?)?;
         }
         Installer::Receipt => {
+            // `None` means the receipt already names this release: another process installed it.
+            // The file at the path is still newer than this process, so the result is the same.
             if let Some(updater) = receipt.as_mut() {
                 updater.run_sync().map_err(|error| failed(&error))?;
             }
