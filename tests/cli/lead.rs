@@ -433,7 +433,7 @@ case "$remote" in
 esac
 "#, if lose_reply { "exit 255" } else { ":" }));
     fs::create_dir_all(rig.dir.join("peer-home")).unwrap();
-    fs::write(rig.dir.join("config.toml"), "remote_command = []\n").unwrap();
+    rig.config("remote_command = []\n");
 }
 
 #[test]
