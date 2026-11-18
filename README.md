@@ -92,6 +92,8 @@ The new server takes over the panes, so shells and agents keep running. If the h
 
 If a systemd unit runs `herdr server`, set `ExitType=cgroup` and `Restart=always` in the unit. With the default `ExitType=main`, the old server's exit after a handoff stops the unit, and systemd kills the new server and every pane. With `ExitType=cgroup`, the unit stays active while the new server runs, and `Restart=always` starts a server again after a crash. Add `ExecStop=herdr server stop`: after a handoff, the unit has no main process to signal.
 
+On Linux, Dogsled reads the server's cgroup before a handoff. If the server runs in a systemd service whose `ExitType` is not `cgroup`, Dogsled does not hand off, and prints `herdr X is installed; the Y server stays, because its systemd unit herdr.service has ExitType=main, so a handoff would end its panes`.
+
 Run an update by hand, or only check:
 
 ```sh
