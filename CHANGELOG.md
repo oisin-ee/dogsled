@@ -2,24 +2,6 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.39.0](https://github.com/oisin-ee/dogsled/compare/v0.38.0...v0.39.0) (2026-11-18)
-
-
-### Features
-
-* dogsled updates itself and its plugins from each release ([#371](https://github.com/oisin-ee/dogsled/issues/371)) ([bc283d0](https://github.com/oisin-ee/dogsled/commit/bc283d029f9a970f932b3e2017e7c8312bf5f3cd))
-* **portal:** fleet metrics page ([fca7994](https://github.com/oisin-ee/dogsled/commit/fca7994437b7c378e34555a4646cbf44a2675a5b))
-* **portal:** share a searchable model and effort picker below the composer ([#370](https://github.com/oisin-ee/dogsled/issues/370)) ([59bddc4](https://github.com/oisin-ee/dogsled/commit/59bddc4889b99fcebea6dc44ea64aa5bf8e26f0d))
-
-
-### Bug Fixes
-
-* **close:** wait for close, accept child names, and name peer refusals ([7f27553](https://github.com/oisin-ee/dogsled/commit/7f275538d32d118bae85fec01ed45e9eedbab5b4))
-* **close:** wait for close, accept child names, and name peer refusals ([133920c](https://github.com/oisin-ee/dogsled/commit/133920cc7ca899b7c9804a3614d9143b5929130b))
-* **sidebar:** keep resource holds out of agent cards ([bd656a9](https://github.com/oisin-ee/dogsled/commit/bd656a905cf20fdc8e0351df4f6b3bcec1c872b5))
-* **sidebar:** keep resource holds out of agent cards ([fee95a4](https://github.com/oisin-ee/dogsled/commit/fee95a41615af5e6a57055bda498aed1262ba6ec))
-* **watchdog:** report a job that retention closed before any scan saw it end ([#367](https://github.com/oisin-ee/dogsled/issues/367)) ([4f48cfe](https://github.com/oisin-ee/dogsled/commit/4f48cfe3a97da2b8ad46ca59709d1c08829db7a2))
-
 ## [0.38.0](https://github.com/oisin-ee/dogsled/compare/v0.37.3...v0.38.0) (2026-11-17)
 
 
