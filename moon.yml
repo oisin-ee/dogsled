@@ -65,7 +65,7 @@ tasks:
   test:
     command: cargo test
     description: Run the Rust unit and integration tests.
-    tags: [precommit]
+    # Heavy: CI and `check` run it before merge and release, not the commit hook.
     # The asset tests read the embedded web bundle, so the bundle must exist
     # before the tests run.
     deps:

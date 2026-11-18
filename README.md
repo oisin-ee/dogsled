@@ -893,6 +893,6 @@ For launchd, dotfiles creates `~/.local/state/dogsled` before loading the agent.
 If mise has a different installation path, dotfiles adjusts the executable path.
 Install the same release on every host before enabling its service. This PR does not install or start host services.
 
-The pre-commit hook runs `moon run :#precommit --affected --status staged`: Rust format, Clippy, Rust tests, TypeScript typecheck, and Pi extension tests.
+The pre-commit hook runs `moon run :#precommit --affected --status staged`: Rust format, Clippy, TypeScript typecheck, and Pi extension tests. The Rust tests run in CI and in `moon run :check`, not at commit.
 CLI behavior tests use private state and fake Herdr/SSH executables. Time-sensitive unit tests inject timestamps.
 See [the design](docs/design.md) for watchdog delivery guarantees and cleanup scope.
