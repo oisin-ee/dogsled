@@ -2,13 +2,11 @@
 
 use crate::error::{Error, Result};
 use crate::shell::Shell;
-use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, ThinkingLevel};
-use serde::Deserialize;
+use portal_types::models::{ModelCatalogue, ModelChoice};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 const HOUR_MS: u64 = 60 * 60 * 1000;
-const INPUT: &[u8] = b"{\"id\":\"models\",\"type\":\"get_available_models\"}\n";
+const INPUT: &[u8] = b"{\"id\":\"models\",\"type\":\"get_entries\"}\n";
 
 #[derive(Debug, Default)]
 pub(super) struct Catalogue {
@@ -38,49 +36,15 @@ impl Catalogue {
     }
 }
 
-#[derive(Deserialize)]
-struct ChatModel {
-    provider: String,
-    id: String,
-    name: Option<String>,
-    #[serde(default)]
-    reasoning: bool,
-    #[serde(default, rename = "thinkingLevelMap")]
-    thinking_level_map: BTreeMap<String, Value>,
-}
-
-impl ChatModel {
-    fn choice(self) -> ModelChoice {
-        use ThinkingLevel::{High, Low, Max, Medium, Minimal, Off, Xhigh};
-        // Port of getSupportedThinkingLevels in @earendil-works/pi-ai 1.3.0,
-        // dist/models.js: null disables a level; xhigh/max need an explicit mapping.
-        let thinking = if self.reasoning {
-            [Off, Minimal, Low, Medium, High, Xhigh, Max]
-                .into_iter()
-                .filter(|level| {
-                    let mapped = self.thinking_level_map.get(level.as_str());
-                    !matches!(mapped, Some(Value::Null))
-                        && (!matches!(level, Xhigh | Max) || mapped.is_some())
-                })
-                .collect()
-        } else {
-            vec![Off]
-        };
-        ModelChoice {
-            model: ModelRef {
-                provider: self.provider,
-                id: self.id,
-            },
-            name: self.name,
-            thinking,
-        }
-    }
-}
-
 fn read(shell: &dyn Shell) -> Result<Vec<ModelChoice>> {
     let output = shell.run_input_bounded(
         "pi",
-        &["--mode".into(), "rpc".into(), "--no-session".into()],
+        &[
+            "--mode".into(),
+            "rpc".into(),
+            "--no-session".into(),
+            "--dogsled-model-catalogue".into(),
+        ],
         INPUT,
         shell.budget().with_limit("pi", crate::budget::CALL_LIMIT)?,
     )?;
@@ -105,20 +69,18 @@ fn parse(transcript: &str) -> Result<Vec<ModelChoice>> {
         if response["success"] != true {
             return Err(Error::Invalid("Pi model catalogue: request refused".into()));
         }
-        let models = response["data"]["models"]
+        let data = response["data"]["entries"]
             .as_array()
-            .ok_or_else(|| Error::Invalid("Pi model catalogue: missing models array".into()))?;
-        return models
-            .iter()
-            // pi-ai 1.3.0 dist/types.d.ts: a chat model's `type` is optional; only image
-            // models always carry their type.
-            .filter(|model| model.get("type").is_none_or(|kind| kind == "chat"))
-            .map(|model| {
-                serde_json::from_value::<ChatModel>(model.clone())
-                    .map(ChatModel::choice)
-                    .map_err(Into::into)
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry["type"] == "custom" && entry["customType"] == "dogsled.model-catalogue.v1"
+                })
             })
-            .collect();
+            .and_then(|entry| entry.get("data"))
+            .ok_or_else(|| {
+                Error::Invalid("Pi model catalogue: missing Dogsled discovery entry".into())
+            })?;
+        return Ok(serde_json::from_value(data.clone())?);
     }
     Err(Error::Invalid(
         "Pi model catalogue: missing response".into(),
@@ -133,25 +95,8 @@ mod tests {
     // RPC wire transcript includes extension startup traffic and unrelated responses.
     const TRANSCRIPT: &str = r#"{"type":"extension_ui_request","id":"ui-1","method":"setStatus","text":"ready"}
 {"type":"response","id":"other","success":true,"data":{}}
-{"type":"response","id":"models","command":"get_available_models","success":true,"data":{"models":[{"type":"chat","provider":"openai","id":"gpt-5","name":"GPT-5","reasoning":true,"thinkingLevelMap":{"off":null,"minimal":null,"xhigh":"xhigh","max":null}},{"type":"chat","provider":"anthropic","id":"claude","name":"Claude","reasoning":true,"thinkingLevelMap":{"max":"max"}},{"type":"chat","provider":"other","id":"plain","name":"Plain","reasoning":false,"thinkingLevelMap":{"xhigh":"high"}},{"type":"image","id":"image"}]}}
-{"type":"extension_ui_request","id":"ui-2","method":"setWidget"}"#;
-    const COMMAND: &str = "pi --mode rpc --no-session";
-
-    #[test]
-    fn rpc_transcript_filters_models_and_ports_thinking_levels() {
-        use ThinkingLevel::{High, Low, Max, Medium, Minimal, Off, Xhigh};
-        let models = parse(TRANSCRIPT).unwrap();
-        assert_eq!(models.len(), 3);
-        assert_eq!(models[0].model.pattern(), "openai/gpt-5");
-        assert_eq!(models[0].name.as_deref(), Some("GPT-5"));
-        assert_eq!(models[0].thinking, [Low, Medium, High, Xhigh]);
-        assert_eq!(models[1].thinking, [Off, Minimal, Low, Medium, High, Max]);
-        assert_eq!(models[2].thinking, [Off]);
-        // Untyped models (custom providers such as `tier`) are chat models too.
-        let default = parse(r#"{"id":"models","type":"response","success":true,"data":{"models":[{"provider":"p","id":"m","reasoning":true}]}}"#).unwrap();
-        assert_eq!(default.len(), 1);
-        assert_eq!(default[0].thinking, [Off, Minimal, Low, Medium, High]);
-    }
+{"type":"response","id":"models","success":true,"data":{"entries":[{"type":"custom","customType":"dogsled.model-catalogue.v1","data":[{"model":{"provider":"p","id":"one"},"scoped":true,"thinking":["high"]},{"model":{"provider":"p","id":"two"},"scoped":false,"thinking":["off"]}]}]}}"#;
+    const COMMAND: &str = "pi --mode rpc --no-session --dogsled-model-catalogue";
 
     #[test]
     fn missing_refused_and_malformed_responses_fail() {
@@ -184,7 +129,10 @@ mod tests {
             timeout: std::time::Duration,
         ) -> Result<Output> {
             assert_eq!(program, "pi");
-            assert_eq!(args, ["--mode", "rpc", "--no-session"]);
+            assert_eq!(
+                args,
+                ["--mode", "rpc", "--no-session", "--dogsled-model-catalogue"]
+            );
             assert_eq!(input, INPUT);
             assert!(timeout <= crate::budget::CALL_LIMIT);
             if self.timeout {
@@ -220,7 +168,9 @@ mod tests {
         shell.on(COMMAND, TRANSCRIPT);
         let mut catalogue = Catalogue::default();
         let good = catalogue.refresh(&shell, 0).unwrap();
-        assert_eq!(good.models.len(), 3);
+        assert_eq!(good.models.len(), 2);
+        assert!(good.models[0].scoped);
+        assert!(!good.models[1].scoped);
         shell.on(
             COMMAND,
             r#"{"type":"response","id":"models","success":false}"#,
@@ -242,7 +192,7 @@ mod tests {
         assert!(timeout.error.as_deref().unwrap().contains("timeout"));
         shell.on(
             COMMAND,
-            r#"{"type":"response","id":"models","success":true,"data":{"models":[]}}"#,
+            r#"{"type":"response","id":"models","success":true,"data":{"entries":[{"type":"custom","customType":"dogsled.model-catalogue.v1","data":[]}]}}"#,
         );
         assert!(catalogue.refresh(&shell, HOUR_MS * 2 + 1).is_none());
         assert_eq!(

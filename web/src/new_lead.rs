@@ -246,12 +246,13 @@ pub(crate) fn NewLeadForm(
             }
             if let Some(message) = error() { Alert { "{message}" } }
             div { class: "conversation-footer new-lead-composer",
-                crate::model_picker::ModelPicker {
-                    choices: model_choices.clone(), selected_model: launch.model,
-                    selected_level: launch.thinking, busy: busy(),
-                    on_change: move |change| settings.write().change(change, &model_choices),
-                }
                 Composer { draft, images, uploading, disabled: !valid(), busy: busy(),
+                    placeholder: "Send a message or start a task…".to_owned(),
+                    model_picker: rsx! { crate::model_picker::ModelPicker {
+                        choices: model_choices.clone(), selected_model: launch.model,
+                        selected_level: launch.thinking, busy: busy(),
+                        on_change: move |change| settings.write().change(change, &model_choices),
+                    } },
                     on_error: move |message| error.set(Some(message)), on_send: send }
             }
         }
@@ -271,6 +272,7 @@ mod tests {
                 provider: "provider".into(),
                 id: id.into(),
             },
+            scoped: false,
             name: None,
             thinking,
         }
@@ -402,7 +404,7 @@ mod tests {
         assert!(!header.contains("model-picker"), "{html}");
         let composer = body.split_once("new-lead-composer").unwrap().1;
         assert!(composer.contains("model-picker"), "{html}");
-        assert!(composer.contains(r#"aria-haspopup="listbox""#), "{html}");
+        assert!(composer.contains(r#"aria-haspopup="dialog""#), "{html}");
         assert!(!composer.contains(r#"role="combobox""#), "{html}");
         assert!(!composer.contains(r#"placeholder="Pi default""#), "{html}");
         assert!(composer.contains("console-composer"), "{html}");

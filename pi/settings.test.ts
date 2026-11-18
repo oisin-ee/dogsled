@@ -15,6 +15,10 @@ function fixture() {
   const setters: string[] = [];
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
   const pi = {
+    registerFlag() {},
+    getFlag() {
+      return undefined;
+    },
     on(name: string, handler: (event: unknown, ctx: ExtensionContext) => void) {
       handlers.set(name, handler);
     },
@@ -139,15 +143,27 @@ test("unknown models report an error and stale or stopped sessions are ignored",
   assert.equal(f.calls.length, 1);
 });
 
-test("scoped model choices replace the available catalogue", async () => {
+test("scoped choices lead the available catalogue without duplicates", async () => {
   const f = fixture();
   const scoped = { ...f.ctx, scopedModels: [{ model: second, thinkingLevel: "low" as const }] };
   const session = new SessionSettings(f.pi, f.client, "w1:p1", evidence, scoped);
   await session.publish();
   const settings = (
-    f.calls[0]!.body as { settings: { models: { model: unknown; thinking: string[] }[] } }
+    f.calls[0]!.body as {
+      settings: { models: { model: unknown; thinking: string[]; scoped: boolean }[] };
+    }
   ).settings;
-  assert.equal(settings.models.length, 1);
+  assert.deepEqual(
+    settings.models.map((choice) => choice.model),
+    [
+      { provider: second.provider, id: second.id },
+      { provider: first.provider, id: first.id },
+    ],
+  );
+  assert.deepEqual(
+    settings.models.map((choice) => choice.scoped),
+    [true, false],
+  );
   assert.deepEqual(settings.models[0]!.model, { provider: second.provider, id: second.id });
   assert.ok(settings.models[0]!.thinking.includes("low"));
   session.stop();

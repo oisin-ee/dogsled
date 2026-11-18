@@ -54,6 +54,9 @@ impl ModelRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelChoice {
+    /// Part of Pi's resolved model cycling scope.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scoped: bool,
     pub model: ModelRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
