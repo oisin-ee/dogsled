@@ -675,6 +675,7 @@ mod model_tests {
                     provider: "openai".into(),
                     id: "gpt-5".into(),
                 },
+                scoped: false,
                 name: Some("GPT-5".into()),
                 thinking: vec![portal_types::models::ThinkingLevel::High],
             }],

@@ -15,7 +15,7 @@ interface Evidence {
 interface Settings {
   model: ModelRef | null;
   thinking: Thinking;
-  models: { model: ModelRef; name: string; thinking: Thinking[] }[];
+  models: { model: ModelRef; name: string; thinking: Thinking[]; scoped: boolean }[];
 }
 interface Change {
   model?: ModelRef;
@@ -59,6 +59,27 @@ function request(value: unknown): value is Request {
   );
 }
 
+/** Both the one-shot discovery process and live sessions use Pi's resolved model scope. */
+function modelChoices(ctx: ExtensionContext): Settings["models"] {
+  const choices: Settings["models"] = [];
+  const seen = new Set<string>();
+  function add(model: ReturnType<typeof ctx.modelRegistry.getAvailable>[number], scoped: boolean) {
+    if (choices.length >= 1000 || !modelRef(model)) return;
+    const key = JSON.stringify([model.provider, model.id]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    choices.push({
+      model: { provider: model.provider, id: model.id },
+      name: model.name.slice(0, 256),
+      thinking: getSupportedThinkingLevels(model),
+      scoped,
+    });
+  }
+  for (const { model } of ctx.scopedModels) add(model, true);
+  for (const model of ctx.modelRegistry.getAvailable()) add(model, false);
+  return choices;
+}
+
 /** One subscription and publication lifetime per native session. */
 export class SessionSettings {
   private readonly controller = new AbortController();
@@ -90,21 +111,11 @@ export class SessionSettings {
   }
 
   private current(): Settings {
-    const models = this.ctx.scopedModels.length
-      ? this.ctx.scopedModels.map((choice) => choice.model)
-      : this.ctx.modelRegistry.getAvailable();
-    const ref = (model: ModelRef): ModelRef => ({ provider: model.provider, id: model.id });
+    const model = this.ctx.model;
     return {
-      model: this.ctx.model ? ref(this.ctx.model) : null,
+      model: model ? { provider: model.provider, id: model.id } : null,
       thinking: this.pi.getThinkingLevel(),
-      models: models
-        .filter(modelRef)
-        .slice(0, 1000)
-        .map((model) => ({
-          model: ref(model),
-          name: model.name.slice(0, 256),
-          thinking: getSupportedThinkingLevels(model),
-        })),
+      models: modelChoices(this.ctx),
     };
   }
 
@@ -188,10 +199,19 @@ export class SessionSettings {
 }
 
 export function registerSettings(pi: ExtensionAPI, client: Client, pane: string | undefined): void {
+  const catalogueFlag = "dogsled-model-catalogue";
+  pi.registerFlag(catalogueFlag, {
+    type: "boolean",
+    description: "Publish model choices for Dogsled catalogue discovery",
+  });
   let session: SessionSettings | undefined;
   pi.on("session_start", (_event, ctx) => {
     session?.stop();
     session = undefined;
+    if (pi.getFlag(catalogueFlag) === true) {
+      pi.appendEntry("dogsled.model-catalogue.v1", modelChoices(ctx));
+      return;
+    }
     if (!pane || !text(pane, 128)) return;
     try {
       const session_file = ctx.sessionManager.getSessionFile(),

@@ -13,6 +13,7 @@ pub(crate) fn selection() -> AgentSettings {
         thinking: ThinkingLevel::High,
         models: vec![ModelChoice {
             model,
+            scoped: false,
             name: Some("Test model".into()),
             thinking: vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High],
         }],

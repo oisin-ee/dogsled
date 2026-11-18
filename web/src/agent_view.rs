@@ -684,6 +684,14 @@ fn AgentSession(
     });
 
     let review_identity = identity.clone();
+    let picker = rsx! {
+        if harness == Some("pi") {
+            if let Some(value) = settings() {
+                crate::model_picker::ModelPicker { choices: value.models, selected_model: value.model,
+                    selected_level: Some(value.thinking), busy: settings_busy(), on_change: change_settings }
+            }
+        }
+    };
     let chat = rsx! {
         div { class: "lead-chat",
                 if tab == Tab::Pending {
@@ -717,7 +725,7 @@ fn AgentSession(
                         connected: loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
                     Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
-                        on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
+                        model_picker: picker.clone(), on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
                 }
             }
         }
@@ -741,11 +749,7 @@ fn AgentSession(
                         }
                     }
                 }
-                if harness == Some("pi") {
-                    if let Some(value) = settings() {
-                        crate::model_picker::ModelPicker { choices: value.models, selected_model: value.model, selected_level: Some(value.thinking), busy: settings_busy(), on_change: change_settings }
-                    }
-                } else if matches!(harness, Some("claude" | "codex")) {
+                if matches!(harness, Some("claude" | "codex")) {
                     crate::model_picker::ReadOnlyModel { model: retained.as_ref().and_then(|conversation| conversation.turns.iter().rev().find_map(|turn| match &turn.source {
                         wire::Source::Harness { model, .. } => model.clone(), _ => None,
                     })) }
@@ -867,7 +871,7 @@ fn AgentSession(
                     TabContent { class: "todos-tab", value: "todos", index: first_tab + 1,
                         div { class: "todo-tab-body", Todos { todos: todos.clone(), workers: workers.clone() } }
                         Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
-                            on_send: move |_| conversation_send(false) }
+                            model_picker: picker.clone(), on_send: move |_| conversation_send(false) }
                     }
                     TabContent { class: "workers-tab", value: "workers", index: first_tab + 2,
                         crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone() }
@@ -1579,6 +1583,7 @@ pub(crate) fn Composer(
     on_error: EventHandler<String>,
     on_send: EventHandler<()>,
     #[props(default)] placeholder: Option<String>,
+    #[props(default = VNode::empty())] model_picker: Element,
 ) -> Element {
     let mut round = use_signal(|| 0_u32);
     use_drop(move || uploading.set(false));
@@ -1602,7 +1607,7 @@ pub(crate) fn Composer(
         });
     });
     rsx! {
-        form { class: "console-composer", aria_label: "Message composer", aria_busy: uploading() || busy,
+        form { class: "console-composer message-composer", aria_label: "Message composer", aria_busy: uploading() || busy,
             onsubmit: move |event| { event.prevent_default(); if !disabled && !busy && !uploading() { on_send.call(()); } },
             if !images().is_empty() {
                 div { class: "composer-images",
@@ -1623,15 +1628,6 @@ pub(crate) fn Composer(
                 }
             }
             div { class: "composer-field",
-                Button { class: "icon-button attach-button", variant: ButtonVariant::Ghost, r#type: "button",
-                    aria_label: "Attach images", title: "Attach images", disabled: disabled || busy || uploading(),
-                    onclick: move |_| { let _ = document::eval("document.getElementById('composer-images').click()"); },
-                    Paperclip { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
-                }
-                Input { key: "{round}", id: "composer-images", name: "images", r#type: "file", hidden: true,
-                    accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
-                    onchange: move |event: FormEvent| upload.call(event.files().iter().filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned()).collect()),
-                }
                 Textarea { name: "message", aria_label: "Message this agent", placeholder, rows: "1", value: "{draft}", disabled: disabled || busy,
                     oninput: move |event: FormEvent| draft.set(event.value()),
                     onpaste: move |event: ClipboardEvent| {
@@ -1652,6 +1648,18 @@ pub(crate) fn Composer(
                     disabled: disabled || busy || uploading() || (draft().trim().is_empty() && images().is_empty()),
                     ArrowUp { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
                 }
+            }
+            div { class: "composer-toolbar",
+                Button { class: "icon-button attach-button", variant: ButtonVariant::Ghost, r#type: "button",
+                    aria_label: "Attach images", title: "Attach images", disabled: disabled || busy || uploading(),
+                    onclick: move |_| { let _ = document::eval("document.getElementById('composer-images').click()"); },
+                    Paperclip { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                }
+                Input { key: "{round}", id: "composer-images", name: "images", r#type: "file", hidden: true,
+                    accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
+                    onchange: move |event: FormEvent| upload.call(event.files().iter().filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned()).collect()),
+                }
+                {model_picker}
             }
         }
     }
