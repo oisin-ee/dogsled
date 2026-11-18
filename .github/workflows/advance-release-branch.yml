@@ -1,0 +1,32 @@
+# release.yml calls this workflow before it announces the GitHub release.
+# The `release` branch always points at the newest published release. The Claude,
+# Codex, and Herdr plugins install from it, so their update commands find each
+# release. Tags never move; only this branch does.
+name: Advance release branch
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  advance:
+    runs-on: ubuntu-24.04
+    if: ${{ !fromJson(inputs.plan).announcement_is_prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Move release to the announced tag
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          tag=$(jq -r '.announcement_tag' <<<"$PLAN")
+          target=$(git rev-parse "refs/tags/$tag^{commit}")
+          # A plain push only fast-forwards, so the branch never moves back.
+          git push origin "$target:refs/heads/release"

@@ -169,6 +169,7 @@ tokio-util = { version = "0.7.20", default-features = false, features = ["rt"] }
 toml = "1.1.6"
 toml_edit = "0.25.18"
 todo-core = { workspace = true, features = ["schema"] }
+axoupdater = { version = "0.10.3", default-features = false, features = ["github_releases", "blocking"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 sysinfo = { version = "=0.40.1", default-features = false, features = ["system"] }

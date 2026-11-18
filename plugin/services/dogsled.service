@@ -3,8 +3,10 @@ Description=Dogsled host status service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/mise x -- dogsled serve
-Restart=on-failure
+# The installer's path. `dogsled serve` updates this file and exits; systemd starts the
+# new release. The service needs git, herdr, and the harness CLIs on PATH.
+ExecStart=%h/.local/bin/dogsled serve
+Restart=always
 RestartSec=10
 StateDirectory=dogsled
 Environment=DOGSLED_STATE=%S/dogsled

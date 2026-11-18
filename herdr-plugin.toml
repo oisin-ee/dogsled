@@ -1,4 +1,4 @@
-# Herdr plugin manifest. Install: herdr plugin install oisin-ee/dogsled --ref vX.Y.Z --yes
+# Herdr plugin manifest. Install: herdr plugin install oisin-ee/dogsled --ref release --yes
 
 id = "dogsled"
 name = "dogsled"

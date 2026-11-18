@@ -104,6 +104,23 @@ pub(crate) enum Event {
     Wake,
     Swept(Result<()>),
     Observe,
+    /// A newer release is installed. Finish the running lanes, then exit for the restart.
+    Restart,
+}
+
+/// Check for releases on a thread of its own; a slow download never delays a lane.
+fn updates(node: &Node<'_>, policy: &Policy, once: bool, send: &mpsc::Sender<Event>) {
+    if once || policy.update.mode == crate::config::UpdateMode::Off {
+        return;
+    }
+    let settings = policy.update.clone();
+    let dir = node.ledger.dir.clone();
+    let send = send.clone();
+    std::thread::spawn(move || {
+        crate::update::watch(&settings, &dir, &|| {
+            let _ = send.send(Event::Restart);
+        });
+    });
 }
 
 /// Wake the loop without waiting for its publication interval. The ledger request is durable;
@@ -220,6 +237,9 @@ struct Workers {
     release_retries: Arc<crate::launch::ReleaseRetries>,
     handles: [Option<std::thread::JoinHandle<()>>; LANES.len()],
     completed: [bool; LANES.len()],
+    /// A newer release is installed: start nothing new, and exit once the lanes finish.
+    /// Durable state is in the ledger, so the new process takes up queued work.
+    draining: bool,
 }
 
 impl Workers {
@@ -228,7 +248,12 @@ impl Workers {
             release_retries,
             handles: Default::default(),
             completed: [false; LANES.len()],
+            draining: false,
         }
+    }
+
+    fn drained(&self) -> bool {
+        self.draining && self.handles.iter().all(Option::is_none)
     }
 
     /// Start eligible lanes without coupling their scheduling to publication or input.
@@ -240,6 +265,9 @@ impl Workers {
         send: &mpsc::Sender<Event>,
         source: &crate::observation::Publisher,
     ) -> Result<()> {
+        if self.draining {
+            return Ok(());
+        }
         let published = source.current()?;
         for (index, lane) in LANES.iter().enumerate() {
             if !once || (!self.completed[index] && ready(*lane, self.completed)) {
@@ -260,6 +288,9 @@ impl Workers {
         send: &mpsc::Sender<Event>,
         source: &crate::observation::Publisher,
     ) -> Result<bool> {
+        if self.draining {
+            return Ok(false);
+        }
         if !once && crate::quota::pending(node.ledger)? {
             let index = LANES
                 .iter()
@@ -566,6 +597,23 @@ impl Observation {
 
 const BASELINE_SAMPLE_DELAY: Duration = Duration::from_secs(1);
 
+fn start_sweep(
+    node: &Node<'_>,
+    policy: &Policy,
+    send: &mpsc::Sender<Event>,
+) -> std::thread::JoinHandle<()> {
+    let mut ledger = node.ledger.clone();
+    ledger.budget = crate::budget::Budget::default();
+    let policy = policy.clone();
+    let home = node.home.to_owned();
+    let send = send.clone();
+    std::thread::spawn(move || {
+        let shell = System::default();
+        let node = Node::new(&shell, &ledger, &policy, &home);
+        let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
+    })
+}
+
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
     let dirty = wake::Dirty::new(send.clone());
@@ -583,6 +631,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
     let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);
+    updates(node, policy, once, &send);
     loop {
         let scheduled = Instant::now() >= next;
         let baseline_due = baseline.take_if(|at| Instant::now() >= *at).is_some();
@@ -607,18 +656,13 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= workers.requests(node, policy, once, &send, &observation.publisher)?;
         loop {
-            if requested && sweep.is_none() {
+            if workers.drained() && sweep.is_none() {
+                eprintln!("dogsled service: exiting to start the new release");
+                return Ok(());
+            }
+            if requested && sweep.is_none() && !workers.draining {
                 requested = false;
-                let mut ledger = node.ledger.clone();
-                ledger.budget = crate::budget::Budget::default();
-                let policy = policy.clone();
-                let home = node.home.to_owned();
-                let send = send.clone();
-                sweep = Some(std::thread::spawn(move || {
-                    let shell = System::default();
-                    let node = Node::new(&shell, &ledger, &policy, &home);
-                    let _ = send.send(Event::Swept(crate::sweep::requested(&node)));
-                }));
+                sweep = Some(start_sweep(node, policy, &send));
             }
             if once && workers.completed.iter().all(|done| *done) && sweep.is_none() {
                 return Ok(());
@@ -629,6 +673,7 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                     requested |=
                         workers.requests(node, policy, once, &send, &observation.publisher)?;
                 }
+                Ok(Event::Restart) => workers.draining = true,
                 Ok(Event::Observe) => {
                     if dirty.pending() && !once {
                         break;
