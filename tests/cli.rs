@@ -731,6 +731,7 @@ impl Rig {
             service: std::sync::Mutex::new(None),
             origin_ms: now(),
         };
+        rig.config("");
         rig.put("machines.json", &json!([]));
         rig.put("agents.json", &json!({"result":{"agents":[]}}));
         rig.put(
@@ -923,7 +924,18 @@ esac
         fs::rename(temporary, path).unwrap();
     }
 
+    /// Every rig turns self-update off: a test never reads the release feed or runs the
+    /// developer's harness CLIs. Invalid TOML is written unchanged, for the tests of it.
     fn config(&self, text: &str) {
+        let text = text.parse::<toml::Table>().map_or_else(
+            |_| text.to_owned(),
+            |mut policy| {
+                policy
+                    .entry("update")
+                    .or_insert_with(|| toml::Value::Table(toml::toml! { mode = "off" }));
+                toml::to_string(&policy).unwrap()
+            },
+        );
         fs::write(self.dir.join("config.toml"), text).unwrap();
     }
 
