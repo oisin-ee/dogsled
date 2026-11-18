@@ -8,18 +8,22 @@ Dogsled measures hosts, starts Pi, Claude, and Codex children and jobs on the ho
 
 ## Install
 
-Install the binary on each Herdr host. Use the same release tag in each command.
+Install the binary on each Herdr host. Each command installs the latest release, and Dogsled keeps every part on the newest release after that (see [Updates](#updates)).
 
-Binary:
+Binary, for Linux x86_64 and macOS arm64:
 
 ```sh
-mise use github:oisin-ee/dogsled@v0.38.0 # x-release-please-version
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/oisin-ee/dogsled/releases/latest/download/dogsled-installer.sh | sh
 ```
+
+The installer writes `~/.local/bin/dogsled` and an install receipt at `~/.config/dogsled/dogsled-receipt.json`. It needs no `sudo`.
+It adds `~/.local/bin` to `PATH` in your shell profile. Set `DOGSLED_NO_MODIFY_PATH=1` to keep the profile unchanged, and `DOGSLED_INSTALL_DIR` to install elsewhere.
+A binary from another tool, such as `mise use -g github:oisin-ee/dogsled`, works too. That tool then owns its updates (see [Updates](#updates)).
 
 Pi (extension, tools, the `todo` tool, and skill), from npm:
 
 ```sh
-pi install npm:@oisin-ee/pi-dogsled@0.38.0 # x-release-please-version
+pi install npm:@oisin-ee/pi-dogsled
 ```
 
 At session start the extension compares its version with `dogsled --version` and warns when they differ.
@@ -27,14 +31,14 @@ At session start the extension compares its version with `dogsled --version` and
 Claude Code (hooks, tools, and skill):
 
 ```sh
-claude plugin marketplace add oisin-ee/dogsled#v0.28.0
+claude plugin marketplace add oisin-ee/dogsled#release
 claude plugin install dogsled@dogsled
 ```
 
 Codex (hooks, tools, and skill):
 
 ```sh
-codex plugin marketplace add oisin-ee/dogsled --ref v0.28.0
+codex plugin marketplace add oisin-ee/dogsled --ref release
 codex plugin add dogsled@dogsled
 ```
 
@@ -44,8 +48,10 @@ The [Codex CLI reference](https://developers.openai.com/codex/cli/reference#code
 Herdr (left-docked work board):
 
 ```sh
-herdr plugin install oisin-ee/dogsled --ref v0.28.0 --yes
+herdr plugin install oisin-ee/dogsled --ref release --yes
 ```
+
+The `release` branch points at the newest published release. A release job moves it forward after each release. Tags never move.
 
 The Claude and Codex plugins use the binary on `PATH`. The Herdr plugin's build step (`plugin/fetch.sh`) installs its own binary at `bin/dogsled`: the release archive for the manifest version, checked against its published SHA-256. When that release has no archive for the platform, it runs `cargo build --release --locked` instead, which needs Rust at the crate's `rust-version` or newer. A checksum mismatch stops the install. `DOGSLED_RELEASES` replaces the download base, such as a mirror. `herdr plugin link` skips build steps, so run `sh plugin/fetch.sh` in a linked checkout. No plugin starts host services.
 

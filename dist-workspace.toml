@@ -10,8 +10,14 @@ ci = "github"
 # Publish only through an explicit dispatch after the release PR passes CI.
 dispatch-releases = true
 pr-run-mode = "skip"
-# The installers to generate for each app
-installers = []
+# The installers to generate for each app. The shell installer writes an install
+# receipt, which `dogsled update` reads to update the binary in place.
+installers = ["shell"]
+# A user-writable directory on PATH, so neither install nor update needs sudo.
+install-path = "~/.local/bin"
+# The GitHub release appears only after every publish job, so the latest release
+# always has its binaries and npm packages. The npm packages carry no binaries.
+github-release = "announce"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Where to host releases
@@ -20,9 +26,11 @@ hosting = "github"
 github-build-setup = "../build-setup.yml"
 # Publish the Pi extension to npm after the binaries are built.
 publish-jobs = ["./publish-npm"]
+# Move the `release` branch to the new tag, for the plugins that follow it.
+post-announce-jobs = ["./advance-release-branch"]
 # Checkout needs contents; npm trusted publishing needs the OIDC token.
-github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" } }
-# Dotfiles installs these templates; dist only bundles them beside the binary.
+github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" }, "advance-release-branch" = { contents = "write" } }
+# Service templates for a host that runs `dogsled serve` and `dogsled web` at login.
 include = ["plugin/services/dogsled.service", "plugin/services/dev.dogsled.plist", "plugin/services/dev.dogsled.web.plist"]
 
 # GitHub retires the macos-14 image on 2026-11-02 and fails its jobs during brownouts.
