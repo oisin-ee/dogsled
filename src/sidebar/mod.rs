@@ -434,12 +434,47 @@ impl Display {
     }
 }
 
+/// Look for a newer build of this program until the sidebar stops.
+fn watch_executable(
+    shell: &dyn Shell,
+    next: &std::sync::OnceLock<crate::update::Successor>,
+    stop: &AtomicBool,
+) {
+    let executable = crate::update::Executable::started();
+    while !stop.load(Ordering::Relaxed) {
+        let until = Instant::now() + crate::update::REPLACEMENT_CHECK;
+        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+            std::thread::park_timeout(TICK);
+        }
+        if let Some(successor) = executable.successor(shell) {
+            let _ = next.set(successor);
+            return;
+        }
+    }
+}
+
+/// The sidebar. When a newer build is installed, the sidebar restores the terminal and
+/// replaces its own process with the new build, so the pane stays open.
 pub fn command(
     shell: System,
     ledger: &Ledger,
     policy: &Policy,
     home: &str,
     owner: Option<String>,
+) -> Result<()> {
+    let next = std::sync::OnceLock::new();
+    run(shell, ledger, policy, home, owner, &next)?;
+    next.into_inner()
+        .map_or(Ok(()), |successor| Err(successor.exec()))
+}
+
+fn run(
+    shell: System,
+    ledger: &Ledger,
+    policy: &Policy,
+    home: &str,
+    owner: Option<String>,
+    next: &std::sync::OnceLock<crate::update::Successor>,
 ) -> Result<()> {
     let owner = board::owner(owner, false)?.unwrap_or_default();
     let mut display = Display::new();
@@ -459,8 +494,12 @@ pub fn command(
         let lifetime = scope.spawn(|| terminal_lifetime(tty.as_fd(), &stop));
         scope.spawn(|| reader(&client, &tx, &stop));
         scope.spawn(|| watch_tab(ledger, &shell, &tx, &stop));
+        scope.spawn(|| watch_executable(&shell, next, &stop));
         let outcome = (|| -> Result<()> {
             loop {
+                if next.get().is_some() {
+                    return Ok(());
+                }
                 let area = terminal.size()?;
                 let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
                 while let Ok(message) = rx.try_recv() {

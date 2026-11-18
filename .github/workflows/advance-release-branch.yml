@@ -1,4 +1,4 @@
-# release.yml calls this workflow after the GitHub release is announced.
+# release.yml calls this workflow before it announces the GitHub release.
 # The `release` branch always points at the newest published release. The Claude,
 # Codex, and Herdr plugins install from it, so their update commands find each
 # release. Tags never move; only this branch does.

@@ -73,6 +73,7 @@ mod transfer;
 mod unit_reply;
 mod unit_request;
 mod unit_transport;
+mod update;
 mod watchdog;
 mod web;
 mod web_store;
@@ -223,6 +224,17 @@ fn turn_command(ledger: &Ledger, shell: &System, json: bool, command: Command) -
     print(json, &signal, || format!("{}\n", signal.event_id))
 }
 
+fn update_command(
+    shell: &System,
+    policy: &config::Policy,
+    ledger: &Ledger,
+    check: bool,
+    json: bool,
+) -> Result<()> {
+    let report = update::run(shell, &policy.update, &ledger.dir, !check)?;
+    print(json, &report, || report.lines())
+}
+
 fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
     let config_path = cli.config.unwrap_or_else(config::default_path);
     let policy = config::load(&config_path)?;
@@ -286,6 +298,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
         Command::Inbox(cmd) => inbox_command(cmd, &ledger, &shell, cli.json)?,
         Command::Sidebar { owner } => sidebar::command(shell, &ledger, &policy, &home, owner)?,
         Command::Web { port } => web::serve(&ledger, &policy, &home, port, &config_path)?,
+        Command::Update { check } => update_command(&shell, &policy, &ledger, check, cli.json)?,
         command @ (Command::Interview { .. } | Command::Review { .. }) => {
             return web::oneshot::command(&shell, &ledger, command);
         }

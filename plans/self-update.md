@@ -52,8 +52,9 @@ Checked on 2026-11-18 at Dogsled `bd8192b` (`v0.38.0`).
 
 ### A release is complete before anyone can see it
 
-dist creates the GitHub release in `announce`, after npm publishes. "Latest release" on GitHub then always means "every
-artifact is available". No consumer needs to check npm.
+dist creates the GitHub release in `announce`, after the publish jobs: npm, and the move of the `release` branch.
+"Latest release" on GitHub then always means "every artifact and every channel is available". No consumer needs to check
+npm or the branch.
 
 ### One release channel for the plugins
 
@@ -61,8 +62,10 @@ Four channels install from Git or npm. Each has a native update command. The com
 release:
 
 - npm: the `latest` dist-tag moves only on a release. Install docs drop the exact version.
-- Git (Claude, Codex, Herdr): a new branch `release`. After `announce`, a release job moves `release` to the new tag. Install
-  docs use `release` as the ref. Tags stay fixed.
+- Git (Claude, Codex, Herdr): a new branch `release`. A publish job moves `release` to the new tag before `announce`. A
+  plain push only fast-forwards. Install docs use `release` as the ref. Tags stay fixed.
+- Git cannot have `release` next to `release/<version>` branches. The owner deleted the nine old release-PR branches
+  `release/0.23.1` to `release/0.31.1` on 2026-11-18. Their PRs were merged or closed.
 
 ### `dogsled update`
 
@@ -79,7 +82,10 @@ release:
    - Claude: `claude plugin marketplace update dogsled`, then `claude plugin update dogsled@dogsled`.
    - Codex: `codex plugin marketplace upgrade dogsled`.
    - Herdr: `herdr plugin update dogsled --yes`.
-   A harness that is not installed, or that pins a tag, is skipped and named in the output.
+   A harness that is not installed is skipped. A pinned plugin stays on its pin.
+   Step 3 runs once for each binary version: after step 2 installs a release, or when the binary is the newest release
+   and the version in `update-plugins` in the ledger directory differs. A failed step leaves that file unchanged, so the
+   next check repeats step 3.
 4. Print one line for each part that changed.
 
 ### Automatic check and restart
@@ -88,8 +94,12 @@ release:
   `[update] mode = "auto"`, `serve` runs `dogsled update`, then exits.
 - The service templates restart after every exit (`Restart=always`, `KeepAlive = true`). The new process runs the new
   binary.
-- `dogsled web` and the Herdr sidebar did not install the update. Each one compares its executable file with the file it
-  started from. When the file changed, it exits, and its supervisor starts it again.
+- `serve` starts no new lane after the install. It exits when the running lanes finish. Queued work is in the ledger.
+- `dogsled web` compares its executable file with the file it started from, every 30 seconds. When the file changed, it
+  exits, and its supervisor starts it again.
+- Herdr does not start a plugin pane again, and `herdr plugin update` installs into a new directory. So the sidebar
+  replaces its own process (`exec`) with the newer build: the file at its start path, or `bin/dogsled` in the plugin root
+  that `herdr plugin list` names. The pane stays open.
 - Running agent sessions keep their loaded plugins until they restart. The Pi extension already warns about the version
   difference.
 
@@ -97,9 +107,9 @@ release:
 
 ```toml
 [update]
-mode = "auto"      # "auto" installs, "check" only logs the new version, "off" does nothing
-interval = "15m"
-command = []       # optional updater for a binary from a package manager
+mode = "auto"          # "auto" installs, "notify" only logs the new version, "off" does nothing
+interval_minutes = 15  # the other config durations are integers too
+# command = ["mise", "use", "-g", "github:oisin-ee/dogsled@{version}"]  # optional
 ```
 
 ## Units
@@ -115,8 +125,8 @@ No dependencies.
 - `dist-workspace.toml`:
   - `github-release = "announce"`.
   - `installers = ["shell"]` and `install-path = ["$DOGSLED_INSTALL_DIR", "~/.local/bin"]`.
-  - `post-announce-jobs = ["./advance-release-branch"]`. The job moves `release` to the tag with `git push --force-with-lease`
-    from the previous `release` commit. It never moves a tag.
+  - `publish-jobs = ["./publish-npm", "./advance-release-branch"]`. The job moves `release` to the tag with a plain,
+    fast-forward-only push. It never moves a tag.
 - Remove the dotfiles comment on line 25.
 - `README.md` "Install": the shell installer for the binary, the npm packages with no version, and `release` as the ref for
   Claude, Codex, and Herdr.
@@ -175,7 +185,8 @@ Decided by the owner on 2026-11-18.
 
 - Hosts update independently, within one interval. For that time, peers run different versions. Peer messages already
   accept older fields during upgrades.
-- An update that fails halfway leaves the binary new and some plugins old. The automatic check then finds no newer release
-  and does not repeat step 3. The Pi warning shows the gap. `dogsled update` by hand repeats step 3. Each update command
-  does nothing when its plugin is current.
+- An update that fails halfway leaves the binary new and some plugins old. The next check repeats step 3, because
+  `update-plugins` still names the old version. Each update command does nothing when its plugin is current.
+- If `announce` fails after the publish jobs, `release` and npm are ahead of the latest GitHub release. Hosts do not
+  update until a retry announces the release. A new plugin install can be one version ahead of the binary until then.
 - A bad release reaches every automatic host within one interval. The fix is a new release. Tags never move back.

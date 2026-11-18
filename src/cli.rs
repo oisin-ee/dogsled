@@ -111,6 +111,13 @@ pub enum Command {
         #[arg(long)]
         owner: Option<String>,
     },
+    /// Install the newest release and update the harness plugins. Nothing changes when this
+    /// binary is the newest release.
+    Update {
+        /// Print whether a newer release exists, and install nothing.
+        #[arg(long)]
+        check: bool,
+    },
     /// Serve the portal's board API on the loopback address.
     Web {
         /// The port to listen on. Defaults to the configured port.

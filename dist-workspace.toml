@@ -24,10 +24,10 @@ targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 hosting = "github"
 # Build the web portal UI before the cargo-dist build.
 github-build-setup = "../build-setup.yml"
-# Publish the Pi extension to npm after the binaries are built.
-publish-jobs = ["./publish-npm"]
-# Move the `release` branch to the new tag, for the plugins that follow it.
-post-announce-jobs = ["./advance-release-branch"]
+# After the binaries are built, publish the Pi packages to npm and move the `release`
+# branch to the new tag. Both finish before `announce` makes the release the latest one,
+# so a host that sees the release finds every plugin channel already on it.
+publish-jobs = ["./publish-npm", "./advance-release-branch"]
 # Checkout needs contents; npm trusted publishing needs the OIDC token.
 github-custom-job-permissions = { "publish-npm" = { contents = "read", id-token = "write" }, "advance-release-branch" = { contents = "write" } }
 # Service templates for a host that runs `dogsled serve` and `dogsled web` at login.

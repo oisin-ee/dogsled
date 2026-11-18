@@ -40,6 +40,43 @@ pub struct Policy {
     pub cleanup: Cleanup,
     pub quota: Quota,
     pub web: Web,
+    pub update: Update,
+}
+
+/// What `dogsled serve` does when a newer release exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateMode {
+    /// Install the release, update the harness plugins, then exit so the service restarts.
+    #[default]
+    Auto,
+    /// Print one line that names the release. Install nothing.
+    Notify,
+    /// Do not check.
+    Off,
+}
+
+/// The self-update settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Update {
+    pub mode: UpdateMode,
+    /// Minutes between two release checks. 15 minutes is 4 GitHub API requests an hour,
+    /// below the unauthenticated limit of 60.
+    pub interval_minutes: u64,
+    /// argv that installs one release, for a binary that another tool installed.
+    /// `{version}` becomes the release version, such as `0.39.0`.
+    pub command: Option<Vec<String>>,
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Self {
+            mode: UpdateMode::Auto,
+            interval_minutes: 15,
+            command: None,
+        }
+    }
 }
 
 /// The web portal's settings.
@@ -86,6 +123,7 @@ impl Default for Policy {
             cleanup: Cleanup::default(),
             quota: Quota::default(),
             web: Web::default(),
+            update: Update::default(),
         }
     }
 }
@@ -189,6 +227,19 @@ mod tests {
         assert_eq!(p.web.port, 8080);
         // The rest of the policy keeps its defaults.
         assert_eq!(p.disk_free_min_percent, 15.0);
+    }
+
+    #[test]
+    fn the_update_settings_have_defaults_and_can_be_set() {
+        assert_eq!(Policy::default().update.mode, UpdateMode::Auto);
+        assert_eq!(Policy::default().update.interval_minutes, 15);
+        let p = parse("[update]\nmode = \"off\"\ncommand = [\"mise\", \"use\", \"-g\", \"github:oisin-ee/dogsled@{version}\"]\n").unwrap();
+        assert_eq!(p.update.mode, UpdateMode::Off);
+        assert_eq!(
+            p.update.command.unwrap()[3],
+            "github:oisin-ee/dogsled@{version}"
+        );
+        assert!(parse("[update]\nmode = \"sometimes\"\n").is_err());
     }
 
     #[test]

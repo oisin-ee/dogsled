@@ -183,12 +183,28 @@ pub fn serve(
         home: home.to_owned(),
         shell: Arc::new(crate::shell::System::default()),
     };
+    let stopping = async {
+        tokio::select! { () = shutdown() => {} () = replaced() => {} }
+    };
     runtime.block_on(run_until(
         ledger,
         port.unwrap_or(policy.web.port),
         leads,
-        shutdown(),
+        stopping,
     ))
+}
+
+/// A newer build is at this executable's path. The server exits and its supervisor starts
+/// the new build.
+async fn replaced() {
+    let executable = crate::update::Executable::started();
+    loop {
+        tokio::time::sleep(crate::update::REPLACEMENT_CHECK).await;
+        if executable.replaced() {
+            println!("dogsled web: exiting to start the new release");
+            return;
+        }
+    }
 }
 
 async fn run_until(

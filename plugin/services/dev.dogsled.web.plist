@@ -1,31 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Dotfiles replaces @HOME@ with the absolute home path and creates the log directory before loading. -->
+<!-- Replace @HOME@ with the absolute home path, and make the log directory, before you load this file. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
   <string>dev.dogsled.web</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@HOME@/.local/bin/mise</string>
-    <string>x</string>
-    <string>--</string>
-    <string>dogsled</string>
+    <string>@HOME@/.local/bin/dogsled</string>
     <string>web</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <!-- After an update, the process exits with success; launchd starts the new release. -->
   <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+  <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
     <string>@HOME@</string>
+    <!-- The service runs git, herdr, and the harness CLIs. Add the directories that hold them. -->
+    <key>PATH</key>
+    <string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>DOGSLED_STATE</key>
     <string>@HOME@/.local/state/dogsled</string>
   </dict>
