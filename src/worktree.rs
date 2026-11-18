@@ -305,6 +305,14 @@ pub fn refuse(message: &str) -> Error {
     Error::Invalid(format!("refuse: {message}; nothing was closed"))
 }
 
+/// A close refusal a peer can name to its caller by `code`; this host still shows `message`.
+pub fn refuse_as(code: crate::error::Refusal, message: &str) -> Error {
+    Error::Refused {
+        code,
+        detail: format!("refuse: {message}; nothing was closed"),
+    }
+}
+
 /// Resolve symlinks on the longest existing ancestor, so a missing subdirectory still matches.
 pub fn resolved(path: &Path) -> PathBuf {
     for ancestor in path.ancestors() {

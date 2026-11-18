@@ -1,7 +1,7 @@
 //! Close a finished child: the panes and Herdr workspace that hold its worktree, the worktree
 //! (after the repository's `teardown`), its branch when integrated, and its pane.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Refusal, Result};
 use crate::ledger::Ledger;
 use crate::worktree::{self, AGENT_LOCK, refuse};
 use serde::{Deserialize, Serialize};
@@ -817,17 +817,21 @@ fn validate_target<'a>(
     let target = panes
         .iter()
         .find(|p| p.pane_id == pane)
-        .ok_or_else(|| Error::Invalid(format!("pane {pane} does not exist on this host")))?;
+        .ok_or_else(|| Error::Refused {
+            code: Refusal::ClosePaneMissing,
+            detail: format!("pane {pane} does not exist on this host"),
+        })?;
     if caller.pane.as_deref() == Some(pane) {
         return Err(refuse(&format!("{pane} is the caller's own pane")));
     }
     if let Some(reason) = worktree::busy(shell, target)? {
-        return Err(refuse(&format!(
-            "{pane} is busy ({reason}); close only an idle or done child"
-        )));
+        return Err(worktree::refuse_as(
+            Refusal::CloseBusy,
+            &format!("{pane} is busy ({reason}); close only an idle or done child"),
+        ));
     }
     if let Some(reason) = crate::cleanup::close_group_hold(shell, panes, pane)? {
-        return Err(refuse(&reason));
+        return Err(worktree::refuse_as(Refusal::CloseHeld, &reason));
     }
     Ok(target)
 }
@@ -1219,9 +1223,10 @@ fn validate_completion(
         && target.agent.is_some()
         && !crate::done::finished(ledger, &crate::probe::agent_list(shell)?)?.contains(pane)
     {
-        return Err(refuse(&format!(
-            "{pane} has not called done; it waits for input"
-        )));
+        return Err(worktree::refuse_as(
+            Refusal::CloseNotDone,
+            &format!("{pane} has not called done; it waits for input"),
+        ));
     }
     Ok(())
 }
@@ -1283,11 +1288,10 @@ fn unsaved(
     } else {
         let dirty = crate::loss::dirty_paths(shell, &tree.path, false)?;
         if !dirty.is_empty() {
-            return Err(refuse(&format!(
-                "{}: uncommitted changes: {}",
-                tree.path,
-                dirty.join(", ")
-            )));
+            return Err(worktree::refuse_as(
+                Refusal::CloseUnsaved,
+                &format!("{}: uncommitted changes: {}", tree.path, dirty.join(", ")),
+            ));
         }
         if detached {
             crate::loss::Evidence::fetch(shell, &repo)
@@ -1305,7 +1309,10 @@ fn unsaved(
     };
     let loss = evidence.assess(shell, &tip, Some(&tree.path))?;
     if !loss.loses_nothing() {
-        return Err(refuse(&format!("{}: {}", tree.path, loss.detail())));
+        return Err(worktree::refuse_as(
+            Refusal::CloseUnsaved,
+            &format!("{}: {}", tree.path, loss.detail()),
+        ));
     }
     crate::cleanup::close_holds(shell, ledger, tree, caller, guard, &loss)?;
     Ok(evidence)

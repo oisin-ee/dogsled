@@ -394,12 +394,14 @@ pub fn agent_action(
     })
 }
 
-/// Close `pane` on `host`, or on the host of its open item.
+/// Close `target` on `host`, or on the host of its open item. `target` is a pane, a lead's
+/// name, or the name or ID of one of the caller's open children, as `spawn` promises.
 pub fn close(
     fleet: &Fleet,
-    pane: &str,
+    target: &str,
     host: Option<&str>,
 ) -> Result<(crate::close::Closed, String)> {
+    let pane = target;
     // A local lead's name closes its pane only while the stored terminal still runs there.
     if host.is_none_or(|host| host == crate::hosts::LOCAL)
         && let Some(lead) = crate::leads::resolve_local(fleet.ledger, pane)?
@@ -413,9 +415,12 @@ pub fn close(
         )?;
         return Ok((closed, crate::hosts::LOCAL.to_owned()));
     }
-    let host = match host {
-        Some(host) => crate::hosts::command_host(fleet, host)?,
-        None => close_host(fleet, pane)?,
+    let named = named_child(fleet, target, host)?;
+    let pane = named.as_ref().map_or(pane, |item| item.pane.as_str());
+    let host = match (host, &named) {
+        (None, Some(item)) => crate::hosts::request_host(fleet, &item.id, &item.host)?,
+        (Some(host), _) => crate::hosts::command_host(fleet, host)?,
+        (None, None) => close_host(fleet, pane)?,
     };
     let request = items::list(fleet.ledger)?
         .iter()
@@ -882,6 +887,21 @@ pub fn read_text(read: &Value) -> String {
 }
 
 /// The host of the open item for `pane`. Pane ids repeat across hosts, so more than one is ambiguous.
+/// The caller's open child whose name or ID is `target`, on `host` when one is given.
+fn named_child(fleet: &Fleet, target: &str, host: Option<&str>) -> Result<Option<Item>> {
+    let host = host
+        .map(|host| crate::hosts::command_host(fleet, host))
+        .transpose()?;
+    let owner = std::env::var("HERDR_PANE_ID").ok();
+    Ok(items::list(fleet.ledger)?.into_iter().rev().find(|item| {
+        item.closed_ms.is_none()
+            && !item.pane.is_empty()
+            && (item.name.as_deref() == Some(target) || item.id == target)
+            && owner.as_ref().is_none_or(|owner| *owner == item.owner_pane)
+            && host.as_ref().is_none_or(|host| host.id == item.host)
+    }))
+}
+
 fn close_host(fleet: &Fleet, pane: &str) -> Result<crate::hosts::Host> {
     let items = items::list(fleet.ledger)?;
     let matching: Vec<_> = items.iter().filter(|item| item.pane == pane).collect();

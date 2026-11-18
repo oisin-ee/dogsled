@@ -284,7 +284,8 @@ fn close_runs_teardown_removes_the_worktree_and_deletes_an_integrated_branch() {
         &["state", "worktrees", "--put"],
         &json!([{"repo":repo,"path":tree,"branch":"feat/x"}, other]),
     );
-    let (code, closed) = rig.json(&["close", "w2:p1"]);
+    // `spawn` names the child, and close accepts that name for its pane.
+    let (code, closed) = rig.json(&["close", "worker"]);
     assert_eq!(code, 0, "{closed}");
     assert_eq!(
         closed["worktree"],
@@ -403,6 +404,47 @@ fn close_refuses_active_unsupported_foreign_locked_or_own_work_without_changes()
     assert!(!herdr.contains("pane close") && !herdr.contains("workspace close"));
     assert!(tree.exists());
     assert!(rig.items()[0]["closed_ms"].is_null());
+}
+
+#[test]
+fn a_peer_close_refusal_names_its_reason_to_the_caller() {
+    let (rig, tree) = close_rig("close-peer-refuse");
+    rig.peer();
+    item(&rig, "8103");
+    rig.script(
+        "remote-close",
+        &format!(
+            "#!/bin/sh\nwhile test \"$1\" != host; do shift; done\nexec '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_dogsled")
+        ),
+    );
+    rig.script(
+        "ssh",
+        r#"#!/bin/sh
+case "$*" in
+  *'host snapshot'*) cat "$RIG/remote.json" ;;
+  *'host close '*) for remote do :; done
+    DOGSLED_STATE="$RIG/peer-state" exec sh -c "$RIG/bin/remote-close $remote" ;;
+  *) echo unexpected >&2; exit 2 ;;
+esac
+"#,
+    );
+    let _publisher = super::observation::resolved(&rig);
+    panes(&rig, "working", &tree);
+    let out = rig.run(&["close", "w2:p1", "--host", "8103"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ssh netcup: the child is busy"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = rig.run(&["close", "w7:p1", "--host", "8103"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ssh netcup: the pane does not exist"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(tree.exists());
 }
 
 /// This fixture has no ancestry under fake Herdr's shell (pid 10), and leads its own

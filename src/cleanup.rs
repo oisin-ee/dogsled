@@ -1935,11 +1935,10 @@ pub fn close_holds(
         Decider::Close { guard },
     )?;
     if !holds.is_empty() {
-        return Err(crate::worktree::refuse(&format!(
-            "{}: held: {}",
-            tree.path,
-            holds.join("; ")
-        )));
+        return Err(crate::worktree::refuse_as(
+            crate::error::Refusal::CloseHeld,
+            &format!("{}: held: {}", tree.path, holds.join("; ")),
+        ));
     }
     Ok(())
 }

@@ -121,6 +121,18 @@ pub enum Refusal {
     JobValidityUnsupported,
     /// The peer explicitly rejects the Files detail operation.
     AgentFilesUnsupported,
+    /// Close found no such pane on the host.
+    ClosePaneMissing,
+    /// Close refused a working or blocked child.
+    CloseBusy,
+    /// Close refused a child that has not called done.
+    CloseNotDone,
+    /// Close refused a checkout with uncommitted changes or unlanded commits.
+    CloseUnsaved,
+    /// Close refused a checkout that a process, a launch, or another owner still holds.
+    CloseHeld,
+    /// Close refused for another reason that only the closing host can show.
+    CloseRefused,
 }
 
 impl Refusal {
@@ -139,6 +151,12 @@ impl Refusal {
             Self::JobClockUnavailable => "JOB_CLOCK_UNAVAILABLE",
             Self::JobValidityUnsupported => "JOB_VALIDITY_UNSUPPORTED",
             Self::AgentFilesUnsupported => "AGENT_FILES_UNSUPPORTED",
+            Self::ClosePaneMissing => "CLOSE_PANE_MISSING",
+            Self::CloseBusy => "CLOSE_BUSY",
+            Self::CloseNotDone => "CLOSE_NOT_DONE",
+            Self::CloseUnsaved => "CLOSE_UNSAVED",
+            Self::CloseHeld => "CLOSE_HELD",
+            Self::CloseRefused => "CLOSE_REFUSED",
         }
     }
 
@@ -157,6 +175,12 @@ impl Refusal {
             Self::JobClockUnavailable,
             Self::JobValidityUnsupported,
             Self::AgentFilesUnsupported,
+            Self::ClosePaneMissing,
+            Self::CloseBusy,
+            Self::CloseNotDone,
+            Self::CloseUnsaved,
+            Self::CloseHeld,
+            Self::CloseRefused,
         ]
         .into_iter()
         .find(|r| r.code() == code)
@@ -185,6 +209,22 @@ impl Refusal {
             Self::AgentFilesUnsupported => "files unsupported",
             Self::JobValidityUnsupported => {
                 "this host does not support job request validity: host too old for job startup ownership; upgrade it; new execution refused"
+            }
+            Self::ClosePaneMissing => {
+                "the pane does not exist on that host; it may already be closed; nothing was closed"
+            }
+            Self::CloseBusy => {
+                "the child is busy; close only an idle or done child; nothing was closed"
+            }
+            Self::CloseNotDone => "the child has not called done; nothing was closed",
+            Self::CloseUnsaved => {
+                "the checkout has uncommitted changes or commits not on a remote; nothing was closed"
+            }
+            Self::CloseHeld => {
+                "the checkout is held by a running process, a pending launch, or its owner; nothing was closed"
+            }
+            Self::CloseRefused => {
+                "the host refused the close; nothing was closed; run `dogsled close` on that host for the reason"
             }
         }
     }

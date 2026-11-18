@@ -3,6 +3,7 @@
     "dogsled": {
       "command": "dogsled",
       "args": ["mcp"],
+      "tool_timeout_sec": 660,
       "env_vars": [
         "HERDR_ENV",
         "HERDR_PANE_ID",

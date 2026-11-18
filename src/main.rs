@@ -950,7 +950,8 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
                     items::saved_close(node.ledger, hosts::LOCAL, &closed)?;
                     Ok(closed)
                 },
-            )?;
+            )
+            .map_err(close_refusal)?;
             print(true, &closed, String::new)?;
         }
         HostCommand::Parent { pane } => {
@@ -973,6 +974,18 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
         _ => unreachable!("only child commands"),
     }
     Ok(())
+}
+
+/// The caller sees a peer's refusal only by code. A close refusal without its own code keeps
+/// this host's text here and tells the caller where to read it.
+fn close_refusal(error: Error) -> Error {
+    match error.root() {
+        Error::Invalid(detail) => Error::Refused {
+            code: error::Refusal::CloseRefused,
+            detail: detail.clone(),
+        },
+        _ => error,
+    }
 }
 
 /// Decode and validate the launch wire before ingress can publish any evidence.

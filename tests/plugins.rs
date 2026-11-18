@@ -163,6 +163,8 @@ fn claude_and_codex_plugins_start_dogsled_mcp_with_the_callers_pane() {
         );
         // Codex forwards only the variables it names, and the server needs the caller's pane.
         if forwards {
+            // Codex waits 60 s by default; close runs for up to the ten-minute setup budget.
+            assert!(server["tool_timeout_sec"].as_u64().unwrap() > 600);
             let forwarded = server["env_vars"].as_array().unwrap();
             for name in [
                 "HERDR_ENV",
