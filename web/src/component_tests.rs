@@ -114,10 +114,18 @@ fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
 }
 
 #[test]
-fn model_picker_select_requests_a_model_without_optimistically_changing_it() {
+fn model_picker_scrolls_and_selects_without_optimistically_changing_the_model() {
     let handle = ModelChangeHandle::default();
     let mut dom = VirtualDom::new_with_props(changing_model_picker_root, handle.clone());
-    dom.rebuild_in_place();
+    let scroll_target = dom
+        .rebuild_to_vec()
+        .edits
+        .into_iter()
+        .find_map(|edit| match edit {
+            dioxus::core::Mutation::NewEventListener { name, id } if name == "scroll" => Some(id),
+            _ => None,
+        })
+        .expect("model list scroll listener");
     settle_catalogue(&mut dom);
     let html = dioxus_ssr::render(&dom);
     assert!((1..20).contains(&html.matches(r#"role="option""#).count()));
@@ -126,6 +134,22 @@ fn model_picker_select_requests_a_model_without_optimistically_changing_it() {
     assert!(html.contains("Scoped"));
     assert!(html.contains(r#"value="high""#));
     assert!(!html.contains(r#"value="max""#));
+    // Scroll without touching the keyboard. A key jump updates the window through a
+    // different handler and would pass even if mouse/touch scrolling stopped working.
+    let scroll = |dom: &mut VirtualDom, top: f64| {
+        let event = catalogue_event(move || ScrollData::from(ModelListScroll(top)));
+        dom.runtime().handle_event("scroll", event, scroll_target);
+        settle_catalogue(dom);
+    };
+    scroll(&mut dom, 22_000.0);
+    let middle = dioxus_ssr::render(&dom);
+    assert!(middle.contains("Choice 500"));
+    assert!(!middle.contains("Choice 0"));
+    assert!((1..20).contains(&middle.matches(r#"role="option""#).count()));
+    scroll(&mut dom, 0.0);
+    let first = dioxus_ssr::render(&dom);
+    assert!(first.contains("Choice 0"));
+    assert!(!first.contains("Choice 500"));
     catalogue_key(&mut dom, "model", Key::End);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("Choice 999"));
@@ -374,10 +398,40 @@ fn catalogue_input_event_for<T: 'static>(
             _ => None,
         })
         .expect("combobox input event");
+    dom.in_runtime(|| listener.call(catalogue_event(data)));
+}
+
+fn catalogue_event<T: 'static>(data: impl Fn() -> T + 'static) -> Event<dyn std::any::Any> {
     let factory: Box<dyn Fn() -> T> = Box::new(data);
     let platform = dioxus::html::PlatformEventData::new(Box::new(factory));
     dioxus::html::set_event_converter(Box::new(CatalogueEventConverter));
-    dom.in_runtime(|| listener.call(dioxus::core::Event::new(std::rc::Rc::new(platform), true)));
+    Event::new(std::rc::Rc::new(platform), true)
+}
+
+struct ModelListScroll(f64);
+
+impl dioxus::html::HasScrollData for ModelListScroll {
+    fn scroll_top(&self) -> f64 {
+        self.0
+    }
+    fn scroll_left(&self) -> f64 {
+        0.0
+    }
+    fn scroll_height(&self) -> i32 {
+        44_000
+    }
+    fn client_height(&self) -> i32 {
+        320
+    }
+    fn scroll_width(&self) -> i32 {
+        320
+    }
+    fn client_width(&self) -> i32 {
+        320
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 struct CatalogueInput(String);
