@@ -216,6 +216,7 @@ fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_fr
         .sender
         .send_replace(Arc::new(super::super::live_activity::ActivityFrame {
             views: activity_frame.views.clone(),
+            changed: activity_frame.changed.clone(),
             bound: activity_frame.bound.clone(),
             bindings_measured_ms: activity_frame.bindings_measured_ms,
             measured: std::time::Instant::now()
@@ -248,6 +249,7 @@ fn retained_activity_never_renews_its_relative_validity_or_leaks_into_general_fr
         .sender
         .send_replace(Arc::new(super::super::live_activity::ActivityFrame {
             views: activity_frame.views.clone(),
+            changed: activity_frame.changed.clone(),
             bound: activity_frame.bound.clone(),
             bindings_measured_ms: activity_frame.bindings_measured_ms,
             measured: std::time::Instant::now()

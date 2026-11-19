@@ -107,6 +107,8 @@ impl Commands {
 #[derive(Debug)]
 pub(crate) struct ActivityFrame {
     pub views: BTreeMap<String, Arc<[u8]>>,
+    /// The last frame revision at which each pane’s activity content changed.
+    pub changed: BTreeMap<String, u64>,
     pub measured: Instant,
     pub bindings_measured_ms: Option<u64>,
     pub bound: BTreeSet<String>,
@@ -156,6 +158,7 @@ impl ActivityPublisher {
             revision: 0,
             sender: watch::channel(Arc::new(ActivityFrame {
                 views: BTreeMap::new(),
+                changed: BTreeMap::new(),
                 measured: Instant::now(),
                 bindings_measured_ms: None,
                 bound: BTreeSet::new(),
@@ -171,9 +174,19 @@ impl ActivityPublisher {
         bound: BTreeSet<String>,
     ) -> crate::error::Result<Arc<ActivityFrame>> {
         let previous = self.sender.borrow().clone();
+        let mut changed = BTreeMap::new();
+        for (pane, view) in &views {
+            if let Some((&revision, bytes)) =
+                previous.changed.get(pane).zip(previous.views.get(pane))
+                && same_activity(bytes, view)?
+            {
+                changed.insert(pane.clone(), revision);
+            }
+        }
         if previous.bindings_measured_ms == measured_ms
             && previous.bound == bound
-            && same_activity(&previous.views, &views)?
+            && changed.len() == views.len()
+            && changed.len() == previous.views.len()
         {
             return Ok(previous);
         }
@@ -184,6 +197,7 @@ impl ActivityPublisher {
         let views = views
             .into_iter()
             .map(|(pane, mut view)| {
+                changed.entry(pane.clone()).or_insert(self.revision);
                 view.epoch.clone_from(&self.epoch);
                 view.revision = self.revision;
                 let mut bytes = serde_json::to_vec(&view)?;
@@ -193,6 +207,7 @@ impl ActivityPublisher {
             .collect::<crate::error::Result<_>>()?;
         let frame = Arc::new(ActivityFrame {
             views,
+            changed,
             measured: Instant::now(),
             bindings_measured_ms: measured_ms,
             bound,
@@ -232,23 +247,9 @@ impl Drop for Handle {
     }
 }
 
-fn same_activity(
-    previous: &BTreeMap<String, Arc<[u8]>>,
-    current: &BTreeMap<String, portal_types::agents::ActivityView>,
-) -> crate::error::Result<bool> {
-    if previous.len() != current.len() {
-        return Ok(false);
-    }
-    for (pane, current) in current {
-        let Some(bytes) = previous.get(pane) else {
-            return Ok(false);
-        };
-        let previous = serde_json::from_slice(bytes)?;
-        if activity_content(previous) != activity_content(current.clone()) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+fn same_activity(previous: &[u8], current: &ActivityView) -> crate::error::Result<bool> {
+    let previous = serde_json::from_slice(previous)?;
+    Ok(activity_content(previous) == activity_content(current.clone()))
 }
 
 fn activity_content(

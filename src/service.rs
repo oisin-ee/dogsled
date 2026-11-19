@@ -457,11 +457,11 @@ impl Observation {
         let mut server = crate::observation::ipc::Server::new(&node.ledger.dir)?;
         let interests = crate::observation::peers::Interests::default();
         server.branches(interests.clone(), dirty.clone());
-        let details = crate::observation::details::Collector::default();
         let (commands, feed, activity) = crate::observation::live_activity::Authority::spawn(
             publisher.epoch().into(),
             System::default(),
         )?;
+        let details = crate::observation::details::Collector::with_activity(feed.clone())?;
         server.activity(commands, feed);
         server.details(details.interests.clone());
         publisher.details(details.payloads.clone());

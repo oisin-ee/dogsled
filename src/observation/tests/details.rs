@@ -158,6 +158,97 @@ fn detail_subscribers_receive_worker_captures_without_another_publication() {
 }
 
 #[test]
+fn activity_wakes_only_its_viewed_pane() {
+    use super::super::live_activity::ActivityPublisher;
+    use portal_types::agents::{
+        ActivityDetail, ActivityProducer, ActivityView, LivePhase, LiveState,
+    };
+    use std::collections::BTreeSet;
+
+    let pane = "w1:p1";
+    let other = "w1:p2";
+    let native = Native::new();
+    let mut activity = ActivityPublisher::new("test".into());
+    let mut views: BTreeMap<String, _> = [pane, other]
+        .into_iter()
+        .map(|pane| {
+            (
+                pane.into(),
+                ActivityView {
+                    pane: pane.into(),
+                    version: 1,
+                    epoch: String::new(),
+                    revision: 0,
+                    session: None,
+                    coarse_state: Some("working".into()),
+                    producer: ActivityProducer {
+                        generation: 1,
+                        id: Some("producer".into()),
+                    },
+                    detail: ActivityDetail::Available {
+                        sequence: 1,
+                        received_at_ms: 1000,
+                        valid_for_ms: 5000,
+                        state: LiveState {
+                            reasoning: None,
+                            phase: LivePhase::Thinking,
+                            active_tools: vec![],
+                        },
+                    },
+                },
+            )
+        })
+        .collect();
+    activity
+        .replace(views.clone(), None, BTreeSet::new())
+        .unwrap();
+    let fixture = Fixture::with_activity(native.server.client(), activity.sender.subscribe());
+    let mut viewer = fixture.client.detail(pane).unwrap();
+    fixture.wait(available);
+
+    std::fs::write(
+        native.agent().transcript.unwrap(),
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"new message\"}}\n",
+    )
+    .unwrap();
+    *native.screen.lock().unwrap() = json!({"text":"refreshed screen", "revision":8});
+    let ActivityDetail::Available { sequence, .. } = &mut views.get_mut(pane).unwrap().detail
+    else {
+        panic!("expected live producer activity");
+    };
+    *sequence += 1;
+    activity
+        .replace(views.clone(), None, BTreeSet::new())
+        .unwrap();
+
+    let deadline = Instant::now() + WAIT_DEADLINE;
+    loop {
+        let connection = viewer.current();
+        assert_eq!(connection.status, ipc::Status::Connected);
+        let detail = &connection.publication.detail;
+        if matches!(&detail.conversation, Content::Available(value) if value.turns[0].text == "new message")
+        {
+            assert!(matches!(&detail.screen, Content::Available(screen) if screen.revision == 8));
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "activity did not deliver a full capture"
+        );
+        viewer.changed(remaining);
+    }
+    assert_eq!(native.reads(), 2);
+
+    views.get_mut(other).unwrap().coarse_state = Some("idle".into());
+    activity.replace(views, None, BTreeSet::new()).unwrap();
+    drop(activity);
+    // Check after the follower and worker have drained their queues, without a manual capture.
+    fixture.drain_closed_activity(pane);
+    assert_eq!(native.reads(), 2, "the other pane caused an extra capture");
+}
+
+#[test]
 fn interests_scope_ticks_and_viewers_share_one_capture() {
     let native = Native::new();
     let fixture = Fixture::new(native.server.client());

@@ -66,6 +66,60 @@ fn native_shell(native: &Native) -> crate::shell::Fake {
 use crate::test_support::WAIT_DEADLINE as PROCESS_DEADLINE;
 
 #[test]
+fn published_activity_markers_track_only_pane_content() {
+    let native = Native::new();
+    let mut authority = native.authority();
+    let now = Instant::now();
+    let ack = authority
+        .register("w1:p1", native.register("producer", 0), now, 1000)
+        .unwrap();
+    authority
+        .publish("w1:p1", snapshot(&ack, 1), now, 1000)
+        .unwrap();
+    let mut views = authority.views(now, 1000);
+    let mut second = views["w1:p1"].clone();
+    second.pane = "w1:p2".into();
+    views.insert(second.pane.clone(), second);
+
+    let mut publisher = ActivityPublisher::new("epoch-a".into());
+    let original = publisher
+        .replace(views.clone(), Some(1000), BTreeSet::new())
+        .unwrap();
+    assert_eq!(
+        original.changed,
+        BTreeMap::from([("w1:p1".into(), 1), ("w1:p2".into(), 1)])
+    );
+
+    views.get_mut("w1:p1").unwrap().coarse_state = Some("idle".into());
+    let changed = publisher
+        .replace(views.clone(), Some(1000), BTreeSet::new())
+        .unwrap();
+    assert_eq!(
+        changed.changed,
+        BTreeMap::from([("w1:p1".into(), 2), ("w1:p2".into(), 1)])
+    );
+
+    for view in views.values_mut() {
+        let ActivityDetail::Available { valid_for_ms, .. } = &mut view.detail else {
+            panic!("expected live producer activity");
+        };
+        *valid_for_ms -= 1;
+    }
+    let lease_only = publisher
+        .replace(views.clone(), Some(1000), BTreeSet::new())
+        .unwrap();
+    assert_eq!(lease_only.changed, changed.changed);
+    assert_eq!(publisher.revision, 2);
+
+    // Bindings can force a new frame even when neither pane changed.
+    let remeasured = publisher
+        .replace(views, Some(1001), BTreeSet::new())
+        .unwrap();
+    assert_eq!(publisher.revision, 3);
+    assert_eq!(remeasured.changed, changed.changed);
+}
+
+#[test]
 fn live_activity_register_acknowledges_while_main_collection_is_blocked() {
     let native = Native::new();
     let (entered, started) = std::sync::mpsc::channel();

@@ -3,7 +3,9 @@
 use super::Collector;
 use crate::herdr_socket::Client;
 use crate::ledger::Ledger;
-use crate::observation::{Domains, Publication, Publisher, Sources, ipc, project};
+use crate::observation::{
+    Domains, Publication, Publisher, Sources, ipc, live_activity::ActivityFeed, project,
+};
 use crate::service::{Event, wake};
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,17 +34,21 @@ impl Fixture {
     }
 
     pub fn at(socket: Client, ledger: Ledger) -> Self {
-        Self::start(socket, ledger, false, None)
+        Self::start(socket, ledger, false, None, None)
     }
 
     pub fn paused(socket: Client) -> Self {
         let ledger = Ledger::temporary();
-        Self::start(socket, ledger, true, None)
+        Self::start(socket, ledger, true, None, None)
     }
 
     pub fn with_files_shell(socket: Client, shell: Arc<dyn crate::shell::Shell>) -> Self {
         let ledger = Ledger::temporary();
-        Self::start(socket, ledger, false, Some(shell))
+        Self::start(socket, ledger, false, Some(shell), None)
+    }
+
+    pub fn with_activity(socket: Client, feed: ActivityFeed) -> Self {
+        Self::start(socket, Ledger::temporary(), false, None, Some(feed))
     }
 
     fn start(
@@ -50,9 +56,13 @@ impl Fixture {
         ledger: Ledger,
         paused: bool,
         files_shell: Option<Arc<dyn crate::shell::Shell>>,
+        activity: Option<ActivityFeed>,
     ) -> Self {
         let mut publisher = Publisher::new().unwrap();
-        let mut collector = Collector::default();
+        let mut collector = match activity {
+            Some(feed) => Collector::with_activity(feed).unwrap(),
+            None => Collector::default(),
+        };
         collector.client = Some(socket.clone());
         collector.files_shell = files_shell;
         publisher.details(collector.payloads.clone());
@@ -133,6 +143,19 @@ impl Fixture {
             );
             subscription.changed(Duration::from_millis(100));
         }
+    }
+
+    pub fn drain_closed_activity(&self, pane: &str) {
+        let (_stop, thread) = self.collector.lock().unwrap().activity.take().unwrap();
+        thread.join().unwrap();
+        let registry = self.interests.0.lock().unwrap();
+        let (send, receive) = mpsc::sync_channel(0);
+        registry.workers[pane]
+            .stop
+            .wake
+            .send(super::Tick::Barrier(send))
+            .unwrap();
+        receive.recv_timeout(WAIT_DEADLINE).unwrap();
     }
 
     pub fn tick(&self, pane: &str) -> bool {
