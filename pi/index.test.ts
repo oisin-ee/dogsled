@@ -72,7 +72,6 @@ function rig() {
 	const sent: any[] = [];
 	const receipts: { customType: string; data: unknown }[] = [];
 	const userMessages: string[] = [];
-	let active: string[] = ["read", "write", "edit", "bash"];
 	let code = 0;
 	let context = "local 3/8\n";
 	let gate = "";
@@ -101,8 +100,6 @@ function rig() {
 		appendEntry(customType: string, data: unknown) { receipts.push({ customType, data }); manager.appendCustomEntry(customType, data); },
 		getAllTools() { return [...tools.keys()].map(name => ({ name, sourceInfo: { path: realpathSync(new URL("./index.ts", import.meta.url)) } })); },
 		registerTool(tool: unknown) { tools.set((tool as { name: string }).name, tool); },
-		getActiveTools() { return [...active]; },
-		setActiveTools(names: string[]) { active = [...names]; },
 		sendUserMessage(content: string) { userMessages.push(content); },
 		sendMessage(message: unknown, options: unknown) { sent.push([message, options]); },
 		async exec(binary: string, args: string[], options?: { timeout: number }) {
@@ -143,7 +140,7 @@ function rig() {
 		poll();
 	});
 	const frame = (line: unknown) => appendFileSync(frames, `${JSON.stringify(line)}\n`);
-	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, receipts, userMessages, active: () => [...active], ctx, next, until,
+	return { calls, widgets, notices, servers, commands, shortcuts, renderers, tools, sent, receipts, userMessages, ctx, next, until,
 		/** Every `dogsled board --watch` this rig started. */
 		subscriptions: () => existsSync(`${frames}.log`) ? readFileSync(`${frames}.log`, "utf8").split("\n").filter(Boolean) : [],
 		/** Make the next subscriptions end after the frames so far, as a stopped serve does. */
@@ -719,12 +716,10 @@ test("the extension registers the interview and submit_plan tools, the plan comm
 	assert.ok(r.tools.has("submit_plan"));
 	assert.ok(r.commands.has("plan"));
 	assert.ok(r.shortcuts.has("ctrl+alt+p"));
-	// The submit tool belongs to planning, so it is not declared to the model at first.
-	assert.equal((r.tools.get("submit_plan") as { defaultActive: boolean }).defaultActive, false);
 	assert.equal((r.tools.get("submit_plan") as { executionMode: string }).executionMode, "sequential");
 });
 
-test("plan mode blocks a write until the plan command turns it on", async () => {
+test("the plan command restricts writes only while plan mode is on", async () => {
 	const r = rig();
 	await r.tools.get("todo").execute("setup", { op: "init", start: "fixture", items: [{ key: "fixture", content: "Test plan-mode writes", contract: {
 		deliverable: "Exercise plan-mode gating with an active unit", scope: { repositoryId: "github.com/oisin-ee/dogsled", owns: ["plans/", "src/"], reads: [], generates: [] },
@@ -738,10 +733,8 @@ test("plan mode blocks a write until the plan command turns it on", async () => 
 	assert.match(String(blocked?.reason), /markdown file/);
 	const allowed = await r.invoke("tool_call", { type: "tool_call", toolName: "write", toolCallId: "c2", input: { path: "plans/x.md" } });
 	assert.deepEqual(allowed, { block: false });
-	assert.ok(r.active().includes("submit_plan"));
 	await r.commands.get("plan").handler("", r.ctx);
 	assert.deepEqual(await r.invoke("tool_call", write), { block: false });
-	assert.ok(!r.active().includes("submit_plan"));
 });
 
 test("plan mode frames the task as a conversation message, not a system prompt change", async () => {
