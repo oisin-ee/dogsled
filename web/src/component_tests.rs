@@ -96,7 +96,7 @@ fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
     use portal_types::models::{ModelChoice, ModelRef, ThinkingLevel};
     let mut requested = use_signal(|| None::<portal_types::models::SettingsChange>);
     handle.set(Some(requested));
-    let choices: Vec<_> = (0..70)
+    let choices: Vec<_> = (0..1000)
         .map(|index| ModelChoice {
             model: ModelRef {
                 provider: "provider".into(),
@@ -120,22 +120,28 @@ fn model_picker_select_requests_a_model_without_optimistically_changing_it() {
     dom.rebuild_in_place();
     settle_catalogue(&mut dom);
     let html = dioxus_ssr::render(&dom);
-    assert_eq!(html.matches(r#"role="option""#).count(), 70);
+    assert!((1..20).contains(&html.matches(r#"role="option""#).count()));
+    assert!(html.contains(r#"aria-setsize="1000""#));
+    assert!(!html.contains("Choice 999"));
     assert!(html.contains("Scoped"));
     assert!(html.contains(r#"value="high""#));
     assert!(!html.contains(r#"value="max""#));
-    catalogue_query(&mut dom, "PROVIDER/MODEL-69");
+    catalogue_key(&mut dom, "model", Key::End);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Choice 999"));
+    assert!(!html.contains("Choice 0"));
+    catalogue_query(&mut dom, "model", "PROVIDER/MODEL-999");
     let html = dioxus_ssr::render(&dom);
     assert_eq!(html.matches(r#"role="option""#).count(), 1);
-    assert!(html.contains("Choice 69"));
-    catalogue_key(&mut dom, Key::ArrowDown);
-    catalogue_key(&mut dom, Key::Enter);
+    assert!(html.contains("Choice 999"));
+    catalogue_key(&mut dom, "model", Key::ArrowDown);
+    catalogue_key(&mut dom, "model", Key::Enter);
     let change = handle.get().unwrap().peek().clone().unwrap();
-    assert_eq!(change.model.unwrap().pattern(), "provider/model-69");
+    assert_eq!(change.model.unwrap().pattern(), "provider/model-999");
     assert_eq!(change.thinking, None);
-    catalogue_query(&mut dom, "not a model");
+    catalogue_query(&mut dom, "model", "not a model");
     assert!(dioxus_ssr::render(&dom).contains("No matching models"));
-    catalogue_query(&mut dom, "Choice 0");
+    catalogue_query(&mut dom, "model", "Choice 0");
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("Choice 0"));
     assert!(html.contains("data-selected=true"), "{html}");
@@ -244,16 +250,21 @@ fn new_conversation_model_catalogue_failures_alert_without_disabling_send() {
             html.contains("The lead starts with Pi&#39;s default model."),
             "{html}"
         );
-        let send = html
-            .split("<button")
-            .find(|button| button.contains(r#"aria-label="Send message""#))
-            .unwrap();
-        let attributes = send.split('>').next().unwrap();
-        assert!(
-            !attributes.contains("disabled=true") && !attributes.contains(r#"disabled="true""#),
-            "{attributes}"
-        );
+        assert_send_enabled(&html);
     }
+}
+
+fn assert_send_enabled(html: &str) {
+    let attributes = html
+        .split("<button")
+        .filter_map(|element| element.split_once('>'))
+        .map(|(attributes, _)| attributes)
+        .find(|attributes| attributes.contains(r#"aria-label="Send message""#))
+        .unwrap();
+    assert!(
+        !attributes.contains("disabled=true") && !attributes.contains(r#"disabled="true""#),
+        "{attributes}"
+    );
 }
 
 fn catalogue_snapshot(
@@ -334,26 +345,21 @@ macro_rules! catalogue_event_converter {
 
 dioxus::html::with_html_event_groups!(catalogue_event_converter);
 
-fn catalogue_input_event<T: 'static>(dom: &VirtualDom, name: &str, data: impl Fn() -> T + 'static) {
-    catalogue_input_event_for(dom, "repository", name, data);
-}
-
 fn catalogue_input_event_for<T: 'static>(
     dom: &VirtualDom,
     field: &str,
     name: &str,
     data: impl Fn() -> T + 'static,
 ) {
-    let inputs: Vec<_> = catalogue_scopes(dom)
+    let mut inputs = catalogue_scopes(dom)
         .into_iter()
-        .filter(|(name, _)| name.contains("::ComboboxInput"))
-        .map(|(_, scope)| scope)
-        .collect();
-    let scope = inputs.iter().copied().find(|scope| {
+        .filter(|(name, _)| name.contains("::ComboboxInput") || name.contains("::Input:"))
+        .map(|(_, scope)| scope);
+    let scope = inputs.find(|scope| {
         dom.get_scope(*scope).unwrap().root_node().dynamic_attrs.iter().flatten().any(|attr| {
             attr.name == "name" && matches!(&attr.value, dioxus::core::AttributeValue::Text(value) if value == field)
         })
-    }).or_else(|| inputs.first().copied()).expect("mounted combobox input");
+    }).expect("named catalogue input");
     let listener = dom
         .get_scope(scope)
         .unwrap()
@@ -429,7 +435,7 @@ impl dioxus::html::HasKeyboardData for CatalogueKey {
 fn settle_catalogue(dom: &mut VirtualDom) -> usize {
     use futures_util::FutureExt as _;
     let mut edits = 0;
-    // Options register independently. Allow the bounded 1,000-model catalogue to settle.
+    // Repository options register independently; drain their pending updates.
     for _ in 0..1024 {
         edits += dom.render_immediate_to_vec().edits.len();
         if dom.wait_for_work().now_or_never().is_none() {
@@ -439,16 +445,16 @@ fn settle_catalogue(dom: &mut VirtualDom) -> usize {
     panic!("catalogue did not settle");
 }
 
-fn catalogue_query(dom: &mut VirtualDom, value: &str) {
+fn catalogue_query(dom: &mut VirtualDom, field: &str, value: &str) {
     let value = value.to_owned();
-    catalogue_input_event(dom, "oninput", move || {
+    catalogue_input_event_for(dom, field, "oninput", move || {
         FormData::from(CatalogueInput(value.clone()))
     });
     settle_catalogue(dom);
 }
 
-fn catalogue_key(dom: &mut VirtualDom, key: Key) {
-    catalogue_input_event(dom, "onkeydown", move || {
+fn catalogue_key(dom: &mut VirtualDom, field: &str, key: Key) {
+    catalogue_input_event_for(dom, field, "onkeydown", move || {
         KeyboardData::from(CatalogueKey(key.clone()))
     });
     settle_catalogue(dom);
@@ -511,7 +517,7 @@ fn catalogue_recovers_in_one_mounted_new_lead_and_preserves_draft_search_and_sel
             "remounted {name}"
         );
     }
-    catalogue_query(&mut dom, "alpha");
+    catalogue_query(&mut dom, "repository", "alpha");
     assert!(dioxus_ssr::render(&dom).contains("value=\"alpha\""));
     let before = catalogue_scopes(&dom);
     // Reordering and a refresh failure must not reset the open query or selected slug.
@@ -530,8 +536,8 @@ fn catalogue_recovers_in_one_mounted_new_lead_and_preserves_draft_search_and_sel
     assert!(failed.contains("value=\"alpha\""), "{failed}");
     assert!(failed.contains("retry next hour"));
     assert_eq!(catalogue_scopes(&dom), before);
-    catalogue_key(&mut dom, Key::ArrowDown);
-    catalogue_key(&mut dom, Key::Enter);
+    catalogue_key(&mut dom, "repository", Key::ArrowDown);
+    catalogue_key(&mut dom, "repository", Key::Enter);
     let selected = dioxus_ssr::render(&dom);
     assert!(selected.contains("value=\"owner/alpha\""), "{selected}");
     dom.in_runtime(|| {
@@ -589,9 +595,9 @@ fn catalogue_recovers_in_one_mounted_new_lead_and_preserves_draft_search_and_sel
     });
     settle_catalogue(&mut dom);
     assert!(dioxus_ssr::render(&dom).contains("owner/alpha was removed from the catalogue"));
-    catalogue_query(&mut dom, "beta");
-    catalogue_key(&mut dom, Key::ArrowDown);
-    catalogue_key(&mut dom, Key::Enter);
+    catalogue_query(&mut dom, "repository", "beta");
+    catalogue_key(&mut dom, "repository", Key::ArrowDown);
+    catalogue_key(&mut dom, "repository", Key::Enter);
     let reselected = dioxus_ssr::render(&dom);
     assert!(reselected.contains("value=\"owner/beta\""), "{reselected}");
     assert!(!reselected.contains("was removed from the catalogue"));
@@ -689,14 +695,7 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
     settle_catalogue(&mut dom);
     let healthy = dioxus_ssr::render(&dom);
     assert!(healthy.contains("value=\"owner/beta\""), "{healthy}");
-    assert!(
-        !healthy
-            .split_once("<form")
-            .unwrap()
-            .1
-            .contains("disabled=true"),
-        "{healthy}"
-    );
+    assert_send_enabled(&healthy);
     let before = catalogue_scopes(&dom);
     // A serve restarted during a GitHub outage publishes its failure with no repositories.
     dom.in_runtime(|| {
@@ -718,14 +717,7 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
         "{failed}"
     );
     assert!(!failed.contains("No GitHub repositories found"), "{failed}");
-    assert!(
-        !failed
-            .split_once("<form")
-            .unwrap()
-            .1
-            .contains("disabled=true"),
-        "{failed}"
-    );
+    assert_send_enabled(&failed);
     assert_eq!(catalogue_scopes(&dom), before);
     assert_eq!(draft(), "Keep this draft");
 }
