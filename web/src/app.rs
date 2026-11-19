@@ -1078,7 +1078,7 @@ mod shell_tests {
         };
         let peer = item("netcup");
         assert_eq!(
-            resolve_link(&requested, &[peer.clone()]),
+            resolve_link(&requested, std::slice::from_ref(&peer)),
             Ok(Some(peer.selection.clone()))
         );
         assert!(resolve_link(&requested, &[peer, item("local")]).is_err());
