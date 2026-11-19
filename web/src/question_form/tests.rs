@@ -4,21 +4,25 @@ use serde_json::json;
 fn remote_image_form() -> Element {
     let pending: Pending = serde_json::from_value(json!({
         "host":"netcup", "id":"remote-question", "pane":"same-pane", "session":"session", "cwd":"/repo", "created_ms":0,
-        "questions":{"questions":[{"id":"q","type":"info","question":"Screenshot", "media":{"type":"image","src":"/api/attachments/one.png"}}]}
+        "questions":{"questions":[
+            {"id":"q","type":"info","question":"Screenshot", "media":{"type":"image","src":"/api/attachments/one.png"}},
+            {"id":"inline","type":"info","question":"Inline image", "media":{"type":"image","src":"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="}}
+        ]}
     })).unwrap();
     rsx! { AskForm { pending, elapsed_ms: 0, on_done: |_| {} } }
 }
 
 #[test]
-fn remote_question_images_use_the_owning_host() {
+fn question_images_link_to_the_owning_host_but_never_navigate_to_inline_data() {
     let mut dom = VirtualDom::new(remote_image_form);
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
-    assert!(
-        html.contains("/api/hosts/netcup/attachments/one.png"),
-        "{html}"
-    );
+    let url = "/api/hosts/netcup/attachments/one.png";
+    assert!(html.contains(&format!(r#"src="{url}""#)), "{html}");
+    assert!(html.contains(&format!(r#"href="{url}""#)), "{html}");
     assert!(!html.contains("src=\"/api/attachments/"), "{html}");
+    assert!(html.contains(r#"src="data:image/gif;"#), "{html}");
+    assert!(!html.contains(r#"href="data:"#), "{html}");
 }
 
 fn question(kind: &str) -> Result<Question, serde_json::Error> {
