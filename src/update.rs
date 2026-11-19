@@ -279,6 +279,7 @@ pub fn run(shell: &dyn Shell, settings: &Update, ledger: &Path, apply: bool) -> 
 }
 
 /// The systemd unit in a `/proc/<pid>/cgroup` file, such as `herdr.service`.
+#[cfg(any(target_os = "linux", test))]
 fn unit(cgroup: &str) -> Option<&str> {
     cgroup
         .lines()
