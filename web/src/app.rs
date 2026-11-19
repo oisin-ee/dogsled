@@ -10,7 +10,7 @@ use portal_types::agents::AgentView as Agent;
 use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use portal_types::{BoardView, PortalEvent};
 
-use crate::agent_view::{AgentView, Draft};
+use crate::agent_view::{AgentView, Composers};
 use crate::api;
 use crate::board::{
     RepoGroup, WaitingAgent, WorkerSummary, navigation_groups, repository_name, take_waiting,
@@ -419,7 +419,7 @@ pub fn App() -> Element {
         use_context_provider(|| Signal::new(link.selection().filter(|_| link.host.is_some())));
     let mut linked = use_signal(|| link.host.is_some());
     let mut link_error = use_signal(|| None::<String>);
-    use_context_provider(|| Draft(Signal::new(String::new())));
+    use_context_provider(Composers::default);
     let conversation = use_context_provider(|| NewConversation {
         open: Signal::new(false),
         repository: Signal::new(None),

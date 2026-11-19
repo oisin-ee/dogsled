@@ -7,7 +7,7 @@ use dioxus_primitives::combobox::{
 use portal_types::agents::RepoChoice;
 use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, SettingsChange, ThinkingLevel};
 
-use crate::agent_view::{Composer, Draft, message_with_images};
+use crate::agent_view::{Composer, PendingMessage, message_with_images, use_composer};
 use crate::api;
 use crate::components::skeleton::Skeleton;
 use crate::notice::{Alert, Status};
@@ -116,10 +116,15 @@ pub(crate) fn NewLeadForm(
     let conversation = use_context::<NewConversation>();
     let mut composing = conversation.open;
     let hint = conversation.repository;
-    let mut draft = use_context::<Draft>().0;
-    let mut images = use_signal(Vec::<String>::new);
+    let crate::agent_view::ComposerState {
+        mut draft,
+        mut images,
+        ..
+    } = use_composer("new");
     let uploading = use_signal(|| false);
     let mut busy = use_signal(|| false);
+    // The first message, shown while its lead starts.
+    let mut starting = use_signal(|| None::<(String, String)>);
     let mut error = use_signal(|| None::<String>);
     let mut repo = use_signal(|| None::<String>);
     let mut initialized = use_signal(|| false);
@@ -164,32 +169,38 @@ pub(crate) fn NewLeadForm(
             })
     });
     let send = move |()| {
-        let Some(target) = repo().filter(|_| valid()) else {
-            return;
-        };
         let text = draft();
         let sent = images();
         let message = message_with_images(&text, &sent);
         if busy() || uploading() || message.trim().is_empty() {
             return;
         }
+        let Some(target) = repo().filter(|_| valid()) else {
+            error.set(Some("Select a repository before sending.".to_owned()));
+            return;
+        };
         let launch = settings();
+        // The box clears at once; a refusal puts the text back.
+        draft.set(String::new());
+        images.set(Vec::new());
+        starting.set(Some((message.clone(), target.clone())));
         busy.set(true);
         error.set(None);
         spawn(async move {
             match api::create_lead(&target, &message, launch.model, launch.thinking).await {
                 Ok(pane) => {
-                    if draft() == text {
-                        draft.set(String::new());
-                    }
-                    if images() == sent {
-                        images.set(Vec::new());
-                    }
                     composing.set(false);
                     selected.set(Some(pane));
                 }
-                Err(message) => error.set(Some(message)),
+                Err(message) => {
+                    if draft.peek().is_empty() && images.peek().is_empty() {
+                        draft.set(text);
+                        images.set(sent);
+                    }
+                    error.set(Some(message));
+                }
             }
+            starting.set(None);
             busy.set(false);
         });
     };
@@ -209,17 +220,11 @@ pub(crate) fn NewLeadForm(
         Err(message) => Some(message.as_str()),
     });
     let launch = settings();
+    // Message, repository, model, effort: the composer holds them in that keyboard order.
     rsx! {
         section { class: "new-lead", aria_label: "New conversation", aria_busy: busy(),
-            header { class: "lead-header new-lead-header",
-                h1 { "New conversation" }
-                RepositoryPicker { choices, selected: repo, busy: busy(),
-                    on_select: move |()| {
-                        initialized.set(true);
-                        selection_removed.set(false);
-                    }
-                }
-            }
+          div { class: "new-lead-center",
+            h1 { class: "new-lead-title", "New conversation" }
             div { class: "new-lead-body",
                 if let Some(message) = model_error {
                     Alert { "Model list unavailable: {message}. The lead starts with Pi's default model." }
@@ -245,9 +250,20 @@ pub(crate) fn NewLeadForm(
                 }
             }
             if let Some(message) = error() { Alert { "{message}" } }
-            div { class: "conversation-footer new-lead-composer",
-                Composer { draft, images, uploading, disabled: !valid(), busy: busy(),
+            if let Some((text, target)) = starting() {
+                div { class: "new-lead-starting",
+                    PendingMessage { text, label: "Starting a lead…", detail: "Starting a lead in {target}. Its conversation opens when it is ready." }
+                }
+            }
+            div { class: "new-lead-composer",
+                Composer { draft, images, uploading, disabled: false, busy: busy(), autofocus: true,
                     placeholder: "Send a message or start a task…".to_owned(),
+                    controls: rsx! { RepositoryPicker { choices, selected: repo, busy: busy(),
+                        on_select: move |()| {
+                            initialized.set(true);
+                            selection_removed.set(false);
+                        }
+                    } },
                     model_picker: rsx! { crate::model_picker::ModelPicker {
                         choices: model_choices.clone(), selected_model: launch.model,
                         selected_level: launch.thinking, busy: busy(),
@@ -255,6 +271,7 @@ pub(crate) fn NewLeadForm(
                     } },
                     on_error: move |message| error.set(Some(message)), on_send: send }
             }
+          }
         }
     }
 }
@@ -391,23 +408,33 @@ mod tests {
             open: Signal::new(true),
             repository: Signal::new(None),
         });
-        use_context_provider(|| crate::agent_view::Draft(Signal::new(String::new())));
         rsx! { super::NewLeadForm {} }
     }
 
     #[test]
-    fn new_conversation_keeps_repository_in_header_and_model_beside_composer() {
+    fn new_conversation_orders_message_repository_model_and_effort_in_one_composer() {
         let html = dioxus_ssr::render(&VirtualDom::prebuilt(new_conversation_root));
-        let (header, body) = html.split_once("</header>").unwrap();
-        assert!(header.contains("new-lead-header"), "{html}");
-        assert!(header.contains(r#"name="repository""#), "{html}");
-        assert!(!header.contains("model-picker"), "{html}");
-        let composer = body.split_once("new-lead-composer").unwrap().1;
-        assert!(composer.contains("model-picker"), "{html}");
-        assert!(composer.contains(r#"aria-haspopup="dialog""#), "{html}");
-        assert!(!composer.contains(r#"role="combobox""#), "{html}");
-        assert!(!composer.contains(r#"placeholder="Pi default""#), "{html}");
-        assert!(composer.contains("console-composer"), "{html}");
+        assert!(!html.contains("<header"), "{html}");
+        let composer = html.split_once("new-lead-composer").unwrap().1;
+        let place = |needle: &str| {
+            composer
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing: {html}"))
+        };
+        let order = [
+            place(r#"name="message""#),
+            place(r#"name="repository""#),
+            place("model-trigger"),
+            place(r#"aria-label="Effort""#),
+            place(r#"aria-label="Attach images""#),
+        ];
+        assert!(order.is_sorted(), "{order:?}: {html}");
+        // Enter sends, so the send button is not a Tab stop between message and repository.
+        assert!(composer.contains(r#"tabindex="-1""#), "{html}");
+        // The message box takes typing before the catalogue loads.
+        let textarea = composer.split_once("<textarea").unwrap().1;
+        let textarea = textarea.split_once('>').unwrap().0;
+        assert!(!textarea.contains("disabled"), "{textarea}");
     }
 
     #[test]

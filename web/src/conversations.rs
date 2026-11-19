@@ -1,6 +1,7 @@
 //! Shell-owned transcript snapshots survive keyed agent sessions.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 use portal_types::agents::{Conversation, DetailSession, Turn};
@@ -23,9 +24,10 @@ impl Conversations {
     }
 }
 
+/// Views share one snapshot, so a render never copies a long history.
 #[derive(Clone, Default)]
 pub struct PaneConversations {
-    entries: VecDeque<Conversation>,
+    entries: VecDeque<Rc<Conversation>>,
     sessions: BTreeMap<String, DetailSession>,
     generations: BTreeMap<String, u64>,
 }
@@ -48,10 +50,17 @@ impl PaneConversations {
     }
 
     /// Keep completeness and provenance with the session-qualified history.
-    pub fn get_session(&self, pane: &str, session: &str) -> Option<&Conversation> {
+    pub fn get_session(&self, pane: &str, session: &str) -> Option<Rc<Conversation>> {
         self.entries
             .iter()
             .find(|entry| entry.pane == pane && entry.session == session)
+            .cloned()
+    }
+
+    /// The last session accepted for a pane. A revisit shows its history at once; the
+    /// agent's first event then confirms the session or discards the history.
+    pub fn session(&self, pane: &str) -> Option<&DetailSession> {
+        self.sessions.get(pane)
     }
 
     fn begin_request(&mut self, pane: &str) -> u64 {
@@ -119,7 +128,7 @@ impl PaneConversations {
                     pane.into(),
                     DetailSession::Available(conversation.session.clone()),
                 );
-                self.insert(conversation);
+                self.insert(Rc::new(conversation));
                 Ok(())
             }
             None => {
@@ -129,7 +138,7 @@ impl PaneConversations {
         }
     }
 
-    fn insert(&mut self, conversation: Conversation) {
+    fn insert(&mut self, conversation: Rc<Conversation>) {
         self.entries.retain(|entry| entry.pane != conversation.pane);
         self.entries.push_back(conversation);
         while self.entries.len() > CAPACITY {
@@ -158,7 +167,6 @@ pub fn use_conversation(
         let cache = hosts.host_mut(&address.host);
         let pane = &address.pane;
         cache.begin_request(pane);
-        cache.sessions.remove(pane);
         cache.access(pane);
     });
     use_resource(move || {
@@ -270,7 +278,10 @@ mod tests {
             )?,
             None
         );
-        assert_eq!(cache.get_session("pane", "new-session"), Some(&new));
+        assert_eq!(
+            cache.get_session("pane", "new-session").as_deref(),
+            Some(&new)
+        );
         assert_eq!(cache.get_session("pane", "pane-session"), None);
         Ok(())
     }
@@ -377,7 +388,10 @@ mod tests {
                 .apply_response("pane", generation, Err("read failed".into()))
                 .is_err()
         );
-        assert_eq!(cache.get_session("pane", "pane-session"), Some(&history));
+        assert_eq!(
+            cache.get_session("pane", "pane-session").as_deref(),
+            Some(&history)
+        );
         assert_eq!(cache.get_session("pane", "other-session"), None);
         cache.select_session("pane", "other-session");
         assert_eq!(cache.get_session("pane", "pane-session"), None);
