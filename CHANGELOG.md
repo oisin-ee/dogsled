@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.40.0](https://github.com/oisin-ee/dogsled/compare/v0.39.0...v0.40.0) (2026-11-19)
+
+
+### Features
+
+* **update:** move a running Herdr server to a newer installed Herdr ([#375](https://github.com/oisin-ee/dogsled/issues/375)) ([e69e222](https://github.com/oisin-ee/dogsled/commit/e69e222e57c6713d052da2b6bc78b9f20e97c898))
+* **web:** merge Waiting on you into one agents sidebar ([#378](https://github.com/oisin-ee/dogsled/issues/378)) ([2ef9fd7](https://github.com/oisin-ee/dogsled/commit/2ef9fd7cf28322db4cf13a028d43ea379ebc2b5c))
+* **web:** move Metrics and New to the top bar ([#379](https://github.com/oisin-ee/dogsled/issues/379)) ([4eb6bb7](https://github.com/oisin-ee/dogsled/commit/4eb6bb7f0c57428a4f48b78060aa5d903f145ae6))
+
+
+### Bug Fixes
+
+* **ci:** stop release checks on the first failure ([#384](https://github.com/oisin-ee/dogsled/issues/384)) ([a88a93c](https://github.com/oisin-ee/dogsled/commit/a88a93c078054b7e7accfe8062b5ff382729ed7b))
+* **pi:** make plan submission available in every session ([#380](https://github.com/oisin-ee/dogsled/issues/380)) ([a6dab93](https://github.com/oisin-ee/dogsled/commit/a6dab9344722039a6098476a62cf1842c2f9716f))
+* **portal:** keep interview images clear of answer controls ([#383](https://github.com/oisin-ee/dogsled/issues/383)) ([00ba87a](https://github.com/oisin-ee/dogsled/commit/00ba87aaad876f46c16d2d1c89144df5fd6f9d89))
+* **portal:** open large model lists without freezing the browser ([#381](https://github.com/oisin-ee/dogsled/issues/381)) ([b3fb7e0](https://github.com/oisin-ee/dogsled/commit/b3fb7e0dc399b6542a756ecc547d01e248d423bc))
+* **update:** never hand off a Herdr server whose systemd unit would kill its panes ([#377](https://github.com/oisin-ee/dogsled/issues/377)) ([5d4779f](https://github.com/oisin-ee/dogsled/commit/5d4779fea3eadd4483e0f3067135ec7ebab3014c))
+
 ## [0.39.0](https://github.com/oisin-ee/dogsled/compare/v0.38.0...v0.39.0) (2026-11-18)
 
 
