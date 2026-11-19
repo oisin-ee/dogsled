@@ -1808,7 +1808,35 @@ fn history(turns: Vec<portal_types::agents::Turn>) -> portal_types::agents::Conv
 }
 
 fn timeline_root(snapshot: portal_types::agents::Conversation) -> Element {
-    rsx! { crate::agent_view::Conversation { snapshot: Some(snapshot), loading: false, assistant: "Selected assistant" } }
+    rsx! { crate::agent_view::Conversation { snapshot: Some(std::rc::Rc::new(snapshot)), loading: false, assistant: "Selected assistant", live: crate::activity::Live::Pending } }
+}
+
+#[test]
+fn a_long_history_opens_with_its_newest_records_and_offers_the_earlier_ones() {
+    use portal_types::agents::Role;
+    let turns = (0..200)
+        .flat_map(|index| {
+            [
+                history_turn(
+                    &format!("ask-{index}"),
+                    Role::User,
+                    &format!("Question {index}."),
+                ),
+                history_turn(
+                    &format!("reply-{index}"),
+                    Role::Assistant,
+                    &format!("Answer {index}."),
+                ),
+            ]
+        })
+        .collect();
+    let html = render_timeline(history(turns));
+    assert_eq!(html.matches("data-record-id").count(), 150, "{html}");
+    assert!(html.contains("Question 125."), "{html}");
+    assert!(html.contains("Answer 199."), "{html}");
+    assert!(!html.contains("Answer 124."), "{html}");
+    assert!(html.contains("Show earlier history (250)"), "{html}");
+    assert!(!html.contains("Earlier history was not returned"), "{html}");
 }
 
 fn render_timeline(snapshot: portal_types::agents::Conversation) -> String {
@@ -2119,7 +2147,7 @@ fn worked_span_uses_the_latest_record_time_even_when_the_final_reply_time_is_ear
 fn live_timeline_root(
     props: (portal_types::agents::Conversation, crate::activity::Live),
 ) -> Element {
-    rsx! { crate::agent_view::Conversation { snapshot: Some(props.0), loading: false, assistant: "Assistant", live: props.1, coarse: "working" } }
+    rsx! { crate::agent_view::Conversation { snapshot: Some(std::rc::Rc::new(props.0)), loading: false, assistant: "Assistant", live: props.1, coarse: "working" } }
 }
 
 fn render_live_timeline(
@@ -2200,7 +2228,7 @@ fn changing_stream_root(handle: StreamHandle) -> Element {
     });
     handle.set(Some(stream));
     let (snapshot, live) = stream();
-    rsx! { crate::agent_view::Conversation { snapshot: Some(snapshot), loading: false, assistant: "Assistant", live, coarse: "working" } }
+    rsx! { crate::agent_view::Conversation { snapshot: Some(std::rc::Rc::new(snapshot)), loading: false, assistant: "Assistant", live, coarse: "working" } }
 }
 
 #[test]
@@ -2288,10 +2316,10 @@ fn follow_root(props: (FollowProbe, FollowHandle)) -> Element {
         page,
         following,
         error,
-        Some(worked_history(true)),
+        Some(std::rc::Rc::new(worked_history(true))),
         false,
         true,
-        live(),
+        live.into(),
     );
     rsx! { p { "Following" } }
 }
@@ -2357,7 +2385,7 @@ fn truncated_history_never_claims_a_complete_or_empty_start() {
 }
 
 fn pending_history_root() -> Element {
-    rsx! { crate::agent_view::Conversation { snapshot: None, loading: true, assistant: "Assistant" } }
+    rsx! { crate::agent_view::Conversation { snapshot: None, loading: true, assistant: "Assistant", live: crate::activity::Live::Pending } }
 }
 
 #[test]
@@ -2376,7 +2404,7 @@ type HistoryHandle =
 fn changing_history_root(props: (portal_types::agents::Conversation, HistoryHandle)) -> Element {
     let snapshot = use_signal(|| props.0);
     props.1.set(Some(snapshot));
-    rsx! { crate::agent_view::Conversation { snapshot: Some(snapshot()), loading: false, assistant: "Assistant" } }
+    rsx! { crate::agent_view::Conversation { snapshot: Some(std::rc::Rc::new(snapshot())), loading: false, assistant: "Assistant", live: crate::activity::Live::Pending } }
 }
 
 fn record_scopes(
@@ -2643,7 +2671,7 @@ fn telemetry_loss_and_session_mismatch_remove_detail_but_keep_the_history_and_wo
         });
         handle.set(Some(live));
         rsx! {
-            crate::agent_view::Conversation { snapshot: Some(history(vec![history_turn("kept", Role::Assistant, "Durable history.")])), loading: false, assistant: "Assistant" }
+            crate::agent_view::Conversation { snapshot: Some(std::rc::Rc::new(history(vec![history_turn("kept", Role::Assistant, "Durable history.")]))), loading: false, assistant: "Assistant", live }
             crate::agent_view::ActivityRow { live: live(), coarse: "working", connected: true, waiting: None }
         }
     }

@@ -590,6 +590,12 @@ textarea {
   color: var(--console-muted);
   font-size: 12px;
 }
+.console-provider .console-shell .conversation-earlier-history {
+  align-self: center;
+  margin-bottom: 20px;
+  color: var(--console-muted);
+  font-size: 12px;
+}
 .console-provider .console-shell .conversation-thought {
   color: var(--console-muted);
   font-style: italic;

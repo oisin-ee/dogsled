@@ -20,6 +20,10 @@ mod review_view;
 mod workers;
 
 fn main() {
+    // Dioxus's default logger records each INFO span, such as every new signal, as a
+    // browser performance mark. The portal logs nothing itself, so keep warnings only.
+    // This fails only when a subscriber is already installed, which keeps its own level.
+    let _ = dioxus::logger::init(dioxus::logger::tracing::Level::WARN);
     dioxus::launch(app::App);
 }
 

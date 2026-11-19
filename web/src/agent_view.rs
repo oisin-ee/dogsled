@@ -212,7 +212,14 @@ fn AgentSession(
     let mut questions = use_signal(|| None::<Vec<Pending>>);
     let mut selection = use_context::<Signal<Option<crate::app::InboxSelection>>>();
     let mut conversations = use_context::<Signal<Conversations>>();
-    let mut detail_session = use_signal(|| None::<wire::DetailSession>);
+    // A revisit renders the cached history at once; the first event confirms or replaces it.
+    let mut detail_session = use_signal(|| {
+        conversations
+            .peek()
+            .host(&address.host)
+            .and_then(|cache| cache.session(&address.pane))
+            .cloned()
+    });
     let mut screen = use_signal(|| None::<wire::Screen>);
     let mut files = use_signal(|| None::<portal_types::files::FilesState>);
     let mut screen_error = use_signal(|| None::<String>);
@@ -518,8 +525,7 @@ fn AgentSession(
         Some(wire::DetailSession::Available(session)) => conversations
             .read()
             .host(&host)
-            .and_then(|cache| cache.get_session(&pane, session))
-            .cloned(),
+            .and_then(|cache| cache.get_session(&pane, session)),
         _ => None,
     };
     let transcript_loading =
@@ -653,6 +659,10 @@ fn AgentSession(
         .and_then(nonempty)
         .unwrap_or("Assistant")
         .to_owned();
+    let coarse = current
+        .as_ref()
+        .map_or("Loading…", |agent| agent.state.as_str())
+        .to_owned();
     let mut page = use_signal(|| None::<Rc<MountedData>>);
     let mut following = use_signal(|| true);
     let follow_error = use_signal(|| None::<String>);
@@ -665,7 +675,7 @@ fn AgentSession(
         retained.clone(),
         transcript_loading,
         tab == Tab::Conversation,
-        live(),
+        live.into(),
     );
     let tracking = attributes!(div {
         onmounted: move |event| {
@@ -712,13 +722,12 @@ fn AgentSession(
                 } else {
                     ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
                         Conversation { snapshot: retained.clone(), loading: transcript_loading, assistant,
-                            live: live(), coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned() }
+                            live, coarse: coarse.clone() }
                     }
                 }
             if tab == Tab::Conversation {
                 footer { class: "conversation-footer",
-                    LiveActivity { live: live(), turns: retained.as_ref().map_or_else(Vec::new, |snapshot| snapshot.turns.clone()),
-                        coarse: current.as_ref().map_or("Loading…", |agent| agent.state.as_str()).to_owned(),
+                    LiveActivity { live, snapshot: retained.clone(), coarse: coarse.clone(),
                         connected: loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
                     Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
@@ -1041,59 +1050,82 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
 }
 
 /// Reuse the same follow policy for transcript and live-edge changes.
+/// The effect reads `live` itself, so live frames never render the caller.
 pub(crate) fn use_follow_scroll(
     page: Signal<Option<Rc<MountedData>>>,
     following: Signal<bool>,
     mut follow_error: Signal<Option<String>>,
-    snapshot: Option<wire::Conversation>,
+    snapshot: Option<Rc<wire::Conversation>>,
     loading: bool,
     visible: bool,
-    live: Live,
+    live: ReadSignal<Live>,
 ) {
-    use_effect(use_reactive(
-        (&snapshot, &loading, &visible, &live),
-        move |_| {
-            if !visible || !following() {
-                return;
+    use_effect(use_reactive((&snapshot, &loading, &visible), move |_| {
+        live.read();
+        if !visible || !following() {
+            return;
+        }
+        let Some(page) = page() else {
+            return;
+        };
+        spawn(async move {
+            let scrolled = async {
+                let size = page.get_scroll_size().await?;
+                page.scroll(
+                    PixelsVector2D::new(0.0, size.height),
+                    ScrollBehavior::Instant,
+                )
+                .await
             }
-            let Some(page) = page() else {
-                return;
-            };
-            spawn(async move {
-                let scrolled = async {
-                    let size = page.get_scroll_size().await?;
-                    page.scroll(
-                        PixelsVector2D::new(0.0, size.height),
-                        ScrollBehavior::Instant,
-                    )
-                    .await
-                }
-                .await;
-                follow_error.set(scrolled.err().map(|error| error.to_string()));
-            });
-        },
-    ));
+            .await;
+            follow_error.set(scrolled.err().map(|error| error.to_string()));
+        });
+    }));
 }
 
+/// The newest records that open with a conversation. Each request for earlier history adds
+/// as many again, so a long transcript opens as fast as a short one.
+const HISTORY_WINDOW: usize = 150;
+
+/// The first group of the newest groups that fill `limit` records. A group is never split.
+fn window_start(groups: &[&[Turn]], limit: usize) -> usize {
+    let mut shown = 0;
+    groups
+        .iter()
+        .rposition(|group| {
+            shown += group.len();
+            shown >= limit
+        })
+        .unwrap_or(0)
+}
+
+/// Live frames reach only the live edge. The history renders again only when its snapshot,
+/// its window, or whether the agent is active changes.
 #[component]
 pub(crate) fn Conversation(
-    snapshot: Option<wire::Conversation>,
+    snapshot: Option<Rc<wire::Conversation>>,
     loading: bool,
     assistant: String,
-    #[props(default = Live::Pending)] live: Live,
+    live: ReadSignal<Live>,
     #[props(default = "idle".to_owned())] coarse: String,
 ) -> Element {
+    let mut limit = use_signal(|| HISTORY_WINDOW);
+    let active = use_memo(use_reactive(&coarse, move |coarse| match &*live.read() {
+        Live::Detail(state) => state.phase != wire::LivePhase::Idle,
+        _ => coarse != "idle",
+    }));
+    let active = active();
     let turns = snapshot
         .as_ref()
         .map_or(&[][..], |snapshot| snapshot.turns.as_slice());
-    let active = match &live {
-        Live::Detail(state) => state.phase != wire::LivePhase::Idle,
-        _ => coarse != "idle",
-    };
     let groups = turns
         .chunk_by(|_, next| next.role != Role::User)
         .collect::<Vec<_>>();
-    let records = groups.iter().enumerate().flat_map(|(index, group)| {
+    let first = window_start(&groups, limit());
+    let earlier = groups.get(..first).map_or(0, |groups| {
+        groups.iter().map(|group| group.len()).sum::<usize>()
+    });
+    let records = groups.iter().enumerate().skip(first).flat_map(|(index, group)| {
         let final_reply = group.iter().rposition(|turn| turn.role == Role::Assistant);
         let finished = !(active && index + 1 == groups.len());
         let mut records = Vec::new();
@@ -1117,7 +1149,10 @@ pub(crate) fn Conversation(
             div { class: "conversation-column",
                 if loading { Skeleton { role: "status", aria_label: "Loading conversation" } }
                 if let Some(snapshot) = &snapshot {
-                    if snapshot.truncated {
+                    if earlier > 0 {
+                        Button { class: "conversation-earlier-history", variant: ButtonVariant::Ghost, r#type: "button",
+                            onclick: move |_| limit += HISTORY_WINDOW, "Show earlier history ({earlier})" }
+                    } else if snapshot.truncated {
                         p { class: "conversation-history-notice", "Earlier history was not returned." }
                     }
                     if snapshot.turns.is_empty() && !snapshot.truncated {
@@ -1342,37 +1377,53 @@ fn platform_time(_ms: u64) -> Option<(String, String, String)> {
 
 #[cfg(target_arch = "wasm32")]
 fn platform_time(ms: u64) -> Option<(String, String, String)> {
-    use js_sys::{Array, Date, Intl::DateTimeFormat, Object, Reflect, wasm_bindgen::JsValue};
+    use js_sys::{Date, Intl::DateTimeFormat, wasm_bindgen::JsValue};
+    thread_local! {
+        // Building an Intl formatter costs far more than formatting with one, and every
+        // record shows a time, so the page builds the pair once.
+        static FORMATS: Option<[DateTimeFormat; 2]> = time_formats();
+    }
     let date = Date::new(&JsValue::from_f64(ms as f64));
     if !date.get_time().is_finite() {
         return None;
     }
+    FORMATS.with(|formats| {
+        let [short, full] = formats.as_ref()?;
+        let text = |format: &DateTimeFormat| {
+            format
+                .format()
+                .call1(&JsValue::UNDEFINED, &date)
+                .ok()?
+                .as_string()
+        };
+        Some((text(short)?, text(full)?, date.to_iso_string().into()))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn time_formats() -> Option<[js_sys::Intl::DateTimeFormat; 2]> {
+    use js_sys::{Array, Intl::DateTimeFormat, Object, Reflect, wasm_bindgen::JsValue};
     let format = |settings: &[(&str, JsValue)]| {
         let options = Object::new();
         for (key, value) in settings {
             Reflect::set(&options, &JsValue::from_str(key), value).ok()?;
         }
-        DateTimeFormat::new(&Array::new(), &options)
-            .format()
-            .call1(&JsValue::UNDEFINED, &date)
-            .ok()?
-            .as_string()
+        Some(DateTimeFormat::new(&Array::new(), &options))
     };
-    Some((
+    Some([
         format(&[
             ("hour", "2-digit".into()),
             ("minute", "2-digit".into()),
             ("hour12", false.into()),
         ])?,
         format(&[("dateStyle", "full".into()), ("timeStyle", "long".into())])?,
-        date.to_iso_string().into(),
-    ))
+    ])
 }
 
 /// The live edge shares the history's scrolling region, not the pinned footer.
 #[component]
-pub(crate) fn LiveEdge(live: Live, #[props(default)] last: Option<Turn>) -> Element {
-    let Live::Detail(state) = live else {
+pub(crate) fn LiveEdge(live: ReadSignal<Live>, #[props(default)] last: Option<Turn>) -> Element {
+    let Live::Detail(state) = live() else {
         return rsx! {};
     };
     let reasoning = state.reasoning.filter(|text| !text.is_empty());
@@ -1406,15 +1457,18 @@ fn LiveThought(text: String) -> Element {
 /// A timer updates only the footer; unchanged history Markdown stays memoized.
 #[component]
 fn LiveActivity(
-    live: Live,
-    turns: Vec<Turn>,
+    live: ReadSignal<Live>,
+    snapshot: Option<Rc<wire::Conversation>>,
     coarse: String,
     connected: bool,
     waiting: Option<String>,
 ) -> Element {
     let mut now = use_signal(now_ms);
     use_interval(Duration::from_secs(1), move |()| now.set(now_ms()));
-    let turn = current_turn(&turns);
+    let live = live();
+    let turn = snapshot
+        .as_ref()
+        .map_or(&[][..], |snapshot| current_turn(&snapshot.turns));
     let end = if matches!(&live, Live::Detail(state) if state.phase == wire::LivePhase::Idle) {
         latest_record_time(turn)
     } else {
@@ -1427,7 +1481,7 @@ fn LiveActivity(
         .zip(end)
         .and_then(|(start, end)| end.checked_sub(start.ms))
         .map(|ms| ms / 1000);
-    rsx! { ActivityRow { live, coarse, connected, waiting, turns, elapsed_seconds } }
+    rsx! { ActivityRow { live, coarse, connected, waiting, turns: turn.to_vec(), elapsed_seconds } }
 }
 
 fn current_turn(turns: &[Turn]) -> &[Turn] {
