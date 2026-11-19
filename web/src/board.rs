@@ -40,6 +40,8 @@ pub struct NavigationRow {
     pub worker: bool,
     pub unseen: bool,
     pub workers: Vec<NavigationRow>,
+    pub jobs: Vec<NavigationRow>,
+    pub stale: bool,
     pub progress: Option<(usize, usize)>,
 }
 
@@ -95,6 +97,8 @@ pub fn take_waiting(navigation: &mut Navigation, inbox: &[InboxItem]) -> Vec<Wai
                     worker: item.selection.kind == InboxKind::UnseenWorker,
                     unseen: false,
                     workers: Vec::new(),
+                    jobs: Vec::new(),
+                    stale: false,
                     progress: None,
                 },
                 item.repository.clone(),
@@ -132,7 +136,7 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
     for agent in agents
         .iter()
         .filter(unlisted)
-        .filter(|agent| agent.launch.is_none())
+        .filter(|agent| agent.launch.is_none() && agent.agent.as_deref() != Some("dogsled-job"))
     {
         let title = board
             .repos
@@ -152,6 +156,8 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 worker: false,
                 unseen: false,
                 workers: Vec::new(),
+                jobs: Vec::new(),
+                stale: false,
                 progress: todo_progress(
                     board
                         .repos
@@ -161,6 +167,17 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 ),
             });
     }
+    let worker_addresses: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter(|r| r.kind == "agent" && r.state != "closed")
+        .filter_map(|r| Some((r.host.as_str(), r.pane.as_deref()?)))
+        .chain(
+            agents
+                .iter()
+                .filter(|a| a.launch.is_some() && a.state != "closed")
+                .map(|a| (a.host.as_str(), a.pane.as_str())),
+        )
+        .collect();
     for repo in &board.repos {
         for row in repo.rows.iter().filter(|row| is_navigation_row(row)) {
             let repository = row
@@ -193,8 +210,17 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 .flat_map(|repo| &mut repo.rows)
                 .find(|lead| !lead.worker && owns_worker(lead, row))
             {
-                lead.workers.push(worker);
-            } else if row.state != "closed" {
+                if row.kind == "job" {
+                    lead.jobs.push(worker);
+                } else {
+                    lead.workers.push(worker);
+                }
+            } else if row.state != "closed"
+                && !row.owner_pane.as_deref().is_some_and(|pane| {
+                    worker_addresses
+                        .contains(&(row.owner_host.as_deref().unwrap_or(&row.host), pane))
+                })
+            {
                 repository_group(&mut navigation.repos, repository)
                     .rows
                     .push(worker);
@@ -206,19 +232,26 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
     for agent in agents
         .iter()
         .filter(unlisted)
-        .filter(|agent| agent.launch.is_some())
+        .filter(|agent| agent.launch.is_some() || agent.agent.as_deref() == Some("dogsled-job"))
     {
+        let job = agent.agent.as_deref() == Some("dogsled-job");
         repository_group(&mut navigation.repos, agent.repository.clone())
             .rows
             .push(NavigationRow {
                 pane: Some(agent.pane.clone()),
-                title: agent_title(None, agent),
-                role: "agent".to_owned(),
+                title: if job {
+                    "Job · owner unavailable".to_owned()
+                } else {
+                    agent_title(None, agent)
+                },
+                role: if job { "job" } else { "agent" }.to_owned(),
                 host: agent.host.clone(),
                 state: agent.state.clone(),
                 worker: true,
                 unseen: false,
                 workers: Vec::new(),
+                jobs: Vec::new(),
+                stale: false,
                 progress: None,
             });
     }
@@ -226,6 +259,71 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
         .repos
         .retain(|repo| !repo.rows.is_empty() || repo.to_land > 0);
     navigation
+}
+
+/// Resolve the root through host-qualified direct owners, not the viewing or execution host.
+pub(crate) fn lead_hostname<'a>(
+    board: &'a BoardView,
+    agents: &[AgentView],
+    selected: &AgentAddress,
+) -> Option<&'a str> {
+    let mut address = (selected.host.as_str(), selected.pane.as_str());
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.insert(address) {
+        let mut matches = board
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.rows)
+            .filter(|row| row.host == address.0 && row.pane.as_deref() == Some(address.1));
+        if let Some(row) = matches.next() {
+            if matches.next().is_some() || row.kind != "agent" || row.ownership_stale {
+                return None;
+            }
+            address = (row.owner_host.as_deref()?, row.owner_pane.as_deref()?);
+            continue;
+        }
+        let root = agents
+            .iter()
+            .find(|agent| agent.host == address.0 && agent.pane == address.1)?;
+        if root.launch.is_some() || root.agent.as_deref() == Some("dogsled-job") {
+            return None;
+        }
+        return board
+            .hosts
+            .iter()
+            .find(|host| host.label == address.0)?
+            .hostname
+            .as_deref();
+    }
+    None
+}
+
+/// Decide whether a restored address can open a conversation before mounting AgentView.
+pub(crate) fn status_only(
+    board: &BoardView,
+    agents: &[AgentView],
+    address: &AgentAddress,
+) -> Option<&'static str> {
+    let rows = || {
+        board
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.rows)
+            .filter(|r| r.host == address.host && r.pane.as_ref() == Some(&address.pane))
+    };
+    if rows().any(|r| r.kind == "job")
+        || agents.iter().any(|a| {
+            a.host == address.host
+                && a.pane == address.pane
+                && a.agent.as_deref() == Some("dogsled-job")
+        })
+    {
+        Some("Command job · status only")
+    } else if rows().any(|r| r.ownership_stale) {
+        Some("Ownership unavailable · last known status only")
+    } else {
+        None
+    }
 }
 
 pub(crate) fn is_navigation_row(row: &RowView) -> bool {
@@ -286,14 +384,12 @@ fn navigation_row(row: &RowView, todos: &[TodoView]) -> NavigationRow {
         title: task_title(title),
         role: row.kind.clone(),
         host: row.host.clone(),
-        state: if row.kind == "job" {
-            "job".to_owned()
-        } else {
-            row.state.clone()
-        },
+        state: row.state.clone(),
         worker: true,
         unseen: row.unseen,
         workers: Vec::new(),
+        jobs: Vec::new(),
+        stale: row.ownership_stale,
         progress: todo_progress(
             todos
                 .iter()
@@ -363,7 +459,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                     for (index, row) in group.rows.into_iter().enumerate() {
                         SidebarMenuItem { key: "{index}:{row.pane:?}",
                             NavigationAgent { row: row.clone() }
-                            if !row.workers.is_empty() {
+                            if !row.workers.is_empty() || !row.jobs.is_empty() {
                                 WorkerSummary { lead: row, inbox: inbox.clone() }
                             }
                         }
@@ -427,7 +523,7 @@ fn NavigationAgent(row: NavigationRow) -> Element {
             r#as: move |attributes: Vec<Attribute>| {
                 let body = body.clone();
                 let host = row.host.clone();
-                match row.pane.clone() {
+                match row.pane.clone().filter(|_| row.role != "job" && !row.stale && row.state != "closed") {
                     Some(pane) => rsx! {
                         button {
                             r#type: "button",
@@ -466,7 +562,21 @@ pub(crate) fn WorkerSummary(lead: NavigationRow, inbox: Vec<InboxItem>) -> Eleme
         .iter()
         .filter(|worker| matches!(worker.state.as_str(), "working" | "running"))
         .count();
-    let summary = worker_summary(count, working, finished);
+    let mut summary = worker_summary(count, working, finished);
+    if !lead.jobs.is_empty() {
+        let active = lead
+            .jobs
+            .iter()
+            .filter(|row| !crate::workers::job_finished(&row.state))
+            .count();
+        if !summary.is_empty() {
+            summary.push_str(" · ");
+        }
+        let count = if active == 0 { lead.jobs.len() } else { active };
+        let state = if active == 0 { "finished " } else { "" };
+        let noun = if count == 1 { "job" } else { "jobs" };
+        summary.push_str(&format!("{count} {state}{noun}"));
+    }
     let states: Vec<_> = lead
         .workers
         .iter()
@@ -507,7 +617,10 @@ fn worker_summary(open: usize, working: usize, finished: usize) -> String {
     let mut summary = if open == 0 {
         String::new()
     } else {
-        format!("{open} workers · {working} working")
+        format!(
+            "{open} {} · {working} working",
+            if open == 1 { "worker" } else { "workers" }
+        )
     };
     if finished > 0 {
         if !summary.is_empty() {
@@ -557,6 +670,30 @@ mod shell_tests {
                 todos: vec![],
             }],
         }
+    }
+
+    #[test]
+    fn owned_work_toolbar_follows_the_root_not_the_worker_or_viewer()
+    -> Result<(), serde_json::Error> {
+        let mut worker = row("worker", Some("lead-a"), "working")?;
+        worker.host = "local".into();
+        worker.owner_host = Some("netcup".into());
+        let mut child = row("child", Some("worker"), "working")?;
+        child.owner_host = Some("local".into());
+        let mut board = board(vec![worker, child]);
+        board.hosts = serde_json::from_value(json!([
+            {"label":"local","hostname":"mac","service":"up","reachable":true,"cores":1,"eligible":true},
+            {"label":"netcup","hostname":"netcup-dev","service":"up","reachable":true,"cores":1,"eligible":true}
+        ]))?;
+        let target = AgentAddress {
+            host: "netcup".into(),
+            pane: "child".into(),
+        };
+        let agents = agents()?;
+        assert_eq!(lead_hostname(&board, &agents, &target), Some("netcup-dev"));
+        board.repos[0].rows[0].owner_pane = Some("child".into());
+        assert_eq!(lead_hostname(&board, &agents, &target), None);
+        Ok(())
     }
 
     #[test]
@@ -617,8 +754,9 @@ mod shell_tests {
         let repo = &groups.repos[0];
         assert_eq!(repo.agent_count(), 2);
         assert_eq!(repo.rows.len(), 3);
-        assert_eq!(repo.rows[0].workers.len(), 2);
-        assert!(repo.rows[0].workers.iter().any(|row| row.role == "job"));
+        assert_eq!(repo.rows[0].workers.len(), 1);
+        assert_eq!(repo.rows[0].jobs.len(), 1);
+        assert_eq!(repo.rows[0].jobs[0].state, "working");
         assert!(repo.rows.iter().any(|row| row.role == "job"));
         Ok(())
     }

@@ -1066,6 +1066,8 @@ fn worker_lead() -> crate::board::NavigationRow {
         worker: false,
         unseen: false,
         workers: Vec::new(),
+        jobs: Vec::new(),
+        stale: false,
         progress: Some((2, 6)),
     }
 }
@@ -1084,6 +1086,67 @@ fn hold_row(id: &str, owner: Option<&str>) -> Result<portal_types::RowView, serd
         "what": "resource hold", "host": "local", "pane": null, "owner_pane": owner,
         "state": "held", "activity": "", "age_ms": 0
     }))
+}
+
+#[test]
+fn owned_work_ui_jobs_are_status_rows_only() -> Result<(), serde_json::Error> {
+    let mut rows = ["iOS", "Android", "web"]
+        .map(|name| worker_row(name, "working"))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    for name in ["dev-ios", "dev-web"] {
+        let mut row = worker_row(name, "working")?;
+        row.kind = "job".into();
+        rows.push(row);
+    }
+    let mut nested = worker_row("check", "exit 1")?;
+    nested.kind = "job".into();
+    nested.owner_host = Some("netcup".into());
+    nested.owner_pane = Some("web".into());
+    rows.push(nested);
+    let board = portal_types::BoardView {
+        hosts: vec![],
+        repos: vec![portal_types::RepoGroup {
+            repository: None,
+            rows,
+            todos: vec![],
+        }],
+        generated_ms: 0,
+    };
+    let direct = crate::workers::direct_rows(&board, "local", Some("lead"));
+    assert_eq!(crate::workers::active_count(&direct), 3);
+    assert_eq!(direct.len(), 5);
+    assert_eq!(
+        crate::workers::direct_rows(&board, "netcup", Some("web"))[0].id,
+        "check"
+    );
+    let mut dom = VirtualDom::new_with_props(workers_root, (direct, Vec::new()));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(
+        html.contains("Jobs · 2") && html.contains("Task Android"),
+        "{html}"
+    );
+    let pane = portal_types::agents::AgentAddress {
+        host: "netcup".into(),
+        pane: "dev-web".into(),
+    };
+    assert_eq!(
+        crate::board::status_only(&board, &[], &pane),
+        Some("Command job · status only")
+    );
+    let orphan: portal_types::agents::AgentView = serde_json::from_value(
+        serde_json::json!({"host":"local","pane":"shell","agent":"dogsled-job","state":"working","repository":"repo"}),
+    )?;
+    let groups = crate::board::navigation_groups(&board, &[orphan]);
+    let repo = groups
+        .repos
+        .iter()
+        .find(|r| r.repository.as_deref() == Some("repo"))
+        .unwrap();
+    assert_eq!(repo.agent_count(), 0);
+    assert_eq!(repo.rows[0].title, "Job · owner unavailable");
+    Ok(())
 }
 
 fn worker_context(selected: Option<portal_types::agents::AgentAddress>) {
@@ -1178,7 +1241,10 @@ fn worker_rows_filter_by_owner_host_and_pane_including_closed() -> Result<(), se
             ],
         }],
     };
-    let rows = crate::workers::owned_rows(Some(&board), Some(&worker_lead()));
+    let rows = crate::workers::owned_rows(
+        Some(&board),
+        Some(&portal_types::agents::AgentAddress::local("lead")),
+    );
     assert_eq!(
         rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
         ["working", "closed"]
@@ -1234,9 +1300,13 @@ fn resource_holds_are_excluded_from_owned_workers_and_sidebar_summary()
             .iter()
             .map(|row| row.role.as_str())
             .collect::<Vec<_>>(),
-        ["agent", "job"]
+        ["agent"]
     );
-    let owned = crate::workers::owned_rows(Some(&board), Some(lead));
+    assert_eq!(lead.jobs.len(), 1);
+    let owned = crate::workers::owned_rows(
+        Some(&board),
+        Some(&portal_types::agents::AgentAddress::local("lead")),
+    );
     assert_eq!(
         owned.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
         ["worker", "job"]
@@ -1244,12 +1314,11 @@ fn resource_holds_are_excluded_from_owned_workers_and_sidebar_summary()
     let mut dom = VirtualDom::new_with_props(worker_sidebar_root, (repo.clone(), Vec::new()));
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
-    assert!(html.contains("2 workers · 1 working"), "{html}");
     assert!(
-        html.contains("Show workers for Ship the portal: 2 workers · 1 working"),
+        html.contains("Show workers for Ship the portal: 1 worker · 1 working · 1 finished job"),
         "{html}"
     );
-    assert_eq!(html.matches("class=\"worker-dot\"").count(), 2, "{html}");
+    assert_eq!(html.matches("class=\"worker-dot\"").count(), 1, "{html}");
     assert!(!html.contains("resource"), "{html}");
     Ok(())
 }
@@ -1306,8 +1375,8 @@ fn sidebar_worker_summary_rolls_up_attention_and_keeps_the_lead_active() {
         "a finished worker has no dot: {html}"
     );
     for expected in [
-        "1 workers · 1 working · 1 finished",
-        "Show workers for Ship the portal: 1 workers",
+        "1 worker · 1 working · 1 finished",
+        "Show workers for Ship the portal: 1 worker",
         "data-waiting=true",
         r#"data-state="waiting""#,
         r#"aria-current="true""#,

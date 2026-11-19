@@ -5,6 +5,104 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[test]
+fn owned_work_projection_has_the_same_direct_owner_on_both_viewers() {
+    use super::super::peers::Ownership;
+    let owned = json!({"request_id":"dev","kind":"job","owner_pane":"w2DT:pD","phase":"admitted","pane":"w18W:p2","name":"bash"});
+    let exec = json!({"request_id":"dev","kind":"job","owner_hostname":"netcup","owner_pane":"w2DT:pD","pane":"w18W:p2","title":"bash","job_label":"bash · web"});
+    let evidence = |hostname, owned, executions| json!({"owned_work":{"version":1,"status":"ready","hostname":hostname,"owned":owned,"executions":executions}});
+    for origin_view in [true, false] {
+        let fixture = Fixture::new();
+        let (origin, mac) = if origin_view {
+            ("local", "mac")
+        } else {
+            ("netcup", "local")
+        };
+        if origin_view {
+            crate::items::record(
+                &fixture.ledger,
+                crate::items::Item {
+                    id: "dev".into(),
+                    host: mac.into(),
+                    pane: "w18W:p2".into(),
+                    kind: "job".into(),
+                    owner_pane: "w2DT:pD".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let net_data = evidence("netcup", json!([owned]), json!([]));
+        let mac_data = evidence("mac", json!([]), json!([exec]));
+        let mut input = fixture.input();
+        input.local.insert(
+            "host".into(),
+            if origin_view {
+                net_data.clone()
+            } else {
+                mac_data.clone()
+            },
+        );
+        let mut projector = project::Projector::default();
+        let local = projector.inputs(&fixture.fleet(), &input);
+        let mut mac_report = host(mac, "working");
+        mac_report.jobs.push(serde_json::from_value(json!({"id":"dev","cmd":["bash"],"cwd":"/work","host":"local","owner":"w2DT:pD","pane":"w18W:p2","state":"working"})).unwrap());
+        let mut collision = host("other", "working");
+        collision.probe.as_mut().unwrap().agent_panes[0].pane = "w18W:p2".into();
+        let reports = vec![host(origin, "working"), mac_report, collision];
+        let peer_key = if origin_view { mac } else { origin };
+        let mut peer = Ownership::default();
+        for step in 0..3 {
+            match step {
+                0 => peer.replace(Some(if origin_view { &mac_data } else { &net_data }), true),
+                1 => peer.replace(None, false),
+                _ => peer.replace(Some(&evidence(peer_key, json!([]), json!([]))), true),
+            }
+            project::derive_with_ownership(
+                &local,
+                reports.clone(),
+                &(&fixture.policy).into(),
+                &mut input,
+                BTreeMap::from([(peer_key.to_string(), peer.clone())]),
+            )
+            .unwrap();
+            let rows: Vec<_> = input.views["portal_board"]["data"]["repos"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|r| r["rows"].as_array().unwrap())
+                .filter(|r| r["id"] == "dev")
+                .collect();
+            assert_eq!(rows.len(), usize::from(origin_view || step != 2));
+            if step < 2 {
+                let hosts = input.views["portal_board"]["data"]["hosts"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(
+                    hosts.iter().find(|h| h["label"] == origin).unwrap()["hostname"],
+                    "netcup"
+                );
+                assert_eq!(rows[0]["host"], mac);
+                assert_eq!(rows[0]["pane"], "w18W:p2");
+                assert_eq!(rows[0]["owner_host"], origin);
+                assert_eq!(rows[0]["owner_pane"], "w2DT:pD");
+                assert_eq!(
+                    rows[0]["ownership_stale"].as_bool().unwrap_or(false),
+                    step == 1
+                );
+            }
+            assert_eq!(
+                input.views["board"]["data"]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["id"] == "dev"),
+                origin_view
+            );
+        }
+    }
+}
+
 fn answer(
     fixture: &Fixture,
     target: &crate::hosts::Host,

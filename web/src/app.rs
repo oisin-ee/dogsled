@@ -293,7 +293,14 @@ impl PortalState {
                 match snapshot.board {
                     Some(view) => {
                         self.board = Some(view);
-                        self.board_error = None;
+                        let missing = snapshot
+                            .gaps
+                            .iter()
+                            .filter(|gap| gap.domain.starts_with("ownership:"))
+                            .map(|gap| gap.detail.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        self.board_error = (!missing.is_empty()).then_some(missing);
                     }
                     None => self.board_error = Some(missing()),
                 }
@@ -527,19 +534,33 @@ pub fn App() -> Element {
 
     let lead = groups.as_ref().and_then(|groups| {
         let address = selected()?;
-        groups
+        let roots = || groups.repos.iter().flat_map(|repo| &repo.rows);
+        let owner = view
+            .as_ref()?
             .repos
             .iter()
             .flat_map(|repo| &repo.rows)
-            .find(|row| {
-                !row.worker
-                    && ((row.host == address.host && row.pane.as_ref() == Some(&address.pane))
-                        || row.workers.iter().any(|worker| {
-                            worker.host == address.host
-                                && worker.pane.as_ref() == Some(&address.pane)
-                        }))
-            })
-            .cloned()
+            .find(|row| row.host == address.host && row.pane.as_ref() == Some(&address.pane))
+            .and_then(|row| {
+                Some((
+                    row.owner_host.as_deref().unwrap_or(&row.host),
+                    row.owner_pane.as_ref()?,
+                ))
+            });
+        if let Some((host, pane)) = owner {
+            roots()
+                .flat_map(|row| std::iter::once(row).chain(&row.workers))
+                .find(|row| row.host == host && row.pane.as_ref() == Some(pane))
+                .cloned()
+        } else {
+            roots()
+                .find(|row| {
+                    !row.worker
+                        && row.host == address.host
+                        && row.pane.as_ref() == Some(&address.pane)
+                })
+                .cloned()
+        }
     });
     // Leads are counted before waiting agents leave their repository groups.
     let waiting = groups
@@ -547,6 +568,13 @@ pub fn App() -> Element {
         .map(|groups| take_waiting(groups, &items))
         .unwrap_or_default();
 
+    let unavailable =
+        selected().and_then(
+            |address| match (&view, publication.read().received_agents()) {
+                (Some(board), Some(agents)) => crate::board::status_only(board, agents, &address),
+                _ => Some("Loading ownership…"),
+            },
+        );
     let navigation = rsx! {
             Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
                 SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" } }
@@ -629,6 +657,7 @@ pub fn App() -> Element {
             {navigation}
             main { class: "console-main",
                 match selected() {
+                    Some(_) if unavailable.is_some() => rsx! { Status { "{unavailable.unwrap_or_default()}" } },
                     Some(pane) => {
                         let picked = selection().filter(|item| item.host == pane.host && item.pane == pane.pane);
                         let pick = |kind| picked.as_ref().filter(|item| item.kind == kind).map(|item| item.id.clone());

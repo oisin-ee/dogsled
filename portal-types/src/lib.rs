@@ -101,6 +101,9 @@ pub enum GroupView {
 pub struct RowView {
     pub group: GroupView,
     pub kind: String,
+    /// The last known owner or execution is not current. Never route actions from this row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ownership_stale: bool,
     pub id: String,
     pub name: String,
     pub what: String,
@@ -157,6 +160,9 @@ pub enum CleanupAction {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostView {
+    /// Name reported by the machine, independent of the viewer’s routing alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     pub label: String,
     pub service: String,
     pub reachable: bool,

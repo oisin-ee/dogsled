@@ -1504,6 +1504,33 @@ fn pending(progress: &Progress, agents: &[crate::probe::Agent]) -> bool {
     })
 }
 
+/// Read only the current launch for this observed terminal. An ambiguous pane does
+/// not identify a request, even if one of its competing records happens to match.
+pub(crate) fn observed_agent_launch(
+    ledger: &Ledger,
+    agent: &crate::probe::Agent,
+) -> Result<Option<work::Launch>> {
+    let Some(terminal) = agent.terminal_id.as_deref().filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let mut candidates = recovery::candidates(ledger, Some(&agent.pane))?
+        .into_iter()
+        .filter(|(_, progress)| progress.closed_ms.is_none());
+    let Some((id, progress)) = candidates.next() else {
+        return Ok(None);
+    };
+    let request = progress.request;
+    let Action::Agent { kind, name, .. } = &request.action else {
+        return Ok(None);
+    };
+    Ok((candidates.next().is_none()
+        && request.id == id
+        && progress.terminal.as_deref() == Some(terminal)
+        && agent.agent.as_deref() == Some(kind.as_str())
+        && agent.name.as_deref() == Some(name.as_str()))
+    .then_some(request))
+}
+
 /// Find the durable launch identity for a pane, independent of Herdr's terminal ids.
 pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     let found = recovery::candidates(ledger, Some(pane))?;

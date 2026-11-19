@@ -770,12 +770,24 @@ fn same_checkout(a: &str, b: &str) -> bool {
     a == b || a.starts_with(b) || b.starts_with(a)
 }
 
-fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
-    let job = hosts
+fn job<'a>(hosts: &'a [HostReport], item: &Item) -> Option<&'a crate::jobs::Job> {
+    hosts
         .iter()
         .filter(|h| h.host.id == item.host)
         .flat_map(|h| &h.jobs)
-        .find(|j| j.id == item.id);
+        .find(|j| j.id == item.id)
+}
+
+pub(crate) fn item_repository(hosts: &[HostReport], item: &Item) -> Option<String> {
+    match item.kind.as_str() {
+        "agent" => agent(hosts, item).and_then(|(_, agent)| agent.repository.clone()),
+        "job" => job_repository(hosts, item, job(hosts, item)),
+        _ => None,
+    }
+}
+
+fn job_row(item: &Item, hosts: &[HostReport], now: u64) -> Row {
+    let job = job(hosts, item);
     let state = job.map_or_else(
         || "starting".to_owned(),
         |j| match (j.ended_ms, j.exit) {
@@ -872,17 +884,18 @@ fn waiting(ticket: &crate::work::Ticket, hosts: &[HostReport], now: u64) -> Row 
     }
 }
 
+pub(crate) fn visible_item(item: &Item) -> bool {
+    item.closed_ms.is_none()
+        || (item.dropped_ms.is_none() && item.branch.as_ref().is_some_and(|branch| !branch.landed))
+}
+
 /// The board for `owner`, or for every owner when `None`.
 pub fn build(status: &Status, owner: Option<&str>, now: u64) -> Board {
     let mine = |o: &str| owner.is_none_or(|owner| owner == o);
     let mut rows: Vec<Row> = status
         .items
         .iter()
-        .filter(|i| {
-            mine(&i.owner_pane)
-                && (i.closed_ms.is_none()
-                    || (i.dropped_ms.is_none() && i.branch.as_ref().is_some_and(|b| !b.landed)))
-        })
+        .filter(|i| mine(&i.owner_pane) && visible_item(i))
         .map(|i| {
             if i.kind == "job" {
                 job_row(i, &status.hosts, now)

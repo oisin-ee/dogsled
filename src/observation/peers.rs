@@ -159,6 +159,32 @@ impl Export {
         }
     }
 
+    /// The SSH helper prints the assembled export as compact JSON and a newline. IPC
+    /// framing does not lift that transport's stdout limit. Drop only optional metadata.
+    pub(super) fn into_wire_value(self, limit: usize) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self)?;
+        if value.pointer("/local/host/owned_work").is_some()
+            && serde_json::to_vec(&value)?.len() >= limit
+            && let Some(host) = value
+                .pointer_mut("/local/host")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            host.insert(
+                "owned_work".into(),
+                serde_json::json!({"version":1,"status":"unavailable","reason":"reply_budget"}),
+            );
+            // Even the marker may not fit beside a base report right at the limit.
+            if serde_json::to_vec(&value)?.len() >= limit
+                && let Some(host) = value
+                    .pointer_mut("/local/host")
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                host.remove("owned_work");
+            }
+        }
+        Ok(value)
+    }
+
     fn validate(&self) -> Result<()> {
         if self.version != VERSION {
             return Err(Error::Invalid("unsupported observation version".into()));
@@ -411,8 +437,29 @@ pub(crate) fn import(ledger: &Ledger, host: &str, results: &[BranchObservation])
     Ok(changed)
 }
 
+/// The latest usable ownership set for one observation source. Losing the source
+/// disables routing, but is not proof that its last-known children went away.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Ownership {
+    pub(crate) evidence: Option<Arc<super::owned_work::Evidence>>,
+    pub(crate) current: bool,
+}
+
+impl Ownership {
+    pub(super) fn replace(&mut self, host: Option<&serde_json::Value>, fresh: bool) {
+        let decoded = host.and_then(super::owned_work::decode);
+        self.current = fresh && decoded.is_some();
+        if let Some(decoded) = decoded
+            && (fresh || self.evidence.is_none())
+        {
+            self.evidence = Some(Arc::new(decoded));
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Ingestion {
+    pub(super) ownership: Ownership,
     export: Option<Export>,
     pub source: Option<PeerSource>,
     pub cached: Option<Cached>,
@@ -477,7 +524,8 @@ impl Ingestion {
             .local
             .get("host")
             .ok_or_else(|| Error::Invalid("host observation unavailable".into()))?;
-        let report: crate::node::SnapshotReport = serde_json::from_value(report.clone())?;
+        let wire_host = report;
+        let report: crate::node::SnapshotReport = serde_json::from_value(wire_host.clone())?;
         let availability = if export.gaps.iter().any(|gap| gap.domain == "host") {
             Availability::Failed
         } else if report
@@ -489,6 +537,8 @@ impl Ingestion {
         } else {
             Availability::Stale
         };
+        self.ownership
+            .replace(Some(wire_host), availability == Availability::Available);
         let changed = self.export.as_ref().is_none_or(|old| {
             old.epoch != export.epoch || old.local_revision != export.local_revision
         });
@@ -511,6 +561,7 @@ impl Ingestion {
     }
 
     fn failure(&mut self, availability: Availability, now: u64) {
+        self.ownership.current = false;
         let source = self.source.get_or_insert(PeerSource {
             epoch: String::new(),
             local_revision: 0,
@@ -531,6 +582,7 @@ impl Ingestion {
         let report =
             fleet.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])?;
         let snapshot = report.as_ref().and_then(|report| report.snapshot.as_ref());
+        self.ownership.current = false;
         self.source = Some(PeerSource {
             epoch: "legacy".into(),
             local_revision: snapshot.map_or(0, |snapshot| snapshot.sampled_ms),
