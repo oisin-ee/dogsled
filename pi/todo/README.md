@@ -120,7 +120,9 @@ The core owns this grouping. A presenter only draws it. Rendering failures resto
 
 ## Dogsled plans
 
-After the user approves a plan, Dogsled plan mode (`/plan` and `submit_plan`) calls the todo approval handle directly.
+Any Pi agent can call `submit_plan` without an active todo or a planning model.
+The optional `/plan` command restricts writes while the agent prepares the plan.
+After the user approves the plan, Dogsled calls the todo approval handle directly.
 Pi-todo continues the approved plan in the same session. No setting is needed.
 
 After approval, the agent reads the current todo list and adds the remaining approved work before implementation.

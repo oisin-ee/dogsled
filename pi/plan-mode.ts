@@ -10,9 +10,6 @@ import { Key } from "@earendil-works/pi-tui";
 import { openInBrowser, type PortalClient, portalUrl, sleep, startOneShot } from "./portal-client.ts";
 import { ServeClient, ServeDown } from "./serve-client.ts";
 
-/** The tool that sends a plan to the portal. */
-const SUBMIT_PLAN = "submit_plan";
-
 /** The custom message the framing note joins the conversation as. */
 const PLAN_MODE_MESSAGE = "dogsled:plan-mode";
 
@@ -49,8 +46,6 @@ export interface PlanApproved {
 export interface PlanHost {
 	sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
 	sendMessage(message: { customType: string; content: string; display: boolean }, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" }): void;
-	getActiveTools(): string[];
-	setActiveTools(names: string[]): void;
 }
 
 /** Whether a path stays inside the working directory and ends in a plan file type. */
@@ -138,16 +133,15 @@ export class PlanMode {
 	/** Whether the model is planning. */
 	get active(): boolean { return this.planning; }
 
-	/** Enter or leave planning. Entering frames the task once and shows the submit tool. */
+	/** Enter or leave planning. Entering frames the task once. */
 	toggle(): void {
 		if (this.planning) this.stop();
 		else this.start();
 	}
 
-	/** Enter planning: frame the task, and make the submit tool the only plan tool. */
+	/** Enter planning and frame the task. */
 	start(): void {
 		this.planning = true;
-		this.activate();
 		if (this.framed) return;
 		this.framed = true;
 		// A conversation message, not a system prompt change: the plan mode frames the task
@@ -155,10 +149,9 @@ export class PlanMode {
 		this.pi.sendMessage({ customType: PLAN_MODE_MESSAGE, content: PLANNING_MESSAGE, display: true }, { triggerTurn: true });
 	}
 
-	/** Leave planning: hide the submit tool. */
+	/** Leave planning and lift its write restrictions. */
 	stop(): void {
 		this.planning = false;
-		this.deactivate();
 	}
 
 	/** The tool call gate. It blocks changes while planning and lets everything else through. */
@@ -290,31 +283,13 @@ export class PlanMode {
 		await this.client.json<unknown>("POST", `/api/decisions/${encodeURIComponent(review)}/ack`).catch(() => undefined);
 		this.acked.add(review);
 	}
-
-	/** Show the submit tool while planning. */
-	private activate(): void {
-		const active = this.pi.getActiveTools();
-		if (!active.includes(SUBMIT_PLAN)) this.pi.setActiveTools([...active, SUBMIT_PLAN]);
-	}
-
-	/** Hide the submit tool again. */
-	private deactivate(): void {
-		const active = this.pi.getActiveTools();
-		if (active.includes(SUBMIT_PLAN)) this.pi.setActiveTools(active.filter(name => name !== SUBMIT_PLAN));
-	}
 }
 
 /** Register the plan mode: the submit tool, the command, and the shortcut. */
 export function registerPlanMode(pi: ExtensionAPI, approved: (plan: PlanApproved, ctx: ExtensionContext) => void, client: PortalClient = new ServeClient(), open: (url: string) => void = openInBrowser): PlanMode {
-	const host: PlanHost = {
-		sendUserMessage: (content, options) => { pi.sendUserMessage(content, options); },
-		sendMessage: (message, options) => { pi.sendMessage(message, options); },
-		getActiveTools: () => pi.getActiveTools(),
-		setActiveTools: names => { pi.setActiveTools(names); },
-	};
-	const mode = new PlanMode(host, approved, client, open);
+	const mode = new PlanMode(pi, approved, client, open);
 	pi.registerTool({
-		name: SUBMIT_PLAN,
+		name: "submit_plan",
 		label: "Submit plan",
 		description: "Send the plan file to the portal for review. Write the plan as one markdown file in the working directory, then call this with its path. The decision arrives later as a message.",
 		promptSnippet: "Send a written plan for review and wait for the decision.",
@@ -323,8 +298,6 @@ export function registerPlanMode(pi: ExtensionAPI, approved: (plan: PlanApproved
 			required: ["filePath"],
 			properties: { filePath: { type: "string", description: "Path of the markdown plan file, absolute or relative to the working directory" } },
 		} as const,
-		// The tool belongs to planning only, so it is declared to the model while planning runs.
-		defaultActive: false,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const filePath = (params as { filePath?: unknown }).filePath;

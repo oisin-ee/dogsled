@@ -4,8 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { bashBlocked, PlanMode, planPathAllowed, registerPlanMode, type PlanHost } from "./plan-mode.ts";
+import { runtimeFixture } from "./todo/src/runtime-fixture.ts";
 import { PortalClient } from "./portal-client.ts";
 import { ServeClient } from "./serve-client.ts";
 
@@ -64,18 +65,15 @@ function context(cwd = "/repo"): ExtensionContext {
 	return { cwd, isIdle: () => true, sessionManager: { getSessionId: () => "session-1" } } as unknown as ExtensionContext;
 }
 
-/** A host that records what the plan mode sends and which tools it declares. */
+/** A host that records plan-mode messages. */
 function host() {
 	const sent: string[] = [];
 	const messages: unknown[] = [];
-	const active: string[] = ["read", "write", "edit", "bash"];
 	const plan: PlanHost = {
 		sendUserMessage(content) { sent.push(content); },
 		sendMessage(message) { messages.push(message); },
-		getActiveTools() { return [...active]; },
-		setActiveTools(names) { active.length = 0; active.push(...names); },
 	};
-	return { plan, sent, messages, active };
+	return { plan, sent, messages };
 }
 
 function call(toolName: string, input: unknown): ToolCallEvent {
@@ -182,7 +180,7 @@ test("plan reviews open only the first revision of each review id", async t => {
 	assert.deepEqual(opened, [firstUrl, nextUrl]);
 });
 
-test("the submit_plan tool text includes the review URL", async t => {
+test("an agent without an active todo can submit a plan and submit again after approval", async t => {
 	const p = portal([], [{ id: "rev-1", revision: 1 }]);
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
@@ -190,21 +188,21 @@ test("the submit_plan tool text includes the review URL", async t => {
 	t.after(() => rmSync(directory, { recursive: true, force: true }));
 	const file = join(directory, "plan.md");
 	writeFileSync(file, "# Plan");
-	let tool: Parameters<ExtensionAPI["registerTool"]>[0] | undefined;
-	const pi = {
-		...host().plan,
-		registerTool(value: Parameters<ExtensionAPI["registerTool"]>[0]) { tool = value; },
-		registerCommand() {},
-		registerShortcut() {},
-	} as unknown as ExtensionAPI;
 	const opened: string[] = [];
-	const mode = registerPlanMode(pi, () => {}, new PortalClient(environment(port)), url => { opened.push(url); });
-	t.after(() => mode.stopWatching());
-	assert.ok(tool);
-	const result = await tool.execute("submit", { filePath: file }, undefined, undefined, context() as ExtensionToolContext);
+	let mode: PlanMode | undefined;
+	const agent = await runtimeFixture(pi => {
+		mode = registerPlanMode(pi, () => {}, new PortalClient(environment(port)), url => { opened.push(url); });
+	});
+	t.after(() => { mode?.stopWatching(); agent.session.dispose(); });
+	assert.ok(mode);
+	await agent.call("submit_plan", { filePath: file });
 	const url = `http://127.0.0.1:${port}/?review=rev-1`;
 	assert.deepEqual(opened, [url]);
-	assert.ok(result.content.some(item => item.type === "text" && item.text.includes(url)));
+	const result = agent.session.messages.find(message => message.role === "toolResult");
+	assert.ok(result?.content.some(item => item.type === "text" && item.text.includes(url)));
+	await mode.decision(JSON.stringify({ ...DECISION, message: "" }), context(), false);
+	await agent.call("submit_plan", { filePath: file });
+	assert.equal(p.calls.filter(call => call.method === "POST" && call.path === "/api/reviews").length, 2);
 });
 
 test("a decision is delivered, acknowledged, and handed on through the approval callback", async t => {
@@ -377,7 +375,7 @@ test("a portal HTTP refusal does not launch a fallback", async t => {
 	await assert.rejects(() => mode.submit(file, context()), /403 refused/);
 });
 
-test("entering planning frames the task once and offers the submit tool", async () => {
+test("entering planning frames the task once", async () => {
 	const p = portal();
 	const port = await listen(p.server);
 	p.server.close();
@@ -386,9 +384,6 @@ test("entering planning frames the task once and offers the submit tool", async 
 	mode.start();
 	assert.equal(h.messages.length, 1);
 	assert.match(String((h.messages[0] as { content: string }).content), /markdown/);
-	assert.ok(h.active.includes("submit_plan"));
 	mode.start();
 	assert.equal(h.messages.length, 1);
-	mode.stop();
-	assert.ok(!h.active.includes("submit_plan"));
 });
