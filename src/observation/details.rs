@@ -1,5 +1,6 @@
 //! Host-local detail observation. Connection leases select work; readers never perform it.
 
+use super::live_activity::{ActivityFeed, ActivityFrame};
 use crate::error::{Error, Result};
 use crate::herdr_socket::Client;
 use crate::probe::Agent;
@@ -319,8 +320,34 @@ enum FilesTick {
 enum Tick {
     Stop,
     Files,
+    Activity,
+    #[cfg(test)]
+    Barrier(std::sync::mpsc::SyncSender<()>),
     #[cfg(test)]
     Manual(std::sync::mpsc::SyncSender<()>),
+}
+
+fn next_tick(
+    ticks: &std::sync::mpsc::Receiver<Tick>,
+    next_capture: std::time::Instant,
+    #[cfg(test)] manual: bool,
+) -> std::result::Result<Option<Tick>, std::sync::mpsc::RecvError> {
+    #[cfg(test)]
+    if manual {
+        loop {
+            match ticks.recv()? {
+                Tick::Barrier(ack) => {
+                    let _ = ack.send(());
+                }
+                tick => return Ok(Some(tick)),
+            }
+        }
+    }
+    match ticks.recv_timeout(next_capture.saturating_duration_since(std::time::Instant::now())) {
+        Ok(tick) => Ok(Some(tick)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::sync::mpsc::RecvError),
+    }
 }
 
 impl Stop {
@@ -393,6 +420,37 @@ impl Interests {
         })
     }
 
+    async fn follow_activity(
+        &self,
+        mut feed: ActivityFeed,
+        mut previous: Arc<ActivityFrame>,
+        mut stop: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut stop => break,
+                changed = feed.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            let current = feed.borrow_and_update().clone();
+            let registry = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (pane, worker) in &registry.workers {
+                if previous.changed.get(pane) != current.changed.get(pane) {
+                    worker.activity_changed();
+                }
+            }
+            drop(registry);
+            previous = current;
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn panes(&self) -> Vec<String> {
         self.0
@@ -439,6 +497,7 @@ struct Worker {
     stop: Stop,
     thread: std::thread::JoinHandle<()>,
     files_thread: std::thread::JoinHandle<()>,
+    activity_pending: Arc<AtomicBool>,
     #[cfg(test)]
     transcript_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -448,6 +507,10 @@ struct Worker {
 pub(crate) struct Collector {
     pub interests: Interests,
     pub payloads: Payloads,
+    activity: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::thread::JoinHandle<()>,
+    )>,
     #[cfg(test)]
     pub(super) client: Option<Client>,
     #[cfg(test)]
@@ -460,6 +523,7 @@ impl Default for Collector {
         Self {
             payloads: Payloads(interests.clone()),
             interests,
+            activity: None,
             #[cfg(test)]
             client: None,
             #[cfg(test)]
@@ -469,6 +533,19 @@ impl Default for Collector {
 }
 
 impl Collector {
+    pub fn with_activity(mut feed: ActivityFeed) -> Result<Self> {
+        let mut collector = Self::default();
+        let interests = collector.interests.clone();
+        let previous = feed.borrow_and_update().clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        let thread = std::thread::Builder::new()
+            .name("detail-activity".into())
+            .spawn(move || runtime.block_on(interests.follow_activity(feed, previous, stopped)))?;
+        collector.activity = Some((stop, thread));
+        Ok(collector)
+    }
+
     pub fn refresh(
         &mut self,
         input: &mut super::Publication,
@@ -648,6 +725,10 @@ impl Registry {
 
 impl Drop for Collector {
     fn drop(&mut self) {
+        if let Some((stop, thread)) = self.activity.take() {
+            let _ = stop.send(());
+            let _ = thread.join();
+        }
         let mut registry = self
             .interests
             .0
@@ -668,6 +749,13 @@ impl Drop for Collector {
 }
 
 impl Worker {
+    fn activity_changed(&self) {
+        // One queued capture is enough even if activity keeps changing during slow I/O.
+        if !self.activity_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.stop.wake.send(Tick::Activity);
+        }
+    }
+
     fn start(
         agent: &Agent,
         session: Session,
@@ -682,6 +770,8 @@ impl Worker {
         let done = Arc::clone(&stopped);
         let source = Arc::clone(&current);
         let (wake, ticks) = std::sync::mpsc::channel();
+        let activity_pending = Arc::new(AtomicBool::new(false));
+        let pending = Arc::clone(&activity_pending);
         let files = FilesWorker::start(
             Arc::clone(&current),
             Arc::clone(&stopped),
@@ -701,8 +791,6 @@ impl Worker {
             let mut next_capture = std::time::Instant::now();
             #[cfg(test)]
             let manual = client.is_some();
-            #[cfg(not(test))]
-            let manual = false;
             #[cfg(test)]
             let mut acknowledgement: Option<std::sync::mpsc::SyncSender<()>> = None;
             loop {
@@ -739,22 +827,22 @@ impl Worker {
                 if let Some(ack) = acknowledgement.take() {
                     let _ = ack.send(());
                 }
-                let tick = if manual {
-                    ticks.recv().ok()
-                } else {
-                    match ticks.recv_timeout(
-                        next_capture.saturating_duration_since(std::time::Instant::now()),
-                    ) {
-                        Ok(tick) => Some(tick),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
+                let Ok(tick) = next_tick(
+                    &ticks,
+                    next_capture,
+                    #[cfg(test)]
+                    manual,
+                ) else {
+                    break;
                 };
                 files_only =
                     matches!(tick, Some(Tick::Files)) && std::time::Instant::now() < next_capture;
                 match tick {
                     Some(Tick::Stop) => break,
                     Some(Tick::Files) => (),
+                    Some(Tick::Activity) => pending.store(false, Ordering::Release),
+                    #[cfg(test)]
+                    Some(Tick::Barrier(_)) => unreachable!("drained detail barrier"),
                     #[cfg(test)]
                     Some(Tick::Manual(ack)) => acknowledgement = Some(ack),
                     None => (),
@@ -772,6 +860,7 @@ impl Worker {
             stop,
             thread,
             files_thread: files.thread,
+            activity_pending,
             #[cfg(test)]
             transcript_reads,
         }
