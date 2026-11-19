@@ -14,7 +14,6 @@ use crate::components::card::{Card, CardContent, CardHeader, CardTitle};
 use crate::components::input::Input;
 use crate::components::select::{Select, SelectOption};
 use crate::components::skeleton::Skeleton;
-use crate::components::tabs::{TabList, TabTrigger};
 use crate::notice::Alert;
 
 const GROUPS: [(ToolGroup, &str); 6] = [
@@ -40,7 +39,6 @@ pub(crate) fn Metrics() -> Element {
         let run_group = run_group();
         async move { api::fetch_metrics(window, group, run_group).await }
     });
-    let width = use_context::<crate::app::ConsoleWidth>().0;
     // A resource retains its old result during a refetch. Do not show that result
     // under the new window or grouping while its replacement is pending.
     let pending = matches!(*report.state().read(), UseResourceState::Pending);
@@ -48,12 +46,6 @@ pub(crate) fn Metrics() -> Element {
         section { class: "metrics-page", aria_label: "Metrics",
             header { class: "lead-header metrics-header",
                 h1 { "Metrics" }
-                if width() < 1100 {
-                    TabList { aria_label: "Portal view",
-                        TabTrigger { value: "agents", index: 0usize, "Agents" }
-                        TabTrigger { value: "chat", index: 1usize, "Metrics" }
-                    }
-                }
                 div { class: "metrics-window", role: "group", aria_label: "Metrics window",
                     for (value, label) in [(Window::Day, "Day"), (Window::Week, "Week"), (Window::Month, "Month")] {
                         Button { variant: ButtonVariant::Ghost, aria_pressed: window() == value,

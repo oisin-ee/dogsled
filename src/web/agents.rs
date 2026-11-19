@@ -920,7 +920,7 @@ fn prompt_refusal(host: &str, status: Option<&str>, reply: bool) -> Option<Respo
         ).into_response()),
         Some("blocked") if !reply => Some((
             StatusCode::CONFLICT,
-            Json(json!({"error": "The agent needs a response. Select its prompt in Waiting on you to reply."})),
+            Json(json!({"error": "The agent needs a response. Select it under Needs you to reply."})),
         ).into_response()),
         Some(_) => None,
     }
@@ -1904,7 +1904,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "The agent needs a response. Select its prompt in Waiting on you to reply."})
+            json!({"error": "The agent needs a response. Select it under Needs you to reply."})
         );
         assert_eq!(*fixture.shell.calls.lock().unwrap(), vec![get]);
 
@@ -2696,7 +2696,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             body_json(response).await,
-            json!({"error": "The agent needs a response. Select its prompt in Waiting on you to reply."})
+            json!({"error": "The agent needs a response. Select it under Needs you to reply."})
         );
         assert_eq!(server.methods(), vec!["agent.list"]);
 

@@ -85,13 +85,12 @@ pub fn AgentView(
     pane: String,
     #[props(default)] review: Option<String>,
     #[props(default)] question: Option<String>,
-    agent_count: usize,
     lead: Option<crate::board::NavigationRow>,
     inbox: Vec<crate::app::InboxItem>,
 ) -> Element {
     // Every session hook reads its own agent, so another agent mounts a fresh session.
     crate::keyed(rsx! {
-        AgentSession { key: "{host}:{pane}", host, pane, review, question, agent_count, lead, inbox }
+        AgentSession { key: "{host}:{pane}", host, pane, review, question, lead, inbox }
     })
 }
 
@@ -162,7 +161,6 @@ fn AgentSession(
     pane: String,
     review: Option<String>,
     question: Option<String>,
-    agent_count: usize,
     lead: Option<crate::board::NavigationRow>,
     inbox: Vec<crate::app::InboxItem>,
 ) -> Element {
@@ -641,7 +639,6 @@ fn AgentSession(
     let mut detail = use_context::<crate::app::LeadDetail>().0;
     let worker_view = row.is_some();
     let placeholder = worker_view.then(|| "Message the worker…".to_owned());
-    let first_tab = usize::from(width() < 1100);
     let completed: usize = todos
         .iter()
         .flat_map(|todo| &todo.sections)
@@ -757,11 +754,10 @@ fn AgentSession(
                 if !plan_open && width() < 1400 {
                     div { class: "lead-tabs",
                         TabList { aria_label: "Lead view",
-                            if width() < 1100 { TabTrigger { value: "agents", index: 0usize, "Agents {agent_count}" } }
-                            TabTrigger { value: "chat", index: first_tab, "Chat" }
-                            TabTrigger { value: "todos", index: first_tab + 1, "Todos {completed}/{todo_count}" }
-                            TabTrigger { value: "workers", index: first_tab + 2, "Workers {worker_count}" }
-                            TabTrigger { value: "files", index: first_tab + 3, "Files {files_count}" }
+                            TabTrigger { value: "chat", index: 0usize, "Chat" }
+                            TabTrigger { value: "todos", index: 1usize, "Todos {completed}/{todo_count}" }
+                            TabTrigger { value: "workers", index: 2usize, "Workers {worker_count}" }
+                            TabTrigger { value: "files", index: 3usize, "Files {files_count}" }
                         }
                     }
                 }
@@ -867,16 +863,16 @@ fn AgentSession(
                         }
                     }
                 } else {
-                    TabContent { class: "chat-tab", value: "chat", index: first_tab, {chat.clone()} }
-                    TabContent { class: "todos-tab", value: "todos", index: first_tab + 1,
+                    TabContent { class: "chat-tab", value: "chat", index: 0usize, {chat.clone()} }
+                    TabContent { class: "todos-tab", value: "todos", index: 1usize,
                         div { class: "todo-tab-body", Todos { todos: todos.clone(), workers: workers.clone() } }
                         Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
                             model_picker: picker.clone(), on_send: move |_| conversation_send(false) }
                     }
-                    TabContent { class: "workers-tab", value: "workers", index: first_tab + 2,
+                    TabContent { class: "workers-tab", value: "workers", index: 2usize,
                         crate::workers::Workers { rows: worker_rows.clone(), inbox: inbox.clone() }
                     }
-                    TabContent { class: "files-tab", value: "files", index: first_tab + 3,
+                    TabContent { class: "files-tab", value: "files", index: 3usize,
                         crate::files::Files { state: files() }
                     }
                 }
