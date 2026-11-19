@@ -578,16 +578,24 @@ fn MediaView(media: Media) -> Element {
     rsx! {
         match &media {
             Media::Image { src, alt, caption, .. } => {
-                let src = if src.starts_with("/api/attachments/") { crate::api::attachment_url(&host, src) } else { src.clone() };
+                let attachment = src.starts_with("/api/attachments/");
+                // Inline data is safe in an img, not as a navigation target.
+                let open_original = attachment || src.starts_with("https://") || src.starts_with("http://");
+                let src = if attachment { crate::api::attachment_url(&host, src) } else { src.clone() };
+                let image = rsx! { img { class: "question-image", src: "{src}", alt: alt.clone().unwrap_or_default() } };
                 rsx! {
-                Item { variant: ItemVariant::Outline,
-                    ItemContent {
-                        AspectRatio { ratio: 16.0 / 9.0, img { src: "{src}", alt: alt.clone().unwrap_or_default() } }
-                        if let Some(caption) = caption {
-                            ItemDescription { "{caption}" }
+                    Item { variant: ItemVariant::Outline,
+                        ItemContent {
+                            if open_original {
+                                a { class: "question-image-link", href: "{src}", target: "_blank", rel: "noopener noreferrer",
+                                    title: "Open full-size image in a new tab", {image}
+                                }
+                            } else { {image} }
+                            if let Some(caption) = caption {
+                                ItemDescription { "{caption}" }
+                            }
                         }
                     }
-                }
                 }
             },
             Media::Table { table, caption, .. } => rsx! {
