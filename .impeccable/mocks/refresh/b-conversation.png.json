@@ -1,0 +1,7 @@
+{
+  "kind": "browser-capture",
+  "source": ".impeccable/mocks/refresh/b-live-fleet.html",
+  "viewport": "1600x1000",
+  "prompt": "Browser screenshot of direction B (Live fleet), conversation screen, a static HTML mockup. Fleet content (repositories dogsled, rondo, zoomies; the Ship release 0.40.0 lead; needs-you items; host loads) is illustrative and modelled on the real fleet and the 0.40.0 release of 2026-11-19. No image model generated this raster.",
+  "approved": false
+}

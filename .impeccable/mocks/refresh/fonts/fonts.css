@@ -1,0 +1,10 @@
+/* Self-hosted OFL 1.1 faces for the refresh mockups; licence texts sit beside each file. Latin subsets only. */
+@font-face{font-family:"Fraunces";font-style:normal;font-weight:100 900;src:url("fraunces-latin.woff2") format("woff2")}
+@font-face{font-family:"Fraunces";font-style:italic;font-weight:100 900;src:url("fraunces-italic-latin.woff2") format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-style:normal;font-weight:100 700;src:url("ibm-plex-sans-latin.woff2") format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-style:italic;font-weight:100 700;src:url("ibm-plex-sans-italic-latin.woff2") format("woff2")}
+@font-face{font-family:"Space Grotesk";font-style:normal;font-weight:300 700;src:url("space-grotesk-latin.woff2") format("woff2")}
+@font-face{font-family:"Geist";font-style:normal;font-weight:100 900;src:url("geist-latin.woff2") format("woff2")}
+@font-face{font-family:"Instrument Sans";font-style:normal;font-weight:400 700;src:url("instrument-sans-latin.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:normal;font-weight:100 800;src:url("jetbrains-mono-latin.woff2") format("woff2")}
+@font-face{font-family:"JetBrains Mono";font-style:italic;font-weight:100 800;src:url("jetbrains-mono-italic-latin.woff2") format("woff2")}

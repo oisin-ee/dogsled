@@ -1,0 +1,75 @@
+{
+  "title": "Portal refresh: three directions",
+  "question": "The owner says the portal feels stale, dark and a bit pointless. Which direction should the production restyle of web/ follow? Each direction shows the agent conversation and New conversation (composer centred, repository, model and effort pickers in the composer control row) at 1600x1000.",
+  "options": [
+    {
+      "id": "a-briefing",
+      "kind": "light",
+      "label": "A \u00b7 Daylight briefing",
+      "thesis": "A briefing you read on return: warm paper, Fraunces task titles, prose replies, tool work folded into structured result blocks, a Now card at the live edge, and Needs you as action cards.",
+      "palette": [
+        "#f6f4ef",
+        "#fffefb",
+        "#1d1b17",
+        "#1e8a5a",
+        "#f4c93f",
+        "#2b47c9"
+      ],
+      "materials": [
+        "IBM Plex Sans",
+        "Fraunces",
+        "JetBrains Mono"
+      ],
+      "html": ".impeccable/mocks/refresh/a-briefing.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/refresh/a-conversation.png",
+      "compNew": ".impeccable/mocks/refresh/a-new.png"
+    },
+    {
+      "id": "b-live-fleet",
+      "kind": "dark",
+      "label": "B \u00b7 Live fleet",
+      "thesis": "An instrument panel that moves: fleet strip with host slot grids, sparklines and live tool calls on every lead row, a Now panel with elapsed time and CI stages, and a seconds-precision timeline.",
+      "palette": [
+        "#080c17",
+        "#0d1322",
+        "#e7ecf7",
+        "#4fc3f7",
+        "#3ddc84",
+        "#ffb547"
+      ],
+      "materials": [
+        "Geist",
+        "Space Grotesk",
+        "JetBrains Mono"
+      ],
+      "html": ".impeccable/mocks/refresh/b-live-fleet.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/refresh/b-conversation.png",
+      "compNew": ".impeccable/mocks/refresh/b-new.png"
+    },
+    {
+      "id": "c-task-desk",
+      "kind": "two-tone",
+      "label": "C \u00b7 Task desk",
+      "thesis": "The task is the unit: an ink rail sorted into Needs you, In flight and To land (with Land and Prune), a light desk with a task card and todo stepper, the conversation beside an Outcome column, and a repository board under the New task composer.",
+      "palette": [
+        "#16171c",
+        "#eef0f3",
+        "#ffffff",
+        "#3347ff",
+        "#0f9d62",
+        "#f6b500"
+      ],
+      "materials": [
+        "Instrument Sans",
+        "JetBrains Mono"
+      ],
+      "html": ".impeccable/mocks/refresh/c-task-desk.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/refresh/c-conversation.png",
+      "compNew": ".impeccable/mocks/refresh/c-new.png"
+    }
+  ],
+  "steer": true
+}

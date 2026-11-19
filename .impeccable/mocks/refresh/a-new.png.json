@@ -1,0 +1,7 @@
+{
+  "kind": "browser-capture",
+  "source": ".impeccable/mocks/refresh/a-briefing.html?screen=new",
+  "viewport": "1600x1000",
+  "prompt": "Browser screenshot of direction A (Daylight briefing), new screen, a static HTML mockup. Fleet content (repositories dogsled, rondo, zoomies; the Ship release 0.40.0 lead; needs-you items; host loads) is illustrative and modelled on the real fleet and the 0.40.0 release of 2026-11-19. No image model generated this raster.",
+  "approved": false
+}

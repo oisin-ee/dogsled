@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dogsled — C · Task desk</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+/* Direction C — Task desk. Ink rail, light cool desk; the task and its progress lead, the chat supports. */
+:root{color-scheme:light;
+  --rail:#16171c;--rail2:#1f2027;--rail-sel:#2a2c36;--rail-line:#2a2b33;--rail-text:#f1f1f4;--rail-muted:#9898a6;--rail-dim:#5f606c;
+  --desk:#eef0f3;--card:#ffffff;--soft:#f6f7f9;--line:#e1e4ea;--line2:#cfd4dd;
+  --ink:#14161b;--muted:#5d6371;--dim:#959ba8;
+  --accent:#3347ff;--accent-soft:#eceeff;
+  --run:#0f9d62;--run-soft:#ddf5ea;--wait:#f6b500;--wait-soft:#fff3cf;--wait-ink:#7a5800;
+  --sans:"Instrument Sans",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
+*{box-sizing:border-box}html,body{height:100%;overflow:hidden}
+body{margin:0;background:var(--desk);color:var(--ink);font:13.5px/1.5 var(--sans);-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+h1,h2,h3,p{margin:0}button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;padding:0}
+svg{display:block;flex:none}.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.mono{font-family:var(--mono);font-size:12px}
+a{color:var(--accent);text-decoration:none;font-weight:500}
+
+.app{display:grid;grid-template-columns:292px minmax(0,1fr);height:100dvh}
+/* rail */
+.rail{background:var(--rail);color:var(--rail-text);display:flex;flex-direction:column;min-height:0}
+.rail-top{display:flex;align-items:center;gap:10px;padding:16px 16px 12px}
+.logo{width:26px;height:26px;border-radius:7px;background:var(--accent);display:grid;place-items:center;font-weight:700;font-size:14px;color:#fff}
+.rail-top b{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.newbtn{margin-left:auto;display:flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:8px;background:#fff;color:var(--ink);font-weight:600;font-size:12.5px}
+.rail .scroll{flex:1;min-height:0;overflow:auto;padding-bottom:10px}
+.lane{display:flex;align-items:center;gap:8px;padding:14px 16px 6px;font-size:11.5px;font-weight:600;color:var(--rail-muted)}
+.lane .n{margin-left:auto;font-size:11.5px;min-width:20px;text-align:center;border-radius:9px;background:var(--rail2);padding:0 6px}
+.lane.needs{color:var(--wait)}.lane.needs .n{background:var(--wait);color:#1a1200}
+.t{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:1px 10px;margin:0 8px;padding:8px;border-radius:9px;align-items:center}
+.t.on{background:var(--rail-sel)}
+.t .tt{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.t .sub{grid-column:2/4;font-size:12px;color:var(--rail-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.t .sub em{font-style:normal;color:#7ee2b0}
+.t .sub.w{color:var(--wait)}
+.tag{font-size:11px;color:var(--rail-dim);border:1px solid var(--rail-line);border-radius:5px;padding:0 6px}
+.ring{width:22px;height:22px;grid-row:1/3;align-self:start;margin-top:1px}
+.wbadge{grid-row:1/3;width:22px;height:22px;border-radius:6px;background:var(--wait);display:grid;place-items:center;color:#1a1200;align-self:start}
+.landrow{margin:2px 8px 0;padding:8px;border-radius:9px;background:var(--rail2)}
+.landrow .tt{font-weight:500}.landrow .tt .mono{display:block;font-weight:400;color:var(--rail-muted);font-size:11.5px}
+.landrow p{font-size:12px;color:var(--rail-muted);margin:2px 0 7px}
+.landrow .acts{display:flex;gap:6px}
+.rb{height:26px;padding:0 10px;border-radius:7px;font-size:12px;font-weight:600;background:var(--rail-sel);color:var(--rail-text)}
+.rb.go{background:#fff;color:var(--ink)}
+.hosts{border-top:1px solid var(--rail-line);padding:12px 16px 14px;display:grid;gap:7px}
+.h{display:grid;grid-template-columns:86px 1fr 40px;align-items:center;gap:8px;font-size:12px;color:var(--rail-muted)}
+.h b{color:var(--rail-text);font-weight:500}.h span:last-child{text-align:right}
+.hm{height:6px;border-radius:3px;background:var(--rail2);overflow:hidden}.hm i{display:block;height:100%;background:#7ee2b0;border-radius:3px}
+.metrics{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--rail-muted);margin-top:2px}
+
+/* desk */
+.desk{display:flex;flex-direction:column;min-width:0;min-height:0;padding:18px 20px 18px}
+body.new .task{display:none}body:not(.new) .compose{display:none}
+.task{display:grid;grid-template-rows:auto minmax(0,1fr);gap:14px;min-height:0;flex:1}
+.taskcard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 20px 16px}
+.crumb{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted)}
+.crumb .sep{color:var(--dim)}
+.crumb .acts{margin-left:auto;display:flex;gap:6px}
+.ib{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:var(--muted);border:1px solid var(--line)}
+.taskcard h1{font-size:26px;font-weight:600;letter-spacing:-.02em;margin:4px 0 8px;display:flex;align-items:center;gap:12px}
+.status{font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:12px;background:var(--run-soft);color:var(--run);letter-spacing:0}
+.status i{width:7px;height:7px;border-radius:50%;background:var(--run)}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:12px;color:var(--muted);background:var(--soft);border:1px solid var(--line);border-radius:6px;padding:1px 8px}
+.pill.m{font-family:var(--mono);font-size:11.5px;color:var(--ink)}
+.stepper{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:16px}
+.st{position:relative;padding-top:12px;font-size:12px;color:var(--muted);line-height:1.35}
+.st::before{content:"";position:absolute;left:0;right:0;top:0;height:5px;border-radius:3px;background:var(--line)}
+.st.done::before{background:var(--ink)}.st.cur::before{background:linear-gradient(90deg,var(--run) 55%,var(--run-soft) 55%)}
+.st.done{color:var(--ink)}.st.cur{color:var(--run);font-weight:600}
+.st small{display:block;font-weight:400;color:var(--dim);font-size:11.5px}
+
+.split{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;min-height:0}
+.convo{background:var(--card);border:1px solid var(--line);border-radius:14px;display:flex;flex-direction:column;min-height:0}
+.convo-head{display:flex;align-items:center;gap:8px;padding:10px 16px;border-bottom:1px solid var(--line)}
+.seg{display:flex;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg span{font-size:12px;font-weight:500;padding:3px 10px;border-radius:6px;color:var(--muted)}
+.seg span.on{background:var(--card);color:var(--ink);box-shadow:0 0 0 1px var(--line)}
+.convo-head .live{margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--run);font-weight:500}
+.convo-head .live i{width:8px;height:8px;border-radius:50%;background:var(--run);box-shadow:0 0 0 3px var(--run-soft)}
+.msgs{flex:1;min-height:0;overflow:auto;padding:16px 22px;display:flex;flex-direction:column;gap:14px}
+.day{text-align:center;font-size:11.5px;color:var(--dim)}
+.me{align-self:flex-end;max-width:76%;background:var(--ink);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 14px;font-size:14px;line-height:1.55}
+.me-meta{align-self:flex-end;font-size:11.5px;color:var(--dim);margin-top:-10px}
+.ag{max-width:86%}
+.ag .who{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:4px}
+.ag .who b{color:var(--ink);font-weight:600}
+.av{width:20px;height:20px;border-radius:6px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:11px;font-weight:700}
+.ag p{font-size:14px;line-height:1.62}.ag p+p{margin-top:6px}
+.steps{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 10px;border-radius:10px;background:var(--soft);border:1px solid var(--line);font-size:12px;color:var(--muted)}
+.steps b{color:var(--ink);font-weight:600;margin-right:2px}
+.sc{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11.5px;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1px 7px;color:var(--ink)}
+.sc i{width:6px;height:6px;border-radius:50%;background:var(--run)}
+.think{font-size:13px;color:var(--muted);font-style:italic}
+.typing{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;border:1px dashed #9fd9bd;background:#f6fcf9;font-size:12.5px}
+.typing b{font-weight:600}.typing .mono{color:var(--muted)}.typing time{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--run);font-weight:600}
+.dots{display:flex;gap:3px}.dots i{width:5px;height:5px;border-radius:50%;background:var(--run)}.dots i:nth-child(2){opacity:.6}.dots i:nth-child(3){opacity:.3}
+.composer{margin:0 14px 14px;border:1px solid var(--line2);border-radius:12px;background:var(--card)}
+.composer textarea{display:block;width:100%;border:0;resize:none;background:none;font:14px/1.5 var(--sans);color:var(--ink);padding:11px 14px 2px;outline:none}
+.composer textarea::placeholder{color:var(--dim)}
+.ctl{display:flex;align-items:center;gap:6px;padding:6px 8px 8px}
+.pick{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:7px;font-size:12.5px;background:var(--soft);border:1px solid var(--line);font-weight:500}
+.pick .sub{color:var(--muted);font-weight:400}.pick .chev{width:12px;height:12px;color:var(--muted)}
+.send{margin-left:auto;height:30px;padding:0 12px;border-radius:8px;background:var(--accent);color:#fff;font-weight:600;display:flex;align-items:center;gap:6px}
+
+.outcome{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.card h2{font-size:12px;font-weight:600;color:var(--muted);display:flex;justify-content:space-between;margin-bottom:8px}
+.card p{font-size:13px}
+.prrow{display:flex;align-items:center;gap:8px;font-size:13px}
+.prrow .st2{margin-left:auto;font-size:11.5px;font-weight:600;color:var(--run);background:var(--run-soft);border-radius:5px;padding:0 7px}
+.jobs{margin-top:10px;display:grid;gap:6px}
+.job{display:flex;align-items:center;gap:8px;font-size:12.5px}
+.job i{width:8px;height:8px;border-radius:50%}
+.job.ok i{background:var(--ink)}.job.run i{background:var(--run);box-shadow:0 0 0 3px var(--run-soft)}.job.wait i{border:1.5px solid var(--dim)}
+.job span{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.wkr{display:flex;align-items:center;gap:10px;font-size:13px;padding:3px 0}
+.wkr .b{margin-left:auto;font-size:11.5px;font-weight:600;color:var(--muted);background:var(--soft);border:1px solid var(--line);border-radius:5px;padding:0 7px}
+
+/* new task */
+.compose{flex:1;display:grid;place-items:center;min-height:0;overflow:auto}
+.compose-col{width:820px}
+.compose h1{font-size:30px;font-weight:600;letter-spacing:-.025em;margin-bottom:6px}
+.compose .lede{color:var(--muted);font-size:14px;margin-bottom:18px}
+.compose .composer{margin:0;border-radius:16px;border-color:var(--line2);box-shadow:0 18px 40px -26px rgba(20,22,27,.35)}
+.compose .composer textarea{min-height:128px;font-size:16px;padding:18px 18px 6px}
+.compose .ctl{padding:8px 10px 10px;gap:8px}
+.pick.repo{background:var(--accent-soft);border-color:#ccd2ff;color:var(--accent)}
+.eff{display:inline-flex;gap:2px}.eff i{width:10px;height:5px;border-radius:2px;background:var(--line2)}.eff i.on{background:var(--ink)}
+.board{margin-top:22px}
+.board-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.board-head h2{font-size:14px;font-weight:600}.board-head span{font-size:12.5px;color:var(--muted)}
+.cols{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.bcol{background:#e6e9ee;border-radius:12px;padding:8px}
+.bcol h3{font-size:11.5px;font-weight:600;color:var(--muted);padding:2px 6px 8px;display:flex;justify-content:space-between}
+.bcol.needs h3{color:var(--wait-ink)}
+.bc{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:9px 11px;margin-bottom:6px}
+.bc b{display:block;font-weight:500;font-size:13px}
+.bc p{font-size:12px;color:var(--muted)}
+.bc .pb{height:4px;border-radius:2px;background:var(--line);margin-top:7px;overflow:hidden}.bc .pb i{display:block;height:100%;background:var(--run)}
+.bc.w{box-shadow:inset 3px 0 0 var(--wait)}
+.bc .acts{display:flex;gap:6px;margin-top:7px}
+.mini{height:24px;padding:0 9px;border-radius:6px;font-size:12px;font-weight:600;border:1px solid var(--line2);background:var(--card)}
+.mini.go{background:var(--ink);color:#fff;border-color:var(--ink)}
+</style></head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="chev" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
+<symbol id="plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+<symbol id="chart" viewBox="0 0 16 16"><path d="M3 13V8M8 13V3M13 13V6"/></symbol>
+<symbol id="clip" viewBox="0 0 16 16"><path d="M11.5 7.5l-4 4a2.5 2.5 0 01-3.5-3.5l5-5a1.7 1.7 0 012.4 2.4l-5 5a.8.8 0 01-1.2-1.2l4.3-4.3"/></symbol>
+<symbol id="term" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7l2 1.5L5 10M8.5 10.5h2.5"/></symbol>
+<symbol id="ext" viewBox="0 0 16 16"><path d="M9 3h4v4M13 3L7.5 8.5M11 9.5V13H3V5h3.5"/></symbol>
+<symbol id="x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+<symbol id="q" viewBox="0 0 16 16"><path d="M6 6a2 2 0 113 1.7c-.6.4-1 .8-1 1.5M8 11.5v.01"/></symbol>
+<symbol id="doc" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4zM9 2.5v3h3M6 9h4M6 11h3"/></symbol>
+<symbol id="key" viewBox="0 0 16 16"><rect x="2" y="5" width="12" height="7" rx="1.5"/><path d="M5 8.5h.01M8 8.5h.01M11 8.5h.01"/></symbol>
+<symbol id="repo" viewBox="0 0 16 16"><path d="M4 2.5h7.5v11H4.5A1.5 1.5 0 013 12V4a1.5 1.5 0 011-1.5zM3 11.5a1.5 1.5 0 011.5-1.5h7"/></symbol>
+<symbol id="arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+</defs></svg>
+
+<div class="app">
+  <nav class="rail">
+    <div class="rail-top"><span class="logo">d</span><b>Dogsled</b><button class="newbtn"><svg class="ic" style="width:14px;height:14px"><use href="#plus"/></svg>New task</button></div>
+    <div class="scroll">
+      <div class="lane needs">Needs you<span class="n">3</span></div>
+      <div class="t"><span class="wbadge"><svg class="ic" style="width:14px;height:14px"><use href="#q"/></svg></span><span class="tt">Squad page: three layout options</span><span class="tag">rondo</span><span class="sub w">Question · which squad header? · 4m</span></div>
+      <div class="t"><span class="wbadge"><svg class="ic" style="width:14px;height:14px"><use href="#doc"/></svg></span><span class="tt">CI waits via gh run watch</span><span class="tag">dogsled</span><span class="sub w">Plan to review · 7 steps · 12m</span></div>
+      <div class="t"><span class="wbadge"><svg class="ic" style="width:14px;height:14px"><use href="#key"/></svg></span><span class="tt">Route maps: three options</span><span class="tag">zoomies</span><span class="sub w">Worker asks: git push? y / n · 1m</span></div>
+
+      <div class="lane">In flight<span class="n">5</span></div>
+      <div class="t on"><svg class="ring" viewBox="0 0 22 22"><circle cx="11" cy="11" r="8.5" fill="none" stroke="#2f313b" stroke-width="3"/><circle cx="11" cy="11" r="8.5" fill="none" stroke="#7ee2b0" stroke-width="3" stroke-dasharray="17.8 53.4" transform="rotate(-90 11 11)" stroke-linecap="round"/></svg><span class="tt">Ship release 0.40.0</span><span class="tag">dogsled</span><span class="sub"><em>Watching release CI</em> · 2 of 6</span></div>
+      <div class="t"><svg class="ring" viewBox="0 0 22 22"><circle cx="11" cy="11" r="8.5" fill="none" stroke="#2f313b" stroke-width="3"/><circle cx="11" cy="11" r="8.5" fill="none" stroke="#7ee2b0" stroke-width="3" stroke-dasharray="13.3 53.4" transform="rotate(-90 11 11)" stroke-linecap="round"/></svg><span class="tt">Portal refresh directions</span><span class="tag">dogsled</span><span class="sub"><em>Writing mockups</em> · 1 of 4</span></div>
+      <div class="t"><svg class="ring" viewBox="0 0 22 22"><circle cx="11" cy="11" r="8.5" fill="none" stroke="#2f313b" stroke-width="3"/><circle cx="11" cy="11" r="8.5" fill="none" stroke="#7ee2b0" stroke-width="3" stroke-dasharray="33.4 53.4" transform="rotate(-90 11 11)" stroke-linecap="round"/></svg><span class="tt">Graceful loading follow-ups</span><span class="tag">rondo</span><span class="sub"><em>Running web tests</em> · 5 of 8 · 2 workers</span></div>
+      <div class="t"><svg class="ring" viewBox="0 0 22 22"><circle cx="11" cy="11" r="8.5" fill="none" stroke="#2f313b" stroke-width="3"/><circle cx="11" cy="11" r="8.5" fill="none" stroke="#7ee2b0" stroke-width="3" stroke-dasharray="43.7 53.4" transform="rotate(-90 11 11)" stroke-linecap="round"/></svg><span class="tt">Route maps: three options</span><span class="tag">zoomies</span><span class="sub"><em>Rendering option C</em> · 9 of 11</span></div>
+      <div class="t"><svg class="ring" viewBox="0 0 22 22"><circle cx="11" cy="11" r="8.5" fill="none" stroke="#5f606c" stroke-width="3"/></svg><span class="tt" style="color:var(--rail-muted)">Home page cards</span><span class="tag">rondo</span><span class="sub">Idle since 18:20 · 3 of 3</span></div>
+
+      <div class="lane">To land<span class="n">2</span></div>
+      <div class="landrow"><div class="tt">Doctor JSON output <span class="mono">fix/doctor-json</span></div><p>Merged, but main is not pushed · 2d</p><div class="acts"><button class="rb go">Push main</button><button class="rb">Prune</button></div></div>
+      <div class="landrow" style="margin-top:6px"><div class="tt">Event page template <span class="mono">feat/event-template</span></div><p>Never merged · rondo · 3d</p><div class="acts"><button class="rb go">Land</button><button class="rb">Prune</button></div></div>
+    </div>
+    <div class="hosts">
+      <div class="h"><b>local</b><span class="hm"><i style="width:42%"></i></span><span>5/12</span></div>
+      <div class="h"><b>netcup</b><span class="hm"><i style="width:88%;background:#f6b500"></i></span><span>14/16</span></div>
+      <div class="h"><b>momokaya-2</b><span class="hm"><i style="width:14%"></i></span><span>1/7</span></div>
+      <div class="metrics"><svg class="ic" style="width:14px;height:14px"><use href="#chart"/></svg>Metrics</div>
+    </div>
+  </nav>
+
+  <main class="desk">
+    <section class="task">
+      <div class="taskcard">
+        <div class="crumb"><span>oisin-ee/dogsled</span><span class="sep">/</span><span>lead</span>
+          <span class="acts"><span class="ib"><svg class="ic"><use href="#term"/></svg></span><span class="ib"><svg class="ic"><use href="#ext"/></svg></span><span class="ib"><svg class="ic"><use href="#x"/></svg></span></span></div>
+        <h1>Ship release 0.40.0 <span class="status"><i></i>Working · 44m</span></h1>
+        <div class="pills"><span class="pill">pi</span><span class="pill">gpt-6.2 · high</span><span class="pill">local</span><span class="pill m">release/0.40.0</span><span class="pill">PR #386</span></div>
+        <div class="stepper">
+          <div class="st done">Merge recovery PR #385<small>20:44</small></div>
+          <div class="st done">Record host versions<small>20:45</small></div>
+          <div class="st cur">Watch release CI<small>22m so far</small></div>
+          <div class="st">Publish GitHub release</div>
+          <div class="st">Update the three hosts</div>
+          <div class="st">Verify plugin stamps</div>
+        </div>
+      </div>
+      <div class="split">
+        <div class="convo">
+          <div class="convo-head"><div class="seg"><span class="on">Conversation</span><span>Files 23</span><span>Workers 1</span></div><span class="live"><i></i>Live</span></div>
+          <div class="msgs">
+            <div class="day">Today · 20:41</div>
+            <div class="me">Land the recovery PR and cut 0.40.0. Check the plugin versions on all three hosts before you publish.</div>
+            <div class="me-meta">You · 20:41</div>
+            <div class="ag"><div class="who"><span class="av">L</span><b>Lead</b>20:43</div><p class="think">Recovery PR #385 is green and approved. Merge it first; release-please then opens the bump.</p></div>
+            <div class="steps"><b>5 steps</b><span class="sc"><i></i>gh pr merge 385</span><span class="sc"><i></i>ci_find release-please</span><span class="sc"><i></i>dogsled doctor · local</span><span class="sc"><i></i>· netcup</span><span class="sc"><i></i>· momokaya-2</span><span style="margin-left:auto">41s</span></div>
+            <div class="ag"><div class="who"><span class="av">L</span><b>Lead</b>21:03</div>
+              <p><a>Recovery PR #385</a> landed. The fresh <a>v0.40.0 candidate</a> is now in <a>release CI</a>.</p>
+              <p>I recorded the service PIDs and installed plugin versions on all three hosts before publication: every host runs binary and plugin 0.39.0.</p></div>
+            <div class="typing"><span class="dots"><i></i><i></i><i></i></span><b>Watching release-please</b><span class="mono">ci_watch · run 44594111877</span><time>22:01</time></div>
+          </div>
+          <form class="composer"><textarea rows="1" placeholder="Message the lead"></textarea>
+            <div class="ctl"><span class="ib" style="border:0"><svg class="ic"><use href="#clip"/></svg></span><span class="pick">gpt-6.2 <span class="sub">high</span><svg class="ic chev"><use href="#chev"/></svg></span><button type="button" class="send">Send<svg class="ic" style="width:14px;height:14px"><use href="#arrow"/></svg></button></div></form>
+        </div>
+        <aside class="outcome">
+          <div class="card"><h2><span>Outcome</span></h2><p>v0.40.0 published on GitHub, and local, netcup and momokaya-2 run it with matching plugin stamps.</p></div>
+          <div class="card"><h2><span>Pull request</span></h2>
+            <div class="prrow"><a>#386</a> chore(main): release 0.40.0<span class="st2">CI running</span></div>
+            <div class="jobs"><div class="job ok"><i></i>build · linux<span>6m 12s</span></div><div class="job run"><i></i>build · macOS<span>14m</span></div><div class="job wait"><i></i>publish<span>waits</span></div></div></div>
+          <div class="card"><h2><span>Workers</span><span>1</span></h2><div class="wkr">Review the release diff<span class="b">done</span></div><p style="font-size:12px;color:var(--muted)">Approved with no blocking findings.</p></div>
+          <div class="card"><h2><span>Changes</span><span>23 files</span></h2><p class="mono" style="color:var(--muted)">+412 −96 · base main 6c0750a</p></div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="compose"><div class="compose-col">
+      <h1>New task</h1>
+      <p class="lede">A lead takes it from here and lands the branch.</p>
+      <form class="composer"><textarea placeholder="What needs doing?"></textarea>
+        <div class="ctl">
+          <span class="pick repo"><svg class="ic" style="width:14px;height:14px"><use href="#repo"/></svg>oisin-ee/rondo<svg class="ic chev"><use href="#chev"/></svg></span>
+          <span class="pick">gpt-6.2<svg class="ic chev"><use href="#chev"/></svg></span>
+          <span class="pick">Effort <span class="eff"><i class="on"></i><i class="on"></i><i></i><i></i></span><span class="sub">medium</span><svg class="ic chev"><use href="#chev"/></svg></span>
+          <span class="ib" style="border:0"><svg class="ic"><use href="#clip"/></svg></span>
+          <button type="button" class="send" style="height:34px;padding:0 14px">Start task<svg class="ic" style="width:14px;height:14px"><use href="#arrow"/></svg></button>
+        </div></form>
+      <div class="board">
+        <div class="board-head"><h2>rondo right now</h2><span>so the new task does not repeat one in flight</span></div>
+        <div class="cols">
+          <div class="bcol needs"><h3><span>Needs you</span><span>1</span></h3>
+            <div class="bc w"><b>Squad page: three layout options</b><p>Question · which squad header?</p><div class="acts"><button class="mini go">Answer</button></div></div></div>
+          <div class="bcol"><h3><span>In flight</span><span>2</span></h3>
+            <div class="bc"><b>Graceful loading follow-ups</b><p>Running web tests · 5 of 8</p><div class="pb"><i style="width:62%"></i></div></div>
+            <div class="bc"><b>Home page cards</b><p>Idle since 18:20 · 3 of 3</p><div class="pb"><i style="width:100%;background:var(--dim)"></i></div></div></div>
+          <div class="bcol"><h3><span>To land</span><span>1</span></h3>
+            <div class="bc"><b>Event page template</b><p class="mono" style="font-size:11.5px">feat/event-template · never merged</p><div class="acts"><button class="mini go">Land</button><button class="mini">Prune</button></div></div></div>
+        </div>
+      </div>
+    </div></section>
+  </main>
+</div>
+<script>if(new URLSearchParams(location.search).get('screen')==='new')document.body.classList.add('new');for(const s of document.querySelectorAll('.msgs'))s.scrollTop=s.scrollHeight</script>
+</body></html>
