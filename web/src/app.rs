@@ -549,23 +549,7 @@ pub fn App() -> Element {
 
     let navigation = rsx! {
             Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
-                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" }
-                    Button { class: "console-metrics", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: metrics_open(),
-                        onclick: move |_| {
-                            selected.set(None);
-                            selection.set(None);
-                            composing.set(false);
-                            metrics_open.set(true);
-                            panel.set(LeadPanel::Chat);
-                        },
-                        "Metrics"
-                    }
-                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
-                        onclick: move |_| start_new(),
-                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
-                        "New"
-                    }
-                }
+                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" } }
                 ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
                     NeedsYou { count: state.count(), error: link_error().or(state.error.clone()), waiting,
                         inbox: items.clone(), elapsed_ms, agents: agents(), reachable: agent_error().is_none() }
@@ -622,6 +606,23 @@ pub fn App() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+                div { class: "console-actions",
+                    Button { class: "console-metrics", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: metrics_open(),
+                        onclick: move |_| {
+                            selected.set(None);
+                            selection.set(None);
+                            composing.set(false);
+                            metrics_open.set(true);
+                            panel.set(LeadPanel::Chat);
+                        },
+                        "Metrics"
+                    }
+                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
+                        onclick: move |_| start_new(),
+                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                        "New"
                     }
                 }
             }
