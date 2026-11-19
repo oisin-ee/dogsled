@@ -1352,11 +1352,14 @@ fn attached_composer_root() -> Element {
     }
 }
 
-fn empty_inbox_root() -> Element {
+fn unreadable_inbox_root() -> Element {
+    use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
+    use_context_provider(|| Signal::new(None::<crate::app::InboxSelection>));
+    use_context_provider(|| Signal::new(crate::app::LeadPanel::Chat));
     rsx! {
         crate::components::sidebar::SidebarProvider {
-            crate::app::InboxSidebar { count: Some(0), loading: false, error: None, items: Vec::new(),
-                elapsed_ms: 0, agents: Vec::new(), reachable: true }
+            crate::app::NeedsYou { count: None, error: Some("netcup: unreachable".to_owned()), waiting: Vec::new(),
+                inbox: Vec::new(), elapsed_ms: 0, agents: Vec::new(), reachable: true }
         }
     }
 }
@@ -1393,15 +1396,11 @@ fn attached_composer_shows_preview_removal_and_disabled_controls() {
 }
 
 #[test]
-fn empty_inbox_keeps_its_heading_and_zero_count() {
-    let html = dioxus_ssr::render(&VirtualDom::prebuilt(empty_inbox_root));
-    assert!(html.contains("Waiting on you"));
-    assert!(html.contains(">0</span>"));
-    assert!(html.contains("Nothing is waiting on you."));
-    assert!(!html.contains("portal-inbox"));
-    assert!(html.contains(r#"data-part="column-empty""#), "{html}");
-    assert!(html.contains(r#"role="status""#), "{html}");
-    assert!(html.contains(r#"data-slot="item""#), "{html}");
+fn an_unreadable_inbox_keeps_needs_you_visible_without_a_zero_count() {
+    let html = dioxus_ssr::render(&VirtualDom::prebuilt(unreadable_inbox_root));
+    assert!(html.contains("Needs you"), "{html}");
+    assert!(html.contains("netcup: unreachable"), "{html}");
+    assert!(!html.contains(">0</span>"), "{html}");
     assert_badge_class(&html, "inbox-count");
 }
 

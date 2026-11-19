@@ -1,12 +1,4 @@
 /* Pending requests keep their own reading regions and pinned actions. */
-.console-provider
-  .console-shell:has(.lead-panel[data-review-open="true"])
-  :is(.console-agents, .console-agents-tab) {
-  display: none;
-}
-.console-provider .console-shell:has(.lead-panel[data-review-open="true"]) .console-main {
-  grid-column: 2 / -1;
-}
 .console-provider .console-shell .lead-panel[data-review-open="true"] {
   display: flex;
   flex-direction: column;

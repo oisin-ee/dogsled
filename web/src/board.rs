@@ -43,6 +43,75 @@ pub struct NavigationRow {
     pub progress: Option<(usize, usize)>,
 }
 
+/// An agent with pending inbox items. It leaves its repository group and moves to the top of
+/// the sidebar until the owner answers.
+#[derive(Clone, PartialEq)]
+pub struct WaitingAgent {
+    pub row: NavigationRow,
+    pub repository: Option<String>,
+    /// Newest first, as the inbox orders them.
+    pub items: Vec<InboxItem>,
+}
+
+/// Moves every agent with an inbox item out of its repository group, newest item first.
+/// A worker nested under a lead is copied, so the lead keeps its full worker list. An item
+/// whose agent has no navigation row still gets a row, so no waiting item is hidden.
+pub fn take_waiting(navigation: &mut Navigation, inbox: &[InboxItem]) -> Vec<WaitingAgent> {
+    let mut waiting: Vec<WaitingAgent> = Vec::new();
+    for item in inbox {
+        let (host, pane) = (&item.selection.host, &item.selection.pane);
+        if let Some(agent) = waiting
+            .iter_mut()
+            .find(|agent| &agent.row.host == host && agent.row.pane.as_ref() == Some(pane))
+        {
+            agent.items.push(item.clone());
+            continue;
+        }
+        let matches = |row: &NavigationRow| &row.host == host && row.pane.as_ref() == Some(pane);
+        let listed = navigation.repos.iter_mut().find_map(|repo| {
+            let index = repo.rows.iter().position(matches)?;
+            Some((repo.rows.remove(index), repo.repository.clone()))
+        });
+        let nested = || {
+            navigation.repos.iter().find_map(|repo| {
+                repo.rows
+                    .iter()
+                    .flat_map(|lead| &lead.workers)
+                    .find(|worker| matches(worker))
+                    .map(|worker| (worker.clone(), repo.repository.clone()))
+            })
+        };
+        let (row, repository) = listed.or_else(nested).unwrap_or_else(|| {
+            (
+                NavigationRow {
+                    pane: Some(pane.clone()),
+                    title: item
+                        .agent_title
+                        .as_deref()
+                        .map_or_else(|| "Agent task".to_owned(), task_title),
+                    role: "agent".to_owned(),
+                    host: host.clone(),
+                    state: "waiting".to_owned(),
+                    worker: item.selection.kind == InboxKind::UnseenWorker,
+                    unseen: false,
+                    workers: Vec::new(),
+                    progress: None,
+                },
+                item.repository.clone(),
+            )
+        });
+        waiting.push(WaitingAgent {
+            row,
+            repository,
+            items: vec![item.clone()],
+        });
+    }
+    navigation
+        .repos
+        .retain(|repo| !repo.rows.is_empty() || repo.to_land > 0);
+    waiting
+}
+
 /// Ledger rows are workers; Herdr agents without a ledger row are leads, unless a Dogsled
 /// launch started them. Closed rows remain in their lead's Workers tab, but never become
 /// sidebar entries.
@@ -293,7 +362,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                 SidebarMenu {
                     for (index, row) in group.rows.into_iter().enumerate() {
                         SidebarMenuItem { key: "{index}:{row.pane:?}",
-                            NavigationAgent { row: row.clone(), inbox: inbox.clone() }
+                            NavigationAgent { row: row.clone() }
                             if !row.workers.is_empty() {
                                 WorkerSummary { lead: row, inbox: inbox.clone() }
                             }
@@ -314,30 +383,23 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
     }
 }
 
+/// Agents with inbox items have already moved to the top of the sidebar, so a row here
+/// never carries a pending item of its own.
 #[component]
-fn NavigationAgent(row: NavigationRow, inbox: Vec<InboxItem>) -> Element {
+fn NavigationAgent(row: NavigationRow) -> Element {
     let mut selected = use_context::<Signal<Option<AgentAddress>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     let mut panel = use_context::<Signal<crate::app::LeadPanel>>();
-    let pending = inbox.iter().find(|item| {
-        item.selection.host == row.host
-            && Some(&item.selection.pane) == row.pane.as_ref()
-            && (!row.worker || item.selection.kind == InboxKind::Prompt)
-    });
-    let tag = pending.map(|item| item.selection.kind);
-    let needs_owner = tag == Some(InboxKind::Prompt) || row.unseen;
-    let worker_status = worker_status(&row, tag);
-    let label = tag.map_or_else(
-        || row.title.clone(),
-        |kind| format!("{} · {}", row.title, kind.tag()),
-    );
+    let needs_owner = row.unseen;
+    let worker_status = worker_status(&row);
+    let label = row.title.clone();
     let is_selected = selected().is_some_and(|address| {
         (address.host == row.host && Some(&address.pane) == row.pane.as_ref())
             || row.workers.iter().any(|worker| {
                 worker.host == address.host && worker.pane.as_ref() == Some(&address.pane)
             })
     });
-    let status = if needs_owner || (!row.worker && tag.is_some()) {
+    let status = if needs_owner {
         "waiting"
     } else if !row.worker && matches!(row.state.as_str(), "working" | "running") {
         "running"
@@ -456,10 +518,8 @@ fn worker_summary(open: usize, working: usize, finished: usize) -> String {
     summary
 }
 
-fn worker_status(row: &NavigationRow, tag: Option<InboxKind>) -> &str {
-    if tag == Some(InboxKind::Prompt) {
-        "prompt"
-    } else if row.unseen {
+fn worker_status(row: &NavigationRow) -> &str {
+    if row.unseen {
         "idle · unseen"
     } else {
         &row.state
@@ -708,13 +768,65 @@ mod shell_tests {
         assert_eq!(navigation_row(&row, &[]).title, "Agent task");
         row.unseen = true;
         let worker = navigation_row(&row, &[]);
-        assert_eq!(worker_status(&worker, None), "idle · unseen");
-        assert_eq!(worker_status(&worker, Some(InboxKind::Prompt)), "prompt");
+        assert_eq!(worker_status(&worker), "idle · unseen");
         row.unseen = false;
         row.state = "working".to_owned();
+        assert_eq!(worker_status(&navigation_row(&row, &[])), "working");
+        Ok(())
+    }
+
+    fn pending(host: &str, pane: &str, kind: InboxKind, id: &str) -> InboxItem {
+        InboxItem {
+            selection: InboxSelection {
+                host: host.into(),
+                kind,
+                id: id.into(),
+                pane: pane.into(),
+            },
+            revision: 1,
+            title: id.into(),
+            agent_title: Some("Asked elsewhere".into()),
+            repository: Some("github.com/owner/other".into()),
+            age_ms: 0,
+        }
+    }
+
+    /// Agents that need the owner leave their repository, newest first, one row per agent.
+    #[test]
+    fn waiting_agents_move_to_the_top_and_keep_every_item() -> Result<(), serde_json::Error> {
+        let board = board(vec![row("worker-a", Some("lead-a"), "working")?]);
+        let mut navigation = navigation_groups(&board, &agents()?);
+        let inbox = [
+            pending("netcup", "lead-b", InboxKind::Question, "newest"),
+            pending("netcup", "worker-a", InboxKind::Prompt, "prompt"),
+            pending("netcup", "lead-b", InboxKind::Review, "older"),
+            pending("local", "gone", InboxKind::Question, "unlisted"),
+        ];
+        let waiting = take_waiting(&mut navigation, &inbox);
+        let order: Vec<_> = waiting
+            .iter()
+            .map(|agent| {
+                (
+                    agent.row.pane.as_deref().unwrap_or_default(),
+                    agent.items.len(),
+                )
+            })
+            .collect();
+        assert_eq!(order, [("lead-b", 2), ("worker-a", 1), ("gone", 1)]);
+        assert_eq!(waiting[0].row.title, "Second lead");
         assert_eq!(
-            worker_status(&navigation_row(&row, &[]), Some(InboxKind::Review)),
-            "working"
+            waiting[0].repository.as_deref(),
+            Some("github.com/owner/repo")
+        );
+        assert_eq!(waiting[2].row.title, "Asked elsewhere");
+        let rows = &navigation.repos[0].rows;
+        assert!(rows.iter().all(|row| row.pane.as_deref() != Some("lead-b")));
+        let lead = rows
+            .iter()
+            .find(|row| row.pane.as_deref() == Some("lead-a"));
+        assert!(
+            lead.is_some_and(|lead| lead.workers.len() == 1),
+            "a waiting worker stays under its lead"
         );
         Ok(())
     }

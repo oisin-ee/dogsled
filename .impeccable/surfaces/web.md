@@ -19,10 +19,11 @@ Mode: Operate. Surface: the `dogsled web` main screen from 800px wide (designed 
   4. Agent chat renders Markdown through a library (`pulldown-cmark`), never a hand-rolled parser.
 - The screen fits the viewport. Chrome stays anchored; only the inbox, agents list, conversation and todos scroll inside their own regions.
 - The palette is not pinned to Herdr's theme (owner, 2026-11-02).
-- Layout steer (owner, 2026-11-02): no inbox strip across the top. Inbox and agents are two left sidebars, as in the Pull Request sketch.
-- A plan review opens over everything right of the inbox sidebar (owner, 2026-11-02). The inbox stays visible and usable.
+- Layout steer (owner, 2026-11-02): no inbox strip across the top.
+- One sidebar (owner, 2026-11-19, supersedes the two-sidebar steer): the separate "Waiting on you" column is removed. Agents that need the owner move to a "Needs you" section at the top of the agents sidebar, as in the Claude and Codex apps. Plan: `plans/combined-sidebar.md`.
+- A plan review opens over everything right of the sidebar (owner, 2026-11-02). The waiting agents stay visible and usable.
 - Branches to land are not inbox items; agents land them (owner, 2026-11-02). The agents list shows a muted per-repository count.
-- Smaller screens use tabs (owner, 2026-11-02). The inbox sidebar never folds.
+- Smaller screens use tabs (owner, 2026-11-02). The sidebar, with its Needs you section, never folds.
 
 ## Direction contract
 
@@ -30,9 +31,9 @@ THESIS: The category standard, played straight: the dark agent console that Line
 
 OWN-WORLD: Near-black ground #0E0F11 with two raised panels (#141518, #1B1C20) and 1px #26272C rules. Text #E6E6E9 / #9A9DA6 / #62656E. Indigo #5E6AD2 for selection, primary action and done; yellow #F2C94C only for "waiting on you"; green #4CB782 for running. Inter for UI, JetBrains Mono for code, paths and commands. 6–10px radii, no shadows, no gradients.
 
-STORY: The owner returns, reads the inbox sidebar first, clears an item in place (keys, Land, Prune) or opens its agent, then reads the lead's conversation and todo progress and sends a message.
+STORY: The owner returns, reads the Needs you section at the top of the sidebar first, clears an item in place (keys, Land, Prune) or opens its agent, then reads the lead's conversation and todo progress and sends a message.
 
-FIRST VIEWPORT: 44px top bar (Dogsled, host load bars). Below it four columns, each with a 52px header row aligned across the screen: 280px inbox sidebar on the raised panel ("Waiting on you" and a yellow count; one row per item: kind icon, kind, age, title, agent · repository, inline actions), 248px agents sidebar (repository → lead → muted workers), conversation (title, state, role · harness · model · host · branch, icon actions; messages newest at bottom, 640px measure; composer pinned at the bottom with attach and send icons only), 300px todos column (in progress, pending, completed, abandoned). A plan review replaces the agents, conversation and todos columns: plan at a 680px measure, 300px notes margin, decision bar pinned at the bottom; the opened inbox row carries a yellow left edge. Smaller screens: at 1100–1399px the todos fold into a segmented `Chat` / `Todos` control in the conversation header; at 800–1099px the agents fold in too (`Agents` / `Chat` / `Todos`), and the review's notes margin becomes a `Notes` tab.
+FIRST VIEWPORT: 44px top bar (Dogsled, host load bars). Below it three columns, each with a 52px header row aligned across the screen: one 280px sidebar on the raised panel (Agents, Metrics, New; a Needs you section with a yellow count and one row per waiting agent: dot, agent title, age, then kind icon, kind and item title, inline key actions; then repository → lead → muted workers), conversation (title, state, role · harness · model · host · branch, icon actions; messages newest at bottom, 640px measure; composer pinned at the bottom with attach and send icons only), 300px todos column (in progress, pending, completed, abandoned). A plan review replaces the conversation and todos columns: plan at a 680px measure, 300px notes margin, decision bar pinned at the bottom; the opened waiting row carries a yellow left edge. Smaller screens: at 1100–1399px the todos fold into a segmented `Chat` / `Todos` control in the conversation header; at 800–1099px the review's notes margin becomes a `Notes` tab. The sidebar never folds.
 
 FORM: The category standard (standing exit, chosen on safer re-roll 1); bar: Linear, Cursor, Conductor. seed:e4107608a77f64a0. Sketches: `.impeccable/mocks/decision/v6-console.html` (main screen) and `v6-console-review.html` (plan review open); `?tab=` picks the open tab. `v5-canon.html` is the card as chosen, before the layout steer.
 

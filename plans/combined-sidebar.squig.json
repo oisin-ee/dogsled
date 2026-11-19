@@ -1,0 +1,3301 @@
+{
+  "app": "squig",
+  "version": 1,
+  "fileName": "combined-sidebar",
+  "look": {
+    "theme": "internet-blue",
+    "paper": "subtle",
+    "font": "hand",
+    "grid": true
+  },
+  "nodes": {
+    "a-label": {
+      "type": "text",
+      "x": 0,
+      "y": -40,
+      "w": 1440,
+      "h": 28,
+      "fontSize": 18,
+      "text": "Combined sidebar \u00b7 Desktop \u00b7 plan review open \u00b7 1440\u00d7900",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-label",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-frame": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "fill": "paper",
+      "stroke": "heavy",
+      "seed": 1,
+      "id": "a-frame",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-top": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 44,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-top",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-brand": {
+      "type": "text",
+      "x": 16,
+      "y": 12,
+      "w": 120,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Dogsled",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-brand",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-h0": {
+      "type": "text",
+      "x": 1020,
+      "y": 13,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "local",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-h0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-hl0": {
+      "type": "text",
+      "x": 1100,
+      "y": 13,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "6/12",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-hl0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-h1": {
+      "type": "text",
+      "x": 1160,
+      "y": 13,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "netcup",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-h1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-hl1": {
+      "type": "text",
+      "x": 1240,
+      "y": 13,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "3/16",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-hl1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-h2": {
+      "type": "text",
+      "x": 1300,
+      "y": 13,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "momokaya-2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-h2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-hl2": {
+      "type": "text",
+      "x": 1380,
+      "y": 13,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1/7",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-hl2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-side": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 44,
+      "w": 280,
+      "h": 856,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-side",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-side-t": {
+      "type": "text",
+      "x": 16,
+      "y": 58,
+      "w": 70,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Agents",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-side-t",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-side-n": {
+      "type": "text",
+      "x": 84,
+      "y": 60,
+      "w": 24,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-side-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-metrics": {
+      "type": "component",
+      "kind": "button",
+      "x": 128,
+      "y": 54,
+      "w": 76,
+      "h": 32,
+      "props": {
+        "label": "Metrics",
+        "variant": "filled",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-metrics",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-new": {
+      "type": "component",
+      "kind": "button",
+      "x": 212,
+      "y": 54,
+      "w": 56,
+      "h": 32,
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "left",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-new",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-side-hr": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 96,
+      "w": 280,
+      "h": 1,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-side-hr",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny-t": {
+      "type": "text",
+      "x": 16,
+      "y": 112,
+      "w": 160,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Needs you",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-ny-t",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny-n": {
+      "type": "component",
+      "kind": "badge",
+      "x": 236,
+      "y": 110,
+      "w": 32,
+      "h": 22,
+      "props": {
+        "label": "2",
+        "variant": "filled",
+        "dot": false
+      },
+      "seed": 1,
+      "id": "a-ny-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny0-sel": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 8,
+      "y": 136,
+      "w": 264,
+      "h": 52,
+      "fill": "light",
+      "stroke": "heavy",
+      "seed": 1,
+      "id": "a-ny0-sel",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 148,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-ny0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny0-title": {
+      "type": "text",
+      "x": 36,
+      "y": 142,
+      "w": 190,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Combine the sidebars",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-ny0-title",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny0-age": {
+      "type": "text",
+      "x": 232,
+      "y": 142,
+      "w": 36,
+      "h": 18,
+      "fontSize": 12,
+      "text": "now",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-ny0-age",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny0-detail": {
+      "type": "text",
+      "x": 36,
+      "y": 162,
+      "w": 232,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Plan review \u00b7 Combined sidebar plan",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-ny0-detail",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 200,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-ny1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-title": {
+      "type": "text",
+      "x": 36,
+      "y": 194,
+      "w": 190,
+      "h": 20,
+      "fontSize": 13,
+      "text": "feat-web-brand-screens",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-ny1-title",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-age": {
+      "type": "text",
+      "x": 232,
+      "y": 194,
+      "w": 36,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2 m",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-ny1-age",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-detail": {
+      "type": "text",
+      "x": 36,
+      "y": 214,
+      "w": 232,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Prompt \u00b7 Allow bash: pnpm build?",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-ny1-detail",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-k0": {
+      "type": "component",
+      "kind": "button",
+      "x": 36,
+      "y": 242,
+      "w": 38,
+      "h": 26,
+      "props": {
+        "label": "1",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-ny1-k0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-k1": {
+      "type": "component",
+      "kind": "button",
+      "x": 80,
+      "y": 242,
+      "w": 38,
+      "h": 26,
+      "props": {
+        "label": "2",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-ny1-k1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny1-k2": {
+      "type": "component",
+      "kind": "button",
+      "x": 124,
+      "y": 242,
+      "w": 38,
+      "h": 26,
+      "props": {
+        "label": "esc",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-ny1-k2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ny-hr": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 16,
+      "y": 278,
+      "w": 248,
+      "h": 1,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-ny-hr",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g0": {
+      "type": "text",
+      "x": 16,
+      "y": 292,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "zoomies",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g0-n": {
+      "type": "text",
+      "x": 248,
+      "y": 292,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g0-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g0r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 324,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-g0r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g0r0": {
+      "type": "text",
+      "x": 36,
+      "y": 318,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "let's add some proper d\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g0r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g0r0-m": {
+      "type": "text",
+      "x": 220,
+      "y": 318,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "93/109",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g0r0-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1": {
+      "type": "text",
+      "x": 16,
+      "y": 356,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "rondo",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1-n": {
+      "type": "text",
+      "x": 248,
+      "y": 356,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g1-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 388,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-g1r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1r0": {
+      "type": "text",
+      "x": 36,
+      "y": 382,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "rondo-have-redone-marketing",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g1r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1r1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 418,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-g1r1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1r1": {
+      "type": "text",
+      "x": 36,
+      "y": 412,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "tell me what is taking up\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g1r1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g1r1-m": {
+      "type": "text",
+      "x": 220,
+      "y": 412,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1/1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g1r1-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g2": {
+      "type": "text",
+      "x": 16,
+      "y": 450,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "grabcrft",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g2-n": {
+      "type": "text",
+      "x": 248,
+      "y": 450,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g2-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g2r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 482,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-g2r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g2r0": {
+      "type": "text",
+      "x": 36,
+      "y": 476,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "grabcraft",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g2r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3": {
+      "type": "text",
+      "x": 16,
+      "y": 514,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "dogsled",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g3",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3-n": {
+      "type": "text",
+      "x": 248,
+      "y": 514,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g3-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 546,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-g3r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3r0": {
+      "type": "text",
+      "x": 36,
+      "y": 540,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "dogsled-have-many-many",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g3r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3r1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 576,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-g3r1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3r1": {
+      "type": "text",
+      "x": 36,
+      "y": 570,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Capture origin and exec\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g3r1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-g3r1-m": {
+      "type": "text",
+      "x": 220,
+      "y": 570,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "idle",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-g3r1-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-main": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 280,
+      "y": 44,
+      "w": 1160,
+      "h": 856,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-main",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-plan": {
+      "type": "text",
+      "x": 304,
+      "y": 60,
+      "w": 400,
+      "h": 30,
+      "fontSize": 20,
+      "text": "Combined sidebar plan",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-plan",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-plan-m": {
+      "type": "text",
+      "x": 304,
+      "y": 92,
+      "w": 400,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Plan review \u00b7 dogsled \u00b7 local",
+      "fixedW": true,
+      "seed": 1,
+      "id": "a-plan-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-plan-body": {
+      "type": "component",
+      "kind": "paragraph",
+      "x": 304,
+      "y": 128,
+      "w": 680,
+      "h": 260,
+      "props": {
+        "heading": true,
+        "lines": 9
+      },
+      "seed": 1,
+      "id": "a-plan-body",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-notes": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 1008,
+      "y": 128,
+      "w": 280,
+      "h": 260,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-notes",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-notes-t": {
+      "type": "text",
+      "x": 1024,
+      "y": 140,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Notes",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "a-notes-t",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-bar": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 280,
+      "y": 836,
+      "w": 1160,
+      "h": 64,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "a-bar",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-req": {
+      "type": "component",
+      "kind": "button",
+      "x": 1140,
+      "y": 850,
+      "w": 150,
+      "h": 36,
+      "props": {
+        "label": "Request changes",
+        "variant": "outline",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-req",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "a-ok": {
+      "type": "component",
+      "kind": "button",
+      "x": 1300,
+      "y": 850,
+      "w": 120,
+      "h": 36,
+      "props": {
+        "label": "Approve plan",
+        "variant": "filled",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "a-ok",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "a"
+      ]
+    },
+    "b-label": {
+      "type": "text",
+      "x": 1540,
+      "y": -40,
+      "w": 1440,
+      "h": 28,
+      "fontSize": 18,
+      "text": "Combined sidebar \u00b7 Desktop \u00b7 nothing waiting \u00b7 1440\u00d7900",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-label",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-frame": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 1540,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "fill": "paper",
+      "stroke": "heavy",
+      "seed": 1,
+      "id": "b-frame",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-top": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 1540,
+      "y": 0,
+      "w": 1440,
+      "h": 44,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-top",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-brand": {
+      "type": "text",
+      "x": 1556,
+      "y": 12,
+      "w": 120,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Dogsled",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "b-brand",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-h0": {
+      "type": "text",
+      "x": 2560,
+      "y": 13,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "local",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-h0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-hl0": {
+      "type": "text",
+      "x": 2640,
+      "y": 13,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "6/12",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-hl0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-h1": {
+      "type": "text",
+      "x": 2700,
+      "y": 13,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "netcup",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-h1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-hl1": {
+      "type": "text",
+      "x": 2780,
+      "y": 13,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "3/16",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-hl1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-h2": {
+      "type": "text",
+      "x": 2840,
+      "y": 13,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "momokaya-2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-h2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-hl2": {
+      "type": "text",
+      "x": 2920,
+      "y": 13,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1/7",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-hl2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-side": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 1540,
+      "y": 44,
+      "w": 280,
+      "h": 856,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-side",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-side-t": {
+      "type": "text",
+      "x": 1556,
+      "y": 58,
+      "w": 70,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Agents",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "b-side-t",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-side-n": {
+      "type": "text",
+      "x": 1624,
+      "y": 60,
+      "w": 24,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-side-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-metrics": {
+      "type": "component",
+      "kind": "button",
+      "x": 1668,
+      "y": 54,
+      "w": 76,
+      "h": 32,
+      "props": {
+        "label": "Metrics",
+        "variant": "filled",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "b-metrics",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-new": {
+      "type": "component",
+      "kind": "button",
+      "x": 1752,
+      "y": 54,
+      "w": 56,
+      "h": 32,
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "left",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "b-new",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-side-hr": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 1540,
+      "y": 96,
+      "w": 280,
+      "h": 1,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-side-hr",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g0": {
+      "type": "text",
+      "x": 1556,
+      "y": 112,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "zoomies",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g0-n": {
+      "type": "text",
+      "x": 1788,
+      "y": 112,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g0-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g0r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 1560,
+      "y": 144,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-g0r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g0r0": {
+      "type": "text",
+      "x": 1576,
+      "y": 138,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "let's add some proper d\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g0r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g0r0-m": {
+      "type": "text",
+      "x": 1760,
+      "y": 138,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "93/109",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g0r0-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1": {
+      "type": "text",
+      "x": 1556,
+      "y": 176,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "rondo",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1-n": {
+      "type": "text",
+      "x": 1788,
+      "y": 176,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g1-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 1560,
+      "y": 208,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-g1r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1r0": {
+      "type": "text",
+      "x": 1576,
+      "y": 202,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "rondo-have-redone-marketing",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g1r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1r1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 1560,
+      "y": 238,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-g1r1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1r1": {
+      "type": "text",
+      "x": 1576,
+      "y": 232,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "tell me what is taking up\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g1r1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g1r1-m": {
+      "type": "text",
+      "x": 1760,
+      "y": 232,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1/1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g1r1-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g2": {
+      "type": "text",
+      "x": 1556,
+      "y": 270,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "grabcrft",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g2",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g2-n": {
+      "type": "text",
+      "x": 1788,
+      "y": 270,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g2-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g2r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 1560,
+      "y": 302,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-g2r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g2r0": {
+      "type": "text",
+      "x": 1576,
+      "y": 296,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "grabcraft",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g2r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3": {
+      "type": "text",
+      "x": 1556,
+      "y": 334,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "dogsled",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g3",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3-n": {
+      "type": "text",
+      "x": 1788,
+      "y": 334,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g3-n",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 1560,
+      "y": 366,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-g3r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3r0": {
+      "type": "text",
+      "x": 1576,
+      "y": 360,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "dogsled-have-many-many",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g3r0",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3r1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 1560,
+      "y": 396,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "b-g3r1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3r1": {
+      "type": "text",
+      "x": 1576,
+      "y": 390,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Capture origin and exec\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g3r1",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-g3r1-m": {
+      "type": "text",
+      "x": 1760,
+      "y": 390,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "idle",
+      "fixedW": true,
+      "seed": 1,
+      "id": "b-g3r1-m",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "b-empty": {
+      "type": "text",
+      "x": 2300,
+      "y": 450,
+      "w": 200,
+      "h": 28,
+      "fontSize": 18,
+      "text": "Select an agent",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "b-empty",
+      "groupIds": [
+        "combined-sidebar",
+        "desktop",
+        "b"
+      ]
+    },
+    "c-label": {
+      "type": "text",
+      "x": 0,
+      "y": 1000,
+      "w": 900,
+      "h": 28,
+      "fontSize": 18,
+      "text": "Combined sidebar \u00b7 Narrow \u00b7 plan review open \u00b7 900\u00d7700",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-label",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-frame": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 1040,
+      "w": 900,
+      "h": 700,
+      "fill": "paper",
+      "stroke": "heavy",
+      "seed": 1,
+      "id": "c-frame",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-top": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 1040,
+      "w": 900,
+      "h": 44,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-top",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-brand": {
+      "type": "text",
+      "x": 16,
+      "y": 1052,
+      "w": 120,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Dogsled",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "c-brand",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-h0": {
+      "type": "text",
+      "x": 480,
+      "y": 1053,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "local",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-h0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-hl0": {
+      "type": "text",
+      "x": 560,
+      "y": 1053,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "6/12",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-hl0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-h1": {
+      "type": "text",
+      "x": 620,
+      "y": 1053,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "netcup",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-h1",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-hl1": {
+      "type": "text",
+      "x": 700,
+      "y": 1053,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "3/16",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-hl1",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-h2": {
+      "type": "text",
+      "x": 760,
+      "y": 1053,
+      "w": 76,
+      "h": 18,
+      "fontSize": 12,
+      "text": "momokaya-2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-h2",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-hl2": {
+      "type": "text",
+      "x": 840,
+      "y": 1053,
+      "w": 40,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1/7",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-hl2",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-side": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 1084,
+      "w": 280,
+      "h": 656,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-side",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-side-t": {
+      "type": "text",
+      "x": 16,
+      "y": 1098,
+      "w": 70,
+      "h": 24,
+      "fontSize": 15,
+      "text": "Agents",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "c-side-t",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-side-n": {
+      "type": "text",
+      "x": 84,
+      "y": 1100,
+      "w": 24,
+      "h": 20,
+      "fontSize": 13,
+      "text": "9",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-side-n",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-metrics": {
+      "type": "component",
+      "kind": "button",
+      "x": 128,
+      "y": 1094,
+      "w": 76,
+      "h": 32,
+      "props": {
+        "label": "Metrics",
+        "variant": "filled",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-metrics",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-new": {
+      "type": "component",
+      "kind": "button",
+      "x": 212,
+      "y": 1094,
+      "w": 56,
+      "h": 32,
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "left",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-new",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-side-hr": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 0,
+      "y": 1136,
+      "w": 280,
+      "h": 1,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-side-hr",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny-t": {
+      "type": "text",
+      "x": 16,
+      "y": 1152,
+      "w": 160,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Needs you",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "c-ny-t",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny-n": {
+      "type": "component",
+      "kind": "badge",
+      "x": 236,
+      "y": 1150,
+      "w": 32,
+      "h": 22,
+      "props": {
+        "label": "2",
+        "variant": "filled",
+        "dot": false
+      },
+      "seed": 1,
+      "id": "c-ny-n",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny0-sel": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 8,
+      "y": 1176,
+      "w": 264,
+      "h": 52,
+      "fill": "light",
+      "stroke": "heavy",
+      "seed": 1,
+      "id": "c-ny0-sel",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1188,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-ny0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny0-title": {
+      "type": "text",
+      "x": 36,
+      "y": 1182,
+      "w": 190,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Combine the sidebars",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "c-ny0-title",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny0-age": {
+      "type": "text",
+      "x": 232,
+      "y": 1182,
+      "w": 36,
+      "h": 18,
+      "fontSize": 12,
+      "text": "now",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-ny0-age",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny0-detail": {
+      "type": "text",
+      "x": 36,
+      "y": 1202,
+      "w": 232,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Plan review \u00b7 Combined sidebar plan",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-ny0-detail",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1240,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-ny1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-title": {
+      "type": "text",
+      "x": 36,
+      "y": 1234,
+      "w": 190,
+      "h": 20,
+      "fontSize": 13,
+      "text": "feat-web-brand-screens",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "c-ny1-title",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-age": {
+      "type": "text",
+      "x": 232,
+      "y": 1234,
+      "w": 36,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2 m",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-ny1-age",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-detail": {
+      "type": "text",
+      "x": 36,
+      "y": 1254,
+      "w": 232,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Prompt \u00b7 Allow bash: pnpm build?",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-ny1-detail",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-k0": {
+      "type": "component",
+      "kind": "button",
+      "x": 36,
+      "y": 1282,
+      "w": 38,
+      "h": 26,
+      "props": {
+        "label": "1",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-ny1-k0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-k1": {
+      "type": "component",
+      "kind": "button",
+      "x": 80,
+      "y": 1282,
+      "w": 38,
+      "h": 26,
+      "props": {
+        "label": "2",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-ny1-k1",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny1-k2": {
+      "type": "component",
+      "kind": "button",
+      "x": 124,
+      "y": 1282,
+      "w": 38,
+      "h": 26,
+      "props": {
+        "label": "esc",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-ny1-k2",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ny-hr": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 16,
+      "y": 1318,
+      "w": 248,
+      "h": 1,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-ny-hr",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g0": {
+      "type": "text",
+      "x": 16,
+      "y": 1332,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "zoomies",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g0-n": {
+      "type": "text",
+      "x": 248,
+      "y": 1332,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g0-n",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g0r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1364,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-g0r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g0r0": {
+      "type": "text",
+      "x": 36,
+      "y": 1358,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "let's add some proper d\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g0r0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g0r0-m": {
+      "type": "text",
+      "x": 220,
+      "y": 1358,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "93/109",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g0r0-m",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1": {
+      "type": "text",
+      "x": 16,
+      "y": 1396,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "rondo",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g1",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1-n": {
+      "type": "text",
+      "x": 248,
+      "y": 1396,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g1-n",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1428,
+      "w": 8,
+      "h": 8,
+      "fill": "strong",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-g1r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1r0": {
+      "type": "text",
+      "x": 36,
+      "y": 1422,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "rondo-have-redone-marketing",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g1r0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1r1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1458,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-g1r1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1r1": {
+      "type": "text",
+      "x": 36,
+      "y": 1452,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "tell me what is taking up\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g1r1",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g1r1-m": {
+      "type": "text",
+      "x": 220,
+      "y": 1452,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1/1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g1r1-m",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g2": {
+      "type": "text",
+      "x": 16,
+      "y": 1490,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "grabcrft",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g2",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g2-n": {
+      "type": "text",
+      "x": 248,
+      "y": 1490,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "1",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g2-n",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g2r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1522,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-g2r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g2r0": {
+      "type": "text",
+      "x": 36,
+      "y": 1516,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "grabcraft",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g2r0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3": {
+      "type": "text",
+      "x": 16,
+      "y": 1554,
+      "w": 200,
+      "h": 18,
+      "fontSize": 12,
+      "text": "dogsled",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g3",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3-n": {
+      "type": "text",
+      "x": 248,
+      "y": 1554,
+      "w": 20,
+      "h": 18,
+      "fontSize": 12,
+      "text": "2",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g3-n",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3r0-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1586,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-g3r0-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3r0": {
+      "type": "text",
+      "x": 36,
+      "y": 1580,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "dogsled-have-many-many",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g3r0",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3r1-dot": {
+      "type": "shape",
+      "shape": "ellipse",
+      "x": 20,
+      "y": 1616,
+      "w": 8,
+      "h": 8,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-g3r1-dot",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3r1": {
+      "type": "text",
+      "x": 36,
+      "y": 1610,
+      "w": 180,
+      "h": 20,
+      "fontSize": 13,
+      "text": "Capture origin and exec\u2026",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g3r1",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-g3r1-m": {
+      "type": "text",
+      "x": 220,
+      "y": 1610,
+      "w": 48,
+      "h": 18,
+      "fontSize": 12,
+      "text": "idle",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-g3r1-m",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-main": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 280,
+      "y": 1084,
+      "w": 620,
+      "h": 656,
+      "fill": "none",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-main",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-plan": {
+      "type": "text",
+      "x": 304,
+      "y": 1100,
+      "w": 400,
+      "h": 30,
+      "fontSize": 20,
+      "text": "Combined sidebar plan",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "c-plan",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-plan-m": {
+      "type": "text",
+      "x": 304,
+      "y": 1132,
+      "w": 400,
+      "h": 18,
+      "fontSize": 12,
+      "text": "Plan review \u00b7 dogsled \u00b7 local",
+      "fixedW": true,
+      "seed": 1,
+      "id": "c-plan-m",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-plan-body": {
+      "type": "component",
+      "kind": "paragraph",
+      "x": 304,
+      "y": 1168,
+      "w": 572,
+      "h": 260,
+      "props": {
+        "heading": true,
+        "lines": 9
+      },
+      "seed": 1,
+      "id": "c-plan-body",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-tabs": {
+      "type": "component",
+      "kind": "tabs",
+      "x": 304,
+      "y": 1440,
+      "w": 220,
+      "h": 36,
+      "props": {
+        "labels": "Plan, Changes, Notes",
+        "active": 1
+      },
+      "seed": 1,
+      "id": "c-tabs",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-bar": {
+      "type": "shape",
+      "shape": "rect",
+      "x": 280,
+      "y": 1676,
+      "w": 620,
+      "h": 64,
+      "fill": "light",
+      "stroke": "light",
+      "seed": 1,
+      "id": "c-bar",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-req": {
+      "type": "component",
+      "kind": "button",
+      "x": 600,
+      "y": 1690,
+      "w": 150,
+      "h": 36,
+      "props": {
+        "label": "Request changes",
+        "variant": "outline",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-req",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "c-ok": {
+      "type": "component",
+      "kind": "button",
+      "x": 760,
+      "y": 1690,
+      "w": 120,
+      "h": 36,
+      "props": {
+        "label": "Approve plan",
+        "variant": "filled",
+        "size": "md",
+        "icon": "none",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "id": "c-ok",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    },
+    "title": {
+      "type": "text",
+      "x": 0,
+      "y": -120,
+      "w": 1400,
+      "h": 36,
+      "fontSize": 24,
+      "text": "Combined sidebar: agents that need you move to the top (no separate Waiting on you column)",
+      "fixedW": true,
+      "bold": true,
+      "seed": 1,
+      "id": "title",
+      "groupIds": [
+        "combined-sidebar",
+        "narrow",
+        "c"
+      ]
+    }
+  },
+  "order": [
+    "a-label",
+    "a-frame",
+    "a-top",
+    "a-brand",
+    "a-h0",
+    "a-hl0",
+    "a-h1",
+    "a-hl1",
+    "a-h2",
+    "a-hl2",
+    "a-side",
+    "a-side-t",
+    "a-side-n",
+    "a-metrics",
+    "a-new",
+    "a-side-hr",
+    "a-ny-t",
+    "a-ny-n",
+    "a-ny0-sel",
+    "a-ny0-dot",
+    "a-ny0-title",
+    "a-ny0-age",
+    "a-ny0-detail",
+    "a-ny1-dot",
+    "a-ny1-title",
+    "a-ny1-age",
+    "a-ny1-detail",
+    "a-ny1-k0",
+    "a-ny1-k1",
+    "a-ny1-k2",
+    "a-ny-hr",
+    "a-g0",
+    "a-g0-n",
+    "a-g0r0-dot",
+    "a-g0r0",
+    "a-g0r0-m",
+    "a-g1",
+    "a-g1-n",
+    "a-g1r0-dot",
+    "a-g1r0",
+    "a-g1r1-dot",
+    "a-g1r1",
+    "a-g1r1-m",
+    "a-g2",
+    "a-g2-n",
+    "a-g2r0-dot",
+    "a-g2r0",
+    "a-g3",
+    "a-g3-n",
+    "a-g3r0-dot",
+    "a-g3r0",
+    "a-g3r1-dot",
+    "a-g3r1",
+    "a-g3r1-m",
+    "a-main",
+    "a-plan",
+    "a-plan-m",
+    "a-plan-body",
+    "a-notes",
+    "a-notes-t",
+    "a-bar",
+    "a-req",
+    "a-ok",
+    "b-label",
+    "b-frame",
+    "b-top",
+    "b-brand",
+    "b-h0",
+    "b-hl0",
+    "b-h1",
+    "b-hl1",
+    "b-h2",
+    "b-hl2",
+    "b-side",
+    "b-side-t",
+    "b-side-n",
+    "b-metrics",
+    "b-new",
+    "b-side-hr",
+    "b-g0",
+    "b-g0-n",
+    "b-g0r0-dot",
+    "b-g0r0",
+    "b-g0r0-m",
+    "b-g1",
+    "b-g1-n",
+    "b-g1r0-dot",
+    "b-g1r0",
+    "b-g1r1-dot",
+    "b-g1r1",
+    "b-g1r1-m",
+    "b-g2",
+    "b-g2-n",
+    "b-g2r0-dot",
+    "b-g2r0",
+    "b-g3",
+    "b-g3-n",
+    "b-g3r0-dot",
+    "b-g3r0",
+    "b-g3r1-dot",
+    "b-g3r1",
+    "b-g3r1-m",
+    "b-empty",
+    "c-label",
+    "c-frame",
+    "c-top",
+    "c-brand",
+    "c-h0",
+    "c-hl0",
+    "c-h1",
+    "c-hl1",
+    "c-h2",
+    "c-hl2",
+    "c-side",
+    "c-side-t",
+    "c-side-n",
+    "c-metrics",
+    "c-new",
+    "c-side-hr",
+    "c-ny-t",
+    "c-ny-n",
+    "c-ny0-sel",
+    "c-ny0-dot",
+    "c-ny0-title",
+    "c-ny0-age",
+    "c-ny0-detail",
+    "c-ny1-dot",
+    "c-ny1-title",
+    "c-ny1-age",
+    "c-ny1-detail",
+    "c-ny1-k0",
+    "c-ny1-k1",
+    "c-ny1-k2",
+    "c-ny-hr",
+    "c-g0",
+    "c-g0-n",
+    "c-g0r0-dot",
+    "c-g0r0",
+    "c-g0r0-m",
+    "c-g1",
+    "c-g1-n",
+    "c-g1r0-dot",
+    "c-g1r0",
+    "c-g1r1-dot",
+    "c-g1r1",
+    "c-g1r1-m",
+    "c-g2",
+    "c-g2-n",
+    "c-g2r0-dot",
+    "c-g2r0",
+    "c-g3",
+    "c-g3-n",
+    "c-g3r0-dot",
+    "c-g3r0",
+    "c-g3r1-dot",
+    "c-g3r1",
+    "c-g3r1-m",
+    "c-main",
+    "c-plan",
+    "c-plan-m",
+    "c-plan-body",
+    "c-tabs",
+    "c-bar",
+    "c-req",
+    "c-ok",
+    "title"
+  ],
+  "variations": [
+    {
+      "id": "a",
+      "title": "A \u00b7 Desktop, waiting",
+      "description": "Agents that need you move to a Needs you section at the top of the one sidebar.",
+      "nodeIds": [
+        "a-label",
+        "a-frame",
+        "a-top",
+        "a-brand",
+        "a-h0",
+        "a-hl0",
+        "a-h1",
+        "a-hl1",
+        "a-h2",
+        "a-hl2",
+        "a-side",
+        "a-side-t",
+        "a-side-n",
+        "a-metrics",
+        "a-new",
+        "a-side-hr",
+        "a-ny-t",
+        "a-ny-n",
+        "a-ny0-sel",
+        "a-ny0-dot",
+        "a-ny0-title",
+        "a-ny0-age",
+        "a-ny0-detail",
+        "a-ny1-dot",
+        "a-ny1-title",
+        "a-ny1-age",
+        "a-ny1-detail",
+        "a-ny1-k0",
+        "a-ny1-k1",
+        "a-ny1-k2",
+        "a-ny-hr",
+        "a-g0",
+        "a-g0-n",
+        "a-g0r0-dot",
+        "a-g0r0",
+        "a-g0r0-m",
+        "a-g1",
+        "a-g1-n",
+        "a-g1r0-dot",
+        "a-g1r0",
+        "a-g1r1-dot",
+        "a-g1r1",
+        "a-g1r1-m",
+        "a-g2",
+        "a-g2-n",
+        "a-g2r0-dot",
+        "a-g2r0",
+        "a-g3",
+        "a-g3-n",
+        "a-g3r0-dot",
+        "a-g3r0",
+        "a-g3r1-dot",
+        "a-g3r1",
+        "a-g3r1-m",
+        "a-main",
+        "a-plan",
+        "a-plan-m",
+        "a-plan-body",
+        "a-notes",
+        "a-notes-t",
+        "a-bar",
+        "a-req",
+        "a-ok"
+      ]
+    },
+    {
+      "id": "b",
+      "title": "B \u00b7 Desktop, nothing waiting",
+      "description": "With nothing waiting, the section is absent and the repositories start at the top.",
+      "nodeIds": [
+        "b-label",
+        "b-frame",
+        "b-top",
+        "b-brand",
+        "b-h0",
+        "b-hl0",
+        "b-h1",
+        "b-hl1",
+        "b-h2",
+        "b-hl2",
+        "b-side",
+        "b-side-t",
+        "b-side-n",
+        "b-metrics",
+        "b-new",
+        "b-side-hr",
+        "b-g0",
+        "b-g0-n",
+        "b-g0r0-dot",
+        "b-g0r0",
+        "b-g0r0-m",
+        "b-g1",
+        "b-g1-n",
+        "b-g1r0-dot",
+        "b-g1r0",
+        "b-g1r1-dot",
+        "b-g1r1",
+        "b-g1r1-m",
+        "b-g2",
+        "b-g2-n",
+        "b-g2r0-dot",
+        "b-g2r0",
+        "b-g3",
+        "b-g3-n",
+        "b-g3r0-dot",
+        "b-g3r0",
+        "b-g3r1-dot",
+        "b-g3r1",
+        "b-g3r1-m",
+        "b-empty"
+      ]
+    },
+    {
+      "id": "c",
+      "title": "C \u00b7 Narrow",
+      "description": "The sidebar stays at 280px; no Agents tab. Plan notes become a tab.",
+      "nodeIds": [
+        "c-label",
+        "c-frame",
+        "c-top",
+        "c-brand",
+        "c-h0",
+        "c-hl0",
+        "c-h1",
+        "c-hl1",
+        "c-h2",
+        "c-hl2",
+        "c-side",
+        "c-side-t",
+        "c-side-n",
+        "c-metrics",
+        "c-new",
+        "c-side-hr",
+        "c-ny-t",
+        "c-ny-n",
+        "c-ny0-sel",
+        "c-ny0-dot",
+        "c-ny0-title",
+        "c-ny0-age",
+        "c-ny0-detail",
+        "c-ny1-dot",
+        "c-ny1-title",
+        "c-ny1-age",
+        "c-ny1-detail",
+        "c-ny1-k0",
+        "c-ny1-k1",
+        "c-ny1-k2",
+        "c-ny-hr",
+        "c-g0",
+        "c-g0-n",
+        "c-g0r0-dot",
+        "c-g0r0",
+        "c-g0r0-m",
+        "c-g1",
+        "c-g1-n",
+        "c-g1r0-dot",
+        "c-g1r0",
+        "c-g1r1-dot",
+        "c-g1r1",
+        "c-g1r1-m",
+        "c-g2",
+        "c-g2-n",
+        "c-g2r0-dot",
+        "c-g2r0",
+        "c-g3",
+        "c-g3-n",
+        "c-g3r0-dot",
+        "c-g3r0",
+        "c-g3r1-dot",
+        "c-g3r1",
+        "c-g3r1-m",
+        "c-main",
+        "c-plan",
+        "c-plan-m",
+        "c-plan-body",
+        "c-tabs",
+        "c-bar",
+        "c-req",
+        "c-ok"
+      ]
+    }
+  ],
+  "comments": []
+}

@@ -102,11 +102,9 @@ components:
     backgroundColor: "{colors.panel-graphite}"
     rounded: "{rounded.lg}"
     padding: "6px"
-  inbox-row:
+  waiting-row:
     textColor: "{colors.console-white}"
-    padding: "12px 15px"
-  inbox-row-open:
-    backgroundColor: "{colors.raised-graphite}"
+    padding: "8px"
   owner-message:
     backgroundColor: "{colors.raised-graphite}"
     textColor: "{colors.console-white}"
@@ -124,7 +122,7 @@ components:
 
 **Creative North Star: "The Category Standard, Played Straight"**
 
-The portal is the dark agent console that Linear, Cursor and Conductor users already know, built without a twist. It is a work surface that an owner reads in seconds when they come back: the inbox first, then the lead's conversation, then its todo progress. Nothing on the screen performs; every pixel is a row, a rule, a label or a message.
+The portal is the dark agent console that Linear, Cursor and Conductor users already know, built without a twist. It is a work surface that an owner reads in seconds when they come back: the agents that need them first, then the lead's conversation, then its todo progress. Nothing on the screen performs; every pixel is a row, a rule, a label or a message.
 
 Density is high and calm. Text is small (13px) and tabular, panels are separated by 1px hairlines instead of cards, and the application always fits the viewport: the document never scrolls, and each column scrolls inside itself. Colour carries state, not decoration. Indigo marks selection, the primary action and done work; yellow means only "waiting on you"; green means only "running".
 
@@ -136,7 +134,7 @@ The system is built on the official Dioxus components (dioxus-primitives). Their
 - Inter at 12–16px for interface text; JetBrains Mono for code, paths and commands.
 - Gentle corners (4–10px), no shadows, no gradients.
 - Fixed-viewport application layout; columns scroll internally.
-- Columns fold into header tabs on smaller screens; the inbox never folds.
+- Columns fold into header tabs on smaller screens; the sidebar never folds.
 
 ## Colors
 
@@ -147,14 +145,14 @@ A graphite console with three signal colours, each reserved for one meaning.
 - **On Indigo** (`on-indigo`): text and icons on an indigo fill, and nowhere else.
 
 ### Secondary
-- **Waiting Yellow** (`waiting-yellow`): only for things waiting on the owner — the inbox count when it is above zero, the inbox item kind, the open inbox row's left edge and a waiting agent's dot.
+- **Waiting Yellow** (`waiting-yellow`): only for things waiting on the owner — the Needs you count when it is above zero, a waiting row's kind, the open waiting row's left edge and a waiting agent's dot.
 
 ### Tertiary
 - **Running Green** (`running-green`): only for running work — a running agent's dot and the host load meters.
 
 ### Neutral
 - **Console Black** (`console-black`): the ground behind every column and the text on a yellow badge.
-- **Panel Graphite** (`panel-graphite`): the inbox sidebar, composer, segmented tab tracks, decision fields and code panels.
+- **Panel Graphite** (`panel-graphite`): the sidebar, composer, segmented tab tracks, decision fields and code panels.
 - **Raised Graphite** (`raised-graphite`): hovered and open rows, owner messages, review notes and inline code.
 - **Selection Graphite** (`selection-graphite`): the active row in the agents sidebar.
 - **Hairline** (`hairline`): every 1px rule and border, the active segmented tab, meter tracks and disabled primary buttons.
@@ -189,16 +187,16 @@ A graphite console with three signal colours, each reserved for one meaning.
 
 The application fills the viewport (`100dvh`) and the document never scrolls. A 44px top bar holds the product name and one 48px load meter per host. Below it, columns sit side by side, each with a 52px header row aligned across the screen and a body that scrolls on its own.
 
-- **Wide (1400px and up):** 280px inbox sidebar, 248px agents sidebar, the conversation (messages at a 640px measure) and a 300px todos column.
+- **Wide (1400px and up):** one 280px sidebar, the conversation (messages at a 640px measure) and a 300px todos column.
 - **Medium (1100–1399px):** the todos fold into a segmented `Chat` / `Todos n/m` control in the conversation header.
-- **Narrow (800–1099px):** the agents fold in too (`Agents n` / `Chat` / `Todos`). The minimum supported width is 800px.
-- **Plan review:** replaces everything right of the inbox. The plan sits at a 680px measure with a 300px notes margin and a decision bar pinned to the bottom. Below 1100px the notes become a `Notes N` tab.
+- **Narrow (800–1099px):** the sidebar stays; the conversation keeps its tabs. The minimum supported width is 800px.
+- **Plan review:** replaces everything right of the sidebar. The plan sits at a 680px measure with a 300px notes margin and a decision bar pinned to the bottom. Below 1100px the notes become a `Notes N` tab.
 - **Questions and key prompts:** replace the conversation in the centre column.
 
 The composer is pinned to the bottom of the conversation. Spacing follows a 4px base with steps of 4, 6, 8, 12, 16 and 24px; rows use 12–16px side padding and column bodies 16–24px.
 
 ### Named Rules
-**The Inbox Never Folds Rule.** The inbox sidebar is visible at every supported width. Every waiting item stays visible and clickable; other columns fold into tabs before the inbox does.
+**The Needs You Never Folds Rule.** The sidebar is visible at every supported width, and agents that need the owner sit at its top. Every waiting item stays visible and clickable; other columns fold into tabs before the sidebar does.
 
 **The Fixed Viewport Rule.** The page itself never scrolls. A region that can grow scrolls inside its own column.
 
@@ -242,13 +240,13 @@ The console uses the official Dioxus components for every control and restyles t
 
 ### Navigation
 - **Segmented tabs:** a 7px-rounded panel track with 2px padding; each tab is 24px high in 12px/500 muted text, and the active tab takes the hairline fill with white text.
-- **Agents sidebar:** repository groups with the name on the left and the count on the right; leads show a status dot, workers are indented and muted with their state on the right.
+- **Sidebar:** the Needs you section first, then repository groups with the name on the left and the count on the right; leads show a status dot, workers are indented and muted with their state on the right.
 
 ### Message timeline
 The conversation is one centred 640px column with a 46px time gutter, a 12px marker track and the message body. The gutter shows the recorded time in the 12px label style with tabular numerals, or "—" when no time is recorded. A hairline runs down the marker track. Each message starts with the author (600) and its source in muted steel. Only owner messages take the raised panel. Adjacent tool records fold into one collapsed row that shows the count and tool names. The activity row sits between the history and the composer and never scrolls with the history. It names the live state only when a producer reports it; otherwise it shows the coarse agent state and says that detail is unavailable.
 
-### Inbox row
-The signature component. Each row shows the kind icon and kind in yellow, the age, the title (500 weight) and `agent · repository` in muted steel, with inline actions. The open row takes the raised tone and a yellow left edge.
+### Waiting row
+The signature component, at the top of the sidebar. One row per agent that needs the owner, newest first: a yellow dot, the agent title (500 weight) and the age; below it the kind icon, kind and item title in yellow, and `+n` when the agent has more items. Key prompts show their keys inline. The agent leaves its repository group while it waits. The open row takes a yellow left edge.
 
 ### Todos column
 The header shows `n of m` done. Sections (In progress, Pending, Completed, Abandoned) are accordions; empty sections are not shown. Completed and abandoned items show their title only, in muted steel.
@@ -258,7 +256,7 @@ The header shows `n of m` done. Sections (In progress, Pending, Completed, Aband
 ### Do:
 - **Do** keep every control an official Dioxus component and change its look in the console CSS layer, scoped under the console shell.
 - **Do** keep yellow for waiting, green for running and indigo for selected, primary and done.
-- **Do** keep the inbox sidebar visible at every width and fold other columns into header tabs first.
+- **Do** keep the sidebar and its Needs you section visible at every width and fold other columns into header tabs first.
 - **Do** render chat and plan Markdown with the Markdown library and highlight code with the highlighter; never hand-roll either.
 - **Do** keep the document from scrolling; let each column scroll itself.
 
