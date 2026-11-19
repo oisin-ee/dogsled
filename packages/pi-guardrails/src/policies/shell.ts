@@ -226,6 +226,11 @@ export const IMPERATIVE_MSG = {
     "nix eval/flake show/path-info/store ls are allowed.",
 };
 
+// The job shows gh's live run view in its tab, and its exit tells the agent the result.
+export const CI_WAIT_ADVICE =
+  "For CI, get the run ID from ci_find, then start `gh run watch <run-id> --exit-status` in the repository " +
+  "with Dogsled `run`.";
+
 export const WAIT_MSG =
   "wait-gate: blocked a command that waits instead of working (sleep, watch, a follow flag, a --watch or --wait " +
   "flag, or a wait subcommand). Never hold a tool call to wait, and never re-read a log to check progress. " +
@@ -233,8 +238,7 @@ export const WAIT_MSG =
   "Use `read` (mcp__dogsled__read) for output and `stop` (mcp__dogsled__stop) to cancel the job. " +
   "Start long work so the host reports its exit: in Claude Code, `run_in_background` " +
   "or Monitor (the exit arrives as a message); in Codex, exec_command, then empty write_stdin calls, which " +
-  "return when the process exits. " +
-  "For CI, use ci_find and ci_watch.";
+  `return when the process exits. ${CI_WAIT_ADVICE}`;
 
 const GH_VALUE_OPTIONS: ReadonlySet<string> = new Set(["-R", "--repo", "--hostname"]),
   FOLLOW_FLAGS: ReadonlySet<string> = new Set(["-f", "-F", "--follow", "--retry"]),

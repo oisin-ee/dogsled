@@ -1,3 +1,5 @@
+import { CI_WAIT_ADVICE } from "../policies/shell.ts";
+
 // Shell-like tools have no default timeout, so an omitted or oversized value can hold a session for hours.
 // Each entry names the argument and its unit, because the tools disagree: pi's bash takes seconds, the
 // Others take milliseconds.
@@ -46,6 +48,15 @@ export function codeWaitViolation(
     : null;
 }
 
+// Tools whose whole job is to hold the call while they poll. Pi settings cannot hide one tool of a package.
+const WAITING_TOOLS: ReadonlySet<string> = new Set(["ci_watch"]);
+
+export function toolWaitViolation(toolName: string): string | null {
+  return WAITING_TOOLS.has(toolName)
+    ? `wait-gate: blocked ${toolName}, which holds the tool call while it polls. ${CI_WAIT_ADVICE}`
+    : null;
+}
+
 export const MAX_TIMEOUT_SECONDS = 600;
 export const DEFAULT_TIMEOUT_SECONDS = 120;
 
@@ -63,8 +74,7 @@ function limitMessage(
     `timeout-gate: blocked ${toolName} ${field}=${value}. The ${field} unit is ${unit === "s" ? "seconds" : "milliseconds"} ` +
     `and the limit is ${max} (${MAX_TIMEOUT_SECONDS / 60} minutes).${unitHint} ` +
     "For a longer job, start it with Dogsled `run` (mcp__dogsled__run) and continue other work. " +
-    "Use `read` (mcp__dogsled__read) for output and `stop` (mcp__dogsled__stop) to cancel the job. " +
-    "For CI, use the ci_find and ci_watch tools."
+    `Use \`read\` (mcp__dogsled__read) for output and \`stop\` (mcp__dogsled__stop) to cancel the job. ${CI_WAIT_ADVICE}`
   );
 }
 

@@ -276,7 +276,7 @@ test("pi allows the Dogsled job tools", async () => {
   }
 });
 
-test("pi blocks blocking CI watches and points to ci_watch", async () => {
+test("pi blocks blocking CI watches and points to a gh run watch job", async () => {
   const pi = fakePi();
   install(pi);
   const result = await pi.trigger(
@@ -288,7 +288,17 @@ test("pi blocks blocking CI watches and points to ci_watch", async () => {
     { cwd: "/repo" },
   );
   assert.equal(result?.block, true);
-  assert.match(result?.reason ?? "", /^wait-gate:.*ci_watch/u);
+  assert.match(result?.reason ?? "", /^wait-gate:.*`gh run watch <run-id> --exit-status`/u);
+  const watch = await pi.trigger(
+    "tool_call",
+    { input: { run_id: 1, workflow: "ci" }, toolName: "ci_watch" },
+    { cwd: "/repo" },
+  );
+  assert.equal(watch?.block, true);
+  assert.match(
+    watch?.reason ?? "",
+    /^wait-gate: blocked ci_watch.*`gh run watch <run-id> --exit-status`/u,
+  );
 });
 
 test("pi blocks sleeps and timer waits written in sandbox code", async () => {
