@@ -20,6 +20,8 @@ env:
 
 jobs:
   checks:
+    # Stop at the first failed gate before allocating the Rust runners.
+    needs: typescript
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -55,7 +57,7 @@ jobs:
     needs: checks
     name: rust (${{ matrix.os }}${{ matrix.shard && format(' {0}/2', matrix.shard) || '' }})
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         # The 3-core macOS runner cannot run the whole suite inside the timeout,
         # so two macOS jobs each run half of it (scripts/test-shard.sh). Lint
