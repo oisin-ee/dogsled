@@ -149,17 +149,11 @@
   justify-items: start;
   gap: 12px;
 }
-.console-provider .console-shell .console-agents .console-column-header {
-  gap: 6px;
-}
-.console-provider .console-shell .console-agents .console-column-header h2 {
-  flex: 1;
-}
 .console-provider .console-shell .console-metrics {
   min-height: 28px;
   height: 28px;
-  padding: 0 6px;
-  font-size: 12px;
+  padding: 0 10px;
+  font-size: 13px;
 }
 .console-provider .console-shell .console-metrics[aria-pressed="true"] {
   background: var(--console-accent);

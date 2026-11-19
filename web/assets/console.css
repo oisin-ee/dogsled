@@ -130,6 +130,14 @@ textarea {
   color: var(--console-muted);
   font-size: 12px;
 }
+.console-provider .console-shell .console-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  align-items: center;
+  padding-left: 16px;
+  border-left: 1px solid var(--console-line);
+}
 .console-provider .console-shell .console-host {
   display: flex;
   gap: 6px;
