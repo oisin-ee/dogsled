@@ -1254,7 +1254,9 @@ textarea {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.model-options [role="option"] { padding: 6px 8px; cursor: pointer; overflow-wrap: anywhere; }
+.model-options { overflow-anchor: none; }
+.model-options [role="option"] { box-sizing: border-box; padding: 4px 8px; line-height: 18px; cursor: pointer; }
+.model-options [role="option"] > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .model-options [data-selected="true"] .repo-slug::before { content: "✓ "; color: var(--console-accent); }
 .model-options [data-highlighted="true"] { background: var(--console-line); }
 .model-scope { margin-inline-start: 8px; color: var(--console-muted); }
