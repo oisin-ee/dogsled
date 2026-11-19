@@ -8,7 +8,7 @@ import {
   canonicalToolName,
   commandsFromToolInput,
 } from "./tool-inputs.ts";
-import { codeWaitViolation, enforceTimeout } from "./tool-timeouts.ts";
+import { codeWaitViolation, enforceTimeout, toolWaitViolation } from "./tool-timeouts.ts";
 import { classifyEdits, editInputsFromPayload } from "../policies/edit.ts";
 import { SHELL_CLASSIFIERS } from "../policies/shell.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -81,6 +81,7 @@ const MAX_NESTING = 8,
       own =
         enforceTimeout(call.toolName, call.input) ??
         codeWaitViolation(call.toolName, call.input) ??
+        toolWaitViolation(call.toolName) ??
         (SHELL_TOOL_NAMES.has(call.toolName) ? shellViolation(call, cwd) : null) ??
         (EDIT_TOOL_NAMES.has(call.toolName) ? editViolation(call, cwd) : null);
     if (own !== null) {
