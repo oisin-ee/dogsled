@@ -11,7 +11,7 @@ const ROW_HEIGHT: usize = 44;
 const OVERSCAN: usize = 3;
 
 #[component]
-fn ModelOptions(
+pub(crate) fn ModelOptions(
     choices: ReadSignal<Vec<ModelChoice>>,
     selected_model: Option<ModelRef>,
     busy: bool,
@@ -156,39 +156,36 @@ pub(crate) fn ModelPicker(
         .and_then(|choice| choice.name.as_deref())
         .or_else(|| selected_model.as_ref().map(|model| model.id.as_str()))
         .unwrap_or("Pi default");
-    let effort = selected_level.map_or("Pi default", ThinkingLevel::as_str);
+    let levels = current
+        .map(|choice| choice.thinking.clone())
+        .unwrap_or_default();
+    // Model, then effort: each is its own control, in that keyboard order.
     rsx! {
         PopoverRoot { class: "model-picker", open: Some(open()), on_open_change: move |value| open.set(value),
             PopoverTrigger { class: "model-trigger", disabled: busy || choices.is_empty(),
-                title: "Model: {name} · Effort: {effort}", aria_label: "Model: {name}, effort: {effort}", aria_haspopup: "dialog", aria_expanded: open(),
+                title: "Model: {name}", aria_label: "Model: {name}", aria_haspopup: "dialog", aria_expanded: open(),
                 span { "{name}" }
-                span { class: "effort-ring", "data-level": effort, aria_hidden: "true" }
             }
-            PopoverContent { class: "model-menu", side: ContentSide::Top, align: ContentAlign::End,
-                ModelMenu { choices, selected_model, selected_level, busy, on_change: move |change| { on_change.call(change); open.set(false); } }
+            PopoverContent { class: "model-menu", side: ContentSide::Top, align: ContentAlign::Start,
+                ModelOptions { choices, selected_model, busy, on_change: move |change| { on_change.call(change); open.set(false); } }
             }
         }
+        EffortSelect { levels, selected_level, busy, on_change }
     }
 }
 
+/// The selected model's thinking levels, as a native select beside the model.
 #[component]
-pub(crate) fn ModelMenu(
-    choices: ReadSignal<Vec<ModelChoice>>,
-    selected_model: Option<ModelRef>,
+pub(crate) fn EffortSelect(
+    levels: Vec<ThinkingLevel>,
     selected_level: Option<ThinkingLevel>,
     busy: bool,
     on_change: EventHandler<SettingsChange>,
 ) -> Element {
-    let catalogue = choices.read();
-    let levels = catalogue
-        .iter()
-        .find(|choice| Some(&choice.model) == selected_model.as_ref())
-        .map(|choice| choice.thinking.as_slice())
-        .unwrap_or_default();
     let effort = selected_level.map_or("Pi default", ThinkingLevel::as_str);
     rsx! {
-        ModelOptions { choices, selected_model, busy, on_change }
-        label { class: "model-effort", "Effort"
+        label { class: "model-effort", title: "Effort: {effort}",
+            span { class: "effort-ring", "data-level": effort, aria_hidden: "true" }
             select { aria_label: "Effort", disabled: busy || levels.is_empty(), value: effort,
                 onchange: { let levels = levels.to_vec(); move |event| {
                     if let Some(thinking) = levels.iter().copied().find(|level| level.as_str() == event.value()) {

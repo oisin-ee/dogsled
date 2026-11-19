@@ -225,6 +225,19 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
     navigation
         .repos
         .retain(|repo| !repo.rows.is_empty() || repo.to_land > 0);
+    // Groups keep their places as agents change state, so sort them by the name the sidebar
+    // shows. Agents without a repository come last.
+    navigation.repos.sort_by_cached_key(|repo| {
+        repo.repository
+            .as_deref()
+            .map_or((true, String::new(), String::new()), |repository| {
+                (
+                    false,
+                    repository_name(repository).to_lowercase(),
+                    repository.to_owned(),
+                )
+            })
+    });
     navigation
 }
 
@@ -597,6 +610,39 @@ mod shell_tests {
         assert!(rows[1].workers[0].worker);
         assert_eq!(rows[2].pane.as_deref(), Some("orphan"));
         assert!(rows[2].worker);
+        Ok(())
+    }
+
+    #[test]
+    fn repository_groups_keep_name_order_whatever_order_agents_arrive_in()
+    -> Result<(), serde_json::Error> {
+        let mut agents: Vec<AgentView> = serde_json::from_value(json!([
+            { "host": "local", "pane": "r", "state": "working", "repository": "github.com/owner/rondo" },
+            { "host": "local", "pane": "n", "state": "idle" },
+            { "host": "local", "pane": "d", "state": "idle", "repository": "github.com/owner/Dogsled" },
+            { "host": "local", "pane": "z", "state": "working", "repository": "github.com/other/zoomies" }
+        ]))?;
+        let empty = BoardView {
+            hosts: vec![],
+            generated_ms: 0,
+            repos: vec![],
+        };
+        let order = |agents: &[AgentView]| {
+            navigation_groups(&empty, agents)
+                .repos
+                .into_iter()
+                .map(|repo| repo.repository)
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![
+            Some("github.com/owner/Dogsled".to_owned()),
+            Some("github.com/owner/rondo".to_owned()),
+            Some("github.com/other/zoomies".to_owned()),
+            None,
+        ];
+        assert_eq!(order(&agents), expected);
+        agents.reverse();
+        assert_eq!(order(&agents), expected);
         Ok(())
     }
 

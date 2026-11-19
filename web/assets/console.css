@@ -590,6 +590,16 @@ textarea {
   color: var(--console-muted);
   font-size: 12px;
 }
+.console-provider .console-shell .conversation-pending .conversation-body {
+  border-style: dashed;
+}
+.console-provider .console-shell .conversation-delivery {
+  color: var(--console-accent);
+}
+.console-provider .console-shell .conversation-pending-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
 .console-provider .console-shell .conversation-earlier-history {
   align-self: center;
   margin-bottom: 20px;
@@ -1147,32 +1157,35 @@ textarea {
   font-size: 13px;
 }
 .console-provider .console-shell .new-lead {
-  display: grid;
+  display: flex;
   height: 100%;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  overflow-y: auto;
+  padding: 24px;
 }
-.console-provider .console-shell .new-lead-header {
-  flex-wrap: wrap;
-  padding-block: 10px;
-}
-.console-provider .console-shell .new-lead-header h1 {
-  flex: 1 0 auto;
+.console-provider .console-shell .new-lead-center {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 720px;
+  margin: auto;
   font-size: 14px;
+}
+.console-provider .console-shell .new-lead-title {
+  margin: 0 0 4px;
+  font-size: 20px;
   font-weight: 600;
-  white-space: nowrap;
 }
 .console-provider .console-shell .new-lead-body {
   display: flex;
   min-width: 0;
-  min-height: 0;
   flex-direction: column;
   gap: 8px;
-  overflow-y: auto;
   overflow-wrap: anywhere;
 }
-.console-provider .console-shell .new-lead-body:not(:empty) {
-  padding: 16px;
+.console-provider .console-shell .new-lead-composer .console-composer {
+  margin: 0;
 }
 .console-provider .console-shell .new-lead-body > * {
   flex-shrink: 0;
@@ -1182,9 +1195,12 @@ textarea {
 }
 .console-provider .console-shell .composer-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+}
+.console-provider .console-shell .composer-toolbar .attach-button {
+  margin-inline-start: auto;
 }
 .console-provider .console-shell .message-composer {
   padding: 0;
@@ -1199,7 +1215,7 @@ textarea {
   background: var(--console-panel);
 }
 .console-provider .console-shell .composer-field:focus-within { border-color: var(--console-accent); }
-.console-provider .console-shell .model-picker { position: relative; min-width: 0; margin-inline-start: auto; }
+.console-provider .console-shell .model-picker { position: relative; min-width: 0; }
 .console-provider .console-shell .model-trigger {
   display: flex;
   align-items: center;
@@ -1236,8 +1252,8 @@ textarea {
   position: absolute;
   z-index: 20;
   bottom: calc(100% + 6px);
-  right: 0;
-  left: auto;
+  right: auto;
+  left: 0;
   transform: none;
   display: flex;
   flex-direction: column;
@@ -1266,8 +1282,8 @@ textarea {
 .model-options [data-selected="true"] .repo-slug::before { content: "✓ "; color: var(--console-accent); }
 .model-options [data-highlighted="true"] { background: var(--console-line); }
 .model-scope { margin-inline-start: 8px; color: var(--console-muted); }
-.model-effort { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--console-line); padding: 8px 4px 0; }
-.model-effort select { color: var(--console-text); background: var(--console-panel); border: 1px solid var(--console-line); border-radius: 4px; }
+.model-effort { display: flex; align-items: center; gap: 6px; padding-inline: 4px; color: var(--console-muted); }
+.model-effort select { color: var(--console-text); background: var(--console-panel); border: 1px solid var(--console-line); border-radius: 4px; font: inherit; }
 .console-provider .console-shell .model-readonly {
   min-width: 0;
   max-width: 240px;
@@ -1285,7 +1301,7 @@ textarea {
 }
 .console-provider .console-shell .new-lead-repo {
   position: relative;
-  width: min(360px, 55%);
+  width: min(260px, 100%);
   min-width: 0;
 }
 .console-provider .console-shell .repo-search {
@@ -1312,7 +1328,7 @@ textarea {
   position: absolute;
   z-index: 10;
   top: calc(100% + 4px);
-  right: 0;
+  left: 0;
   width: min(440px, 100vw - 32px);
   max-height: min(400px, 60dvh);
   overflow-y: auto;
@@ -1349,14 +1365,7 @@ textarea {
 }
 @media (max-width: 600px) {
   .console-provider .console-shell .new-lead {
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
-  }
-  .console-provider .console-shell .new-lead-header {
-    flex-wrap: wrap;
-    padding: 10px 16px;
-  }
-  .console-provider .console-shell .new-lead-header h1 {
-    flex-basis: 100%;
+    padding: 16px 12px;
   }
   .console-provider .console-shell .new-lead-repo {
     width: 100%;

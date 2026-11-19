@@ -108,9 +108,13 @@ fn changing_model_picker_root(handle: ModelChangeHandle) -> Element {
         })
         .collect();
     let selected_model = Some(choices[0].model.clone());
-    rsx! { crate::model_picker::ModelMenu { choices, selected_model, selected_level: Some(ThinkingLevel::High), busy: false,
-        on_change: move |change| requested.set(Some(change)),
-    } }
+    let levels = choices[0].thinking.clone();
+    rsx! {
+        crate::model_picker::ModelOptions { choices, selected_model, busy: false,
+            on_change: move |change| requested.set(Some(change)) }
+        crate::model_picker::EffortSelect { levels, selected_level: Some(ThinkingLevel::High), busy: false,
+            on_change: move |change| requested.set(Some(change)) }
+    }
 }
 
 #[test]
@@ -198,8 +202,8 @@ fn catalogue_root(props: (PortalHandle, DraftHandle)) -> Element {
         open: Signal::new(true),
         repository: Signal::new(Some("github.com/owner/beta".into())),
     });
-    let draft = use_context_provider(|| crate::agent_view::Draft(Signal::new(String::new()))).0;
-    props.1.set(Some(draft));
+    let composers = use_context_provider(crate::agent_view::Composers::default);
+    props.1.set(Some(composers.state("new").draft));
     rsx! { crate::new_lead::NewLeadForm {} }
 }
 
@@ -218,7 +222,8 @@ fn new_model_catalogue_root(
         open: Signal::new(true),
         repository: Signal::new(None),
     });
-    use_context_provider(|| crate::agent_view::Draft(Signal::new("First message".into())));
+    let composers = use_context_provider(crate::agent_view::Composers::default);
+    use_hook(|| composers.state("new").draft.set("First message".into()));
     rsx! { crate::new_lead::NewLeadForm { model_catalogue: Some(model_catalogue) } }
 }
 
@@ -243,15 +248,16 @@ fn new_conversation_renders_catalogue_choices_and_pi_defaults() {
     dom.rebuild_in_place();
     settle_catalogue(&mut dom);
     let html = dioxus_ssr::render(&dom);
-    let (header, body) = html.split_once("</header>").unwrap();
-    assert!(header.contains("New conversation"), "{html}");
-    assert!(!header.contains("model-picker"), "{html}");
-    assert!(header.contains(r#"name="repository""#), "{html}");
-    let composer = body.split_once("new-lead-composer").unwrap().1;
-    assert!(composer.contains(r#"aria-haspopup="dialog""#), "{html}");
-    assert!(composer.contains(">Pi default</span>"), "{html}");
-    assert!(!composer.contains(r#"role="combobox""#), "{html}");
-    assert!(composer.find("composer-toolbar").unwrap() < composer.find("model-picker").unwrap());
+    assert!(html.contains("New conversation"), "{html}");
+    let composer = html.split_once("new-lead-composer").unwrap().1;
+    let toolbar = composer.split_once("composer-toolbar").unwrap().1;
+    assert!(toolbar.contains(r#"name="repository""#), "{html}");
+    assert!(toolbar.contains(r#"aria-haspopup="dialog""#), "{html}");
+    assert!(toolbar.contains(">Pi default</span>"), "{html}");
+    assert!(
+        toolbar.find(r#"name="repository""#) < toolbar.find("model-picker"),
+        "{html}"
+    );
 }
 
 #[test]
@@ -321,6 +327,7 @@ fn catalogue_component_scopes(
                         || component.name.ends_with("::RepositoryPicker")
                         || component.name.ends_with("::ComboboxInput")
                         || component.name.ends_with("::Input")
+                        || component.name.ends_with("::Textarea")
                         || component.name.contains("::ComboboxOption")
                         || component.name.contains("::Select")
                     {
@@ -377,7 +384,11 @@ fn catalogue_input_event_for<T: 'static>(
 ) {
     let mut inputs = catalogue_scopes(dom)
         .into_iter()
-        .filter(|(name, _)| name.contains("::ComboboxInput") || name.contains("::Input:"))
+        .filter(|(name, _)| {
+            name.contains("::ComboboxInput")
+                || name.contains("::Input:")
+                || name.contains("::Textarea:")
+        })
         .map(|(_, scope)| scope);
     let scope = inputs.find(|scope| {
         dom.get_scope(*scope).unwrap().root_node().dynamic_attrs.iter().flatten().any(|attr| {
@@ -675,17 +686,14 @@ fn catalogue_notices_render_in_the_body_instead_of_crowding_the_header() {
     settle_catalogue(&mut dom);
     let assert_notices = |dom: &VirtualDom, notices: &[&str]| {
         let html = dioxus_ssr::render(dom);
-        let (header, body) = html
-            .split_once("</header>")
-            .expect("New conversation header");
-        assert!(header.contains("New conversation"), "{html}");
-        assert!(header.contains(r#"role="combobox""#), "{html}");
-        assert!(!header.contains(r#"role="alert""#), "{html}");
-        assert!(!header.contains(r#"role="status""#), "{html}");
+        let (title, rest) = html.split_once("</h1>").expect("New conversation title");
+        assert!(title.contains("New conversation"), "{html}");
+        let (body, composer) = rest.split_once("new-lead-composer").expect("composer");
         assert!(body.starts_with(r#"<div class="new-lead-body">"#), "{html}");
+        assert!(composer.contains(r#"role="combobox""#), "{html}");
         for notice in notices {
             assert!(body.contains(notice), "{notice}: {html}");
-            assert!(!header.contains(notice), "{notice}: {html}");
+            assert!(!composer.contains(notice), "{notice}: {html}");
         }
     };
     assert_notices(&dom, &["Loading projects"]);
@@ -1396,6 +1404,62 @@ fn attached_composer_root() -> Element {
         crate::agent_view::Composer { draft, images, uploading, disabled: true, busy: false,
             on_error: |_| {}, on_send: |_| {} }
     }
+}
+
+type ComposerHandle = std::rc::Rc<std::cell::Cell<Option<(Signal<&'static str>, Signal<u32>)>>>;
+
+#[component]
+fn AgentComposer(name: &'static str, sent: Signal<u32>) -> Element {
+    let crate::agent_view::ComposerState { draft, images, .. } =
+        crate::agent_view::use_composer(name);
+    let uploading = use_signal(|| false);
+    let history = vec!["First message".to_owned(), "Latest message".to_owned()];
+    rsx! {
+        crate::agent_view::Composer { draft, images, uploading, disabled: false, busy: false, history,
+            on_error: |_| {}, on_send: move |()| sent += 1 }
+    }
+}
+
+fn switching_composer_root(handle: ComposerHandle) -> Element {
+    use_context_provider(crate::agent_view::Composers::default);
+    let selected = use_signal(|| "alpha");
+    let sent = use_signal(|| 0_u32);
+    handle.set(Some((selected, sent)));
+    crate::keyed(rsx! { AgentComposer { key: "{selected}", name: selected(), sent } })
+}
+
+#[test]
+fn each_agent_keeps_its_draft_and_up_recalls_the_latest_message() {
+    let handle = ComposerHandle::default();
+    let mut dom = VirtualDom::new_with_props(switching_composer_root, handle.clone());
+    dom.rebuild_in_place();
+    let (mut selected, sent) = handle.get().unwrap();
+    let message = |dom: &VirtualDom| {
+        let html = dioxus_ssr::render(dom);
+        let textarea = html.split_once("<textarea").unwrap().1;
+        let value = textarea.split_once(r#"value=""#).unwrap().1;
+        value.split_once('"').unwrap().0.to_owned()
+    };
+    catalogue_query(&mut dom, "message", "Half-written for alpha");
+    dom.in_runtime(|| selected.set("beta"));
+    settle_catalogue(&mut dom);
+    assert_eq!(message(&dom), "");
+    catalogue_key(&mut dom, "message", Key::ArrowUp);
+    assert_eq!(message(&dom), "Latest message");
+    catalogue_key(&mut dom, "message", Key::ArrowUp);
+    assert_eq!(message(&dom), "First message");
+    catalogue_key(&mut dom, "message", Key::ArrowDown);
+    catalogue_key(&mut dom, "message", Key::ArrowDown);
+    assert_eq!(message(&dom), "");
+    catalogue_key(&mut dom, "message", Key::ArrowUp);
+    catalogue_key(&mut dom, "message", Key::Enter);
+    assert_eq!(*sent.peek(), 1);
+    dom.in_runtime(|| selected.set("alpha"));
+    settle_catalogue(&mut dom);
+    assert_eq!(message(&dom), "Half-written for alpha");
+    // Up moves the caret inside a message the owner is writing.
+    catalogue_key(&mut dom, "message", Key::ArrowUp);
+    assert_eq!(message(&dom), "Half-written for alpha");
 }
 
 fn unreadable_inbox_root() -> Element {
@@ -2313,13 +2377,16 @@ fn follow_root(props: (FollowProbe, FollowHandle)) -> Element {
     let live = use_signal(|| crate::activity::Live::Pending);
     props.1.set(Some((live, following)));
     crate::agent_view::use_follow_scroll(
-        page,
-        following,
-        error,
+        crate::agent_view::Follow {
+            page,
+            following,
+            error,
+        },
         Some(std::rc::Rc::new(worked_history(true))),
         false,
         true,
         live.into(),
+        0,
     );
     rsx! { p { "Following" } }
 }

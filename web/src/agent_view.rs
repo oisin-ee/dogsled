@@ -1,5 +1,6 @@
 //! The selected agent's screen: its pending request, or its conversation.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -36,9 +37,256 @@ use crate::notice::{Alert, Status};
 use crate::question_form::QuestionForm;
 use crate::review_view::ReviewView;
 
-/// A message draft shared with the review view when its provider is present.
+/// The selected agent's draft, shared with its review view to quote a passage.
 #[derive(Clone, Copy)]
 pub struct Draft(pub Signal<String>);
+
+/// What one composer keeps while the page is open: the unsent draft and its images, and the
+/// sent messages that the agent's transcript does not show yet. It outlives the agent's view,
+/// so a switch to another agent neither carries this draft along nor drops a queued message.
+#[derive(Clone, Copy)]
+pub struct ComposerState {
+    pub draft: Signal<String>,
+    pub images: Signal<Vec<String>>,
+    outbox: Signal<Vec<Outgoing>>,
+    /// Messages waiting for the one before them, so the agent receives them in order.
+    queue: Signal<std::collections::VecDeque<Delivering>>,
+    delivering: Signal<bool>,
+    /// Why the last message was not sent.
+    error: Signal<Option<String>>,
+    next: Signal<u64>,
+    /// The scope that keeps this state, and runs its deliveries.
+    owner: ScopeId,
+}
+
+impl ComposerState {
+    fn new_in_scope(owner: ScopeId) -> Self {
+        Self {
+            draft: Signal::new_in_scope(String::new(), owner),
+            images: Signal::new_in_scope(Vec::new(), owner),
+            outbox: Signal::new_in_scope(Vec::new(), owner),
+            queue: Signal::new_in_scope(std::collections::VecDeque::new(), owner),
+            delivering: Signal::new_in_scope(false, owner),
+            error: Signal::new_in_scope(None, owner),
+            next: Signal::new_in_scope(0, owner),
+            owner,
+        }
+    }
+
+    /// Send one message after the ones before it. The send outlives the agent's view.
+    fn deliver(self, pane: wire::AgentAddress, message: Delivering) {
+        let Self {
+            mut draft,
+            mut images,
+            mut outbox,
+            mut queue,
+            mut delivering,
+            mut error,
+            owner,
+            ..
+        } = self;
+        queue.write().push_back(message);
+        if *delivering.peek() {
+            return;
+        }
+        delivering.set(true);
+        dioxus::core::Runtime::current().spawn(owner, async move {
+            loop {
+                let next = queue.write().pop_front();
+                let Some(sent) = next else { break };
+                match api::send_prompt(&pane, &sent.message, sent.reply).await {
+                    Ok(()) => {
+                        if let Some(item) =
+                            outbox.write().iter_mut().find(|item| item.id == sent.id)
+                        {
+                            item.delivery = if sent.queued {
+                                Delivery::Queued
+                            } else {
+                                Delivery::Sent
+                            };
+                        }
+                    }
+                    Err(failure) => {
+                        outbox.write().retain(|item| item.id != sent.id);
+                        // The text comes back unless the owner has started a new message.
+                        if draft.peek().is_empty() && images.peek().is_empty() {
+                            draft.set(sent.text);
+                            images.set(sent.images);
+                        }
+                        error.set(Some(failure));
+                    }
+                }
+            }
+            delivering.set(false);
+        });
+    }
+}
+
+/// Every composer's state, one per agent and one for the New conversation page.
+#[derive(Clone)]
+pub struct Composers {
+    states: Rc<std::cell::RefCell<BTreeMap<String, ComposerState>>>,
+    owner: ScopeId,
+}
+
+/// The composers live as long as the scope that creates them.
+impl Default for Composers {
+    fn default() -> Self {
+        Self {
+            states: Rc::default(),
+            owner: dioxus::core::current_scope_id(),
+        }
+    }
+}
+
+impl Composers {
+    /// The state of one composer, created empty on first use.
+    pub fn state(&self, key: &str) -> ComposerState {
+        *self
+            .states
+            .borrow_mut()
+            .entry(key.to_owned())
+            .or_insert_with(|| ComposerState::new_in_scope(self.owner))
+    }
+}
+
+/// The state of one composer, kept by the page's `Composers` when it provides them.
+pub fn use_composer(key: &str) -> ComposerState {
+    let composers = try_use_context::<Composers>();
+    use_hook(|| {
+        composers.map_or_else(
+            || ComposerState::new_in_scope(dioxus::core::current_scope_id()),
+            |composers| composers.state(key),
+        )
+    })
+}
+
+/// Where a sent message is until the transcript records it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// The request is on its way to the agent.
+    Sending,
+    /// The agent was working, so it reads the message when its current step ends.
+    Queued,
+    /// The agent has the message and has not recorded it yet.
+    Sent,
+}
+
+impl Delivery {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sending => "Sending…",
+            Self::Queued => "Queued",
+            Self::Sent => "Sent",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Sending => "Sending the message to the agent.",
+            Self::Queued => {
+                "The agent is working. It reads this message when its current step ends."
+            }
+            Self::Sent => "The agent has this message. It shows here until the agent records it.",
+        }
+    }
+}
+
+/// A message the owner sent that the transcript does not show yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Outgoing {
+    id: u64,
+    text: String,
+    delivery: Delivery,
+    /// The newest transcript record when this message was sent. The history window
+    /// slides, so a record id stays put where a count from the front would not.
+    after: Option<String>,
+}
+
+/// The history entry that Up (`earlier`) or Down shows next, with its text. Down past the
+/// newest entry returns to an empty message; Up at the oldest entry does nothing.
+pub(crate) fn recall(
+    history: &[String],
+    current: Option<usize>,
+    earlier: bool,
+) -> Option<(Option<usize>, String)> {
+    let shown = |index: usize| Some((Some(index), history.get(index)?.clone()));
+    match (current, earlier) {
+        (None, true) => shown(history.len().checked_sub(1)?),
+        (Some(index), true) => shown(index.checked_sub(1)?),
+        (Some(index), false) => shown(index + 1).or(Some((None, String::new()))),
+        (None, false) => None,
+    }
+}
+
+/// One message for the delivery queue. A prompt reply has no outbox entry.
+struct Delivering {
+    id: u64,
+    reply: bool,
+    message: String,
+    text: String,
+    images: Vec<String>,
+    queued: bool,
+}
+
+/// Whether the owner typed this record. Dogsled and extension input are not the owner's.
+fn owner_message(turn: &Turn) -> bool {
+    turn.role == Role::User && matches!(turn.source, wire::Source::Harness { .. })
+}
+
+/// Messages the owner typed, oldest first.
+fn owner_messages(turns: &[Turn]) -> impl Iterator<Item = &str> {
+    turns
+        .iter()
+        .filter(|turn| owner_message(turn))
+        .map(|turn| turn.text.trim())
+}
+
+/// The sent messages that no later owner message in the transcript accounts for.
+/// A recorded message may carry more than was sent, such as its attached images.
+pub(crate) fn undelivered(outbox: &[Outgoing], turns: &[Turn]) -> Vec<Outgoing> {
+    let mut used = vec![false; turns.len()];
+    outbox
+        .iter()
+        .filter(|item| {
+            let sent = item.text.trim();
+            // A record that has left the window is older than everything still in it.
+            let start = item.after.as_ref().map_or(0, |id| {
+                turns
+                    .iter()
+                    .position(|turn| &turn.id == id)
+                    .map_or(0, |index| index + 1)
+            });
+            let found = turns.iter().enumerate().skip(start).find(|(index, turn)| {
+                used.get(*index) == Some(&false) && owner_message(turn) && turn.text.contains(sent)
+            });
+            match found.and_then(|(index, _)| used.get_mut(index)) {
+                Some(slot) => {
+                    *slot = true;
+                    false
+                }
+                None => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// A sent message, shown as the owner's record with where it is.
+#[component]
+pub(crate) fn PendingMessage(text: String, label: String, detail: String) -> Element {
+    rsx! {
+        article { class: "conversation-event conversation-owner conversation-pending", aria_label: "You",
+            span { class: "conversation-time", aria_hidden: "true" }
+            div { class: "conversation-axis", aria_hidden: "true", i {} }
+            div { class: "conversation-body",
+                div { class: "conversation-meta", strong { "You" }
+                    span { class: "conversation-delivery", role: "status", title: "{detail}", "{label}" } }
+                p { class: "conversation-pending-text", "{text}" }
+            }
+        }
+    }
+}
 
 /// The compact prompt controls are a subset of the server's allowed keys.
 const PANEL_KEYS: &[(&str, &str)] = &[
@@ -291,14 +539,21 @@ fn AgentSession(
     // A choice belongs to the request that was visible when it was made.
     // A new request opens in front; the same request preserves the tab.
     let mut choice = use_signal(|| None::<(String, Tab)>);
-    let mut images = use_signal(Vec::<String>::new);
     let uploading = use_signal(|| false);
     use_effect(move || {
         let _ = selection();
         choice.set(None);
     });
-    let local_draft = use_signal(String::new);
-    let mut draft = try_use_context::<Draft>().map_or(local_draft, |draft| draft.0);
+    let composer = use_composer(&format!("{host}:{pane}"));
+    let ComposerState {
+        mut draft,
+        mut images,
+        mut outbox,
+        error: mut delivery_error,
+        next: mut next_message,
+        ..
+    } = composer;
+    use_context_provider(|| Draft(draft));
 
     // Transcript I/O must start and render without waiting for the full agent list.
     let transcript = use_conversation(address.clone(), conversation_trigger, detail_session);
@@ -478,30 +733,60 @@ fn AgentSession(
 
     let send_pane = address.clone();
     let send = move |prompt_reply: bool| {
-        let pane = send_pane.clone();
         let text = draft();
         let sent_images = if prompt_reply { Vec::new() } else { images() };
         let message = message_with_images(&text, &sent_images);
-        if busy() || uploading() || !reachable() || message.trim().is_empty() {
+        if uploading() || !reachable() || message.trim().is_empty() {
             return;
         }
-        busy.set(true);
+        // The box clears at once and the message shows where it is until the transcript has it.
+        draft.set(String::new());
+        if !prompt_reply {
+            images.set(Vec::new());
+        }
         action_error.set(None);
-        spawn(async move {
-            let result = api::send_prompt(&pane, &message, prompt_reply).await;
-            match result {
-                Ok(()) => {
-                    if draft() == text {
-                        draft.set(String::new());
-                    }
-                    if !prompt_reply && images() == sent_images {
-                        images.set(Vec::new());
-                    }
-                }
-                Err(message) => action_error.set(Some(message)),
-            }
-            busy.set(false);
-        });
+        delivery_error.set(None);
+        let id = next_message();
+        next_message += 1;
+        let snapshot = match detail_session.peek().as_ref() {
+            Some(wire::DetailSession::Available(session)) => conversations
+                .peek()
+                .host(&send_pane.host)
+                .and_then(|cache| cache.get_session(&send_pane.pane, session)),
+            _ => None,
+        };
+        let turns = snapshot
+            .as_ref()
+            .map_or(&[][..], |snapshot| snapshot.turns.as_slice());
+        let mut pending = undelivered(&outbox.peek(), turns);
+        let working = !pending.is_empty()
+            || match &*live.peek() {
+                Live::Detail(state) => state.phase != wire::LivePhase::Idle,
+                _ => agent
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|agent| agent.state != "idle"),
+            };
+        if !prompt_reply {
+            pending.push(Outgoing {
+                id,
+                text: message.clone(),
+                delivery: Delivery::Sending,
+                after: turns.last().map(|turn| turn.id.clone()),
+            });
+            outbox.set(pending);
+        }
+        composer.deliver(
+            send_pane.clone(),
+            Delivering {
+                id,
+                reply: prompt_reply,
+                message,
+                text,
+                images: sent_images,
+                queued: working,
+            },
+        );
     };
 
     let mut reply_send = send.clone();
@@ -663,19 +948,31 @@ fn AgentSession(
         .as_ref()
         .map_or("Loading…", |agent| agent.state.as_str())
         .to_owned();
+    let turns = retained
+        .as_ref()
+        .map_or(&[][..], |snapshot| snapshot.turns.as_slice());
+    let unsent = undelivered(&outbox.read(), turns);
+    // Up in an empty composer recalls the owner's messages, newest first.
+    let history: Vec<String> = owner_messages(turns)
+        .map(str::to_owned)
+        .chain(unsent.iter().map(|item| item.text.clone()))
+        .collect();
     let mut page = use_signal(|| None::<Rc<MountedData>>);
     let mut following = use_signal(|| true);
     let follow_error = use_signal(|| None::<String>);
     // Follow the newest turn until the owner scrolls up to read; scrolling back
     // to the end resumes it. The page region is the one that scrolls.
     use_follow_scroll(
-        page,
-        following,
-        follow_error,
+        Follow {
+            page,
+            following,
+            error: follow_error,
+        },
         retained.clone(),
         transcript_loading,
         tab == Tab::Conversation,
         live.into(),
+        unsent.len(),
     );
     let tracking = attributes!(div {
         onmounted: move |event| {
@@ -722,7 +1019,7 @@ fn AgentSession(
                 } else {
                     ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
                         Conversation { snapshot: retained.clone(), loading: transcript_loading, assistant,
-                            live, coarse: coarse.clone() }
+                            live, coarse: coarse.clone(), unsent: unsent.clone() }
                     }
                 }
             if tab == Tab::Conversation {
@@ -730,7 +1027,7 @@ fn AgentSession(
                     LiveActivity { live, snapshot: retained.clone(), coarse: coarse.clone(),
                         connected: loading() || (reachable() && stream_error().is_none()),
                         waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
-                    Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
+                    Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), history: history.clone(), on_error: move |message| action_error.set(Some(message)),
                         model_picker: picker.clone(), on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
                 }
             }
@@ -825,7 +1122,7 @@ fn AgentSession(
                 if let Some(message) = (portal.board_error)() { Alert { "{message}" } }
                 if stream_error().is_some() { Status { "Live updates paused. Reconnecting." } }
                 if let Some(message) = settings_error().or(settings_load_error()) { Alert { "{message}" } }
-                if let Some(message) = action_error() { Alert { "{message}" } }
+                if let Some(message) = action_error().or(delivery_error()) { Alert { "{message}" } }
                 if let Some(message) = follow_error() { Alert { "Could not follow the conversation: {message}" } }
             }
             if plan_open {
@@ -875,7 +1172,7 @@ fn AgentSession(
                     TabContent { class: "chat-tab", value: "chat", index: 0usize, {chat.clone()} }
                     TabContent { class: "todos-tab", value: "todos", index: 1usize,
                         div { class: "todo-tab-body", Todos { todos: todos.clone(), workers: workers.clone() } }
-                        Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), on_error: move |message| action_error.set(Some(message)),
+                        Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), history, on_error: move |message| action_error.set(Some(message)),
                             model_picker: picker.clone(), on_send: move |_| conversation_send(false) }
                     }
                     TabContent { class: "workers-tab", value: "workers", index: 2usize,
@@ -1049,38 +1346,53 @@ fn is_blocked(agent: &wire::AgentView) -> bool {
     agent.state == "blocked" || agent.blocked.is_some()
 }
 
-/// Reuse the same follow policy for transcript and live-edge changes.
+/// The scrolling region, whether it follows the newest record, and why it last failed to.
+#[derive(Clone, Copy)]
+pub(crate) struct Follow {
+    pub page: Signal<Option<Rc<MountedData>>>,
+    pub following: Signal<bool>,
+    pub error: Signal<Option<String>>,
+}
+
+/// Reuse the same follow policy for transcript, outbox, and live-edge changes.
 /// The effect reads `live` itself, so live frames never render the caller.
 pub(crate) fn use_follow_scroll(
-    page: Signal<Option<Rc<MountedData>>>,
-    following: Signal<bool>,
-    mut follow_error: Signal<Option<String>>,
+    follow: Follow,
     snapshot: Option<Rc<wire::Conversation>>,
     loading: bool,
     visible: bool,
     live: ReadSignal<Live>,
+    unsent: usize,
 ) {
-    use_effect(use_reactive((&snapshot, &loading, &visible), move |_| {
-        live.read();
-        if !visible || !following() {
-            return;
-        }
-        let Some(page) = page() else {
-            return;
-        };
-        spawn(async move {
-            let scrolled = async {
-                let size = page.get_scroll_size().await?;
-                page.scroll(
-                    PixelsVector2D::new(0.0, size.height),
-                    ScrollBehavior::Instant,
-                )
-                .await
+    use_effect(use_reactive(
+        (&snapshot, &loading, &visible, &unsent),
+        move |_| {
+            let Follow {
+                page,
+                following,
+                mut error,
+            } = follow;
+            live.read();
+            if !visible || !following() {
+                return;
             }
-            .await;
-            follow_error.set(scrolled.err().map(|error| error.to_string()));
-        });
-    }));
+            let Some(page) = page() else {
+                return;
+            };
+            spawn(async move {
+                let scrolled = async {
+                    let size = page.get_scroll_size().await?;
+                    page.scroll(
+                        PixelsVector2D::new(0.0, size.height),
+                        ScrollBehavior::Instant,
+                    )
+                    .await
+                }
+                .await;
+                error.set(scrolled.err().map(|error| error.to_string()));
+            });
+        },
+    ));
 }
 
 /// The newest records that open with a conversation. Each request for earlier history adds
@@ -1108,6 +1420,9 @@ pub(crate) fn Conversation(
     assistant: String,
     live: ReadSignal<Live>,
     #[props(default = "idle".to_owned())] coarse: String,
+    /// Sent messages the transcript does not show yet. They follow the live edge.
+    #[props(default)]
+    unsent: Vec<Outgoing>,
 ) -> Element {
     let mut limit = use_signal(|| HISTORY_WINDOW);
     let active = use_memo(use_reactive(&coarse, move |coarse| match &*live.read() {
@@ -1161,6 +1476,10 @@ pub(crate) fn Conversation(
                 }
                 {records.into_iter()}
                 LiveEdge { live, last: turns.last().cloned() }
+                for item in unsent {
+                    PendingMessage { key: "outbox:{item.id}", text: item.text, label: item.delivery.label(),
+                        detail: item.delivery.detail() }
+                }
             }
         }
     }
@@ -1634,8 +1953,19 @@ pub(crate) fn Composer(
     on_send: EventHandler<()>,
     #[props(default)] placeholder: Option<String>,
     #[props(default = VNode::empty())] model_picker: Element,
+    /// Controls before the model, such as the New conversation repository.
+    #[props(default = VNode::empty())]
+    controls: Element,
+    /// The owner's earlier messages, oldest first. Up in an empty composer recalls them.
+    #[props(default)]
+    history: Vec<String>,
+    /// Focus the message box when it mounts, so typing starts at once.
+    #[props(default)]
+    autofocus: bool,
 ) -> Element {
     let mut round = use_signal(|| 0_u32);
+    // The history entry the composer shows, until the owner edits it.
+    let mut recalled = use_signal(|| None::<usize>);
     use_drop(move || uploading.set(false));
     let upload = use_callback(move |files: Vec<web_sys::File>| {
         if disabled || busy || uploading() || files.is_empty() {
@@ -1658,7 +1988,9 @@ pub(crate) fn Composer(
     });
     rsx! {
         form { class: "console-composer message-composer", aria_label: "Message composer", aria_busy: uploading() || busy,
-            onsubmit: move |event| { event.prevent_default(); if !disabled && !busy && !uploading() { on_send.call(()); } },
+            // Enter in the repository or model search submits the form too. Only the message's
+            // Enter and the send button send, so choosing a control never sends the message.
+            onsubmit: move |event| event.prevent_default(),
             if !images().is_empty() {
                 div { class: "composer-images",
                     for (index, path) in images().iter().enumerate() {
@@ -1679,7 +2011,15 @@ pub(crate) fn Composer(
             }
             div { class: "composer-field",
                 Textarea { name: "message", aria_label: "Message this agent", placeholder, rows: "1", value: "{draft}", disabled: disabled || busy,
-                    oninput: move |event: FormEvent| draft.set(event.value()),
+                    onmounted: move |event: MountedEvent| {
+                        if autofocus {
+                            spawn(async move { let _ = event.data().set_focus(true).await; });
+                        }
+                    },
+                    oninput: move |event: FormEvent| {
+                        recalled.set(None);
+                        draft.set(event.value());
+                    },
                     onpaste: move |event: ClipboardEvent| {
                         let files = event.data().try_as_web_event()
                             .and_then(|event| event.dyn_into::<web_sys::ClipboardEvent>().ok())
@@ -1688,18 +2028,34 @@ pub(crate) fn Composer(
                         if !files.is_empty() { event.prevent_default(); upload.call(files); }
                     },
                     onkeydown: move |event: KeyboardEvent| {
-                        if event.key() == Key::Enter && !event.modifiers().shift() && !event.is_composing() {
+                        if event.is_composing() {
+                            return;
+                        }
+                        let key = event.key();
+                        if key == Key::Enter && !event.modifiers().shift() {
                             event.prevent_default();
+                            recalled.set(None);
                             if !disabled && !busy && !uploading() { on_send.call(()); }
+                        } else if (key == Key::ArrowUp || key == Key::ArrowDown) && event.modifiers().is_empty()
+                            && (recalled().is_some() || draft.peek().is_empty())
+                            && let Some((index, text)) = recall(&history, recalled(), key == Key::ArrowUp)
+                        {
+                            event.prevent_default();
+                            recalled.set(index);
+                            draft.set(text);
                         }
                     },
                 }
-                Button { class: "icon-button send-button", r#type: "submit", aria_label: "Send message", title: "Send message",
+                // Enter sends, so Tab goes from the message to the controls below it.
+                Button { class: "icon-button send-button", r#type: "button", aria_label: "Send message", title: "Send message", tabindex: "-1",
+                    onclick: move |_| if !disabled && !busy && !uploading() { on_send.call(()); },
                     disabled: disabled || busy || uploading() || (draft().trim().is_empty() && images().is_empty()),
                     ArrowUp { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
                 }
             }
             div { class: "composer-toolbar",
+                {controls}
+                {model_picker}
                 Button { class: "icon-button attach-button", variant: ButtonVariant::Ghost, r#type: "button",
                     aria_label: "Attach images", title: "Attach images", disabled: disabled || busy || uploading(),
                     onclick: move |_| { let _ = document::eval("document.getElementById('composer-images').click()"); },
@@ -1709,7 +2065,6 @@ pub(crate) fn Composer(
                     accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
                     onchange: move |event: FormEvent| upload.call(event.files().iter().filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned()).collect()),
                 }
-                {model_picker}
             }
         }
     }
@@ -2514,5 +2869,54 @@ mod tests {
         );
         assert!(pending_tab("pane", None, None, Some(&[]), Some(&[]), false).is_none());
         Ok(())
+    }
+
+    fn said(text: &str, source: wire::Source) -> Turn {
+        Turn {
+            id: text.into(),
+            role: Role::User,
+            text: text.into(),
+            source,
+            timestamp: None,
+            tool: None,
+        }
+    }
+
+    #[test]
+    fn a_sent_message_stays_in_the_outbox_until_the_transcript_records_it() {
+        let pi = wire::Source::Harness {
+            harness: "pi".into(),
+            model: None,
+            provider: None,
+        };
+        let outgoing = |id, text: &str| Outgoing {
+            id,
+            text: text.into(),
+            delivery: Delivery::Queued,
+            after: Some("earlier".into()),
+        };
+        // The owner said "ok" before; two new "ok" messages are both still on their way.
+        let mut earlier = said("ok", pi.clone());
+        earlier.id = "earlier".into();
+        let outbox = vec![outgoing(0, "ok"), outgoing(1, "ok")];
+        let mut turns = vec![earlier];
+        assert_eq!(undelivered(&outbox, &turns).len(), 2);
+        // A Dogsled delivery with the same words is not the owner's message.
+        turns.push(said(
+            "ok",
+            wire::Source::Dogsled {
+                sender: "worker".into(),
+                delivery_kind: "message".into(),
+            },
+        ));
+        assert_eq!(undelivered(&outbox, &turns).len(), 2);
+        // Pi records the first one, with the images it was sent with.
+        turns.push(said("ok\n\nAttached image: /tmp/a.png", pi.clone()));
+        assert_eq!(undelivered(&outbox, &turns), vec![outgoing(1, "ok")]);
+        turns.push(said("ok", pi));
+        assert!(undelivered(&outbox, &turns).is_empty());
+        // The window slides past the record the messages were sent after.
+        turns.remove(0);
+        assert!(undelivered(&outbox, &turns).is_empty());
     }
 }
