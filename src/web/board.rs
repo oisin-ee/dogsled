@@ -139,6 +139,7 @@ impl From<&board::Row> for RowView {
             id: row.id.clone(),
             name: row.name.clone(),
             what: row.what.clone(),
+            branch: None,
             host: row.host.clone(),
             pane: row.pane.clone(),
             owner_pane: row.owner_pane.clone(),

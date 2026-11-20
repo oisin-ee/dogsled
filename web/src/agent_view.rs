@@ -2332,6 +2332,7 @@ mod tests {
         wire::AgentView {
             host: "local".into(),
             pane: "pane".into(),
+            model: None,
             name: None,
             title: None,
             agent: None,
@@ -2824,6 +2825,7 @@ mod tests {
         let mut agent = wire::AgentView {
             host: "local".into(),
             pane: "test".to_owned(),
+            model: None,
             name: None,
             title: None,
             agent: None,

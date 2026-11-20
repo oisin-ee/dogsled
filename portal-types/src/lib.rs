@@ -124,6 +124,8 @@ pub struct RowView {
     pub id: String,
     pub name: String,
     pub what: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub host: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,

@@ -98,6 +98,7 @@ fn imported(item: &Owned) -> RowView {
         cleanup: None,
         unseen: false,
         name: item.name.clone(),
+        branch: None,
         what: if item.kind == Kind::Job {
             "job"
         } else {
@@ -123,6 +124,10 @@ fn apply(
     current: bool,
     execution: Option<Match<'_>>,
 ) {
+    row.branch.clone_from(&item.branch);
+    if row.repository.is_none() {
+        row.repository.clone_from(&item.repository);
+    }
     let valid_owner = owner_matches(item, origin);
     row.owner_host = Some(origin.host.label.clone());
     row.owner_pane = valid_owner.then(|| item.owner_pane.clone());
