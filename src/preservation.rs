@@ -392,7 +392,9 @@ impl Operation {
         if &self.expectation.mode != mode {
             return Err(self.refusal("close mode or stopped episode changed"));
         }
-        if self.stage == Stage::TeardownEntered {
+        // A teardown that exited with a failure has a known outcome: it runs again, after the
+        // live checkout matches the initial capture once more. An interrupted one never does.
+        if self.stage == Stage::TeardownEntered && !self.teardown_failed() {
             return Err(self.refusal(
                 self.blocker
                     .as_deref()

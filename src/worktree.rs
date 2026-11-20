@@ -1175,13 +1175,14 @@ fn run_teardown(
             .ok_or_else(|| operation.refusal("missing initial capture"))?;
         crate::preservation::VerifiedRemoval::capture(shell, tree, saved)?;
         crate::close::validate_preservation(shell, ledger, operation, tree)?;
+        operation.blocker = None;
         operation.advance(ledger, Stage::TeardownEntered)?;
         crate::work::launch_test_barrier("PRESERVATION_TEARDOWN_ENTERED")?;
     }
     if let Err(error) = teardown(shell, &settings, tree) {
         return Err(if let Some(operation) = operation.as_deref_mut() {
             operation.blocker = Some(format!(
-                "{}{error}; hook will not be rerun automatically; fix its cause, then close with --retry-teardown",
+                "{}{error}; fix its cause, then close again to rerun it",
                 crate::preservation::TEARDOWN_FAILED
             ));
             operation.save(ledger)?;

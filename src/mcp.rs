@@ -591,8 +591,7 @@ impl Server {
     )]
     async fn close(&self, Parameters(args): Parameters<CloseArgs>) -> Result<String, String> {
         self.call_bounded(crate::budget::SETUP_LIMIT, move |fleet| {
-            let (closed, _) =
-                crate::runtime::close(fleet, &args.pane, args.host.as_deref(), false)?;
+            let (closed, _) = crate::runtime::close(fleet, &args.pane, args.host.as_deref())?;
             Ok(serde_json::to_value(closed)?)
         })
         .await

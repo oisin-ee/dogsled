@@ -284,10 +284,6 @@ pub enum Command {
         /// The child's host. Defaults to the host of the open item for this child, else local.
         #[arg(long)]
         host: Option<String>,
-        /// Run a teardown that failed once more, after you fixed its cause. Close never repeats
-        /// a teardown without it, and never repeats one whose outcome is unknown.
-        #[arg(long)]
-        retry_teardown: bool,
     },
     /// Claim custody of an orphaned child on this host.
     Claim {
@@ -914,9 +910,6 @@ pub enum HostCommand {
         landed: bool,
         #[arg(long, requires = "landed")]
         writer: bool,
-        /// Run a failed teardown once more; only an owner close accepts it.
-        #[arg(long, conflicts_with_all = ["pushed", "landed", "writer", "stopped_orphan"])]
-        retry_teardown: bool,
     },
     Launch {
         #[arg(long)]
