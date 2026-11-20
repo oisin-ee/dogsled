@@ -78,6 +78,7 @@ r#"CREATE TABLE host_snapshot_probe_agent_panes (
  session_response_model TEXT,
  session_thinking TEXT,
  session_activity TEXT,
+ session_reply_id TEXT,
  worktree_present INTEGER NOT NULL CHECK(worktree_present IN (0,1)),
  worktree_path TEXT,
  worktree_branch TEXT,
@@ -770,6 +771,7 @@ fn put_snapshot_probe_agent_panes(
     if let Some(value) = &value.session.thinking {
         columns.text("session_thinking", Some(value));
     }
+    columns.text("session_reply_id", value.session.reply_id.as_deref());
     if let Some(value) = &value.session.activity {
         columns.text("session_activity", Some(value));
     }
@@ -841,6 +843,7 @@ fn load_snapshot_probe_agent_panes(
                     response_model: rows::text(row, "session_response_model")?,
                     thinking: rows::text(row, "session_thinking")?,
                     activity: rows::text(row, "session_activity")?,
+                    reply_id: rows::text(row, "session_reply_id")?,
                 },
                 worktree: if row.get::<_, Option<bool>>("worktree_present")? == Some(true) {
                     Some(crate::facts::Worktree {

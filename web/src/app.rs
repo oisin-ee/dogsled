@@ -642,6 +642,7 @@ pub fn App() -> Element {
 
     rsx! {
         document::Style { "{font_faces()}" }
+        document::Script { src: asset!("/assets/unread.js") }
         document::Stylesheet { href: COMPONENTS_CSS }
         document::Stylesheet { href: CONSOLE_CSS }
         document::Stylesheet { href: MARKDOWN_CSS }
@@ -785,6 +786,7 @@ pub(crate) fn NeedsYou(
                                     span { class: "inbox-place", "{kind.label()} · {place}" }
                                     if more > 0 { span { class: "inbox-more", "+{more}" } }
                                     span { class: "inbox-age", "{age}" }
+                                    crate::unread::UnreadDot { host: address.host.clone(), pane: address.pane.clone() }
                                 }
                                 span { class: "inbox-title", "{item.title}" }
                                 if repository.is_some() { span { class: "agent-title", "{agent.row.title}" } }

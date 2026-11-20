@@ -54,19 +54,38 @@ pub fn plain(text: &str) -> String {
 /// The last 256 KiB of a transcript, as JSON values, newest first. Lines cut by the window or
 /// written partly are skipped.
 pub fn tail(path: &str) -> Option<Vec<Value>> {
+    Some(session_tail("", path)?.0)
+}
+
+/// Read the same bounded tail once for session facts and the latest reply's timeline ID.
+/// A user, thinking, or tool record at the live edge is not a final assistant reply.
+pub(crate) fn session_tail(agent: &str, path: &str) -> Option<(Vec<Value>, Option<String>)> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(262_144)))
-        .ok()?;
-    let mut bytes = Vec::new();
-    file.take(262_144).read_to_end(&mut bytes).ok()?;
-    Some(
-        String::from_utf8_lossy(&bytes)
-            .lines()
-            .rev()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect(),
+    let mut values = Vec::new();
+    let mut latest = None;
+    lines_backwards_file(
+        &mut file,
+        len,
+        262_144,
+        262_144,
+        |offset, line| {
+            if let Ok(value) = serde_json::from_slice(line) {
+                if latest.is_none() && !agent.is_empty() {
+                    latest = records(agent, &value, offset, &mut false)
+                        .into_iter()
+                        .rev()
+                        .find(|turn| turn.role != Role::Context)
+                        .map(|turn| (turn.role == Role::Assistant).then_some(turn.id));
+                }
+                values.push(value);
+            }
+            true
+        },
+        |_, _| {},
     )
+    .ok()?;
+    Some((values, latest.flatten()))
 }
 
 /// One step of an agent's work: a tool call or a message.
@@ -1497,6 +1516,29 @@ mod tests {
         }
         std::fs::write(&path, text).expect("the transcript");
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn unread_reply_matches_the_transcript_even_without_native_ids() {
+        let input = json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}});
+        let reply = json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}});
+        let path = transcript(&[input.clone(), reply]);
+        let (_, stamp) = session_tail("codex", &path).unwrap();
+        assert!(stamp.is_some());
+        assert_eq!(
+            stamp,
+            conversation("codex", &path)
+                .turns
+                .last()
+                .map(|turn| turn.id.clone())
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "{input}").unwrap();
+        assert_eq!(session_tail("codex", &path).unwrap().1, None);
+        std::fs::remove_file(path).unwrap();
     }
 
     fn incremental_fixture(agent: &str) -> Vec<Value> {

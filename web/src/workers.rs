@@ -182,7 +182,7 @@ pub(crate) fn Workers(
                                                         panel.set(LeadPanel::Chat);
                                                     },
                                                     span { class: "worker-dot", "data-state": category.value(), aria_hidden: "true" }
-                                                    span { class: "worker-title", "{title}" }
+                                                    span { class: "worker-title", "{title}" if let Some(pane) = &row.pane { crate::unread::UnreadDot { host: row.host.clone(), pane: pane.clone() } } }
                                                     span { class: "worker-phase", "{state} · {elapsed} · {row.host}" }
                                                     span { class: "worker-activity", if row.ownership_stale { "Last known · ownership unavailable" } else { "{row.activity}" } }
                                                 }

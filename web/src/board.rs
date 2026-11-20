@@ -529,6 +529,9 @@ fn NavigationAgent(row: NavigationRow) -> Element {
             if let Some((done, total)) = row.progress { small { "{done}/{total}" } }
             span { class: "agent-now", "data-status": status, "{now}" }
         }
+        if let Some(pane) = &row.pane {
+            crate::unread::UnreadDot { host: row.host.clone(), pane: pane.clone() }
+        }
     };
     rsx! {
         SidebarMenuButton {
@@ -891,6 +894,7 @@ mod shell_tests {
             cwd: Some("/r/.worktrees/fix-portal-titles".to_owned()),
             repository: None,
             blocked: None,
+            reply: None,
             launch: None,
         };
         assert_eq!(agent_title(None, &agent), "fix-portal-titles");

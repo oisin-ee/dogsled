@@ -19,6 +19,9 @@ pub struct Session {
     pub response_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// ID of the final assistant record at the transcript's live edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_id: Option<String>,
     /// The latest step, on one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
@@ -299,8 +302,11 @@ fn transcript(agent: &Agent, old: Option<&Agent>) -> Session {
         return old.session.clone();
     }
     match (agent.agent.as_deref(), agent.transcript.as_deref()) {
-        (Some(kind), Some(path)) => activity::tail(path)
-            .map(|values| session(kind, &values))
+        (Some(kind), Some(path)) => activity::session_tail(kind, path)
+            .map(|(values, reply_id)| Session {
+                reply_id,
+                ..session(kind, &values)
+            })
             .unwrap_or_default(),
         _ => Session::default(),
     }

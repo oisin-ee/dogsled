@@ -558,6 +558,16 @@ fn sidebar_views(
     Ok(())
 }
 
+fn reply_stamp(agent: &crate::probe::Agent) -> Option<portal_types::agents::ReplyStamp> {
+    if !matches!(agent.state.as_str(), "idle" | "done") {
+        return None;
+    }
+    Some(portal_types::agents::ReplyStamp {
+        id: agent.session.reply_id.clone()?,
+        session: serde_json::to_string(&super::details::Session::of(agent)?).ok()?,
+    })
+}
+
 fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option<Vec<AgentView>> {
     let mut agents = local.agents.clone()?;
     // Each host publishes how far its launch for a pane got, so a reader can tell a launched
@@ -569,10 +579,11 @@ fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option
         .map(|probe| probe.agent_panes.as_slice())
         .unwrap_or_default();
     for agent in &mut agents {
-        agent.launch = launches
-            .iter()
-            .find(|launched| launched.pane == agent.pane)
-            .and_then(|launched| launched.launch_progress.clone());
+        let source = launches.iter().find(|launched| launched.pane == agent.pane);
+        agent.launch = source.and_then(|launched| launched.launch_progress.clone());
+        agent.reply = source
+            .filter(|source| source.state == agent.state)
+            .and_then(reply_stamp);
     }
     for report in reports.iter().filter(|report| !report.host.is_local()) {
         if let Some(probe) = &report.probe {
@@ -590,6 +601,7 @@ fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option
                 cwd: agent.cwd.clone(),
                 repository: agent.repository.clone(),
                 blocked: None,
+                reply: report.fresh(now).then(|| reply_stamp(agent)).flatten(),
                 launch: agent.launch_progress.clone(),
             }));
         }

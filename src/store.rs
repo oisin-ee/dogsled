@@ -6,9 +6,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 
-/// The schema version this binary creates. A store with an older version starts again
-/// empty: earlier records are not read or converted.
-const VERSION: i64 = 6;
+/// Version 6 upgrades in place. Earlier versions retain their existing reset policy.
+const VERSION: i64 = 7;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -75,7 +74,15 @@ fn open(ledger: &Ledger) -> Result<Connection> {
         ledger.with_lock("state-db", || {
             let current = version(&connection)?;
             connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-            if current < VERSION {
+            if current == 6 {
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                tx.execute_batch(
+                    "ALTER TABLE host_snapshot_probe_agent_panes ADD COLUMN session_reply_id TEXT;
+                     UPDATE host_snapshot_probe_agent_panes SET transcript_modified=NULL WHERE transcript IS NOT NULL;",
+                )?;
+                tx.pragma_update(None, "user_version", VERSION)?;
+                tx.commit()?;
+            } else if current < VERSION {
                 // An older store starts again empty. Nothing reads or converts it.
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let tables: Vec<String> = tx
@@ -540,6 +547,18 @@ mod tests {
     }
 
     #[test]
+    fn unread_reply_upgrade_preserves_existing_items() {
+        let ledger = ledger();
+        write(&ledger, |tx| sync_items(tx, &[item("keep")])).unwrap();
+        release();
+        let conn = Connection::open(ledger.dir.join("state.db")).unwrap();
+        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; PRAGMA user_version=6;").unwrap();
+        drop(conn);
+        assert_eq!(items(&ledger).unwrap(), json!([item("keep")]));
+        std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
     fn an_older_store_starts_again_empty() {
         let ledger = ledger();
         std::fs::create_dir_all(&ledger.dir).unwrap();
@@ -549,7 +568,7 @@ mod tests {
                 "CREATE TABLE items (seq INTEGER PRIMARY KEY, record TEXT);
                  INSERT INTO items (record) VALUES ('{{}}');
                  PRAGMA user_version={};",
-                VERSION - 1
+                5
             ))
             .unwrap();
         drop(connection);
@@ -607,7 +626,7 @@ mod tests {
         write(&ledger, |tx| {
             let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             assert_eq!(version, VERSION);
-            assert_eq!(version, 6);
+            assert_eq!(version, 7);
             assert!(!crate::lead_store::exists_in(tx, "absent")?);
             let columns: Vec<String> = tx
                 .prepare("PRAGMA table_info(leads)")?

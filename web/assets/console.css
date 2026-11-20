@@ -418,6 +418,26 @@ textarea {
   border: 1.5px solid var(--console-dim);
   border-radius: 50%;
 }
+dogsled-unread-dot { display: none; }
+dogsled-unread-dot[data-unread] {
+  display: inline-block;
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-inline-start: auto;
+  border-radius: 50%;
+  background: #8ac6ff;
+}
+.console-provider .console-shell .console-agents [data-slot="sidebar-menu-button"][data-worker="false"]:not([data-size="lg"]):has(> dogsled-unread-dot[data-unread]) {
+  grid-template-columns: 8px minmax(0, 1fr) auto 9px;
+}
+.console-agents [data-worker="false"] > dogsled-unread-dot[data-unread] {
+  grid-column: -2;
+  grid-row: 1;
+}
+.worker-title dogsled-unread-dot[data-unread] { margin-inline-start: 8px; }
+.console-provider .console-shell .console-agents button:has(dogsled-unread-dot[data-unread]) .agent-title { font-weight: 650; }
+dogsled-read-edge { display: block; height: 1px; }
 .console-provider .console-shell .agent-dot[data-status="running"] {
   border-color: var(--console-running);
   background: var(--console-running);
