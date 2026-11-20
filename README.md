@@ -946,7 +946,7 @@ proto install
 proto run moon -- run :fmt-check :lint :test :typecheck :test-shim
 ```
 
-The `lint` and `test` tasks build the web bundle first, so they work in a fresh checkout.
+Clippy runs without a web bundle. The `test` task still builds the bundle because the asset tests serve its files.
 
 The executable is `target/release/dogsled`.
 Release archives include the binary and three service templates from `plugin/services/`: `dogsled.service`, `dev.dogsled.plist`, and `dev.dogsled.web.plist`.

@@ -11,8 +11,6 @@ use std::path::Path;
 const BUNDLE: &str = "web/public";
 /// The page the bundle holds.
 const INDEX: &str = "index.html";
-/// The command that fills the folder.
-const BUILD_COMMAND: &str = "moon run :web-build";
 
 fn main() {
     // The bundle changes whenever the web crate changes, so the build must
@@ -22,9 +20,8 @@ fn main() {
     println!("cargo:rerun-if-changed=web/Cargo.toml");
     println!("cargo:rerun-if-changed=src/web/assets.rs");
 
-    assert!(
-        Path::new(BUNDLE).join(INDEX).is_file(),
-        "the web bundle is missing: {BUNDLE}/{INDEX} does not exist.\n\
-         Run `{BUILD_COMMAND}` first, which runs `dx bundle --web --release`."
-    );
+    println!("cargo:rustc-check-cfg=cfg(portal_index_missing)");
+    if !Path::new(BUNDLE).join(INDEX).is_file() {
+        println!("cargo:rustc-cfg=portal_index_missing");
+    }
 }
