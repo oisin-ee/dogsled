@@ -185,7 +185,7 @@ A graphite console with three signal colours, each reserved for one meaning.
 
 ## Layout
 
-The application fills the viewport (`100dvh`) and the document never scrolls. A 44px top bar holds the product name, one 48px load meter per host and, at its right end, the Metrics and New buttons. Below it, columns sit side by side, each with a 52px header row aligned across the screen and a body that scrolls on its own.
+The application fills the viewport (`100dvh`) and the document never scrolls. The 44px top bar groups Dogsled, Metrics and New on the left. Each host has a 48px load meter on the right. Below it, columns sit side by side, each with a 52px header row aligned across the screen and a body that scrolls on its own.
 
 - **Wide (1400px and up):** one 280px sidebar, the conversation (messages at a 640px measure) and a 300px todos column.
 - **Medium (1100–1399px):** the todos fold into a segmented `Chat` / `Todos n/m` control in the conversation header.

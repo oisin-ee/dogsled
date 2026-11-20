@@ -10,7 +10,7 @@ This supersedes the 2026-11-02 steer "Inbox and agents are two left sidebars" in
 
 ## Behaviour
 
-1. The sidebar is 280px on the raised panel. Its header shows `Agents n`. Metrics and New sit at the right end of the top bar (owner, 2026-11-19).
+1. The sidebar is 280px on the raised panel. Its header shows `Agents n`. Metrics and New sit beside Dogsled at the left end of the top bar.
 2. A "Needs you" section sits at the top of the list. Its yellow badge shows the server's inbox count.
 3. The section has one row per agent with inbox items, newest item first. A row shows a yellow dot, the agent title and the age. Its second line shows the kind icon, the kind and the item title, and `+n` for more items.
 4. A key prompt shows its keys inline under the row. A lead with workers keeps its worker summary.
