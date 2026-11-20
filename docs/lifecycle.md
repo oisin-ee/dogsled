@@ -127,8 +127,7 @@ Close saves the initial snapshot before teardown.
 After successful teardown, close saves changed content again before normalization and unforced removal.
 A failed or unknown teardown keeps the checkout and its resources.
 Dogsled does not automatically repeat an entered teardown with an unknown outcome.
-After you fix the cause of a failed teardown, `dogsled close CHILD --retry-teardown` runs it once more against the pinned initial snapshot.
-The flag never repeats a teardown with an unknown outcome.
+A teardown that exited with a failure runs again on the next close, after the checkout matches its initial snapshot.
 An interrupted normalization also keeps the checkout for inspection.
 Shared ownership, changed checkout identity, and unsupported content prevent removal.
 

@@ -356,92 +356,60 @@ fn interrupt_p3(rig: &Rig, phase: &str) {
 }
 
 #[test]
-fn p3_failed_or_unknown_teardown_keeps_checkout() {
-    for failed in [true, false] {
-        let (rig, tree) = p3_rig(if failed {
-            "p3-failed-hook"
-        } else {
-            "p3-unknown-hook"
-        });
-        fs::write(tree.join("draft"), b"live work\n").unwrap();
-        if failed {
-            fs::write(rig.dir.join("hook-fails"), b"").unwrap();
-            assert!(!rig.run(&["close", "w2:p1"]).status.success());
-        } else {
-            interrupt_p3(&rig, "TEARDOWN_ENTERED");
-        }
-        assert_p3_kept(&rig, &tree);
-        let before = rig.log("hook.log");
-        let out = rig.run(&["close", "w2:p1"]);
-        let error = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success());
-        assert!(
-            error.contains(if failed {
-                "failed teardown"
-            } else {
-                "unknown teardown outcome"
-            }),
-            "{error}"
-        );
-        assert!(error.contains("recovery"), "{error}");
-        assert!(error.contains("will not be rerun"), "{error}");
-        assert_eq!(before, rig.log("hook.log"));
-        let _out = rig.run(&["prune", "--yes", "worktrees"]);
-        assert_eq!(
-            before,
-            rig.log("hook.log"),
-            "ordinary prune must not retry an uncertain hook"
-        );
-        assert_p3_kept(&rig, &tree);
-        let operation = &operations(&rig)[0];
-        let repo = rig.dir.join("home/repo");
-        assert_ne!(
-            git(
-                &repo,
-                &[
-                    "rev-parse",
-                    &format!(
-                        "refs/dogsled/recovery/{}",
-                        operation["initial_id"].as_str().unwrap()
-                    )
-                ]
-            ),
-            ""
-        );
-    }
+fn p3_unknown_teardown_keeps_checkout() {
+    let (rig, tree) = p3_rig("p3-unknown-hook");
+    fs::write(tree.join("draft"), b"live work\n").unwrap();
+    interrupt_p3(&rig, "TEARDOWN_ENTERED");
+    assert_p3_kept(&rig, &tree);
+    let before = rig.log("hook.log");
+    let out = rig.run(&["close", "w2:p1"]);
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(error.contains("unknown teardown outcome"), "{error}");
+    assert!(error.contains("recovery"), "{error}");
+    assert!(error.contains("will not be rerun"), "{error}");
+    assert_eq!(before, rig.log("hook.log"));
+    let _out = rig.run(&["prune", "--yes", "worktrees"]);
+    assert_eq!(
+        before,
+        rig.log("hook.log"),
+        "ordinary prune must not retry an uncertain hook"
+    );
+    assert_p3_kept(&rig, &tree);
+    let operation = &operations(&rig)[0];
+    let repo = rig.dir.join("home/repo");
+    assert_ne!(
+        git(
+            &repo,
+            &[
+                "rev-parse",
+                &format!(
+                    "refs/dogsled/recovery/{}",
+                    operation["initial_id"].as_str().unwrap()
+                )
+            ]
+        ),
+        ""
+    );
 }
 
 #[test]
-fn p3_retry_teardown_runs_a_failed_teardown_once_more() {
-    let (rig, tree) = p3_rig("p3-retry-teardown");
+fn p3_close_reruns_a_failed_teardown() {
+    let (rig, tree) = p3_rig("p3-rerun-teardown");
     fs::write(tree.join("draft"), b"live work\n").unwrap();
     fs::write(rig.dir.join("hook-fails"), b"").unwrap();
     assert!(!rig.run(&["close", "w2:p1"]).status.success());
     assert_p3_kept(&rig, &tree);
     let before = rig.log("hook.log");
-    let out = rig.run(&["close", "w2:p1", "--retry-teardown"]);
+    let out = rig.run(&["close", "w2:p1"]);
     assert!(!out.status.success(), "the hook still fails");
-    assert_ne!(before, rig.log("hook.log"), "the retry runs the hook");
+    assert_ne!(before, rig.log("hook.log"), "close reruns the failed hook");
     assert_p3_kept(&rig, &tree);
     fs::remove_file(rig.dir.join("hook-fails")).unwrap();
-    let (code, closed) = rig.json(&["close", "w2:p1", "--retry-teardown"]);
+    let (code, closed) = rig.json(&["close", "w2:p1"]);
     assert_eq!(code, 0, "{closed}");
     assert!(!tree.exists());
     assert!(closed["recovery"]["id"].is_string(), "{closed}");
-}
-
-#[test]
-fn p3_retry_teardown_never_repeats_an_unknown_teardown() {
-    let (rig, tree) = p3_rig("p3-retry-unknown");
-    fs::write(tree.join("draft"), b"live work\n").unwrap();
-    interrupt_p3(&rig, "TEARDOWN_ENTERED");
-    let before = rig.log("hook.log");
-    let out = rig.run(&["close", "w2:p1", "--retry-teardown"]);
-    let error = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success());
-    assert!(error.contains("--retry-teardown needs"), "{error}");
-    assert_eq!(before, rig.log("hook.log"));
-    assert_p3_kept(&rig, &tree);
 }
 
 #[test]
