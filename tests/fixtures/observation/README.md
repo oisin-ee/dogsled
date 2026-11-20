@@ -10,4 +10,4 @@ To regenerate this fixture explicitly:
 DOGSLED_UPDATE_CONTEXT_PUBLICATION=1 cargo test --bin dogsled observation::tests::context_fixture::context_pre_handoff_snapshot_matches_real_capture_and_compose
 ```
 
-Review the JSON diff after generation. The fixture builder normalizes the temporary root, epoch, clock, and CPU capacity.
+Review the JSON diff after generation. The fixture builder normalizes the temporary root, epoch, clock, CPU capacity, and hostname.

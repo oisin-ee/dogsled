@@ -28,6 +28,34 @@
       "holds": [],
       "job_validity": 2,
       "jobs": [],
+      "owned_work": {
+        "executions": [],
+        "hostname": "fixture-host",
+        "owned": [
+          {
+            "kind": "agent",
+            "name": "worker",
+            "owner_pane": "w1:p1",
+            "owner_session": null,
+            "pane": "w2:p1",
+            "phase": "admitted",
+            "repository": "github.com/fixture/context",
+            "request_id": "mine"
+          },
+          {
+            "kind": "agent",
+            "name": "other",
+            "owner_pane": "w9:p9",
+            "owner_session": null,
+            "pane": "w2:p1",
+            "phase": "admitted",
+            "repository": "github.com/fixture/context",
+            "request_id": "theirs"
+          }
+        ],
+        "status": "ready",
+        "version": 1
+      },
       "placement_replay": 3,
       "probe": {
         "agent_panes": [
@@ -877,6 +905,7 @@
               "busy": 1.0,
               "cores": 8,
               "eligible": true,
+              "hostname": "fixture-host",
               "label": "local",
               "reachable": true,
               "service": "up"
@@ -902,7 +931,7 @@
                   "name": "worker",
                   "owner_host": "local",
                   "owner_pane": "w1:p1",
-                  "pane": "w2:p1",
+                  "ownership_stale": true,
                   "repository": "github.com/fixture/context",
                   "state": "done",
                   "what": "pi"
@@ -923,7 +952,7 @@
                   "name": "other",
                   "owner_host": "local",
                   "owner_pane": "w9:p9",
-                  "pane": "w2:p1",
+                  "ownership_stale": true,
                   "repository": "github.com/fixture/context",
                   "state": "done",
                   "what": "pi"
@@ -957,6 +986,7 @@
             "busy": 1.0,
             "cores": 8,
             "eligible": true,
+            "hostname": "fixture-host",
             "label": "local",
             "reachable": true,
             "service": "up"
@@ -982,7 +1012,7 @@
                 "name": "worker",
                 "owner_host": "local",
                 "owner_pane": "w1:p1",
-                "pane": "w2:p1",
+                "ownership_stale": true,
                 "repository": "github.com/fixture/context",
                 "state": "done",
                 "what": "pi"
@@ -1003,7 +1033,7 @@
                 "name": "other",
                 "owner_host": "local",
                 "owner_pane": "w9:p9",
-                "pane": "w2:p1",
+                "ownership_stale": true,
                 "repository": "github.com/fixture/context",
                 "state": "done",
                 "what": "pi"
