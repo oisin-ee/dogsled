@@ -114,6 +114,26 @@ pub(crate) struct ActivityFrame {
     pub bound: BTreeSet<String>,
 }
 
+impl ActivityFrame {
+    /// Relative validity is a transport budget, not renewed by reading a retained frame.
+    pub(super) fn current_view(&self, pane: &str) -> crate::error::Result<Option<ActivityView>> {
+        let Some(bytes) = self.views.get(pane) else {
+            return Ok(None);
+        };
+        let mut view: ActivityView = serde_json::from_slice(bytes)?;
+        if let ActivityDetail::Available { valid_for_ms, .. } = &mut view.detail {
+            let elapsed = u64::try_from(self.measured.elapsed().as_millis()).unwrap_or(u64::MAX);
+            *valid_for_ms = valid_for_ms.saturating_sub(elapsed);
+            if *valid_for_ms == 0 {
+                view.detail = ActivityDetail::Unavailable {
+                    reason: UnavailableReason::NativeUnavailable,
+                };
+            }
+        }
+        Ok(Some(view))
+    }
+}
+
 pub(crate) type ActivityFeed = watch::Receiver<Arc<ActivityFrame>>;
 
 #[derive(Debug, Clone)]

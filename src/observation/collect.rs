@@ -112,11 +112,19 @@ pub(crate) struct Collector {
     snapshot: Option<Snapshot>,
     sample_error: Option<String>,
     report: Option<HostReport>,
+    worker_clocks: super::owned_work::WorkerClocks,
     catalogue: catalogue::Catalogue,
     models: models::Catalogue,
 }
 
 impl Collector {
+    pub(crate) fn with_activity(feed: super::live_activity::ActivityFeed) -> Self {
+        Self {
+            worker_clocks: super::owned_work::WorkerClocks::with_feed(feed),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn record<T: Serialize>(&mut self, domain: &str, now: u64, value: Result<T>) {
         self.record_value(
             domain,
@@ -330,6 +338,7 @@ impl Collector {
                 &report,
                 status.as_ref().ok(),
                 todos.as_deref().ok(),
+                &mut self.worker_clocks,
             )
         });
         self.record_value("host", now, host);

@@ -1192,9 +1192,14 @@ fn workers_render_the_four_groups_in_order_and_mark_the_open_worker()
         repository: None,
         age_ms: 0,
     };
+    let mut idle = worker_row("idle", "idle")?;
+    idle.turn_clock = Some(portal_types::WorkerClock {
+        clock: portal_types::agents::TurnClock::Finished { elapsed_ms: 76_900 },
+        valid_until_ms: u64::MAX,
+    });
     let rows = vec![
         worker_row("finished", "closed")?,
-        worker_row("idle", "idle")?,
+        idle,
         worker_row("working", "working")?,
         unseen,
         worker_row("prompt", "blocked")?,
@@ -1220,9 +1225,10 @@ fn workers_render_the_four_groups_in_order_and_mark_the_open_worker()
     for expected in [
         "1 working",
         "Task working",
-        "working · 13s · netcup",
+        "working · netcup",
+        "idle · 1m 16s · netcup",
         "Latest activity for working",
-        "Finished · 13s · netcup",
+        "Finished · netcup",
         r#"aria-current="true""#,
     ] {
         assert!(html.contains(expected), "missing {expected}: {html}");

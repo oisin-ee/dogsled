@@ -781,22 +781,7 @@ async fn activity_connection(
             .await;
         }
         let frame = receiver.borrow_and_update().clone();
-        if let Some(bytes) = frame.views.get(&pane) {
-            // Relative validity is a transport budget, not renewed by reading a retained
-            // publication. Subtract queue/retention time before handing it to a consumer.
-            let mut activity: portal_types::agents::ActivityView = serde_json::from_slice(bytes)?;
-            if let portal_types::agents::ActivityDetail::Available { valid_for_ms, .. } =
-                &mut activity.detail
-            {
-                let elapsed =
-                    u64::try_from(frame.measured.elapsed().as_millis()).unwrap_or(u64::MAX);
-                *valid_for_ms = valid_for_ms.saturating_sub(elapsed);
-                if *valid_for_ms == 0 {
-                    activity.detail = portal_types::agents::ActivityDetail::Unavailable {
-                        reason: portal_types::agents::UnavailableReason::NativeUnavailable,
-                    };
-                }
-            }
+        if let Some(activity) = frame.current_view(&pane)? {
             let mut bytes = serde_json::to_vec(&activity)?;
             bytes.push(b'\n');
             write(socket, &bytes).await?;

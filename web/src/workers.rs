@@ -118,15 +118,6 @@ pub(crate) fn working_count(rows: &[RowView]) -> usize {
         .count()
 }
 
-fn elapsed(ms: u64) -> String {
-    let seconds = ms / 1_000;
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
-    }
-}
-
 #[component]
 pub(crate) fn Workers(
     rows: Vec<RowView>,
@@ -136,6 +127,10 @@ pub(crate) fn Workers(
     let mut selected = use_context::<Signal<Option<AgentAddress>>>();
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     let mut panel = use_context::<Signal<LeadPanel>>();
+    let mut now = use_signal(crate::agent_view::now_ms);
+    dioxus_sdk_time::use_interval(std::time::Duration::from_secs(1), move |()| {
+        now.set(crate::agent_view::now_ms())
+    });
     let working = working_count(&rows);
     let (jobs, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.kind == "job");
     rsx! {
@@ -170,7 +165,7 @@ pub(crate) fn Workers(
                                             let open = address.is_some() && selected() == address;
                                             let title = row.title.as_deref().filter(|title| !title.trim().is_empty() && !title.starts_with("u-"))
                                                 .unwrap_or(&row.name);
-                                            let elapsed = elapsed(row.quiet_ms.unwrap_or(row.age_ms));
+                                            let elapsed = row.turn_clock.filter(|_| address.is_some()).and_then(|clock| clock.seconds(now())).map(crate::agent_view::elapsed_label);
                                             let state = if matches!(row.state.as_str(), "closed" | "done") { "Finished" } else { &row.state };
                                             rsx! {
                                                 Button { key: "{row.host}:{row.id}", class: "worker-row", variant: ButtonVariant::Ghost,
@@ -183,7 +178,7 @@ pub(crate) fn Workers(
                                                     },
                                                     span { class: "worker-dot", "data-state": category.value(), aria_hidden: "true" }
                                                     span { class: "worker-title", "{title}" if let Some(pane) = &row.pane { crate::unread::UnreadDot { host: row.host.clone(), pane: pane.clone() } } }
-                                                    span { class: "worker-phase", "{state} · {elapsed} · {row.host}" }
+                                                    span { class: "worker-phase", "{state} · " if let Some(elapsed) = elapsed { "{elapsed} · " } "{row.host}" }
                                                     span { class: "worker-activity", if row.ownership_stale { "Last known · ownership unavailable" } else { "{row.activity}" } }
                                                 }
                                             }

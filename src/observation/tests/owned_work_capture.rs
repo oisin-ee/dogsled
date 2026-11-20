@@ -79,7 +79,14 @@ fn capture(
     todos: &[crate::board::TodoSections],
 ) -> Value {
     let status = collect::status(ledger, Vec::new(), 12).unwrap();
-    owned_work::serialize_host(ledger, report, Some(&status), Some(todos)).unwrap()
+    owned_work::serialize_host(
+        ledger,
+        report,
+        Some(&status),
+        Some(todos),
+        &mut owned_work::WorkerClocks::default(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -225,10 +232,85 @@ fn owned_work_wire_capture_matches_current_terminal_and_owned_job() {
 }
 
 #[test]
+fn owned_worker_clock_uses_the_same_turn_as_conversation_detail() {
+    use super::super::{details::Session, live_activity::ActivityPublisher};
+    use portal_types::agents::{ActivityView, LivePhase, TurnClock};
+    use std::io::Write;
+    let ledger = Ledger::temporary();
+    launch(&ledger, "child", "current-terminal");
+    let path = ledger.dir.join("session.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    let mut record = |role, ms| {
+        writeln!(file, "{}", json!({"type":"message", "message":{"role":role, "content":"a message", "timestamp":ms}})).unwrap();
+    };
+    record("user", 1_000);
+    record("assistant", 9_000);
+    record("user", 100_000);
+    record("assistant", 142_500);
+    let agent = Agent {
+        pane: "executing-pane".into(),
+        state: "working".into(),
+        agent: Some("pi".into()),
+        name: Some("worker".into()),
+        agent_session: Some("worker-session".into()),
+        terminal_id: Some("current-terminal".into()),
+        transcript: Some(path.to_str().unwrap().into()),
+        ..Default::default()
+    };
+    let session = serde_json::to_string(&Session::of(&agent).unwrap()).unwrap();
+    let report = report(&ledger, vec![agent]);
+    let status = collect::status(&ledger, Vec::new(), 12).unwrap();
+    let mut publisher = ActivityPublisher::new("serve".into());
+    let mut clocks = owned_work::WorkerClocks::with_feed(publisher.sender.subscribe());
+    let mut capture = |session: &str, phase| {
+        let view: ActivityView = serde_json::from_value(json!({"version":1, "pane":"executing-pane", "epoch":"serve", "revision":1,
+            "session":session, "producer":{"generation":1,"id":"producer"}, "detail":{"availability":"available", "sequence":1,
+            "received_at_ms":1, "valid_for_ms":10_000, "state":{"phase":phase,"active_tools":[]}}})).unwrap();
+        publisher
+            .replace(
+                [(view.pane.clone(), view)].into(),
+                Some(1),
+                std::collections::BTreeSet::new(),
+            )
+            .unwrap();
+        let host =
+            owned_work::serialize_host(&ledger, &report, Some(&status), Some(&[]), &mut clocks)
+                .unwrap();
+        owned_work::decode(&host).unwrap().executions[0].turn_clock
+    };
+    let running = capture(&session, LivePhase::Thinking).unwrap();
+    assert_eq!(running.seconds(170_500), Some(70));
+    assert_eq!(running.seconds(171_500), Some(71));
+    assert_eq!(running.seconds(running.valid_until_ms), None);
+    let idle = capture(&session, LivePhase::Idle).unwrap();
+    let detail = crate::activity::try_conversation("pi", path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        Some(idle.clock),
+        TurnClock::from_history(&detail.turns, LivePhase::Idle)
+    );
+    assert_eq!(idle.seconds(200_000), Some(42));
+    record("user", 201_000);
+    assert_eq!(
+        capture(&session, LivePhase::Working)
+            .unwrap()
+            .seconds(202_000),
+        Some(1)
+    );
+    assert_eq!(capture("other session", LivePhase::Working), None);
+}
+
+#[test]
 fn owned_work_wire_capture_failure_preserves_base_report() {
     let ledger = Ledger::temporary();
     let report = report(&ledger, Vec::new());
-    let mut host = owned_work::serialize_host(&ledger, &report, None, Some(&[])).unwrap();
+    let mut host = owned_work::serialize_host(
+        &ledger,
+        &report,
+        None,
+        Some(&[]),
+        &mut owned_work::WorkerClocks::default(),
+    )
+    .unwrap();
     assert!(owned_work::decode(&host).is_none());
     let extension = host.as_object_mut().unwrap().remove("owned_work").unwrap();
     assert_eq!(

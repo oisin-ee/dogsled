@@ -40,6 +40,8 @@ pub(crate) struct Execution {
     pub pane: String,
     pub title: String,
     pub job_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_clock: Option<portal_types::WorkerClock>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -67,14 +69,71 @@ pub(crate) fn decode(host: &Value) -> Option<Evidence> {
     Evidence::deserialize(value).ok()
 }
 
+/// One incremental timestamp window per observed worker session, on its execution host.
+#[derive(Debug, Default)]
+pub(super) struct WorkerClocks {
+    feed: Option<super::live_activity::ActivityFeed>,
+    readers: BTreeMap<String, (super::details::Session, crate::activity::Incremental)>,
+}
+
+impl WorkerClocks {
+    pub(super) fn with_feed(feed: super::live_activity::ActivityFeed) -> Self {
+        Self {
+            feed: Some(feed),
+            ..Self::default()
+        }
+    }
+
+    fn clock(&mut self, agent: &crate::probe::Agent) -> Option<portal_types::WorkerClock> {
+        use portal_types::agents::{ActivityDetail, TurnClock};
+        let session = super::details::Session::of(agent)?;
+        let now = crate::ledger::now_ms();
+        let view = self
+            .feed
+            .as_ref()?
+            .borrow()
+            .current_view(&agent.pane)
+            .ok()??;
+        if view.session? != serde_json::to_string(&session).ok()? || agent.state == "blocked" {
+            return None;
+        }
+        let ActivityDetail::Available {
+            state,
+            valid_for_ms,
+            ..
+        } = view.detail
+        else {
+            return None;
+        };
+        let (key, reader) = self.readers.entry(agent.pane.clone()).or_insert_with(|| {
+            (
+                session.clone(),
+                crate::activity::Incremental::timestamps_only(),
+            )
+        });
+        if *key != session {
+            *key = session;
+            *reader = crate::activity::Incremental::timestamps_only();
+        }
+        let history = reader
+            .advance(agent.agent.as_deref()?, agent.transcript.as_deref()?)
+            .ok()?;
+        Some(portal_types::WorkerClock {
+            clock: TurnClock::from_history(&history.turns, state.phase)?,
+            valid_until_ms: now.saturating_add(valid_for_ms),
+        })
+    }
+}
+
 pub(super) fn serialize_host(
     ledger: &Ledger,
     report: &SnapshotReport,
     status: Option<&Status>,
     todos: Option<&[TodoSections]>,
+    clocks: &mut WorkerClocks,
 ) -> crate::error::Result<Value> {
     let mut value = serde_json::to_value(report)?;
-    let extension = match capture(ledger, status, report.snapshot.as_ref(), todos) {
+    let extension = match capture(ledger, status, report.snapshot.as_ref(), todos, clocks) {
         Ok(Evidence {
             hostname,
             owned,
@@ -95,6 +154,7 @@ fn capture(
     status: Option<&Status>,
     snapshot: Option<&Snapshot>,
     todos: Option<&[TodoSections]>,
+    clocks: &mut WorkerClocks,
 ) -> Result<Evidence, &'static str> {
     let status = status.ok_or("status unavailable")?;
     let snapshot = snapshot.ok_or("host sample unavailable")?;
@@ -103,7 +163,10 @@ fn capture(
     if hostname.is_empty() || hostname == "unknown" {
         return Err("hostname unavailable");
     }
-    let mut executions = agent_executions(ledger, snapshot, todos)?;
+    let mut executions = agent_executions(ledger, snapshot, todos, clocks)?;
+    clocks
+        .readers
+        .retain(|pane, _| executions.iter().any(|exec| exec.pane == *pane));
     executions.extend(job_executions(ledger, &snapshot.jobs)?);
     executions.sort_by(|a, b| a.request_id.cmp(&b.request_id).then(a.pane.cmp(&b.pane)));
     Ok(Evidence {
@@ -215,6 +278,7 @@ fn agent_executions(
     ledger: &Ledger,
     snapshot: &Snapshot,
     todos: &[TodoSections],
+    clocks: &mut WorkerClocks,
 ) -> Result<Vec<Execution>, &'static str> {
     let mut executions = Vec::new();
     for agent in &snapshot.probe.agent_panes {
@@ -245,6 +309,7 @@ fn agent_executions(
             pane: agent.pane.clone(),
             title,
             job_label: None,
+            turn_clock: clocks.clock(agent),
         });
     }
     Ok(executions)
@@ -290,6 +355,7 @@ fn job_executions(ledger: &Ledger, jobs: &[Job]) -> Result<Vec<Execution>, &'sta
                 pane: job.pane.clone(),
                 title,
                 job_label: Some(job_label),
+                turn_clock: None,
             })
         })
         .collect())
