@@ -2,22 +2,6 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.41.0](https://github.com/oisin-ee/dogsled/compare/v0.40.0...v0.41.0) (2026-11-20)
-
-
-### Features
-
-* **web:** instant send, per-agent drafts, and fast agent switching ([#392](https://github.com/oisin-ee/dogsled/issues/392)) ([f83c46f](https://github.com/oisin-ee/dogsled/commit/f83c46f31cd64140ac88765be0a54ec503ff4b33))
-
-
-### Bug Fixes
-
-* **close:** skip ignored paths, settle refused jobs, and retry failed teardowns ([#395](https://github.com/oisin-ee/dogsled/issues/395)) ([4366ff8](https://github.com/oisin-ee/dogsled/commit/4366ff8d459fbc4e14fbbbecfbc9151b8e1fd918))
-* **observation:** capture pane detail when its live activity changes ([#391](https://github.com/oisin-ee/dogsled/issues/391)) ([1062594](https://github.com/oisin-ee/dogsled/commit/1062594fca4b5eb15c4e61fb4ea9eb3c8c02c413))
-* **pi:** keep an interview waiting across a dogsled serve restart ([#393](https://github.com/oisin-ee/dogsled/issues/393)) ([721da4d](https://github.com/oisin-ee/dogsled/commit/721da4d87b3f50a26254eebd9b1b292d09061fb9))
-* **portal:** keep fleet workers and jobs with their owners ([#389](https://github.com/oisin-ee/dogsled/issues/389)) ([5473e26](https://github.com/oisin-ee/dogsled/commit/5473e2620cb16e72cba8c86b323ff75cc1309f9c))
-* **web:** keep Metrics and New at the top left ([#394](https://github.com/oisin-ee/dogsled/issues/394)) ([28453d3](https://github.com/oisin-ee/dogsled/commit/28453d3225b30cf55a893f550fabda2df409d6bb))
-
 ## [0.40.0](https://github.com/oisin-ee/dogsled/compare/v0.39.0...v0.40.0) (2026-11-19)
 
 
