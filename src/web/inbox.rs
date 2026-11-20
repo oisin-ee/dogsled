@@ -285,6 +285,7 @@ mod tests {
         AgentView {
             host: host.into(),
             pane: pane.into(),
+            model: None,
             name: Some("worker".into()),
             title: None,
             agent: None,
@@ -655,6 +656,7 @@ mod tests {
         let blocked_agent = AgentView {
             host: "local".into(),
             pane: "worker-pane".into(),
+            model: None,
             name: Some("worker".into()),
             title: None,
             agent: None,

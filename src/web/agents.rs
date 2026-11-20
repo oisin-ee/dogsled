@@ -779,6 +779,7 @@ fn view_of(
         pane: agent["pane_id"].as_str().unwrap_or_default().to_owned(),
         name: agent["name"].as_str().map(str::to_owned),
         title,
+        model: None,
         agent: agent["agent"].as_str().map(str::to_owned),
         state: agent["agent_status"]
             .as_str()

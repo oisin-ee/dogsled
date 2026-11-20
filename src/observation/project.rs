@@ -572,14 +572,16 @@ fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option
     let mut agents = local.agents.clone()?;
     // Each host publishes how far its launch for a pane got, so a reader can tell a launched
     // worker from a lead even when no ledger row names the pane.
-    let launches = reports
-        .iter()
-        .find(|report| report.host.is_local())
+    let local_report = reports.iter().find(|report| report.host.is_local());
+    let launches = local_report
         .and_then(|report| report.probe.as_ref())
         .map(|probe| probe.agent_panes.as_slice())
         .unwrap_or_default();
     for agent in &mut agents {
         let source = launches.iter().find(|launched| launched.pane == agent.pane);
+        agent.model = source
+            .filter(|_| local_report.is_some_and(|r| r.fresh(now)))
+            .and_then(|a| a.session.label());
         agent.launch = source.and_then(|launched| launched.launch_progress.clone());
         agent.reply = source
             .filter(|source| source.state == agent.state)
@@ -592,6 +594,7 @@ fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option
                 pane: agent.pane.clone(),
                 name: agent.name.clone(),
                 title: None,
+                model: report.fresh(now).then(|| agent.session.label()).flatten(),
                 agent: agent.agent.clone(),
                 state: if report.fresh(now) {
                     agent.state.clone()

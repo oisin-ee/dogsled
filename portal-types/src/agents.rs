@@ -51,6 +51,9 @@ pub struct AgentView {
     /// The task the agent was given: the first line of its first own message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Model label from the execution host's current transcript sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub state: String,

@@ -92,12 +92,13 @@ fn capture(
 #[test]
 fn owned_work_wire_capture_deduplicates_admission_and_filters_origin() {
     let ledger = Ledger::temporary();
-    let tickets = [
+    let mut tickets = [
         pending("b-pending", &agent_action()),
         pending("a-admitted", &agent_action()),
         pending("place", &Action::Place),
         pending("landed", &agent_action()),
     ];
+    tickets[1].request.branch = Some("feat/calendar".into());
     crate::store::write(&ledger, |tx| crate::tables::sync_tickets(tx, &tickets)).unwrap();
     let admitted = Item {
         id: "a-admitted".into(),
@@ -143,11 +144,11 @@ fn owned_work_wire_capture_deduplicates_admission_and_filters_origin() {
         json!([
             {"request_id":"a-admitted", "kind":"agent", "owner_pane":"owner",
                 "owner_session":"origin-session", "pane":"worker-pane", "phase":"admitted",
-                "name":"admitted worker", "repository":"github.com/oisin-ee/dogsled"},
+                "name":"admitted worker", "branch":"feat/calendar", "repository":"github.com/oisin-ee/dogsled"},
             {"request_id":"b-pending", "kind":"agent", "owner_pane":"owner", "owner_session":null,
                 "pane":null, "phase":"pending", "name":"worker", "repository":"github.com/oisin-ee/dogsled"},
             {"request_id":"c-retained", "kind":"agent", "owner_pane":"owner", "owner_session":"origin-session",
-                "pane":null, "phase":"retained", "name":"admitted worker", "repository":null},
+                "pane":null, "phase":"retained", "name":"admitted worker", "branch":"topic", "repository":null},
         ])
     );
     assert_eq!(owned_work::decode(&host).unwrap().owned.len(), 3);

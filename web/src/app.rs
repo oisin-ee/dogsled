@@ -17,7 +17,6 @@ use crate::board::{
 };
 use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::button::{Button, ButtonVariant};
-use crate::components::item::{Item, ItemContent, ItemSize, ItemTitle, ItemVariant};
 use crate::components::progress::Progress;
 use crate::components::scroll_area::ScrollArea;
 use crate::components::sidebar::{
@@ -553,7 +552,11 @@ pub fn App() -> Element {
             .sum::<usize>()
     });
     let to_land = groups.as_ref().map_or(0, |groups| {
-        groups.repos.iter().map(|repo| repo.to_land).sum::<usize>()
+        groups
+            .repos
+            .iter()
+            .map(|repo| repo.to_land.len())
+            .sum::<usize>()
     });
     let working = agents()
         .iter()
@@ -603,7 +606,8 @@ pub fn App() -> Element {
     // Leads are counted before waiting agents leave their repository groups.
     let waiting = groups
         .as_mut()
-        .map(|groups| take_waiting(groups, &items))
+        .zip(view.as_ref())
+        .map(|(groups, board)| take_waiting(groups, &items, &board.hosts, &agents()))
         .unwrap_or_default();
 
     let unavailable =
@@ -627,11 +631,6 @@ pub fn App() -> Element {
                         Some(groups) => rsx! {
                             for (index, group) in groups.repos.into_iter().enumerate() {
                                 RepoGroup { key: "{index}:{group.repository:?}", group, inbox: items.clone() }
-                            }
-                            if groups.finished_without_repository > 0 {
-                                Item { variant: ItemVariant::Muted, size: ItemSize::Sm, "data-part": "finished-branches",
-                                    ItemContent { ItemTitle { "{groups.finished_without_repository} finished branches have no repository" } }
-                                }
                             }
                         },
                         None => rsx! { Skeleton { role: "status", aria_label: "Loading agents" } },
@@ -790,6 +789,7 @@ pub(crate) fn NeedsYou(
                                 }
                                 span { class: "inbox-title", "{item.title}" }
                                 if repository.is_some() { span { class: "agent-title", "{agent.row.title}" } }
+                                span { class: "agent-runtime", title: "{agent.row.runtime}", "{agent.row.runtime}" }
                             };
                             rsx! {
                                 SidebarMenuItem { key: "{address.host}:{address.pane}", class: "waiting-agent", "data-open": open,

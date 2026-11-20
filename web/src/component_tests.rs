@@ -1070,6 +1070,7 @@ fn worker_lead() -> crate::board::NavigationRow {
     crate::board::NavigationRow {
         pane: Some("lead".into()),
         title: "Ship the portal".into(),
+        runtime: "Host: local · Model: unknown".into(),
         role: "lead".into(),
         host: "local".into(),
         state: "working".into(),
@@ -1280,6 +1281,44 @@ fn worker_sidebar_root(
 }
 
 #[test]
+fn sidebar_identifies_agents_and_retained_branches() -> Result<(), serde_json::Error> {
+    let mut closed = worker_row("old", "closed")?;
+    closed.group = portal_types::GroupView::ToLand;
+    closed.branch = Some("fix/checkout".into());
+    let board = portal_types::BoardView {
+        hosts: serde_json::from_value(
+            serde_json::json!([{"label":"local","hostname":"MacBook","service":"up","reachable":true,"cores":1,"eligible":true}]),
+        )?,
+        generated_ms: 0,
+        repos: vec![portal_types::RepoGroup {
+            repository: None,
+            todos: vec![],
+            rows: vec![closed],
+        }],
+    };
+    let agents = serde_json::from_value::<Vec<_>>(serde_json::json!([
+        {"host":"local","pane":"lead","name":"Ship it","state":"working","model":"opus 5"},
+        {"host":"netcup","pane":"lead","state":"idle"}
+    ]))?;
+    let mut nav = crate::board::navigation_groups(&board, &agents);
+    let mut dom =
+        VirtualDom::new_with_props(worker_sidebar_root, (nav.repos.remove(0), Vec::new()));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    for label in [
+        "Repository unknown",
+        "<details",
+        "1 branch to review",
+        "fix/checkout",
+        "Host: MacBook · Model: opus 5",
+        "Host: netcup · Model: unknown",
+    ] {
+        assert!(html.contains(label), "missing {label}: {html}");
+    }
+    Ok(())
+}
+
+#[test]
 fn resource_holds_are_excluded_from_owned_workers_and_sidebar_summary()
 -> Result<(), serde_json::Error> {
     let mut job = worker_row("job", "done")?;
@@ -1309,7 +1348,7 @@ fn resource_holds_are_excluded_from_owned_workers_and_sidebar_summary()
     let repo = &navigation.repos[0];
     assert_eq!(repo.agent_count(), 1);
     assert_eq!(repo.rows.len(), 1);
-    assert_eq!(repo.to_land, 1);
+    assert!(repo.to_land.is_empty(), "jobs are not branches");
     let lead = &repo.rows[0];
     assert_eq!(
         lead.workers
@@ -1356,7 +1395,6 @@ fn unowned_resource_holds_never_become_sidebar_rows() -> Result<(), serde_json::
         };
         let navigation = crate::board::navigation_groups(&board, &[]);
         assert!(navigation.repos.is_empty());
-        assert_eq!(navigation.finished_without_repository, 0);
     }
     Ok(())
 }
@@ -1379,7 +1417,7 @@ fn sidebar_worker_summary_rolls_up_attention_and_keeps_the_lead_active() {
     let repo = crate::board::NavigationRepo {
         repository: Some("owner/repo".into()),
         rows: vec![lead],
-        to_land: 0,
+        to_land: Vec::new(),
     };
     assert_eq!(repo.agent_count(), 1);
     let mut dom = VirtualDom::new_with_props(worker_sidebar_root, (repo, Vec::new()));

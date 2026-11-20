@@ -28,6 +28,8 @@ pub(crate) struct Owned {
     pub pane: Option<String>,
     pub phase: Phase,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     pub repository: Option<String>,
 }
 
@@ -207,6 +209,7 @@ fn pending(request: &Request) -> Option<Owned> {
         pane: None,
         phase: Phase::Pending,
         name,
+        branch: request.branch.clone(),
         repository: repository(request),
     })
 }
@@ -258,6 +261,11 @@ fn origin(status: &Status) -> Vec<Owned> {
                         .and_then(program)
                         .unwrap_or_else(|| "job".into()),
                 },
+                branch: item
+                    .branch
+                    .as_ref()
+                    .map(|branch| branch.name.clone())
+                    .or_else(|| requests.get(request_id)?.branch.clone()),
                 repository: requests
                     .get(request_id)
                     .and_then(|request| repository(request))
@@ -300,7 +308,9 @@ fn agent_executions(
         let title = todos
             .iter()
             .find(|todo| todo.pane == agent.pane && !todo.current.trim().is_empty())
-            .map_or(name, |todo| todo.current.clone());
+            .map(|todo| todo.current.clone())
+            .or_else(|| launch.unit.map(|unit| unit.exported.contract.title))
+            .unwrap_or(name);
         executions.push(Execution {
             request_id: launch.id,
             kind: Kind::Agent,

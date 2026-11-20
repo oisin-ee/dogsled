@@ -620,12 +620,16 @@ fn closed_owner_requests_leave_publication_but_keep_durable_history() {
 
 #[test]
 fn fleet_agent_projection_keeps_same_pane_on_distinct_hosts() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    fixture.local.probe.as_mut().unwrap().agent_panes[0]
+        .session
+        .model = Some("local-model".into());
     let mut input = fixture.input();
     let mut projector = project::Projector::default();
     let local = projector.inputs(&fixture.fleet(), &input);
     let mut peer = host("peer", "working");
     peer.host.label = "netcup".into();
+    peer.probe.as_mut().unwrap().agent_panes[0].session.model = Some("peer-model".into());
     peer.probe.as_mut().unwrap().agent_panes[0].pane = "local-worker".into();
     let reports = vec![fixture.local.clone(), peer];
     project::derive(
@@ -640,12 +644,15 @@ fn fleet_agent_projection_keeps_same_pane_on_distinct_hosts() {
     assert_eq!(agents[0]["host"], "local");
     assert_eq!(agents[1]["host"], "netcup");
     assert_eq!(agents[0]["pane"], agents[1]["pane"]);
+    assert_eq!(agents[0]["model"], "local-model");
+    assert_eq!(agents[1]["model"], "peer-model");
     assert_eq!(*agents, input.views["agents"]["data"]);
     assert_eq!(agents[1]["repository"], "github.com/owner/repository");
     // A peer-only composition must use the current time, not the last local capture time.
     input.published_ms += crate::node::STALE_MS + 1;
     project::derive(&local, reports, &(&fixture.policy).into(), &mut input).unwrap();
     assert_eq!(input.views["agents"]["data"][1]["state"], "unknown");
+    assert!(input.views["agents"]["data"][1].get("model").is_none());
 }
 
 #[test]
