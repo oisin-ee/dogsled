@@ -589,6 +589,23 @@ pub fn App() -> Element {
             },
             header { class: "console-topbar",
                 a { href: "/", aria_label: "Homepage", "Dogsled" }
+                div { class: "console-actions",
+                    Button { class: "console-metrics", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: metrics_open(),
+                        onclick: move |_| {
+                            selected.set(None);
+                            selection.set(None);
+                            composing.set(false);
+                            metrics_open.set(true);
+                            panel.set(LeadPanel::Chat);
+                        },
+                        "Metrics"
+                    }
+                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
+                        onclick: move |_| start_new(),
+                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                        "New"
+                    }
+                }
                 if stream_paused() { Status { "Live updates paused, retrying" } }
                 div { class: "console-hosts", aria_label: "Host load",
                     if let Some(view) = &view {
@@ -606,23 +623,6 @@ pub fn App() -> Element {
                                 }
                             }
                         }
-                    }
-                }
-                div { class: "console-actions",
-                    Button { class: "console-metrics", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: metrics_open(),
-                        onclick: move |_| {
-                            selected.set(None);
-                            selection.set(None);
-                            composing.set(false);
-                            metrics_open.set(true);
-                            panel.set(LeadPanel::Chat);
-                        },
-                        "Metrics"
-                    }
-                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
-                        onclick: move |_| start_new(),
-                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
-                        "New"
                     }
                 }
             }
