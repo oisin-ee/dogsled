@@ -462,6 +462,7 @@ impl Observation {
             System::default(),
         )?;
         let details = crate::observation::details::Collector::with_activity(feed.clone())?;
+        let collector = crate::observation::collect::Collector::with_activity(feed.clone());
         server.activity(commands, feed);
         server.details(details.interests.clone());
         publisher.details(details.payloads.clone());
@@ -478,7 +479,7 @@ impl Observation {
         Ok(Self {
             publisher,
             _server: server,
-            collector: crate::observation::collect::Collector::default(),
+            collector,
             exchange: Exchange {
                 peers: crate::observation::peers_runtime::Observers::default(),
                 branches: crate::observation::peers::Branches::default(),

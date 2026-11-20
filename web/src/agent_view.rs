@@ -13,7 +13,7 @@ use dioxus_primitives::scroll_area::ScrollDirection;
 use dioxus_sdk_time::{sleep, use_interval};
 use gloo_net::http::Request;
 use js_sys::wasm_bindgen::JsCast;
-use portal_types::agents::{self as wire, BlockedPrompt, Role, Turn};
+use portal_types::agents::{self as wire, BlockedPrompt, Role, Turn, current_turn};
 use portal_types::questions::{Pending, PendingList};
 use portal_types::reviews::{ReviewList, ReviewSummary};
 use portal_types::{TodoStatusView, TodoView};
@@ -1552,7 +1552,7 @@ fn count_label(thoughts: usize, calls: usize) -> String {
     )
 }
 
-fn elapsed_label(seconds: u64) -> String {
+pub(crate) fn elapsed_label(seconds: u64) -> String {
     if seconds >= 60 {
         format!("{}m {}s", seconds / 60, seconds % 60)
     } else {
@@ -1560,19 +1560,11 @@ fn elapsed_label(seconds: u64) -> String {
     }
 }
 
-fn latest_record_time(turns: &[Turn]) -> Option<u64> {
-    turns
-        .iter()
-        .filter(|turn| turn.role != Role::User)
-        .filter_map(|turn| turn.timestamp.as_ref().map(|time| time.ms))
-        .max()
-}
-
 fn worked_label(owner: &Turn, turns: &[Turn]) -> String {
     let span = owner
         .timestamp
         .as_ref()
-        .zip(latest_record_time(turns))
+        .zip(wire::latest_record_time(turns))
         .and_then(|(start, end)| end.checked_sub(start.ms))
         .map(|ms| format!(" for {}", elapsed_label(ms / 1000)))
         .unwrap_or_default();
@@ -1828,35 +1820,22 @@ fn LiveActivity(
     let turn = snapshot
         .as_ref()
         .map_or(&[][..], |snapshot| current_turn(&snapshot.turns));
-    let end = if matches!(&live, Live::Detail(state) if state.phase == wire::LivePhase::Idle) {
-        latest_record_time(turn)
-    } else {
-        Some(now())
+    let elapsed_seconds = match &live {
+        Live::Detail(state) => {
+            wire::TurnClock::from_history(turn, state.phase).and_then(|clock| clock.seconds(now()))
+        }
+        _ => None,
     };
-    let elapsed_seconds = turn
-        .first()
-        .filter(|turn| turn.role == Role::User)
-        .and_then(|turn| turn.timestamp.as_ref())
-        .zip(end)
-        .and_then(|(start, end)| end.checked_sub(start.ms))
-        .map(|ms| ms / 1000);
     rsx! { ActivityRow { live, coarse, connected, waiting, turns: turn.to_vec(), elapsed_seconds, step } }
 }
 
-fn current_turn(turns: &[Turn]) -> &[Turn] {
-    &turns[turns
-        .iter()
-        .rposition(|turn| turn.role == Role::User)
-        .unwrap_or(0)..]
-}
-
 #[cfg(target_arch = "wasm32")]
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     js_sys::Date::now() as u64
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

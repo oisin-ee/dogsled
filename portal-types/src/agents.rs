@@ -163,6 +163,61 @@ pub struct Turn {
     pub tool: Option<ToolSummary>,
 }
 
+/// Transcript clock for the latest user turn. Running clocks use the viewer's wall clock;
+/// finished clocks stop at the latest dated non-user record in that turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnClock {
+    Running { started_ms: u64 },
+    Finished { elapsed_ms: u64 },
+}
+
+impl TurnClock {
+    #[must_use]
+    pub fn from_history(turns: &[Turn], phase: LivePhase) -> Option<Self> {
+        let (user, work) = current_turn(turns).split_first()?;
+        let started_ms = user
+            .timestamp
+            .as_ref()
+            .filter(|_| user.role == Role::User)?
+            .ms;
+        if phase == LivePhase::Idle {
+            Some(Self::Finished {
+                elapsed_ms: latest_record_time(work)?.checked_sub(started_ms)?,
+            })
+        } else {
+            Some(Self::Running { started_ms })
+        }
+    }
+
+    #[must_use]
+    pub fn seconds(self, now_ms: u64) -> Option<u64> {
+        Some(
+            match self {
+                Self::Running { started_ms } => now_ms.checked_sub(started_ms)?,
+                Self::Finished { elapsed_ms } => elapsed_ms,
+            } / 1000,
+        )
+    }
+}
+
+#[must_use]
+pub fn current_turn(turns: &[Turn]) -> &[Turn] {
+    &turns[turns
+        .iter()
+        .rposition(|turn| turn.role == Role::User)
+        .unwrap_or(0)..]
+}
+
+#[must_use]
+pub fn latest_record_time(turns: &[Turn]) -> Option<u64> {
+    turns
+        .iter()
+        .filter(|turn| turn.role != Role::User)
+        .filter_map(|turn| turn.timestamp.as_ref().map(|time| time.ms))
+        .max()
+}
+
 /// An agent's turns from its transcript, oldest first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversation {

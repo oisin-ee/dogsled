@@ -150,6 +150,7 @@ impl From<&board::Row> for RowView {
             activity: row.activity.clone(),
             age_ms: row.age_ms,
             quiet_ms: row.quiet_ms,
+            turn_clock: None,
             ahead: row.ahead,
             dirty: row.dirty,
             repository: row.repository.clone(),

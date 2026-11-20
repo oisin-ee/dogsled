@@ -108,6 +108,7 @@ fn imported(item: &Owned) -> RowView {
         activity: String::new(),
         age_ms: 0,
         quiet_ms: None,
+        turn_clock: None,
         ahead: None,
         dirty: false,
         repository: item.repository.clone(),
@@ -148,6 +149,9 @@ fn apply(
                 .as_ref()
                 .and_then(|p| p.agent_panes.iter().find(|a| a.pane == exec.pane))
             {
+                if !row.ownership_stale {
+                    row.turn_clock = exec.turn_clock;
+                }
                 if !origin.host.is_local() {
                     row.state.clone_from(&agent.state);
                 }

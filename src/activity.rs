@@ -395,6 +395,20 @@ impl ParsedLine {
         }
         parsed
     }
+
+    fn for_reader(agent: &str, offset: u64, line: &[u8], timestamps_only: bool) -> Self {
+        let mut parsed = Self::new(agent, offset, &String::from_utf8_lossy(line));
+        if timestamps_only {
+            for record in &mut parsed.records {
+                record.text = String::new();
+                if let Some(tool) = &mut record.tool {
+                    tool.call = None;
+                    tool.output = None;
+                }
+            }
+        }
+        parsed
+    }
 }
 
 #[cfg(test)]
@@ -446,6 +460,7 @@ const CHUNK_BYTES: u64 = 1024 * 1024;
 /// Unchanged metadata needs no byte reads. An unfinished line is retained.
 #[derive(Debug, Default)]
 pub(crate) struct Incremental {
+    timestamps_only: bool,
     stamp: Option<std::fs::Metadata>,
     agent: String,
     offset: u64,
@@ -464,6 +479,15 @@ pub(crate) struct Incremental {
 }
 
 impl Incremental {
+    /// Use the same record window and pairing as conversation detail, without retaining
+    /// message bodies or tool output for an unopened worker's clock.
+    pub(crate) fn timestamps_only() -> Self {
+        Self {
+            timestamps_only: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn advance(&mut self, agent: &str, path: &str) -> std::io::Result<&History> {
         self.advance_with_limit(agent, path, CONVERSATION_BYTES)
     }
@@ -549,7 +573,7 @@ impl Incremental {
                     self.line_start = offset;
                     self.pending.extend_from_slice(line);
                 } else {
-                    let parsed = ParsedLine::new(agent, offset, &String::from_utf8_lossy(line));
+                    let parsed = ParsedLine::for_reader(agent, offset, line, self.timestamps_only);
                     if !parsed.records.is_empty() || parsed.truncated {
                         self.rows.push_front(parsed);
                     }
@@ -618,10 +642,11 @@ impl Incremental {
                 }
                 if part.last() == Some(&b'\n') {
                     if self.line_start >= floor {
-                        let parsed = ParsedLine::new(
+                        let parsed = ParsedLine::for_reader(
                             agent,
                             self.line_start,
-                            &String::from_utf8_lossy(&self.pending),
+                            &self.pending,
+                            self.timestamps_only,
                         );
                         if !parsed.records.is_empty() || parsed.truncated {
                             self.rows.push_back(parsed);
@@ -646,11 +671,7 @@ impl Incremental {
         let preview = self.line_start >= floor
             && window.push(
                 agent,
-                ParsedLine::new(
-                    agent,
-                    self.line_start,
-                    &String::from_utf8_lossy(&self.pending),
-                ),
+                ParsedLine::for_reader(agent, self.line_start, &self.pending, self.timestamps_only),
             );
         if preview {
             for line in self.rows.iter().rev() {

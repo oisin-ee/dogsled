@@ -97,6 +97,23 @@ pub enum GroupView {
     Waiting,
 }
 
+/// A worker clock is usable only while its sampled live phase is valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerClock {
+    pub clock: agents::TurnClock,
+    pub valid_until_ms: u64,
+}
+
+impl WorkerClock {
+    #[must_use]
+    pub fn seconds(self, now_ms: u64) -> Option<u64> {
+        if now_ms >= self.valid_until_ms {
+            return None;
+        }
+        self.clock.seconds(now_ms)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowView {
     pub group: GroupView,
@@ -126,6 +143,8 @@ pub struct RowView {
     pub age_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_clock: Option<WorkerClock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ahead: Option<u64>,
     #[serde(default)]
