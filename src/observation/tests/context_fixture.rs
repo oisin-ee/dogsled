@@ -255,7 +255,11 @@ impl Fixture {
         let frame = Publisher::new().unwrap().replace(input).unwrap();
         let mut value = serde_json::to_value(&*frame).unwrap();
         value["epoch"] = json!("context-pre-handoff");
-        normalize(&mut value, self.root.to_str().unwrap());
+        normalize(
+            &mut value,
+            self.root.to_str().unwrap(),
+            &crate::inbox::hostname(),
+        );
         value
     }
 }
@@ -266,12 +270,14 @@ impl Drop for Fixture {
     }
 }
 
-fn normalize(value: &mut Value, root: &str) {
+/// Replace what the test host decides: the temporary root and this machine's hostname.
+fn normalize(value: &mut Value, root: &str, hostname: &str) {
     match value {
+        Value::String(text) if text == hostname => *text = "fixture-host".into(),
         Value::String(text) => *text = text.replace(root, "/fixture/context"),
         Value::Array(values) => {
             for value in values {
-                normalize(value, root);
+                normalize(value, root, hostname);
             }
         }
         Value::Object(values) => {
@@ -279,7 +285,7 @@ fn normalize(value: &mut Value, root: &str) {
                 if key == "epoch" {
                     *value = json!("context-pre-handoff");
                 } else {
-                    normalize(value, root);
+                    normalize(value, root, hostname);
                 }
             }
         }
