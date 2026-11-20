@@ -787,6 +787,7 @@ fn view_of(
         cwd: agent["cwd"].as_str().map(str::to_owned),
         repository,
         blocked,
+        reply: None,
         launch: None,
     }
 }

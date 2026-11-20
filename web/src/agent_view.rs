@@ -1012,6 +1012,10 @@ fn AgentSession(
             waiting: pending.as_ref().map(|pending| pending.state().to_owned()),
             step: todo_title.map(str::to_owned) }
     };
+    let read_edge = current
+        .as_ref()
+        .filter(|_| reachable() && tab == Tab::Conversation)
+        .and_then(|agent| crate::unread::matching_reply(agent, retained.as_deref()?));
     let chat = rsx! {
         div { class: "lead-chat",
                 if tab == Tab::Pending {
@@ -1035,7 +1039,7 @@ fn AgentSession(
                 } else {
                     ScrollArea { class: "conversation-scroll", direction: ScrollDirection::Vertical, attributes: tracking,
                         Conversation { snapshot: retained.clone(), loading: transcript_loading, assistant,
-                            live, coarse: coarse.clone(), unsent: unsent.clone() }
+                            live, coarse: coarse.clone(), unsent: unsent.clone(), read_edge: read_edge.clone() }
                     }
                 }
             if tab == Tab::Conversation {
@@ -1440,6 +1444,8 @@ pub(crate) fn Conversation(
     assistant: String,
     live: ReadSignal<Live>,
     #[props(default = "idle".to_owned())] coarse: String,
+    /// Receipt key for the verified final reply in this snapshot.
+    read_edge: Option<String>,
     /// Sent messages the transcript does not show yet. They follow the live edge.
     #[props(default)]
     unsent: Vec<Outgoing>,
@@ -1447,7 +1453,7 @@ pub(crate) fn Conversation(
     let mut limit = use_signal(|| HISTORY_WINDOW);
     let active = use_memo(use_reactive(&coarse, move |coarse| match &*live.read() {
         Live::Detail(state) => state.phase != wire::LivePhase::Idle,
-        _ => coarse != "idle",
+        _ => !matches!(coarse.as_str(), "idle" | "done"),
     }));
     let active = active();
     let turns = snapshot
@@ -1460,6 +1466,13 @@ pub(crate) fn Conversation(
     let earlier = groups.get(..first).map_or(0, |groups| {
         groups.iter().map(|group| group.len()).sum::<usize>()
     });
+    let edge_turn = turns.iter().rev().find(|turn| turn.role != Role::Context);
+    let record = |turn: &Turn| {
+        let receipt = (!active && edge_turn.is_some_and(|edge| std::ptr::eq(edge, turn)))
+            .then(|| read_edge.clone())
+            .flatten();
+        conversation_record(turn, &assistant, receipt)
+    };
     let records = groups.iter().enumerate().skip(first).flat_map(|(index, group)| {
         let final_reply = group.iter().rposition(|turn| turn.role == Role::Assistant);
         let finished = !(active && index + 1 == groups.len());
@@ -1467,15 +1480,15 @@ pub(crate) fn Conversation(
         if let Some(final_reply) = final_reply.filter(|&reply| {
             finished && group[0].role == Role::User && group[1..reply].iter().any(is_work)
         }) {
-            records.push(conversation_record(&group[0], &assistant));
+            records.push(record(&group[0]));
             let work = &group[1..final_reply];
             let label = worked_label(&group[0], group);
             records.push(rsx! {
                 ToolRecords { key: "work:{group[0].id}", turns: work.to_vec(), assistant: assistant.clone(), label }
             });
-            records.extend(group[final_reply..].iter().map(|turn| conversation_record(turn, &assistant)));
+            records.extend(group[final_reply..].iter().map(&record));
         } else {
-            records.extend(group.iter().map(|turn| conversation_record(turn, &assistant)));
+            records.extend(group.iter().map(&record));
         }
         records
     }).collect::<Vec<_>>();
@@ -1509,11 +1522,11 @@ fn is_work(turn: &Turn) -> bool {
     matches!(turn.role, Role::Thinking | Role::Tool)
 }
 
-fn conversation_record(turn: &Turn, assistant: &str) -> Element {
+fn conversation_record(turn: &Turn, assistant: &str, receipt: Option<String>) -> Element {
     if turn.role == Role::Tool {
         rsx! { ToolRecord { key: "{turn.id}", turn: turn.clone() } }
     } else {
-        rsx! { MessageRecord { key: "{turn.id}", turn: turn.clone(), assistant: assistant.to_owned() } }
+        rsx! { MessageRecord { key: "{turn.id}", turn: turn.clone(), assistant: assistant.to_owned(), receipt } }
     }
 }
 
@@ -1600,7 +1613,7 @@ fn source_label(turn: &Turn, assistant: &str) -> (String, String, bool) {
 }
 
 #[component]
-fn MessageRecord(turn: Turn, assistant: String) -> Element {
+fn MessageRecord(turn: Turn, assistant: String, receipt: Option<String>) -> Element {
     let (author, source, owner) = source_label(&turn, &assistant);
     // Polls, activity, and attribution changes must not reparse unchanged Markdown.
     let markdown = use_memo(use_reactive(&turn.text, |text| {
@@ -1613,6 +1626,9 @@ fn MessageRecord(turn: Turn, assistant: String) -> Element {
             div { class: "conversation-body",
                 div { class: "conversation-meta", strong { "{author}" } span { "{source}" } }
                 div { class: "markdown-body", dangerous_inner_html: markdown() }
+                if let Some(receipt) = receipt {
+                    dogsled-read-edge { key: "{receipt}", "data-receipt": receipt, "aria-hidden": "true" }
+                }
             }
         }
     }
@@ -1630,7 +1646,7 @@ fn ToolRecords(turns: Vec<Turn>, assistant: String, label: String) -> Element {
             Collapsible { class: "conversation-body", keep_mounted: true,
                 CollapsibleTrigger { "{label}" }
                 CollapsibleContent { "data-part": "turn-work",
-                    for turn in &turns { {conversation_record(turn, &assistant)} }
+                    for turn in &turns { {conversation_record(turn, &assistant, None)} }
                 }
             }
         }
@@ -2344,6 +2360,7 @@ mod tests {
             cwd: None,
             repository: None,
             blocked: None,
+            reply: None,
             launch: None,
         }
     }
@@ -2835,6 +2852,7 @@ mod tests {
             cwd: None,
             repository: None,
             blocked: None,
+            reply: None,
             launch: None,
         };
         assert!(!is_blocked(&agent));

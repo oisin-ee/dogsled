@@ -34,6 +34,13 @@ impl AgentAddress {
     }
 }
 
+/// Exact final record of an idle turn, qualified by the conversation session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyStamp {
+    pub session: String,
+    pub id: String,
+}
+
 /// One agent in the list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentView {
@@ -55,6 +62,8 @@ pub struct AgentView {
     /// Set only while the agent is blocked and its screen shows a prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<BlockedPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReplyStamp>,
     /// How far the Dogsled launch that owns the pane got: `allocating`, `allocated`,
     /// `attempted`, `confirmed` or `ambiguous`. A pane no launch started, such as a lead's,
     /// has none.
