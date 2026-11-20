@@ -2,42 +2,43 @@
 name: Dogsled
 description: The owner's console for a fleet of coding agents — what is waiting on you, who is working, and what they said.
 colors:
-  console-black: "#0e0f11"
-  panel-graphite: "#141518"
-  raised-graphite: "#1b1c20"
-  selection-graphite: "#22232a"
-  hairline: "#26272c"
-  console-white: "#e6e6e9"
-  muted-steel: "#9a9da6"
-  dim-steel: "#62656e"
-  signal-indigo: "#5e6ad2"
-  on-indigo: "#ffffff"
+  slate-ground: "#0f1626"
+  slate-panel: "#131b2e"
+  slate-raised: "#1a2339"
+  slate-selection: "#1f2943"
+  hairline: "#222c45"
+  hairline-strong: "#2c3754"
+  console-white: "#e8ecf5"
+  muted-steel: "#9aa3b9"
+  dim-steel: "#68728c"
+  signal-indigo: "#8b95ff"
+  on-indigo: "#0b0f2a"
   waiting-yellow: "#f2c94c"
-  running-green: "#4cb782"
+  running-green: "#4cc38a"
 typography:
   headline:
-    fontFamily: "Inter, system-ui, sans-serif"
-    fontSize: "16px"
+    fontFamily: "IBM Plex Sans, system-ui, sans-serif"
+    fontSize: "24px"
     fontWeight: 600
     lineHeight: 1.5
   title:
-    fontFamily: "Inter, system-ui, sans-serif"
-    fontSize: "14px"
+    fontFamily: "IBM Plex Sans, system-ui, sans-serif"
+    fontSize: "18px"
     fontWeight: 600
     lineHeight: 1.5
   body:
-    fontFamily: "Inter, system-ui, sans-serif"
+    fontFamily: "IBM Plex Sans, system-ui, sans-serif"
     fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.5
     fontFeature: "tnum"
   prose:
-    fontFamily: "Inter, system-ui, sans-serif"
-    fontSize: "14px"
+    fontFamily: "IBM Plex Sans, system-ui, sans-serif"
+    fontSize: "15px"
     fontWeight: 400
-    lineHeight: 1.75
+    lineHeight: 1.6
   label:
-    fontFamily: "Inter, system-ui, sans-serif"
+    fontFamily: "IBM Plex Sans, system-ui, sans-serif"
     fontSize: "12px"
     fontWeight: 500
     lineHeight: 1.5
@@ -53,6 +54,7 @@ rounded:
   md: "8px"
   pill: "9px"
   lg: "10px"
+  xl: "12px"
 spacing:
   xxs: "4px"
   xs: "6px"
@@ -73,20 +75,20 @@ components:
     padding: "0 16px"
     height: "40px"
   button-primary-disabled:
-    backgroundColor: "{colors.hairline}"
+    backgroundColor: "{colors.slate-raised}"
     textColor: "{colors.dim-steel}"
   button-icon:
     textColor: "{colors.muted-steel}"
-    rounded: "{rounded.sm}"
+    rounded: "{rounded.md}"
     size: "30px"
   segmented-tabs:
-    backgroundColor: "{colors.panel-graphite}"
+    backgroundColor: "{colors.slate-panel}"
     textColor: "{colors.muted-steel}"
     typography: "{typography.label}"
     rounded: "{rounded.track}"
     padding: "2px"
   segmented-tab-active:
-    backgroundColor: "{colors.hairline}"
+    backgroundColor: "{colors.slate-selection}"
     textColor: "{colors.console-white}"
     height: "24px"
   badge-count:
@@ -97,21 +99,27 @@ components:
     height: "18px"
   badge-count-waiting:
     backgroundColor: "{colors.waiting-yellow}"
-    textColor: "{colors.console-black}"
+    textColor: "{colors.slate-ground}"
   composer:
-    backgroundColor: "{colors.panel-graphite}"
-    rounded: "{rounded.lg}"
-    padding: "6px"
-  waiting-row:
+    backgroundColor: "{colors.slate-panel}"
+    rounded: "{rounded.xl}"
+    padding: "10px 10px 8px 14px"
+  waiting-card:
+    backgroundColor: "{colors.slate-raised}"
     textColor: "{colors.console-white}"
-    padding: "8px"
+    rounded: "{rounded.lg}"
+    padding: "10px 12px"
   owner-message:
-    backgroundColor: "{colors.raised-graphite}"
+    backgroundColor: "{colors.slate-raised}"
     textColor: "{colors.console-white}"
     rounded: "{rounded.lg}"
-    padding: "8px 12px"
+    padding: "10px 14px"
+  work-fold:
+    backgroundColor: "{colors.slate-panel}"
+    rounded: "{rounded.lg}"
+    padding: "9px 14px"
   review-note:
-    backgroundColor: "{colors.raised-graphite}"
+    backgroundColor: "{colors.slate-raised}"
     rounded: "{rounded.md}"
     padding: "10px 12px"
 ---
@@ -120,136 +128,146 @@ components:
 
 ## Overview
 
-**Creative North Star: "The Category Standard, Played Straight"**
+**Creative North Star: "The Quiet Console"**
 
-The portal is the dark agent console that Linear, Cursor and Conductor users already know, built without a twist. It is a work surface that an owner reads in seconds when they come back: the agents that need them first, then the lead's conversation, then its todo progress. Nothing on the screen performs; every pixel is a row, a rule, a label or a message.
+The portal is a dark agent console in the style that Linear, Cursor and Conductor users know. The conversation leads. When the owner comes back, they read what the lead said and reply. The agents that need the owner sit at the top of the sidebar. What the lead does now sits at the top of the right column.
 
-Density is high and calm. Text is small (13px) and tabular, panels are separated by 1px hairlines instead of cards, and the application always fits the viewport: the document never scrolls, and each column scrolls inside itself. Colour carries state, not decoration. Indigo marks selection, the primary action and done work; yellow means only "waiting on you"; green means only "running".
+The screen is calm, not dense. The interface text is 13px. Messages are 15px prose. Panels are separated by 1px hairlines. The application always fits the viewport: the document never scrolls, and each column scrolls inside itself. Colour shows state, not decoration. Indigo marks selection, the primary action and done work. Yellow means only "waiting on you". Green means only "running".
 
-The system is built on the official Dioxus components (dioxus-primitives). Their structure stays; the console changes only their look, from a CSS layer scoped to the console shell.
+The system uses the official Dioxus components (dioxus-primitives). Their structure stays. The console changes only their look, from a CSS layer that is scoped to the console shell.
+
+The owner chose this direction (B2, "Quiet console") on 2026-11-20. The mock is in `.impeccable/mocks/refresh-b/`.
 
 **Key Characteristics:**
-- Near-black ground with two raised graphite tones and 1px hairline rules.
+- A slate navy ground with two raised tones and 1px hairline rules.
 - Three state colours with one meaning each.
-- Inter at 12–16px for interface text; JetBrains Mono for code, paths and commands.
-- Gentle corners (4–10px), no shadows, no gradients.
-- Fixed-viewport application layout; columns scroll internally.
-- Columns fold into header tabs on smaller screens; the sidebar never folds.
+- IBM Plex Sans for the interface and prose. JetBrains Mono for code, branches, hosts and times.
+- The portal ships both fonts. It loads no fonts from the network.
+- Gentle corners (4–12px), no shadows, no gradients.
+- A fixed-viewport layout. Columns scroll internally.
+- On smaller screens, columns fold into header tabs. The sidebar never folds.
 
 ## Colors
 
-A graphite console with three signal colours, each reserved for one meaning.
+A slate console with three signal colours. Each colour has one meaning.
 
 ### Primary
-- **Signal Indigo** (`signal-indigo`): selection, focus rings, the primary action (Send, Approve plan), completed todo indicators, the "Recommended" badge and text selection.
+- **Signal Indigo** (`signal-indigo`): selection, focus rings, the primary action (New, Send, Approve plan), completed todo indicators, links, the "Recommended" badge and text selection.
 - **On Indigo** (`on-indigo`): text and icons on an indigo fill, and nowhere else.
 
 ### Secondary
-- **Waiting Yellow** (`waiting-yellow`): only for things waiting on the owner — the Needs you count when it is above zero, a waiting row's kind, the open waiting row's left edge and a waiting agent's dot.
+- **Waiting Yellow** (`waiting-yellow`): only for things that wait on the owner. Examples: the "need you" tally, the Needs you heading and count, the left edge of a waiting card, its kind line, and the dot and state line of a waiting agent.
 
 ### Tertiary
-- **Running Green** (`running-green`): only for running work — a running agent's dot and the host load meters.
+- **Running Green** (`running-green`): only for running work. Examples: a running agent's dot, the "working" tally, the in-progress todo ring, the time of the current turn and the host load meters.
 
 ### Neutral
-- **Console Black** (`console-black`): the ground behind every column and the text on a yellow badge.
-- **Panel Graphite** (`panel-graphite`): the sidebar, composer, segmented tab tracks, decision fields and code panels.
-- **Raised Graphite** (`raised-graphite`): hovered and open rows, owner messages, review notes and inline code.
-- **Selection Graphite** (`selection-graphite`): the active row in the agents sidebar.
-- **Hairline** (`hairline`): every 1px rule and border, the active segmented tab, meter tracks and disabled primary buttons.
+- **Slate Ground** (`slate-ground`): the ground behind the conversation, and the text on a yellow badge.
+- **Slate Panel** (`slate-panel`): the sidebar, the right column, the composer, segmented tab tracks and the work fold.
+- **Slate Raised** (`slate-raised`): waiting cards, owner messages, composer chips, hovered rows, review notes and inline code.
+- **Slate Selection** (`slate-selection`): the active row in the sidebar and the active segmented tab.
+- **Hairline** (`hairline`): every 1px rule and border.
+- **Hairline Strong** (`hairline-strong`): the composer border, meter tracks and the dashed outline of an unsent message.
 - **Console White** (`console-white`): primary text.
-- **Muted Steel** (`muted-steel`): metadata, section labels, completed and abandoned todos, empty states and icon buttons.
-- **Dim Steel** (`dim-steel`): disabled text and the faintest metadata.
+- **Muted Steel** (`muted-steel`): metadata, section labels, an agent's state line, completed todos and icon buttons.
+- **Dim Steel** (`dim-steel`): times, disabled text and the faintest metadata.
 
 ### Named Rules
-**The One Meaning Rule.** Yellow means waiting on the owner, green means running, indigo means selected, primary or done. Never use one of them for decoration or for a second meaning.
+**The One Meaning Rule.** Yellow means waiting on the owner, green means running, and indigo means selected, primary or done. Never use one of them for decoration or for a second meaning.
 
 **The No Pinned Theme Rule.** The palette belongs to the portal. It does not follow Herdr's terminal theme.
 
 ## Typography
 
-**Body Font:** Inter (with system-ui, sans-serif)
+**Body Font:** IBM Plex Sans (with system-ui, sans-serif)
 **Label/Mono Font:** JetBrains Mono (with ui-monospace, monospace)
 
-**Character:** A neutral, well-spaced sans for a dense interface, with a quiet monospace that marks anything the owner could copy into a terminal.
+**Character:** A plain, readable sans for long replies, with a quiet monospace for anything that the owner could copy into a terminal.
+
+Both faces are in `web/assets/fonts/` with their SIL Open Font License files. `web/src/app.rs` declares the faces, because the bundler gives each asset a hashed name.
 
 ### Hierarchy
-- **Headline** (600, 16px, 1.5): empty-state titles and question headings.
-- **Title** (600, 14px, 1.5): the product name in the top bar, the conversation title and the plan title. Column headers use the same weight at 13px.
-- **Body** (400, 13px, 1.5, tabular numerals): rows, messages and controls.
-- **Prose** (400, 14px, 1.75): rendered Markdown in plans and questions, at a 680px measure. Chat messages use the body size at a 640px measure.
+- **Headline** (600, 24px): the New conversation title.
+- **Title** (600, 18px): the conversation title. The product name in the top bar is 14px.
+- **Body** (400, 13px, 1.5, tabular numerals): rows, controls and metadata.
+- **Prose** (400, 15px, 1.6): messages in the conversation, at a 640px measure. Plans and questions use the Markdown styles at a 680px measure.
 - **Label** (500–600, 12px): metadata lines, segmented tabs, section labels and badges.
-- **Code** (400, 0.875em of the surrounding text, 1.6): fenced code, paths and commands, with syntax colours from the highlighter. Diffs use 12px.
+- **Code** (400, 0.875em of the surrounding text, 1.6): fenced code, paths and commands, with syntax colours from the highlighter. Diffs use 12px. Times in the timeline and host values use 11.5px.
 
 ### Named Rules
-**The Mono Means Machine Rule.** JetBrains Mono is only for text a machine reads or produces: code, diffs, paths, commands and IDs. Interface labels stay in Inter.
+**The Mono Means Machine Rule.** JetBrains Mono is only for text that a machine reads or produces: code, diffs, paths, branches, hosts, commands, IDs and clock times. Interface labels stay in IBM Plex Sans.
 
 ## Layout
 
-The application fills the viewport (`100dvh`) and the document never scrolls. The 44px top bar groups Dogsled, Metrics and New on the left. Each host has a 48px load meter on the right. Below it, columns sit side by side, each with a 52px header row aligned across the screen and a body that scrolls on its own.
+The application fills the viewport (`100dvh`), and the document never scrolls.
 
-- **Wide (1400px and up):** one 280px sidebar, the conversation (messages at a 640px measure) and a 300px todos column.
-- **Medium (1100–1399px):** the todos fold into a segmented `Chat` / `Todos n/m` control in the conversation header.
-- **Narrow (800–1099px):** the sidebar stays; the conversation keeps its tabs. The minimum supported width is 800px.
-- **Plan review:** replaces everything right of the sidebar. The plan sits at a 680px measure with a 300px notes margin and a decision bar pinned to the bottom. Below 1100px the notes become a `Notes N` tab.
+The top bar is 48px high. From left to right, it shows Dogsled, then Metrics and New, then the fleet tally ("3 need you · 12 working · 4 idle · 1 to land"). The host meters are on the right: the host name, a 64px load meter and the busy cores out of all cores.
+
+Below the top bar, the columns sit side by side. Each column has a body that scrolls on its own.
+
+- **Wide (1400px and up):** a 292px sidebar, the conversation (messages at a 640px measure) and a 300px right column.
+- **Medium (1100–1399px):** the right column folds into a segmented `Chat` / `Todos` / `Workers` / `Files` control in the conversation header. The Now panel moves above the composer.
+- **Narrow (800–1099px):** the sidebar stays. The conversation keeps its tabs. The minimum supported width is 800px.
+- **Plan review:** replaces everything right of the sidebar. The plan sits at a 680px measure with a 300px notes margin and a decision bar pinned to the bottom. Below 1100px, the notes become a `Notes N` tab.
 - **Questions and key prompts:** replace the conversation in the centre column.
 
-The composer is pinned to the bottom of the conversation. Spacing follows a 4px base with steps of 4, 6, 8, 12, 16 and 24px; rows use 12–16px side padding and column bodies 16–24px.
+The composer is pinned to the bottom of the conversation. Spacing follows a 4px base with steps of 4, 6, 8, 12, 16, 20 and 28px.
 
 ### Named Rules
-**The Needs You Never Folds Rule.** The sidebar is visible at every supported width, and agents that need the owner sit at its top. Every waiting item stays visible and clickable; other columns fold into tabs before the sidebar does.
+**The Needs You Never Folds Rule.** The sidebar is visible at every supported width, and agents that need the owner sit at its top. Every waiting item stays visible and clickable. Other columns fold into tabs before the sidebar does.
 
 **The Fixed Viewport Rule.** The page itself never scrolls. A region that can grow scrolls inside its own column.
 
 ## Elevation & Depth
 
-The system is flat. Depth comes only from tonal layering: the ground, the panel graphite and the raised graphite, separated by 1px hairlines. Component shadows are removed; focus is shown with a 2px indigo outline at a 2px offset.
+The system is flat. Depth comes only from tonal layers: the slate ground, the slate panel and the slate raised tone, separated by 1px hairlines. Component shadows are removed. Focus shows as a 2px indigo outline. The composer is the one exception: when it has focus, its border turns indigo and it gets a soft 3px indigo ring.
 
 ### Named Rules
-**The Flat Console Rule.** No shadows and no gradients, at rest or on hover. Raise a surface by one tone, never by a shadow.
+**The Flat Console Rule.** No shadows, glows or gradients, at rest or on hover. Raise a surface by one tone, never by a shadow.
 
 ## Shapes
 
-Corners are gently rounded and stay small: 4px for inline code, 6px for icon buttons and image thumbnails, 7px for segmented tab tracks, 8px for buttons, fields, notes and code panels, 10px for the composer and owner messages, and a 9px radius makes 18px-high pills for count and recommendation badges. Status dots are round. Sidebar rows and inbox rows have square corners and run edge to edge, separated by hairlines.
+Corners are gently rounded and stay small: 4px for inline code, 7px for composer chips and segmented tab tracks, 8px for buttons, icon buttons and code panels, 10px for waiting cards, owner messages and the work fold, and 12px for the composer. Count badges are pills. Status dots are round.
 
 ## Components
 
-The console uses the official Dioxus components for every control and restyles them with CSS only.
+The console uses the official Dioxus components for every control and changes their look with CSS only.
 
 ### Buttons
-- **Shape:** gently rounded (8px); icon buttons 30px square at 6px.
-- **Primary:** indigo fill with white text, 40px high with 16px side padding in decision bars (Approve plan). The send button is the same treatment as an icon button.
-- **Hover / Focus:** the primary fill stays indigo on hover; focus shows the 2px indigo outline.
-- **Disabled:** hairline fill with dim text.
-- **Secondary:** an outline button with a dim-steel border on a faint dim-steel wash (Request changes), or ghost icon buttons in muted steel (headers, attach).
+- **Shape:** gently rounded (8px). Icon buttons are 30px square and have no border.
+- **Primary:** indigo fill with dark indigo text. New in the top bar and Send in the composer use it. Approve plan uses it at 40px high.
+- **Hover / Focus:** the primary fill stays indigo on hover. Focus shows the 2px indigo outline.
+- **Disabled:** the raised tone with dim text.
+- **Secondary:** Metrics is a ghost button that takes the selection tone when it is open. Request changes is an outline button.
 
 ### Chips
-- **Count badge:** an 18px pill (9px radius, 0 7px padding, 12px/600). Hairline fill at zero; yellow fill with black text when something is waiting.
-- **Recommended badge:** the same pill in indigo with white text.
-
-### Cards / Containers
-- **Corner Style:** 8–10px.
-- **Background:** raised graphite for owner messages and review notes; panel graphite for code panels and fields.
-- **Shadow Strategy:** none (see Elevation & Depth).
-- **Border:** 1px hairline.
-- **Internal Padding:** 8px 12px for messages, 10px 12px for notes, 12–16px for code.
+- **Count badge:** an 18px pill (12px/600). Yellow fill with dark text when something waits.
+- **Tally:** "need you" is a yellow pill with the count in a solid yellow badge. Other tally counts are bold white numbers with muted words.
+- **Composer chips:** the repository, model and effort controls are 28px chips on the raised tone.
 
 ### Inputs / Fields
-- **Composer:** a 10px-rounded panel holding an attach icon, the text field and a send icon. The field has no border or helper text and grows from one line to eight.
-- **Decision note:** an 8px-rounded panel field with a hairline border that grows from one line to eight and cannot be resized by hand.
-- **Focus:** the indigo caret and the 2px indigo focus outline.
+- **Composer:** a 12px-rounded panel. The text field is on top. Below it is one toolbar: repository (New page only), model, effort, attach, and the send button at the far right. The field has no border and grows from one line to eight. The New page field starts at four lines.
+- **Decision note:** an 8px-rounded field with a hairline border. It grows from one line to eight and cannot be resized by hand.
+- **Focus:** an indigo caret, and the indigo ring described in Elevation & Depth.
 
 ### Navigation
-- **Segmented tabs:** a 7px-rounded panel track with 2px padding; each tab is 24px high in 12px/500 muted text, and the active tab takes the hairline fill with white text.
-- **Sidebar:** the Needs you section first, then repository groups with the name on the left and the count on the right; leads show a status dot, workers are indented and muted with their state on the right.
+- **Segmented tabs:** a 7px-rounded panel track with 2px padding. Each tab is 24px high in 12px muted text. The active tab takes the selection tone.
+- **Sidebar:** the Needs you cards come first. Then the "Agents" label and count, then the repository groups. A group shows its name, and its count or "n to land". A lead row shows a status dot, its title (500 weight), its todo progress, and a state line below ("Working", "Idle", or "Waiting for you" in yellow). Workers are indented and muted, with their state on the right.
 
 ### Message timeline
-The conversation is one centred 640px column with a 46px time gutter, a 12px marker track and the message body. The gutter shows the recorded time in the 12px label style with tabular numerals, or "—" when no time is recorded. A hairline runs down the marker track. Each message starts with the author (600) and its source in muted steel. Only owner messages take the raised panel. Adjacent tool records fold into one collapsed row that shows the count and tool names. The activity row sits between the history and the composer and never scrolls with the history. It names the live state only when a producer reports it; otherwise it shows the coarse agent state and says that detail is unavailable.
+The conversation is one centred column, 704px wide. Each record has a 46px time column on the left and the message body on the right. The time column shows the recorded time in 11.5px mono, or "—" when no time is recorded. There is no marker track. Each message starts with its author (600) and its source in dim steel. Owner messages put their text in a raised bubble. An unsent owner message has a dashed outline and shows its state: Sending…, Queued or Sent. Thoughts are italic and muted. A finished turn folds its thinking and tool records into one bordered row: "Worked for 4m 10s · 3 thoughts · 12 tool calls". The row opens to the records.
 
-### Waiting row
-The signature component, at the top of the sidebar. One row per agent that needs the owner, newest first: a yellow dot, the agent title (500 weight) and the age; below it the kind icon, kind and item title in yellow, and `+n` when the agent has more items. Key prompts show their keys inline. The agent leaves its repository group while it waits. The open row takes a yellow left edge.
+### Now panel
+The Now panel shows what the agent does now. On a wide screen, it is at the top of the right column. On a smaller screen, it sits above the composer. It shows a status dot, the live phase ("Running tools: bash"), the agent's current todo, and the thought and tool call counts of this turn. The time of the current turn is large green mono. The panel names the live state only when a producer reports it. Otherwise, it shows the coarse agent state and says that detail is unavailable.
 
-### Todos column
-The header shows `n of m` done. Sections (In progress, Pending, Completed, Abandoned) are accordions; empty sections are not shown. Completed and abandoned items show their title only, in muted steel.
+### Waiting card
+The signature component, at the top of the sidebar. There is one raised card for each agent that needs the owner, newest first. A card has a yellow left edge. Its first line, in yellow, gives the kind, the repository and the age, and `+n` when the agent has more items. Below it are the item title (500 weight, two lines at most) and the agent title. Key prompts show their keys as small mono buttons in the card. The agent leaves its repository group while it waits. The open card takes the selection tone.
+
+### Right column
+The Now panel is at the top. Below it are the `Todos n/m`, `Workers n` and `Files n` tabs. The todos are accordions by section (In progress, Pending, Completed, Abandoned), and empty sections are not shown. An in-progress todo has a green ring. A completed todo has an indigo dot and a muted title.
+
+### New page
+The New page is centred in the main area. It shows the title, one sentence that says where the lead starts, and the composer. Below the composer, it shows the host with the most free cores now, and the leads that already run in the chosen repository, with their state and host. A key legend (Enter, Tab, Shift Enter) closes the page. The keyboard order is message, repository, model, effort.
 
 ## Do's and Don'ts
 
@@ -262,8 +280,9 @@ The header shows `n of m` done. Sections (In progress, Pending, Completed, Aband
 
 ### Don't:
 - **Don't** replace a component with a plain element to change how it looks.
-- **Don't** add shadows, gradients or decorative colour.
-- **Don't** add helper or placeholder text where an icon or control can carry the meaning.
+- **Don't** add shadows, glows, gradients or decorative colour.
+- **Don't** add helper or placeholder text where an icon or control can carry the meaning. The New page sentence and key legend are the only exceptions.
 - **Don't** show branches waiting to land as inbox items.
 - **Don't** pin the palette to Herdr's theme.
+- **Don't** load fonts or other assets from the network.
 - **Don't** fall back to the plain upstream component look.

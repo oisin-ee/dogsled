@@ -688,6 +688,8 @@ fn catalogue_notices_render_in_the_body_instead_of_crowding_the_header() {
         let html = dioxus_ssr::render(dom);
         let (title, rest) = html.split_once("</h1>").expect("New conversation title");
         assert!(title.contains("New conversation"), "{html}");
+        let (lede, rest) = rest.split_once("</p>").expect("lede");
+        assert!(lede.starts_with(r#"<p class="new-lead-lede">"#), "{html}");
         let (body, composer) = rest.split_once("new-lead-composer").expect("composer");
         assert!(body.starts_with(r#"<div class="new-lead-body">"#), "{html}");
         assert!(composer.contains(r#"role="combobox""#), "{html}");

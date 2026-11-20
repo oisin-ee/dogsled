@@ -131,7 +131,7 @@
   color: var(--console-text);
 }
 .console-provider .console-shell .metrics-tool {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--console-mono);
 }
 .console-provider .console-shell .metrics-empty {
   padding: 16px 0;
@@ -150,13 +150,21 @@
   gap: 12px;
 }
 .console-provider .console-shell .console-metrics {
-  min-height: 28px;
-  height: 28px;
-  padding: 0 10px;
+  min-height: 30px;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--console-muted);
   font-size: 13px;
+  font-weight: 500;
+}
+.console-provider .console-shell .console-metrics:not(:disabled):hover {
+  background: var(--console-raised);
+  color: var(--console-text);
 }
 .console-provider .console-shell .console-metrics[aria-pressed="true"] {
-  background: var(--console-accent);
-  border-color: var(--console-accent);
-  color: #fff;
+  background: var(--console-selected);
+  color: var(--console-text);
 }

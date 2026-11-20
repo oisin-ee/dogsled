@@ -5,7 +5,6 @@ use portal_types::agents::{AgentAddress, AgentView};
 use portal_types::{BoardView, GroupView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
-use crate::components::item::{Item, ItemContent, ItemSize, ItemTitle, ItemVariant};
 use crate::components::sidebar::{
     SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton,
     SidebarMenuButtonSize, SidebarMenuItem,
@@ -459,12 +458,18 @@ fn task_title(title: &str) -> String {
 pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
     let count = group.agent_count();
     let branches = group.to_land;
+    let land = if branches == 1 {
+        "1 branch to land".to_owned()
+    } else {
+        format!("{branches} branches to land")
+    };
     rsx! {
         SidebarGroup {
             if let Some(repository) = group.repository {
                 SidebarGroupLabel { title: "{repository}",
                     span { "{repository_name(&repository)}" }
-                    span { "{count}" }
+                    if branches > 0 { span { class: "repo-land", title: "{land}", "{branches} to land" } }
+                    else { span { "{count}" } }
                 }
             }
             SidebarGroupContent {
@@ -474,15 +479,6 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                             NavigationAgent { row: row.clone() }
                             if !row.workers.is_empty() || !row.jobs.is_empty() {
                                 WorkerSummary { lead: row, inbox: inbox.clone() }
-                            }
-                        }
-                    }
-                    if branches > 0 {
-                        SidebarMenuItem {
-                            Item { variant: ItemVariant::Muted, size: ItemSize::Sm,
-                                ItemContent {
-                                    ItemTitle { "{branches} " if branches == 1 { "branch to land" } else { "branches to land" } }
-                                }
                             }
                         }
                     }
@@ -520,11 +516,19 @@ fn NavigationAgent(row: NavigationRow) -> Element {
     } else {
         SidebarMenuButtonSize::Default
     };
+    let now = if needs_owner {
+        "Waiting for you".to_owned()
+    } else {
+        state_phrase(&row.state)
+    };
     let body = rsx! {
         span { class: "agent-dot", "data-status": status, aria_hidden: "true" }
         span { class: "agent-title", "{row.title}" }
         if row.worker { small { "{worker_status}" } }
-        else if let Some((done, total)) = row.progress { small { "{done}/{total}" } }
+        else {
+            if let Some((done, total)) = row.progress { small { "{done}/{total}" } }
+            span { class: "agent-now", "data-status": status, "{now}" }
+        }
     };
     rsx! {
         SidebarMenuButton {
@@ -556,6 +560,14 @@ fn NavigationAgent(row: NavigationRow) -> Element {
             },
         }
     }
+}
+
+/// A lead's coarse state as the sidebar says it: "working" reads "Working".
+fn state_phrase(state: &str) -> String {
+    let mut letters = state.chars();
+    letters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(letters).collect()
+    })
 }
 
 #[component]

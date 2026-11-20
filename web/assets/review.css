@@ -99,7 +99,7 @@
 }
 .console-provider .console-shell .review-diff {
   overflow: auto;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--console-mono);
   font-size: 12px;
 }
 .console-provider .console-shell .review-body .review-margin {
@@ -301,7 +301,7 @@
   overflow: visible;
   white-space: nowrap;
   background: var(--console-accent);
-  color: white;
+  color: var(--console-on-accent);
   border: 0;
   height: 18px;
   padding: 0 7px;
@@ -397,7 +397,7 @@
   border: 1px solid var(--console-line);
   border-radius: 8px;
   background: var(--console-panel);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--console-mono);
   font-size: 12px;
 }
 .console-provider .console-shell .prompt-keys {

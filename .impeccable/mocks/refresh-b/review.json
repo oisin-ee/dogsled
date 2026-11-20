@@ -1,0 +1,77 @@
+{
+  "title": "Portal refresh: three variants of direction B (Live fleet)",
+  "question": "The owner chose direction B (PR #390). Which variant of B should the production restyle of web/ follow? Each variant keeps the live-fleet ideas and shows the composer and delivery behaviour that shipped in #392, at 1600x1000.",
+  "reference": ".impeccable/mocks/refresh/b-live-fleet.html on design/portal-refresh-options (PR #390)",
+  "options": [
+    {
+      "id": "b1-fleet-wall",
+      "kind": "dark",
+      "label": "B1 \u00b7 Fleet wall",
+      "thesis": "The fleet leads. Darkest and densest: a wide instrument sidebar with a sparkline, step bar and time on step for every lead, a fleet pulse and two-row host slot grids in the top bar, and a compact Now panel with CI stage bars.",
+      "palette": [
+        "#04060c",
+        "#090e1a",
+        "#dde5f4",
+        "#36d0ff",
+        "#39f08a",
+        "#ffb02e"
+      ],
+      "materials": [
+        "Geist",
+        "Space Grotesk",
+        "JetBrains Mono"
+      ],
+      "html": ".impeccable/mocks/refresh-b/b1-fleet-wall.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/refresh-b/b1-conversation.png",
+      "compNew": ".impeccable/mocks/refresh-b/b1-new.png"
+    },
+    {
+      "id": "b2-quiet-console",
+      "kind": "dark",
+      "label": "B2 \u00b7 Quiet console",
+      "thesis": "The conversation leads. Lighter slate navy, flat, DESIGN.md indigo for selection, IBM Plex Sans prose at 15px, tool work folded into one summary row, and the Now panel docked at the live edge above the composer.",
+      "palette": [
+        "#0f1626",
+        "#131b2e",
+        "#e8ecf5",
+        "#8b95ff",
+        "#4cc38a",
+        "#f2c94c"
+      ],
+      "materials": [
+        "IBM Plex Sans",
+        "JetBrains Mono"
+      ],
+      "html": ".impeccable/mocks/refresh-b/b2-quiet-console.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/refresh-b/b2-conversation.png",
+      "compNew": ".impeccable/mocks/refresh-b/b2-new.png"
+    },
+    {
+      "id": "b3-run-clock",
+      "kind": "dark",
+      "label": "B3 \u00b7 Run clock",
+      "thesis": "Time leads. The Now panel becomes a timeline of the run (steps, CI stages, activity, now cursor), the transcript is grouped by step, and New shows the repository's day on the same clock. Violet-navy dusk, white primary actions, teal running.",
+      "palette": [
+        "#0c0f1f",
+        "#11152b",
+        "#eceefa",
+        "#f4f5ff",
+        "#2ee6c5",
+        "#ffc34d",
+        "#9d8cff"
+      ],
+      "materials": [
+        "Instrument Sans",
+        "Space Grotesk",
+        "JetBrains Mono"
+      ],
+      "html": ".impeccable/mocks/refresh-b/b3-run-clock.html",
+      "htmlFrame": "1600x1000",
+      "comp": ".impeccable/mocks/refresh-b/b3-conversation.png",
+      "compNew": ".impeccable/mocks/refresh-b/b3-new.png"
+    }
+  ],
+  "approved": null
+}

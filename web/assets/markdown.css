@@ -89,9 +89,9 @@
 }
 
 .console-provider .console-shell .markdown-body a {
-  color: var(--console-text);
+  color: var(--console-accent);
   text-decoration: underline;
-  text-decoration-color: var(--console-accent);
+  text-decoration-color: var(--console-accent-soft);
   text-underline-offset: 0.2em;
 }
 
@@ -100,7 +100,7 @@
 }
 
 .console-provider .console-shell .markdown-body :is(code, pre) {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--console-mono);
   font-size: 0.875em;
 }
 

@@ -1,14 +1,17 @@
 //! A blank conversation: pick a GitHub repository, and the first message starts its lead.
 
 use dioxus::prelude::*;
+use dioxus_icons::lucide::Server;
 use dioxus_primitives::combobox::{
     Combobox, ComboboxEmpty, ComboboxInput, ComboboxList, ComboboxOption, default_combobox_filter,
 };
+use portal_types::HostView;
 use portal_types::agents::RepoChoice;
 use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, SettingsChange, ThinkingLevel};
 
 use crate::agent_view::{Composer, PendingMessage, message_with_images, use_composer};
 use crate::api;
+use crate::board::{NavigationRepo, NavigationRow, repository_name};
 use crate::components::skeleton::Skeleton;
 use crate::notice::{Alert, Status};
 
@@ -101,15 +104,39 @@ impl LaunchSettings {
     }
 }
 
+/// The host a new lead would start on now: the eligible host with the most free cores, as
+/// the server chooses, with ties to the lexically smaller label.
+fn roomiest(hosts: &[HostView]) -> Option<(&HostView, f64)> {
+    hosts
+        .iter()
+        .filter(|host| host.reachable && host.eligible)
+        .filter_map(|host| {
+            let busy = host.busy.filter(|busy| busy.is_finite())?;
+            Some((host, busy))
+        })
+        .min_by(|(a, a_busy), (b, b_busy)| {
+            (f64::from(b.cores) - b_busy)
+                .total_cmp(&(f64::from(a.cores) - a_busy))
+                .then(a.label.cmp(&b.label))
+        })
+}
+
 #[component]
-pub(crate) fn NewLead() -> Element {
+pub(crate) fn NewLead(
+    /// The fleet's hosts, for where the lead starts.
+    hosts: Vec<HostView>,
+    /// Every repository group, for what already runs in the chosen repository.
+    running: Vec<NavigationRepo>,
+) -> Element {
     let catalogue = use_resource(api::models);
-    rsx! { NewLeadForm { model_catalogue: catalogue() } }
+    rsx! { NewLeadForm { model_catalogue: catalogue(), hosts, running } }
 }
 
 #[component]
 pub(crate) fn NewLeadForm(
     #[props(default)] model_catalogue: Option<Result<ModelCatalogue, String>>,
+    #[props(default)] hosts: Vec<HostView>,
+    #[props(default)] running: Vec<NavigationRepo>,
 ) -> Element {
     let mut settings = use_signal(LaunchSettings::default);
     let mut selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
@@ -220,11 +247,20 @@ pub(crate) fn NewLeadForm(
         Err(message) => Some(message.as_str()),
     });
     let launch = settings();
+    let start = roomiest(&hosts);
+    let chosen = repo().map(|slug| format!("github.com/{}", slug.to_lowercase()));
+    let leads = running
+        .iter()
+        .filter(|group| group.repository.as_deref().map(str::to_lowercase) == chosen)
+        .flat_map(|group| group.rows.iter().filter(|row| !row.worker))
+        .cloned()
+        .collect::<Vec<_>>();
     // Message, repository, model, effort: the composer holds them in that keyboard order.
     rsx! {
         section { class: "new-lead", aria_label: "New conversation", aria_busy: busy(),
           div { class: "new-lead-center",
             h1 { class: "new-lead-title", "New conversation" }
+            p { class: "new-lead-lede", "Describe the task. A lead starts on the host with the most room." }
             div { class: "new-lead-body",
                 if let Some(message) = model_error {
                     Alert { "Model list unavailable: {message}. The lead starts with Pi's default model." }
@@ -271,8 +307,48 @@ pub(crate) fn NewLeadForm(
                     } },
                     on_error: move |message| error.set(Some(message)), on_send: send }
             }
+            if let Some((host, busy)) = start {
+                div { class: "new-lead-fact",
+                    span { class: "fact-icon", Server { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } }
+                    div {
+                        p { class: "fact-label", "Starts on" }
+                        p { class: "fact-value", "{host.label}" }
+                        p { class: "fact-note", "Most room now: {busy:.0} of {host.cores} cores busy" }
+                    }
+                }
+            }
+            if let Some(slug) = repo().filter(|_| !leads.is_empty()) {
+                section { class: "new-lead-running", aria_label: "Already running",
+                    h2 { "Already running in {repository_name(&slug)}" }
+                    ul {
+                        for row in leads {
+                            li { key: "{row.host}:{row.pane:?}",
+                                span { class: "agent-dot", "data-status": lead_status(&row), aria_hidden: "true" }
+                                span { class: "running-title", "{row.title}" }
+                                span { class: "running-state", "data-status": lead_status(&row), if row.unseen { "Waits on you" } else { "{row.state}" } }
+                                code { "{row.host}" }
+                            }
+                        }
+                    }
+                }
+            }
+            p { class: "new-lead-keys",
+                span { kbd { "Enter" } " start" }
+                span { kbd { "Tab" } " repository, model, effort" }
+                span { kbd { "Shift Enter" } " new line" }
+            }
           }
         }
+    }
+}
+
+fn lead_status(row: &NavigationRow) -> &'static str {
+    if row.unseen {
+        "waiting"
+    } else if matches!(row.state.as_str(), "working" | "running") {
+        "running"
+    } else {
+        "muted"
     }
 }
 
