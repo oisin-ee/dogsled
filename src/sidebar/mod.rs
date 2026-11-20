@@ -291,7 +291,7 @@ fn perform(
                 home.to_owned(),
                 published.ok_or_else(|| Error::Invalid("observation unavailable".into()))?,
             )?;
-            let (closed, label) = crate::runtime::close(&fleet, &pane, Some(&card.host))?;
+            let (closed, label) = crate::runtime::close(&fleet, &pane, Some(&card.host), false)?;
             Ok(crate::runtime::closed_line(&closed, &label)
                 .trim_end()
                 .to_owned())

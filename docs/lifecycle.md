@@ -127,6 +127,8 @@ Close saves the initial snapshot before teardown.
 After successful teardown, close saves changed content again before normalization and unforced removal.
 A failed or unknown teardown keeps the checkout and its resources.
 Dogsled does not automatically repeat an entered teardown with an unknown outcome.
+After you fix the cause of a failed teardown, `dogsled close CHILD --retry-teardown` runs it once more against the pinned initial snapshot.
+The flag never repeats a teardown with an unknown outcome.
 An interrupted normalization also keeps the checkout for inspection.
 Shared ownership, changed checkout identity, and unsupported content prevent removal.
 
@@ -134,7 +136,7 @@ Recovery snapshots keep HEAD, the staged index, and working content in local Git
 They can preserve untracked files, binary content, deletions, renames, symbolic links, and executable modes.
 The snapshot code refuses content that Git cannot store without loss.
 Examples include a conflicted index, a dirty submodule, a nested repository, and unsupported file types.
-Snapshots exclude ignored files.
+Snapshots exclude ignored files, so ignored content, such as package checkouts in build output, never blocks a close.
 Dogsled neither pushes nor expires `refs/dogsled/recovery/<id>`.
 
 `list` and `show` inspect archived snapshots after the original checkout disappears or the process restarts.

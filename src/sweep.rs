@@ -521,6 +521,7 @@ fn settle_stopped(
             crate::close::Options {
                 guard: Guard::StoppedOrphan { episode: &episode },
                 request: Some(&request),
+                retry_teardown: false,
             },
             reconcile,
         )

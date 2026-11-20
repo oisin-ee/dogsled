@@ -173,6 +173,9 @@ pub enum Stage {
     Finished,
 }
 
+/// The blocker prefix of a teardown that ran and exited with a failure.
+pub const TEARDOWN_FAILED: &str = "failed teardown: ";
+
 /// Kept by this store, not item retention. Incomplete operations must never expire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
@@ -374,6 +377,15 @@ impl Operation {
             Stage::Normalized => "normalized; recovery pinned",
             Stage::Removed | Stage::Finished => "removed",
         }
+    }
+
+    /// The entered teardown ran and exited with a failure, so its outcome is known.
+    pub fn teardown_failed(&self) -> bool {
+        self.stage == Stage::TeardownEntered
+            && self
+                .blocker
+                .as_deref()
+                .is_some_and(|blocker| blocker.starts_with(TEARDOWN_FAILED))
     }
 
     pub fn check_retry(&self, mode: &CloseMode) -> crate::error::Result<()> {
@@ -1107,10 +1119,33 @@ fn preflight(shell: &dyn Shell, checkout: &Path) -> Result<()> {
         }
         submodules.push(path);
     }
-    walk(checkout, checkout, &submodules)
+    // Capture excludes ignored paths, so their content cannot block it. Skipping them also
+    // keeps build output, such as package checkouts that are Git repositories, out of the walk.
+    let ignored = checked(
+        shell,
+        checkout,
+        None,
+        &[
+            "-c",
+            "core.quotePath=true",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )?;
+    let mut skipped = submodules;
+    for quoted in ignored.lines().filter(|path| !path.is_empty()) {
+        let bytes = unquote_path(quoted)?;
+        let relative = bytes.strip_suffix(b"/").unwrap_or(&bytes);
+        skipped.push(checkout.join(std::ffi::OsStr::from_bytes(relative)));
+    }
+    walk(checkout, checkout, &skipped)
 }
 
-fn walk(root: &Path, dir: &Path, submodules: &[PathBuf]) -> Result<()> {
+/// Check every path Git can capture. `skipped` holds submodules and ignored paths.
+fn walk(root: &Path, dir: &Path, skipped: &[PathBuf]) -> Result<()> {
     let entries = fs::read_dir(dir).map_err(|_| Refusal::UnreadablePath(dir.into()))?;
     for entry in entries {
         let entry = entry.map_err(|_| Refusal::UnreadablePath(dir.into()))?;
@@ -1118,7 +1153,7 @@ fn walk(root: &Path, dir: &Path, submodules: &[PathBuf]) -> Result<()> {
         if dir == root && entry.file_name() == ".git" {
             continue;
         }
-        if submodules.contains(&path) {
+        if skipped.contains(&path) {
             continue;
         }
         if entry.file_name() == ".git" {
@@ -1133,7 +1168,7 @@ fn walk(root: &Path, dir: &Path, submodules: &[PathBuf]) -> Result<()> {
             if meta.permissions().mode() & 0o555 == 0 {
                 return Err(Refusal::UnreadablePath(path).into());
             }
-            walk(root, &path, submodules)?;
+            walk(root, &path, skipped)?;
         } else if kind.is_file() {
             if meta.permissions().mode() & 0o444 == 0 {
                 return Err(Refusal::UnreadablePath(path).into());
@@ -2992,6 +3027,23 @@ mod tests {
             snapshot(&System::default(), &repo.path),
             Err(Error::Refused(Refusal::NestedRepository(_)))
         ));
+    }
+
+    #[test]
+    fn ignored_nested_repository_and_unreadable_file_do_not_refuse() {
+        let repo = Repo::new(true);
+        fs::write(repo.path.join(".gitignore"), b"build/\nsecret\n").unwrap();
+        fs::create_dir_all(repo.path.join("build/checkouts/package")).unwrap();
+        repo.git(&["-C", "build/checkouts/package", "init", "-b", "main"]);
+        fs::write(repo.path.join("secret"), b"private").unwrap();
+        fs::set_permissions(repo.path.join("secret"), fs::Permissions::from_mode(0o0)).unwrap();
+        let result = snapshot(&System::default(), &repo.path);
+        fs::set_permissions(repo.path.join("secret"), fs::Permissions::from_mode(0o644)).unwrap();
+        let saved = result.unwrap();
+        let tree = repo.git(&["ls-tree", "-r", "--name-only", &saved.commit]);
+        assert!(!tree.contains("build/"));
+        assert!(!tree.contains("secret"));
+        assert!(repo.path.join("build/checkouts/package/.git").exists());
     }
 
     #[test]

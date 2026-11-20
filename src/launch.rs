@@ -1488,20 +1488,22 @@ pub(crate) enum Receipt {
 
 /// Hold only an allocating launch or an attempted start with its matching live agent.
 /// A stranded empty shell cannot finish startup and does not hold the checkout.
+/// A launch that a preflight refused never starts, so it holds no checkout.
 fn pending(progress: &Progress, agents: &[crate::probe::Agent]) -> bool {
-    progress.pane.as_ref().is_none_or(|pane| {
-        progress.attempted
-            && agents.iter().any(|agent| {
-                let Action::Agent { name, kind, .. } = &progress.request.action else {
-                    return false;
-                };
-                agent.pane == *pane
-                    && agent.name.as_ref() == Some(name)
-                    && agent.agent.as_ref() == Some(kind)
-                    && progress.terminal.is_some()
-                    && agent.terminal_id == progress.terminal
-            })
-    })
+    progress.preflight_refusal.is_none()
+        && progress.pane.as_ref().is_none_or(|pane| {
+            progress.attempted
+                && agents.iter().any(|agent| {
+                    let Action::Agent { name, kind, .. } = &progress.request.action else {
+                        return false;
+                    };
+                    agent.pane == *pane
+                        && agent.name.as_ref() == Some(name)
+                        && agent.agent.as_ref() == Some(kind)
+                        && progress.terminal.is_some()
+                        && agent.terminal_id == progress.terminal
+                })
+        })
 }
 
 /// Read only the current launch for this observed terminal. An ambiguous pane does

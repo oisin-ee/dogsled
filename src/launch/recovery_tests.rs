@@ -358,6 +358,13 @@ fn pending_paths_require_an_allocating_launch_or_its_matching_attempted_agent() 
     progress.pane = None;
     crate::launch_store::put_progress_value(&ledger, "own", &progress).unwrap();
     assert_eq!(pending_paths(&ledger, &[]).unwrap(), ["/checkout"]);
+    progress.preflight_refusal = Some(crate::launch::PreflightRefusal::Job {
+        detail: "refuse: execution directory disappeared; nothing was closed".into(),
+    });
+    crate::launch_store::put_progress_value(&ledger, "own", &progress).unwrap();
+    assert_eq!(pending_paths(&ledger, &[]).unwrap(), Vec::<String>::new());
+    progress.preflight_refusal = None;
+    crate::launch_store::put_progress_value(&ledger, "own", &progress).unwrap();
     crate::launch_store::put_receipt(
         &ledger,
         "own",

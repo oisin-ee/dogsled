@@ -937,6 +937,7 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
             preservation_request,
             landed,
             writer,
+            retry_teardown,
         } => {
             let episode = stopped_orphan
                 .as_deref()
@@ -958,6 +959,7 @@ fn child(cmd: HostCommand, node: &Node<'_>) -> Result<()> {
                 close::Options {
                     guard: mode,
                     request: request.as_ref(),
+                    retry_teardown,
                 },
                 |closed| {
                     items::saved_close(node.ledger, hosts::LOCAL, &closed)?;
