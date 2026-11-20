@@ -850,7 +850,8 @@ async fn peer_connection(
             || peer.local_revision != Some(frame.published.local_revision)
             || tokio::time::Instant::now() >= deadline
         {
-            let export = serde_json::to_value(super::peers::Export::of(&frame.published))?;
+            let export = super::peers::Export::of(&frame.published)
+                .into_wire_value(crate::shell::OUTPUT_LIMIT)?;
             return write_frames(socket, &super::pages::frames(&export, MAX_FRAME_BYTES)?).await;
         }
         match tokio::time::timeout_at(deadline, updated(socket, receiver)).await {

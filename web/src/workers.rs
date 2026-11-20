@@ -66,26 +66,46 @@ pub(crate) fn group(row: &RowView, inbox: &[InboxItem]) -> WorkerGroup {
 
 pub(crate) fn owned_rows(
     board: Option<&portal_types::BoardView>,
-    lead: Option<&NavigationRow>,
+    owner: Option<&AgentAddress>,
 ) -> Vec<RowView> {
-    match (board, lead) {
-        (Some(board), Some(lead)) => board
-            .repos
-            .iter()
-            .flat_map(|repo| &repo.rows)
-            .filter(|row| {
-                crate::board::is_navigation_row(row) && crate::board::owns_worker(lead, row)
-            })
-            .cloned()
-            .collect(),
+    match (board, owner) {
+        (Some(board), Some(owner)) => direct_rows(board, &owner.host, Some(&owner.pane)),
         _ => Vec::new(),
     }
+}
+
+pub(crate) fn direct_rows(
+    board: &portal_types::BoardView,
+    host: &str,
+    pane: Option<&str>,
+) -> Vec<RowView> {
+    board
+        .repos
+        .iter()
+        .flat_map(|repo| &repo.rows)
+        .filter(|row| {
+            pane.is_some()
+                && crate::board::is_navigation_row(row)
+                && row.owner_host.as_deref().unwrap_or(&row.host) == host
+                && row.owner_pane.as_deref() == pane
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn job_finished(state: &str) -> bool {
+    matches!(
+        state,
+        "closed" | "done" | "exited" | "stopped" | "failed" | "cancelled"
+    ) || state.starts_with("exit ")
 }
 
 /// Workers that have not finished. A finished worker stays in its group until its branch
 /// lands, but it no longer counts as one of the lead's workers.
 pub(crate) fn active_count(rows: &[RowView]) -> usize {
-    rows.iter().filter(|row| !finished(&row.state)).count()
+    rows.iter()
+        .filter(|row| row.kind != "job" && !finished(&row.state))
+        .count()
 }
 
 pub(crate) fn finished(state: &str) -> bool {
@@ -94,7 +114,7 @@ pub(crate) fn finished(state: &str) -> bool {
 
 pub(crate) fn working_count(rows: &[RowView]) -> usize {
     rows.iter()
-        .filter(|row| matches!(row.state.as_str(), "working" | "running"))
+        .filter(|row| row.kind != "job" && matches!(row.state.as_str(), "working" | "running"))
         .count()
 }
 
@@ -117,13 +137,26 @@ pub(crate) fn Workers(
     let mut selection = use_context::<Signal<Option<InboxSelection>>>();
     let mut panel = use_context::<Signal<LeadPanel>>();
     let working = working_count(&rows);
+    let (jobs, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|row| row.kind == "job");
     rsx! {
         section { class: "workers-panel", aria_label: "Lead workers",
             if header {
                 header { class: "console-column-header", h2 { "Workers" } span { "{working} working" } }
             }
             ScrollArea { class: "console-scroll workers-list", direction: ScrollDirection::Vertical,
-                if rows.is_empty() { Status { "data-part": "column-empty", "No workers are recorded for this lead." } }
+                if !jobs.is_empty() {
+                    section { class: "worker-group", aria_label: "Command jobs",
+                        h3 { "Jobs · {jobs.len()}" }
+                        for job in &jobs {
+                            div { class: "worker-row", key: "{job.owner_host:?}:{job.id}",
+                                span { class: "worker-title", "{job.title.as_deref().unwrap_or(&job.name)}" }
+                                span { class: "worker-phase", "{job.state} · {job.host}" }
+                                if job.ownership_stale { small { "Last known · ownership unavailable" } }
+                            }
+                        }
+                    }
+                }
+                if rows.is_empty() && jobs.is_empty() { Status { "data-part": "column-empty", "No workers are recorded for this lead." } }
                 for category in [WorkerGroup::Waiting, WorkerGroup::Working, WorkerGroup::Idle, WorkerGroup::Finished] {
                     {
                         let members: Vec<_> = rows.iter().filter(|row| group(row, &inbox) == category).collect();
@@ -133,7 +166,7 @@ pub(crate) fn Workers(
                                     h3 { "{category.title()} · {members.len()}" }
                                     for row in members {
                                         {
-                                            let address = row.pane.clone().map(|pane| AgentAddress { host: row.host.clone(), pane });
+                                            let address = row.pane.clone().filter(|_| !row.ownership_stale && row.state != "closed").map(|pane| AgentAddress { host: row.host.clone(), pane });
                                             let open = address.is_some() && selected() == address;
                                             let title = row.title.as_deref().filter(|title| !title.trim().is_empty() && !title.starts_with("u-"))
                                                 .unwrap_or(&row.name);
@@ -151,7 +184,7 @@ pub(crate) fn Workers(
                                                     span { class: "worker-dot", "data-state": category.value(), aria_hidden: "true" }
                                                     span { class: "worker-title", "{title}" }
                                                     span { class: "worker-phase", "{state} · {elapsed} · {row.host}" }
-                                                    span { class: "worker-activity", "{row.activity}" }
+                                                    span { class: "worker-activity", if row.ownership_stale { "Last known · ownership unavailable" } else { "{row.activity}" } }
                                                 }
                                             }
                                         }

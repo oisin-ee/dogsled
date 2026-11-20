@@ -27,6 +27,7 @@ pub(crate) struct View<T> {
 pub(crate) struct LocalInputs {
     pub now: u64,
     captured_ms: u64,
+    ownership: super::peers::Ownership,
     inventory: Option<Value>,
     todos: Option<Vec<TodoSections>>,
     sidebar_preferences: Option<BTreeMap<String, crate::sidebar::model::Saved>>,
@@ -180,6 +181,7 @@ impl LocalInputs {
         Self {
             now,
             captured_ms: input.published_ms,
+            ownership: super::peers::Ownership::default(),
             inventory: status.and_then(|status| {
                 capture(
                     "status",
@@ -252,7 +254,15 @@ impl Projector {
         {
             return Arc::clone(inputs);
         }
-        let inputs = Arc::new(LocalInputs::capture(fleet, input, &mut self.titles));
+        let mut inputs = LocalInputs::capture(fleet, input, &mut self.titles);
+        if let Some((_, last)) = &self.cached {
+            inputs.ownership.clone_from(&last.ownership);
+        }
+        inputs.ownership.replace(
+            input.local.get("host"),
+            !input.gaps.iter().any(|gap| gap.domain == "host"),
+        );
+        let inputs = Arc::new(inputs);
         self.cached = Some((key, Arc::clone(&inputs)));
         inputs
     }
@@ -318,10 +328,21 @@ fn enriched(status: &Status, owner: Option<&str>, local: &LocalInputs) -> Option
 /// The local owner namespace is this publication's host; foreign jobs retain execution IDs.
 pub(crate) fn derive(
     local: &LocalInputs,
-    mut reports: Vec<HostReport>,
+    reports: Vec<HostReport>,
     limits: &Thresholds,
     input: &mut Publication,
 ) -> Result<()> {
+    derive_with_ownership(local, reports, limits, input, BTreeMap::new())
+}
+
+pub(crate) fn derive_with_ownership(
+    local: &LocalInputs,
+    mut reports: Vec<HostReport>,
+    limits: &Thresholds,
+    input: &mut Publication,
+    mut ownership: BTreeMap<String, super::peers::Ownership>,
+) -> Result<()> {
+    ownership.insert(crate::hosts::LOCAL.into(), local.ownership.clone());
     for report in &mut reports {
         for job in &mut report.jobs {
             job.host.clone_from(&report.host.id);
@@ -407,7 +428,7 @@ pub(crate) fn derive(
     insert(views, "findings", local.findings.as_ref(), &gaps)?;
     let agents = fleet_agents(local, &reports, input.published_ms);
     agents_view(views, agents.as_ref(), &gaps)?;
-    let portal = portal(
+    let mut portal = portal(
         local,
         agents,
         board.as_ref(),
@@ -415,11 +436,38 @@ pub(crate) fn derive(
         &gaps,
         input.published_ms,
     );
+    project_ownership(&mut portal, &reports, &ownership, status.as_ref());
+    // Ownership gaps describe the portal hierarchy, not failure of the local board.
     insert(views, "portal_board", portal.board.as_ref(), &gaps)?;
     insert(views, "inbox", portal.inbox.as_ref(), &gaps)?;
     insert(views, "portal", Some(portal), &gaps)?;
     input.gaps = gaps;
     Ok(())
+}
+
+fn project_ownership(
+    portal: &mut portal_types::PortalSnapshot,
+    reports: &[HostReport],
+    ownership: &BTreeMap<String, super::peers::Ownership>,
+    status: Option<&Status>,
+) {
+    if let (Some(board), Some(status)) = (&mut portal.board, status) {
+        crate::web::board::ownership::merge(board, reports, ownership, &status.queue);
+    }
+    for report in reports {
+        let source = ownership.get(&report.host.id);
+        if !source.is_some_and(|source| source.current) {
+            portal.gaps.push(Gap {
+                domain: format!("ownership:{}", report.host.id),
+                availability: if source.is_some_and(|source| source.evidence.is_some()) {
+                    Availability::Stale
+                } else {
+                    Availability::Unavailable
+                },
+                detail: format!("Ownership unavailable: {}", report.host.label),
+            });
+        }
+    }
 }
 
 fn repos_view(

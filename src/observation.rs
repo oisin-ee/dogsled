@@ -8,6 +8,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod display;
 pub(crate) mod ipc;
 pub(crate) mod live_activity;
+pub(crate) mod owned_work;
 mod pages;
 pub(crate) mod peers;
 pub(crate) mod peers_runtime;

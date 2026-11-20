@@ -2,6 +2,8 @@
 //! repository, and the JSON payload the API serves.
 
 use crate::board;
+
+pub(crate) mod ownership;
 use portal_types::{
     BoardView, GroupView, HostView, RepoGroup, RowView, TodoChildView, TodoItemView,
     TodoSectionView, TodoStatusView, TodoView,
@@ -132,6 +134,7 @@ impl From<&board::Row> for RowView {
     fn from(row: &board::Row) -> Self {
         Self {
             group: row.group.into(),
+            ownership_stale: false,
             kind: row.kind.clone(),
             id: row.id.clone(),
             name: row.name.clone(),
@@ -158,6 +161,7 @@ impl From<&board::HostLine> for HostView {
     fn from(host: &board::HostLine) -> Self {
         Self {
             label: host.label.clone(),
+            hostname: None,
             service: host.service.clone(),
             reachable: host.reachable,
             busy: host.busy,

@@ -91,6 +91,65 @@ fn input(value: u64) -> Publication {
     }
 }
 
+#[test]
+fn owned_work_wire_preserves_base_report_at_reply_limit() {
+    let mut publication = input(100);
+    let mut publisher = Publisher::new().unwrap();
+    let base = publisher.replace(publication.clone()).unwrap();
+    let base_len = serde_json::to_vec(&peers::Export::of(&base)).unwrap().len();
+    publication.local.get_mut("host").unwrap()["owned_work"] = json!({
+        "version":1, "status":"ready", "hostname":"origin", "owned":[], "executions":[],
+        "padding":"x".repeat(1024)
+    });
+    let frame = publisher.replace(publication).unwrap();
+    assert!(frame.local_revision > base.local_revision);
+    for limit in [base_len + 1, base_len + 128] {
+        let wire = peers::Export::of(&frame).into_wire_value(limit).unwrap();
+        assert!(
+            serde_json::to_vec(&wire).unwrap().len() < limit,
+            "newline must also fit"
+        );
+        let host = &wire["local"]["host"];
+        assert_eq!(host["running"], true);
+        assert!(host.get("owned_work").is_none() || host["owned_work"]["status"] == "unavailable");
+        serde_json::from_value::<crate::node::SnapshotReport>(host.clone()).unwrap();
+    }
+}
+
+#[test]
+fn owned_work_wire_retains_last_good_until_a_fresh_replacement() {
+    let mut capture = peers::Ownership::default();
+    let ready = |owned| json!({"owned_work":{"version":1,"status":"ready","hostname":"netcup","owned":owned,"executions":[]}});
+    let full = ready(
+        json!([{"request_id":"r1","kind":"job","owner_pane":"owner","phase":"pending","name":"cargo"}]),
+    );
+    capture.replace(Some(&full), true);
+    assert!(capture.current);
+    let first = capture.evidence.clone().unwrap();
+    let empty = ready(json!([]));
+    for host in [
+        None,
+        Some(json!({})),
+        Some(json!({"owned_work":{"version":2}})),
+        Some(json!({"owned_work":"invalid"})),
+    ] {
+        capture.replace(host.as_ref(), true);
+        assert!(!capture.current);
+        assert!(std::sync::Arc::ptr_eq(
+            &first,
+            capture.evidence.as_ref().unwrap()
+        ));
+    }
+    capture.replace(Some(&empty), false);
+    assert!(std::sync::Arc::ptr_eq(
+        &first,
+        capture.evidence.as_ref().unwrap()
+    ));
+    capture.replace(Some(&empty), true);
+    assert!(capture.current);
+    assert_eq!(capture.evidence.unwrap().owned.len(), 0);
+}
+
 fn check() -> Checked {
     Checked {
         item: "child".into(),

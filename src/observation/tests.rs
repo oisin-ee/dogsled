@@ -2,6 +2,7 @@ mod actions;
 mod context_fixture;
 mod details;
 mod local;
+mod owned_work_capture;
 mod peer;
 mod projection;
 mod projection_import;

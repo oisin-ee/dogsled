@@ -843,9 +843,10 @@ fn AgentSession(
             .cloned()
             .collect()
     });
-    let worker_rows = crate::workers::owned_rows(board_view.as_ref(), lead.as_ref());
+    let worker_rows = crate::workers::owned_rows(board_view.as_ref(), Some(&address));
     let workers: Vec<(String, String)> = worker_rows
         .iter()
+        .filter(|row| row.kind == "agent")
         .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
         .collect();
     let files_count = crate::files::path_count(files.read().as_ref())
@@ -937,7 +938,16 @@ fn AgentSession(
         .map(|section| section.count)
         .sum();
     let role = if row.is_some() { "worker" } else { "lead" };
-    let host = row.map(|row| row.host.as_str());
+    let lead_hostname = board_view
+        .as_ref()
+        .and_then(|board| {
+            crate::board::lead_hostname(
+                board,
+                portal.agents.read().as_deref().unwrap_or_default(),
+                &address,
+            )
+        })
+        .unwrap_or("unavailable");
     let assistant = current
         .as_ref()
         .and_then(|agent| agent.name.as_deref())
@@ -1047,7 +1057,6 @@ fn AgentSession(
                     div { class: "lead-heading", h1 { "{title}" }
                         p { class: "lead-meta", "{state} · {role}"
                             if let Some(harness) = harness { " · {harness}" }
-                            if let Some(host) = host { " · {host}" }
                             if let Some(branch) = branch { " · {branch}" }
                         }
                     }
@@ -1068,6 +1077,7 @@ fn AgentSession(
                     }
                 }
                 div { class: "lead-actions",
+                    span { class: "lead-meta", "Lead host: {lead_hostname}" }
                     if tab == Tab::Pending {
                         Button { class: "icon-button", variant: ButtonVariant::Ghost, r#type: "button",
                             aria_label: if plan_open { "Close plan review" } else { "Show conversation" },

@@ -118,7 +118,15 @@ pub(crate) struct Collector {
 
 impl Collector {
     pub(super) fn record<T: Serialize>(&mut self, domain: &str, now: u64, value: Result<T>) {
-        match value.and_then(|value| serde_json::to_value(value).map_err(Into::into)) {
+        self.record_value(
+            domain,
+            now,
+            value.and_then(|value| serde_json::to_value(value).map_err(Into::into)),
+        );
+    }
+
+    fn record_value(&mut self, domain: &str, now: u64, value: Result<serde_json::Value>) {
+        match value {
             Ok(value) => {
                 self.local.insert(domain.into(), value);
                 self.measured.insert(domain.into(), now);
@@ -316,7 +324,15 @@ impl Collector {
         if capture_terminals {
             self.record("terminals", now, terminals);
         }
-        self.record("host", now, host);
+        let host = host.and_then(|report| {
+            super::owned_work::serialize_host(
+                node.ledger,
+                &report,
+                status.as_ref().ok(),
+                todos.as_deref().ok(),
+            )
+        });
+        self.record_value("host", now, host);
         self.record("headroom", now, headroom);
         self.record("status", now, status);
         self.record("todos", now, todos);

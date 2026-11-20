@@ -764,6 +764,7 @@ mod tests {
             .hosts
             .push(portal_types::HostView {
                 label: "offline-host".into(),
+                hostname: None,
                 service: "unreachable".into(),
                 reachable: false,
                 busy: None,

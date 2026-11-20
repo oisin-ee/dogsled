@@ -20,6 +20,7 @@ struct State {
     sources: BTreeMap<String, PeerSource>,
     gaps: Vec<Gap>,
     cached: Option<crate::hosts::Cached>,
+    ownership: peers::Ownership,
 }
 
 pub(super) fn receipt(
@@ -146,6 +147,7 @@ impl Observers {
         mut reports: Vec<HostReport>,
     ) -> Result<()> {
         let local = self.projector.inputs(fleet, input);
+        let mut ownership = BTreeMap::new();
         for host in self.hosts.iter().filter(|host| !host.is_local()) {
             let state = self
                 .workers
@@ -167,10 +169,19 @@ impl Observers {
                 retry_tokens: Vec::new(),
                 availability: Availability::Unavailable,
             });
+            let mut owned = state.ownership;
+            owned.current &= source.availability == Availability::Available && report.fresh(now);
+            ownership.insert(host.id.clone(), owned);
             peer_gaps(host, &report, source, &state.gaps, input, now);
             reports.push(report);
         }
-        super::project::derive(&local, reports, &fleet.policy.into(), input)
+        super::project::derive_with_ownership(
+            &local,
+            reports,
+            &fleet.policy.into(),
+            input,
+            ownership,
+        )
     }
 }
 
@@ -268,6 +279,8 @@ fn poll(
             receipt(source, previous.as_ref(), retry);
         }
         state.cached.clone_from(&ingestion.cached);
+        let ownership_changed = state.ownership != ingestion.ownership;
+        state.ownership.clone_from(&ingestion.ownership);
         let gaps = ingestion.gaps();
         let gaps_changed = state.gaps != gaps;
         state.gaps = gaps;
@@ -277,6 +290,7 @@ fn poll(
         if result.as_ref().is_ok_and(|changed| *changed)
             || previous.as_ref() != ingestion.source.as_ref()
             || gaps_changed
+            || ownership_changed
             || local_changes != 0
         {
             dirty.mark(PEERS | local_changes);
