@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dogsled — B3 · Run clock</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+/* B3 — Run clock. Time is the organising axis: the Now panel becomes a timeline of the run,
+   the transcript is grouped by step, and New shows the repository's day on the same clock.
+   Violet-navy dusk, white primary actions, teal for running, Space Grotesk numerals, Instrument Sans text. */
+:root{color-scheme:dark;
+  --ground:#0c0f1f;--panel:#11152b;--raised:#181d3a;--sel:#1e2447;--line:#20264a;--line2:#2c335d;
+  --text:#eceefa;--muted:#9a9fc0;--dim:#636a92;
+  --accent:#f4f5ff;--on-accent:#0c0f1f;--done:#9d8cff;--done-soft:rgba(157,140,255,.16);
+  --run:#2ee6c5;--run-soft:rgba(46,230,197,.14);--wait:#ffc34d;--wait-soft:rgba(255,195,77,.11);
+  --ui:"Instrument Sans",system-ui,sans-serif;--num:"Space Grotesk",sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
+*{box-sizing:border-box}html,body{height:100%;overflow:hidden}
+body{margin:0;background:var(--ground);color:var(--text);font:13px/1.5 var(--ui);-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+h1,h2,h3,p{margin:0}button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;padding:0}
+svg{display:block;flex:none}.ic{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.mono{font-family:var(--mono)}a{color:var(--done);text-decoration:none}
+.lbl{font:600 11px var(--num);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+
+.top{height:58px;display:flex;align-items:center;gap:24px;padding:0 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{font:700 17px var(--num);letter-spacing:-.01em}
+.brand span{color:var(--run)}
+.tally{display:flex;gap:20px}
+.tl{display:flex;align-items:baseline;gap:6px;font-size:12px;color:var(--muted)}.tl b{font:600 22px var(--num);color:var(--text)}
+.tl.w b{color:var(--wait)}.tl.r b{color:var(--run)}
+.gauges{display:flex;gap:18px;margin-left:auto}
+.g{display:flex;align-items:center;gap:8px}
+.g svg{width:30px;height:30px}
+.g div{display:flex;flex-direction:column;line-height:1.25}.g b{font-size:12.5px;font-weight:600}.g span{font:12px var(--num);color:var(--muted)}
+.g.best span{color:var(--run)}
+.clock{font:500 15px var(--num);color:var(--text);padding:0 0 0 18px;border-left:1px solid var(--line)}
+.btn{display:flex;align-items:center;gap:6px;height:32px;padding:0 13px;border-radius:16px;font-weight:600}
+.btn.ghost{color:var(--muted);border:1px solid var(--line2)}.btn.primary{background:var(--accent);color:var(--on-accent)}
+
+.app{display:grid;grid-template-columns:318px minmax(0,1fr) 278px;height:calc(100dvh - 58px)}
+body.new .app{grid-template-columns:318px minmax(0,1fr)}
+body.new .runcol,body.new .chat{display:none}body:not(.new) .launch{display:none}
+.side{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.scroll{overflow:auto;min-height:0;flex:1}
+.sec{display:flex;align-items:center;padding:14px 16px 8px}
+.sec .n{margin-left:auto;font:600 12px var(--num);color:var(--muted)}
+.sec.needs .lbl{color:var(--wait)}.sec.needs .n{color:#1f1500;background:var(--wait);border-radius:10px;padding:0 7px}
+.need{margin:0 10px 6px;padding:10px 12px;border-radius:12px;background:linear-gradient(var(--wait-soft),var(--wait-soft)),var(--panel);border:1px solid rgba(255,195,77,.28)}
+.need-top{display:flex;gap:6px;font-size:11.5px;color:var(--wait);font-weight:500}.need-top time{margin-left:auto;font-family:var(--num);color:var(--muted)}
+.need h3{font-size:13.5px;font-weight:600;margin-top:2px;line-height:1.35}
+.need p{font-size:12px;color:var(--muted)}
+.ans{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
+.opt{height:26px;padding:0 10px;border-radius:13px;border:1px solid var(--line2);background:var(--ground);font-size:12px;display:inline-flex;align-items:center;gap:6px}
+.opt.rec{border-color:var(--done)}.opt.rec::after{content:"recommended";font-size:10px;color:var(--done)}
+.opt.go{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.opt.key{font-family:var(--mono);font-size:11.5px;min-width:30px;justify-content:center}
+.repo{display:flex;align-items:center;gap:8px;padding:12px 16px 4px;font-size:12px;font-weight:600;color:var(--muted)}
+.repo .land{margin-left:auto;font-size:11px;font-weight:500;color:var(--text);background:var(--raised);border-radius:9px;padding:0 7px}
+.lead{margin:0 10px 2px;padding:8px 10px;border-radius:10px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px}
+.lead.on{background:var(--sel);box-shadow:inset 0 0 0 1px var(--line2)}
+.lead .t{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:7px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--run);flex:none}
+.dot.w{background:var(--wait)}.dot.idle{background:transparent;border:1.5px solid var(--dim)}
+.lead .el{font:600 13px var(--num);color:var(--run);text-align:right}
+.lead .now{font:11px var(--mono);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:14px}
+.lead .now b{color:var(--text);font-weight:500}
+.lead .sub{font-size:10.5px;color:var(--dim);text-align:right}
+.hist{grid-column:1/3;display:flex;align-items:flex-end;gap:2px;height:16px;margin:4px 0 0 14px}
+.hist i{flex:1;background:var(--run);opacity:.75;border-radius:1px 1px 0 0;min-height:1px}
+.hist.w i{background:var(--wait)}.hist.idle i{background:var(--dim)}
+.lead .wk{grid-column:1/3;font-size:11px;color:var(--dim);padding-left:14px;margin-top:3px;display:flex;gap:5px;align-items:center}
+.wk i{width:6px;height:6px;border-radius:50%;background:var(--run)}.wk i.w{background:var(--wait)}
+
+.chat{display:flex;flex-direction:column;min-width:0;min-height:0}
+.chat-head{height:58px;display:flex;align-items:center;gap:14px;padding:0 24px}
+.chat-head h1{font:600 20px var(--num);letter-spacing:-.01em}
+.meta{font-size:12px;color:var(--muted);display:flex;gap:10px}.meta .mono{font-size:11.5px;color:var(--text)}
+.acts{margin-left:auto;display:flex;gap:6px}.ib{width:30px;height:30px;display:grid;place-items:center;border-radius:15px;border:1px solid var(--line2);color:var(--muted)}
+
+/* run clock */
+.clockp{margin:0 24px;border:1px solid var(--line2);border-radius:14px;background:var(--panel);padding:12px 16px 10px;display:grid;grid-template-columns:168px minmax(0,1fr);gap:0 18px}
+.big{border-right:1px solid var(--line);padding-right:14px}
+.big .lbl{color:var(--run)}
+.big b{display:block;font:600 40px/1.05 var(--num);letter-spacing:-.02em;margin:4px 0 2px}
+.big b small{font-size:22px;color:var(--muted);font-weight:500}
+.big p{font-size:12px;color:var(--muted);line-height:1.4}
+.big .eta{margin-top:8px;font-size:12px;color:var(--text)}.big .eta span{color:var(--run);font-family:var(--num);font-weight:600}
+.axis{position:relative;height:16px;font:10.5px var(--num);color:var(--dim)}
+.axis span{position:absolute;transform:translateX(-50%)}
+.lanes{position:relative}
+.lane{position:relative;height:24px;margin-top:4px;border-radius:5px;background:repeating-linear-gradient(90deg,transparent 0 calc(20% - 1px),var(--line) calc(20% - 1px) 20%)}
+.lane .nm{position:absolute;left:0;top:-1px;font-size:10.5px;color:var(--dim);transform:translateY(-100%)}
+.seg{position:absolute;top:3px;height:18px;border-radius:4px;font-size:11px;line-height:18px;padding:0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seg.d{background:var(--done-soft);color:var(--text);box-shadow:inset 2px 0 0 var(--done)}
+.seg.c{background:var(--run-soft);color:var(--text);box-shadow:inset 2px 0 0 var(--run)}
+.seg.p{border:1px dashed var(--line2);color:var(--dim);background:transparent}
+.seg.est{background:repeating-linear-gradient(135deg,rgba(46,230,197,.18) 0 4px,transparent 4px 8px);border-radius:0 4px 4px 0}
+.tick{position:absolute;top:8px;width:3px;height:8px;border-radius:1px;background:var(--muted)}
+.tick.you{background:var(--accent);height:12px;top:6px;width:4px}
+.tick.say{background:var(--done)}
+.nowc{position:absolute;top:-18px;bottom:-4px;width:2px;background:var(--run);box-shadow:0 0 0 3px var(--run-soft)}
+.nowc span{position:absolute;top:0;right:6px;font:600 10.5px var(--num);color:var(--run);white-space:nowrap}
+.legend{display:flex;gap:14px;margin-top:8px;font-size:11px;color:var(--dim)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+
+.stream{flex:1;min-height:0;overflow:auto;padding:10px 0}
+.col{max-width:720px;margin:0 auto;padding:0 24px}
+.earlier{display:flex;justify-content:center;margin-bottom:6px}
+.earlier button{height:26px;padding:0 12px;border-radius:13px;border:1px solid var(--line2);font-size:12px;color:var(--muted)}
+.chap{display:flex;align-items:center;gap:10px;margin:10px 0 4px;font-size:12px;color:var(--muted)}
+.chap b{font:600 12px var(--num);color:var(--text);background:var(--raised);border-radius:9px;padding:0 8px}
+.chap.cur b{background:var(--run);color:#04201b}
+.chap::after{content:"";flex:1;height:1px;background:var(--line)}
+.chap .t{font-family:var(--num);color:var(--dim)}
+.ev{display:grid;grid-template-columns:44px minmax(0,1fr);gap:0 14px;padding:5px 0}
+.ev time{font:11px var(--num);color:var(--dim);padding-top:3px}
+.who{font-size:12px;color:var(--muted);margin-bottom:3px;display:flex;align-items:center;gap:8px}.who b{color:var(--text);font-weight:600}
+.msg{background:var(--raised);border-radius:12px 12px 12px 4px;padding:9px 13px;font-size:14px;line-height:1.55}
+.say p{font-size:14px;line-height:1.65}.say p+p{margin-top:5px}
+.tools{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:13px;background:var(--panel);border:1px solid var(--line);font-size:12px}
+.chip .ok{color:var(--done)}.chip .d{font:11px var(--num);color:var(--dim)}
+.chip.live{border-color:rgba(46,230,197,.4);background:var(--run-soft)}.chip.live .ok{color:var(--run)}
+.vers{margin-top:6px;display:flex;gap:6px}
+.ver{border:1px solid var(--line);border-radius:9px;padding:5px 10px;font-size:12px}
+.ver b{display:block;font-weight:600}.ver span{font:11px var(--mono);color:var(--muted)}
+.pend .msg{background:transparent;border:1px dashed var(--line2)}
+.dl{font-size:11px;font-weight:600;border-radius:9px;padding:0 7px;line-height:17px}
+.dl.sent{background:var(--done-soft);color:var(--done)}.dl.queued{background:var(--wait-soft);color:var(--wait)}
+.composer-wrap{padding:8px 24px 16px}
+.composer{max-width:720px;margin:0 auto;border:1px solid var(--line2);border-radius:16px;background:var(--panel)}
+.composer textarea{display:block;width:100%;border:0;resize:none;background:none;font:14px/1.5 var(--ui);color:var(--text);padding:12px 16px 2px;outline:none}
+.composer textarea::placeholder{color:var(--dim)}
+.ctl{display:flex;align-items:center;gap:6px;padding:6px 8px 8px}
+.pick{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 11px;border-radius:14px;background:var(--raised);font-size:12.5px}
+.pick .sub{color:var(--muted)}.chev{width:12px;height:12px;color:var(--muted)}
+.pips{display:inline-flex;gap:3px}.pips i{width:6px;height:6px;border-radius:50%;background:var(--line2)}.pips i.on{background:var(--run)}
+.send{margin-left:auto;width:32px;height:32px;border-radius:16px;display:grid;place-items:center;background:var(--accent);color:var(--on-accent)}
+
+.runcol{border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:var(--panel)}
+.blk{padding:14px 16px;border-bottom:1px solid var(--line)}
+.bh{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}.bh b{font:600 13px var(--num)}
+.step{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:0 8px;font-size:12.5px;padding:4px 0;align-items:center}
+.step .no{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font:600 10.5px var(--num);background:var(--raised);color:var(--muted)}
+.step.done{color:var(--muted)}.step.done .no{background:var(--done);color:#120d33}
+.step.cur .no{background:var(--run);color:#04201b}.step.cur span{font-weight:600}
+.step time{font:11px var(--num);color:var(--dim)}.step.cur time{color:var(--run)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 12px;font-size:12.5px}
+.kv span:nth-child(odd){color:var(--muted)}.kv span:nth-child(even){text-align:right}.kv .mono{font-size:11.5px}
+.ci{display:flex;gap:4px;margin-top:8px}.ci i{flex:1;height:5px;border-radius:3px;background:var(--line2)}.ci i.d{background:var(--done)}.ci i.c{background:var(--run)}
+.hostrow{display:flex;align-items:center;gap:12px}
+.hostrow svg{width:46px;height:46px}
+.hostrow b{font:600 18px var(--num)}.hostrow p{font-size:12px;color:var(--muted)}
+
+.launch{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:0;overflow:hidden;padding:0 40px}
+.lc{width:840px}
+.lc h1{font:600 30px var(--num);letter-spacing:-.02em;margin-bottom:16px;text-align:center}
+.lc .composer{max-width:none;border-color:var(--accent);border-radius:18px}
+.ph{min-height:112px;padding:16px 20px 0;font-size:15px;color:var(--dim)}
+.caret{display:inline-block;width:1.5px;height:19px;background:var(--accent);vertical-align:-4px;margin-right:2px}
+.lc .ctl{padding:8px 10px 10px}
+.pick.repo{background:var(--accent);color:var(--on-accent);font-weight:600}.pick.repo .chev{color:var(--on-accent)}
+.keyrow{display:flex;justify-content:center;gap:18px;margin-top:10px;font-size:12px;color:var(--dim)}
+.keyrow kbd{font:11px var(--mono);color:var(--text);border:1px solid var(--line2);border-radius:5px;padding:0 6px;margin-right:5px}
+.ctx{display:grid;grid-template-columns:260px minmax(0,1fr);gap:12px;margin-top:22px}
+.card{border:1px solid var(--line2);border-radius:14px;background:var(--panel);padding:12px 14px}
+.card .lbl{margin-bottom:8px}
+.hosts3{display:flex;flex-direction:column;gap:6px}
+.h3r{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:8px;align-items:center;font-size:12.5px;padding:3px 6px;border-radius:8px}
+.h3r svg{width:24px;height:24px}.h3r span{font:12px var(--num);color:var(--muted)}
+.h3r.pick3{background:var(--run-soft);box-shadow:inset 0 0 0 1px rgba(46,230,197,.4)}.h3r.pick3 span{color:var(--run)}
+.base{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.base b{display:block;font:600 14px var(--mono);color:var(--text)}
+.day .axis{margin:0 0 2px 150px}
+.dl2{display:grid;grid-template-columns:150px minmax(0,1fr);align-items:center;margin-top:6px}
+.dl2 .nm2{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:10px;display:flex;align-items:center;gap:6px}
+.dl2 .lane{margin:0;height:20px;background:repeating-linear-gradient(90deg,transparent 0 calc(25% - 1px),var(--line) calc(25% - 1px) 25%)}
+.dl2 .seg{top:2px;height:16px;line-height:16px;font-size:10.5px}
+.seg.w{background:var(--wait-soft);box-shadow:inset 2px 0 0 var(--wait);color:var(--wait)}
+.seg.l{background:var(--raised);color:var(--muted)}
+</style></head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="chev" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
+<symbol id="plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+<symbol id="chart" viewBox="0 0 16 16"><path d="M3 13V8M8 13V3M13 13V6"/></symbol>
+<symbol id="clip" viewBox="0 0 16 16"><path d="M11.5 7.5l-4 4a2.5 2.5 0 01-3.5-3.5l5-5a1.7 1.7 0 012.4 2.4l-5 5a.8.8 0 01-1.2-1.2l4.3-4.3"/></symbol>
+<symbol id="term" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 7l2 1.5L5 10M8.5 10.5h2.5"/></symbol>
+<symbol id="ext" viewBox="0 0 16 16"><path d="M9 3h4v4M13 3L7.5 8.5M11 9.5V13H3V5h3.5"/></symbol>
+<symbol id="x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></symbol>
+<symbol id="up" viewBox="0 0 16 16"><path d="M8 13V3M4 7l4-4 4 4"/></symbol>
+<symbol id="repo" viewBox="0 0 16 16"><path d="M4 2.5h7.5v11H4.5A1.5 1.5 0 013 12V4a1.5 1.5 0 011-1.5zM3 11.5a1.5 1.5 0 011.5-1.5h7"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <div class="brand">dogsled<span>.</span></div>
+  <div class="tally"><span class="tl w"><b>3</b>need you</span><span class="tl r"><b>12</b>working</span><span class="tl"><b>4</b>idle</span><span class="tl"><b>1</b>to land</span></div>
+  <div class="gauges">
+    <div class="g"><svg data-ring="5,1,12"></svg><div><b>local</b><span>5 / 12</span></div></div>
+    <div class="g"><svg data-ring="13,1,16"></svg><div><b>netcup</b><span>14 / 16</span></div></div>
+    <div class="g best"><svg data-ring="1,0,7"></svg><div><b>momokaya-2</b><span>1 / 7 · most room</span></div></div>
+  </div>
+  <span class="clock">21:25:14</span>
+  <button class="btn ghost"><svg class="ic"><use href="#chart"/></svg>Metrics</button>
+  <button class="btn primary"><svg class="ic"><use href="#plus"/></svg>New</button>
+</header>
+
+<main class="app">
+  <nav class="side"><div class="scroll">
+    <div class="sec needs"><span class="lbl">Needs you</span><span class="n">3</span></div>
+    <div class="need"><div class="need-top">Question · rondo<time>4m</time></div><h3>Which header should the squad page use?</h3>
+      <div class="ans"><span class="opt rec">Compact bar</span><span class="opt">Photo hero</span><span class="opt">Tabs only</span></div></div>
+    <div class="need"><div class="need-top">Plan review · dogsled<time>12m</time></div><h3>Route CI waits to a gh run watch job</h3><p>7 steps · pi/guardrails.ts and the CI skill</p>
+      <div class="ans"><span class="opt go">Approve</span><span class="opt">Read the plan</span></div></div>
+    <div class="need"><div class="need-top">Key prompt · zoomies writer<time>1m</time></div><h3>Push feat/route-maps to origin?</h3>
+      <div class="ans"><span class="opt key">y</span><span class="opt key">n</span><span class="opt key">esc</span></div></div>
+
+    <div class="sec"><span class="lbl">Leads</span><span class="n">6</span></div>
+    <div class="repo">dogsled<span class="land">1 to land</span></div>
+    <div class="lead on"><span class="t"><i class="dot"></i>Ship release 0.40.0</span><span class="el">22m</span>
+      <span class="now"><b>ci_watch</b> release CI · step 3/6</span><span class="sub">on step</span>
+      <div class="hist" data-h="2,3,2,6,8,7,12,10,6,4,3,5,9,11,6,3,2,2,3,2,2,3,2,2,2,3,2,2,3,2"></div></div>
+    <div class="lead"><span class="t"><i class="dot"></i>Portal refresh: three B variants</span><span class="el">48s</span>
+      <span class="now"><b>write</b> b3-run-clock.html</span><span class="sub">on step</span>
+      <div class="hist" data-h="1,1,2,3,2,4,6,5,7,9,8,10,12,9,11,13,12,14,11,13,15,12,14,16,13,15,17,14,16,18"></div></div>
+    <div class="repo">rondo</div>
+    <div class="lead"><span class="t"><i class="dot w"></i>Squad page layout</span><span class="el" style="color:var(--wait)">4m</span>
+      <span class="now" style="color:var(--wait)">waiting for your answer</span><span class="sub">waiting</span>
+      <div class="hist w" data-h="6,8,7,9,11,10,8,9,7,6,5,4,3,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"></div></div>
+    <div class="lead"><span class="t"><i class="dot"></i>Graceful loading follow-ups</span><span class="el">3m</span>
+      <span class="now"><b>bash</b> pnpm test --filter web</span><span class="sub">on step</span>
+      <div class="hist" data-h="8,10,7,12,9,11,8,13,10,9,12,8,11,10,13,9,12,11,8,12,10,13,11,12,9,11,10,12,11,13"></div>
+      <span class="wk"><i></i><i></i>writer and reviewer working</span></div>
+    <div class="repo">zoomies</div>
+    <div class="lead"><span class="t"><i class="dot"></i>Route maps: three options</span><span class="el">1m</span>
+      <span class="now"><b>bash</b> node render.mjs --option c</span><span class="sub">on step</span>
+      <div class="hist" data-h="5,7,9,8,11,9,12,10,8,11,13,10,12,9,11,8,10,12,9,11,10,12,11,10,9,12,10,11,13,12"></div>
+      <span class="wk"><i></i><i class="w"></i>2 workers · 1 waits on you</span></div>
+  </div></nav>
+
+  <section class="chat">
+    <header class="chat-head">
+      <div><h1>Ship release 0.40.0</h1><div class="meta"><span>lead on local · gpt-6.2 high</span><span class="mono">release/0.40.0</span><span>started 20:41 · 21 tool calls</span></div></div>
+      <div class="acts"><span class="ib"><svg class="ic"><use href="#term"/></svg></span><span class="ib"><svg class="ic"><use href="#ext"/></svg></span><span class="ib"><svg class="ic"><use href="#x"/></svg></span></div>
+    </header>
+    <div class="clockp">
+      <div class="big"><span class="lbl">Now · step 3 of 6</span><b>22<small>m</small> 01<small>s</small></b><p>Waiting for release CI to go green</p><p class="eta">Done by about <span>21:27</span></p></div>
+      <div>
+        <div class="axis"><span style="left:0;transform:none">20:40</span><span style="left:20%">20:50</span><span style="left:40%">21:00</span><span style="left:60%">21:10</span><span style="left:80%">21:20</span><span style="left:100%;transform:translateX(-100%)">21:30</span></div>
+        <div class="lanes">
+          <div class="lane"><span class="seg d" style="left:2%;width:6.4%">1</span><span class="seg d" style="left:8.6%;width:37.6%">2 · Record host versions, wait for the bump PR</span><span class="seg c" style="left:46.4%;width:43.6%">3 · Watch release CI to green</span><span class="seg est" style="left:90%;width:4%"></span><span class="seg p" style="left:94.2%;width:5.8%">4–6</span>
+            <span class="nowc" style="left:90%"><span>now 21:25</span></span></div>
+          <div class="lane"><span class="seg d" style="left:46.4%;width:12.4%">build linux 6m 12s</span><span class="seg c" style="left:60.6%;width:29.4%">build macOS 14m 03s</span><span class="seg p" style="left:94.2%;width:5.8%">publish</span></div>
+          <div class="lane"><i class="tick you" style="left:2%"></i><i class="tick" style="left:6.6%"></i><i class="tick" style="left:8.3%"></i><i class="tick" style="left:9%"></i><i class="tick" style="left:10%"></i><i class="tick" style="left:24%"></i><i class="tick" style="left:36%"></i><i class="tick say" style="left:46.2%"></i><i class="tick" style="left:46.8%"></i><i class="tick" style="left:58%"></i><i class="tick" style="left:72%"></i><i class="tick you" style="left:89.3%"></i><i class="tick you" style="left:90%"></i></div>
+        </div>
+        <div class="legend"><span><i style="background:var(--done)"></i>done</span><span><i style="background:var(--run)"></i>running</span><span><i style="background:var(--muted)"></i>tool call</span><span><i style="background:var(--accent)"></i>your message</span><span style="margin-left:auto">lanes: steps · CI stages · activity</span></div>
+      </div>
+    </div>
+    <div class="stream"><div class="col">
+      <div class="earlier"><button>Show earlier history · 128</button></div>
+      <div class="chap"><b>1–2</b>Merge and record versions<span class="t">20:41–21:03 · 22m</span></div>
+      <div class="ev"><time>20:41</time><div><div class="who"><b>You</b></div><div class="msg">Land the recovery PR and cut 0.40.0. Check the plugin versions on all three hosts before you publish.</div></div></div>
+      <div class="ev"><time>20:44</time><div><div class="tools"><span class="chip"><span class="ok">✓</span>Merged <a>#385</a><span class="d">3s</span></span><span class="chip"><span class="ok">✓</span>Found the CI run<span class="d">18s</span></span><span class="chip"><span class="ok">✓</span>Checked 3 hosts<span class="d">1s</span></span><span class="chip" style="color:var(--muted)">+ 2 thoughts</span></div>
+        <div class="vers"><div class="ver"><b>local</b><span>0.39.0 · pid 2003474</span></div><div class="ver"><b>netcup</b><span>0.39.0 · pid 1969445</span></div><div class="ver"><b>momokaya-2</b><span>0.39.0 · pid 4137127</span></div></div></div></div>
+      <div class="chap cur"><b>3</b>Watch release CI to green<span class="t">from 21:03 · 22m so far</span></div>
+      <div class="ev"><time>21:03</time><div><div class="who"><b>Lead</b>pi · gpt-6.2</div>
+        <div class="say"><p><a>Recovery PR #385</a> landed and the <a>v0.40.0 candidate</a> is in release CI. Every host runs 0.39.0; I kept the service PIDs to prove each restart after the update.</p></div></div></div>
+      <div class="ev"><time>21:04</time><div class="tools"><span class="chip live"><span class="ok">●</span>Watching release CI · run 44594111877<span class="d">22m</span></span></div></div>
+      <div class="ev pend"><time>21:24</time><div><div class="who"><b>You</b><span class="dl sent">Sent</span></div><div class="msg">When CI is green, paste the release notes link here before you publish.</div></div></div>
+      <div class="ev pend"><time>21:25</time><div><div class="who"><b>You</b><span class="dl queued">Queued</span><span style="font-size:11px;color:var(--dim)">it reads this when the step ends</span></div><div class="msg">Then update the Homebrew tap too.</div></div></div>
+    </div></div>
+    <div class="composer-wrap"><form class="composer"><textarea rows="1" placeholder="Message the lead"></textarea>
+      <div class="ctl"><span class="ib" style="border:0"><svg class="ic"><use href="#clip"/></svg></span><span class="pick">gpt-6.2<svg class="ic chev"><use href="#chev"/></svg></span><span class="pick">effort <span class="pips"><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="sub">high</span><svg class="ic chev"><use href="#chev"/></svg></span><button type="button" class="send"><svg class="ic"><use href="#up"/></svg></button></div></form></div>
+  </section>
+
+  <aside class="runcol"><div class="scroll">
+    <div class="blk"><div class="bh"><span class="lbl">Steps</span><b>2 / 6</b></div>
+      <div class="step done"><span class="no">1</span><span>Merge recovery PR #385</span><time>3m</time></div>
+      <div class="step done"><span class="no">2</span><span>Record host versions and PIDs</span><time>19m</time></div>
+      <div class="step cur"><span class="no">3</span><span>Watch release CI to green</span><time>22m</time></div>
+      <div class="step"><span class="no">4</span><span>Publish the v0.40.0 release</span><time></time></div>
+      <div class="step"><span class="no">5</span><span>Update all three hosts</span><time></time></div>
+      <div class="step"><span class="no">6</span><span>Verify plugin stamps match</span><time></time></div></div>
+    <div class="blk"><div class="bh"><span class="lbl">Branch</span></div>
+      <div class="kv"><span>branch</span><span class="mono">release/0.40.0</span><span>pull request</span><span><a>#386</a> CI 1 of 3 done</span><span>changes</span><span>23 files +412 −96</span><span>base</span><span class="mono">main 6c0750a</span></div>
+      <div class="ci"><i class="d"></i><i class="c"></i><i></i></div></div>
+    <div class="blk"><div class="bh"><span class="lbl">Workers</span><b>1</b></div>
+      <div class="step done"><span class="no">✓</span><span>Review the release diff<br><span style="font-size:11.5px;color:var(--dim)">No blocking findings · netcup</span></span><time>20:58</time></div></div>
+    <div class="blk" style="border:0"><div class="bh"><span class="lbl">Host</span></div>
+      <div class="hostrow"><svg data-ring="4,1,12"></svg><div><b>local</b><p>5 of 12 slots · 35.2 / 48 GiB</p></div></div></div>
+  </div></aside>
+
+  <section class="launch"><div class="lc">
+    <h1>New conversation</h1>
+    <form class="composer"><div class="ph"><span class="caret"></span>Send a message or start a task…</div>
+      <div class="ctl">
+        <span class="pick repo"><svg class="ic" style="width:14px;height:14px"><use href="#repo"/></svg>oisin-ee/dogsled<svg class="ic chev"><use href="#chev"/></svg></span>
+        <span class="pick">gpt-6.2<svg class="ic chev"><use href="#chev"/></svg></span>
+        <span class="pick">effort <span class="pips"><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="sub">high</span><svg class="ic chev"><use href="#chev"/></svg></span>
+        <span class="ib" style="border:0"><svg class="ic"><use href="#clip"/></svg></span>
+        <button type="button" class="send"><svg class="ic"><use href="#up"/></svg></button>
+      </div></form>
+    <div class="keyrow"><span><kbd>Enter</kbd>start</span><span><kbd>Tab</kbd>repository → model → effort</span><span><kbd>↑</kbd>last message</span></div>
+    <div class="ctx">
+      <div class="card"><div class="lbl">Starts on</div>
+        <div class="hosts3">
+          <div class="h3r pick3"><svg data-ring="1,0,7"></svg>momokaya-2<span>1 / 7 · most room</span></div>
+          <div class="h3r"><svg data-ring="5,1,12"></svg>local<span>5 / 12</span></div>
+          <div class="h3r"><svg data-ring="13,1,16"></svg>netcup<span>14 / 16</span></div></div>
+        <div class="base"><span class="lbl">Base</span><b>main · 6c0750a</b>release 0.40.0 (#386) · 41m ago</div></div>
+      <div class="card day"><div class="lbl" style="display:flex">dogsled today<span style="margin-left:auto;letter-spacing:0;text-transform:none;font-weight:500">3 leads · 1 to land</span></div>
+        <div class="axis"><span style="left:0;transform:none">18:00</span><span style="left:25%">19:00</span><span style="left:50%">20:00</span><span style="left:75%">21:00</span><span style="left:100%;transform:translateX(-100%)">now</span></div>
+        <div class="dl2"><span class="nm2"><i class="dot"></i>Ship release 0.40.0</span><div class="lane"><span class="seg c" style="left:67%;width:33%">ci_watch · step 3/6</span></div></div>
+        <div class="dl2"><span class="nm2"><i class="dot"></i>Portal refresh: B variants</span><div class="lane"><span class="seg d" style="left:8%;width:30%">directions A B C</span><span class="seg c" style="left:88%;width:12%">write</span></div></div>
+        <div class="dl2"><span class="nm2"><i class="dot w"></i>Route CI waits</span><div class="lane"><span class="seg d" style="left:52%;width:44%">planning</span><span class="seg w" style="left:96%;width:4%"></span></div></div>
+        <div class="dl2"><span class="nm2"><i class="dot idle"></i>fix/portal-owner-hosts</span><div class="lane"><span class="seg l" style="left:20%;width:80%">to land · merged, main not pushed</span></div></div>
+      </div>
+    </div>
+  </div></section>
+</main>
+<script>
+for(const h of document.querySelectorAll('[data-h]')){const v=h.dataset.h.split(',').map(Number),m=Math.max(...v)||1;h.innerHTML=v.map(n=>`<i style="height:${Math.max(6,n/m*100)}%"></i>`).join('')}
+for(const s of document.querySelectorAll('svg[data-ring]')){
+  const [r,w,t]=s.dataset.ring.split(',').map(Number),C=2*Math.PI*9,seg=C/t;
+  let html='<g transform="rotate(-90 12 12)">';for(let i=0;i<t;i++){const c=i<r?'#2ee6c5':i<r+w?'#ffc34d':'#2c335d';html+=`<circle cx="12" cy="12" r="9" fill="none" stroke="${c}" stroke-width="3.2" stroke-dasharray="${(seg-1.4).toFixed(2)} ${(C-seg+1.4).toFixed(2)}" stroke-dashoffset="${(-i*seg).toFixed(2)}"/>`}
+  s.setAttribute('viewBox','0 0 24 24');s.innerHTML=html+'</g>';
+}
+if(new URLSearchParams(location.search).get('screen')==='new')document.body.classList.add('new');
+for(const s of document.querySelectorAll('.stream'))s.scrollTop=s.scrollHeight;
+</script>
+</body></html>
