@@ -21,15 +21,14 @@ use crate::components::item::{Item, ItemContent, ItemSize, ItemTitle, ItemVarian
 use crate::components::progress::Progress;
 use crate::components::scroll_area::ScrollArea;
 use crate::components::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
-    SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuButtonSize, SidebarMenuItem,
-    SidebarProvider,
+    Sidebar, SidebarCollapsible, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu,
+    SidebarMenuButton, SidebarMenuButtonSize, SidebarMenuItem, SidebarProvider,
 };
 use crate::components::skeleton::Skeleton;
 use crate::components::tabs::{TabContent, Tabs};
 use crate::conversations::Conversations;
 use crate::new_lead::{NewConversation, NewLead};
-use dioxus_icons::lucide::{CircleQuestionMark, CornerDownLeft, FileText, Moon, Plus};
+use dioxus_icons::lucide::Plus;
 
 /// Portal stream projections shared with the selected agent view.
 #[derive(Clone, Copy)]
@@ -54,6 +53,28 @@ const RETRY: Duration = Duration::from_secs(2);
 const COMPONENTS_CSS: Asset = asset!("/assets/dx-components-theme.css");
 const CONSOLE_CSS: Asset = asset!("/assets/console.css");
 const MARKDOWN_CSS: Asset = asset!("/assets/markdown.css");
+// The faces ship with the portal (OFL 1.1, licences beside them), so it never waits on a
+// font service. Bundled assets get hashed names, so the faces are declared here.
+const PLEX_SANS: Asset = asset!("/assets/fonts/ibm-plex-sans-latin.woff2");
+const PLEX_SANS_ITALIC: Asset = asset!("/assets/fonts/ibm-plex-sans-italic-latin.woff2");
+const JETBRAINS_MONO: Asset = asset!("/assets/fonts/jetbrains-mono-latin.woff2");
+const JETBRAINS_MONO_ITALIC: Asset = asset!("/assets/fonts/jetbrains-mono-italic-latin.woff2");
+
+fn font_faces() -> String {
+    [
+        ("IBM Plex Sans", "normal", "100 700", PLEX_SANS),
+        ("IBM Plex Sans", "italic", "100 700", PLEX_SANS_ITALIC),
+        ("JetBrains Mono", "normal", "100 800", JETBRAINS_MONO),
+        ("JetBrains Mono", "italic", "100 800", JETBRAINS_MONO_ITALIC),
+    ]
+    .into_iter()
+    .map(|(family, style, weight, source)| {
+        format!(
+            "@font-face{{font-family:\"{family}\";font-style:{style};font-weight:{weight};font-display:swap;src:url(\"{source}\") format(\"woff2\")}}"
+        )
+    })
+    .collect()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LeadPanel {
@@ -531,6 +552,17 @@ pub fn App() -> Element {
             .map(|repo| repo.agent_count())
             .sum::<usize>()
     });
+    let to_land = groups.as_ref().map_or(0, |groups| {
+        groups.repos.iter().map(|repo| repo.to_land).sum::<usize>()
+    });
+    let working = agents()
+        .iter()
+        .filter(|agent| matches!(agent.state.as_str(), "working" | "running"))
+        .count();
+    let idle = agents()
+        .iter()
+        .filter(|agent| agent.state == "idle")
+        .count();
 
     let lead = groups.as_ref().and_then(|groups| {
         let address = selected()?;
@@ -562,6 +594,12 @@ pub fn App() -> Element {
                 .cloned()
         }
     });
+    // The New page lists every lead of its repository, waiting ones too.
+    let running = groups
+        .as_ref()
+        .filter(|_| composing())
+        .map(|groups| groups.repos.clone())
+        .unwrap_or_default();
     // Leads are counted before waiting agents leave their repository groups.
     let waiting = groups
         .as_mut()
@@ -577,10 +615,10 @@ pub fn App() -> Element {
         );
     let navigation = rsx! {
             Sidebar { class: "console-agents", collapsible: SidebarCollapsible::None, aria_label: "Repositories and agents",
-                SidebarHeader { class: "console-column-header", h2 { "Agents" } span { "{agent_count}" } }
                 ScrollArea { class: "console-scroll", direction: ScrollDirection::Vertical,
                     NeedsYou { count: state.count(), error: link_error().or(state.error.clone()), waiting,
                         inbox: items.clone(), elapsed_ms, agents: agents(), reachable: agent_error().is_none() }
+                    h2 { class: "sidebar-section", "Agents" span { "{agent_count}" } }
                     if let Some(message) = board_error() { Alert { "Board updates unavailable: {message}" } }
                     // The agent list comes from the observation, not from Herdr. Show its own
                     // error, once when the board has the same one.
@@ -603,6 +641,7 @@ pub fn App() -> Element {
     };
 
     rsx! {
+        document::Style { "{font_faces()}" }
         document::Stylesheet { href: COMPONENTS_CSS }
         document::Stylesheet { href: CONSOLE_CSS }
         document::Stylesheet { href: MARKDOWN_CSS }
@@ -634,6 +673,14 @@ pub fn App() -> Element {
                         "New"
                     }
                 }
+                p { class: "console-tally", aria_label: "Fleet",
+                    if let Some(count) = state.count().filter(|count| *count > 0) {
+                        span { class: "tally-waiting", b { "{count}" } " need you" }
+                    }
+                    span { class: "tally-working", b { "{working}" } " working" }
+                    span { b { "{idle}" } " idle" }
+                    if to_land > 0 { span { b { "{to_land}" } " to land" } }
+                }
                 if stream_paused() { Status { "Live updates paused, retrying" } }
                 div { class: "console-hosts", aria_label: "Host load",
                     if let Some(view) = &view {
@@ -643,10 +690,10 @@ pub fn App() -> Element {
                                 let load = busy.map_or(0.0, |busy| if host.cores == 0 { 0.0 } else { (busy / f64::from(host.cores) * 100.0).clamp(0.0, 100.0) });
                                 let value = busy.map_or_else(|| format!("—/{}", host.cores), |busy| format!("{busy:.0}/{}", host.cores));
                                 rsx! {
-                                    div { class: "console-host", key: "{host.label}", title: "{host.label}: {host.service}",
-                                        span { "{host.label}" }
+                                    div { class: "console-host", key: "{host.label}", title: "{host.label}: {host.service}, CPU {value}",
+                                        span { class: "host-label", "{host.label}" }
                                         Progress { value: Some(load), max: 100.0, aria_label: "{host.label} CPU load" }
-                                        span { "{value}" }
+                                        span { class: "host-value", "{value}" }
                                     }
                                 }
                             }
@@ -666,7 +713,7 @@ pub fn App() -> Element {
                         rsx! { AgentView { key: "{pane.host}:{pane.pane}", host: pane.host, pane: pane.pane, review, question, lead: lead.clone(), inbox: items.clone() } }
                     }
                     None if metrics_open() => rsx! { crate::metrics::Metrics {} },
-                    None if composing() => rsx! { NewLead {} },
+                    None if composing() => rsx! { NewLead { hosts: view.as_ref().map(|view| view.hosts.clone()).unwrap_or_default(), running } },
                     None => rsx! { div { class: "empty-lead",
                         TabContent { class: "empty-chat", value: "chat", index: 0usize,
                         div { class: "console-empty",
@@ -728,26 +775,19 @@ pub(crate) fn NeedsYou(
                             let repository = agent.repository.as_deref().map(repository_name);
                             let summary = format!("{}{} · {}: {}", agent.row.title,
                                 repository.map(|name| format!(" · {name}")).unwrap_or_default(), kind.label(), item.title);
+                            let place = repository.map_or_else(|| agent.row.title.clone(), str::to_owned);
                             let options = agents.iter().find(|agent| agent.host == address.host && agent.pane == address.pane)
                                 .and_then(|agent| agent.blocked.as_ref()).map(|prompt| prompt.options.clone()).unwrap_or_default();
                             let workers = !agent.row.worker && !agent.row.workers.is_empty();
                             let lead = agent.row.clone();
                             let body = rsx! {
-                                span { class: "waiting-head",
-                                    span { class: "agent-dot", "data-status": "waiting", aria_hidden: "true" }
-                                    span { class: "agent-title", "{agent.row.title}" }
+                                span { class: "inbox-kind",
+                                    span { class: "inbox-place", "{kind.label()} · {place}" }
+                                    if more > 0 { span { class: "inbox-more", "+{more}" } }
                                     span { class: "inbox-age", "{age}" }
                                 }
-                                span { class: "inbox-kind",
-                                    match kind {
-                                        InboxKind::Review => rsx! { FileText { size: 14, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
-                                        InboxKind::Question => rsx! { CircleQuestionMark { size: 14, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
-                                        InboxKind::Prompt => rsx! { CornerDownLeft { size: 14, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
-                                        InboxKind::UnseenWorker => rsx! { Moon { size: 14, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) } },
-                                    }
-                                    span { class: "inbox-title", "{kind.label()} · {item.title}" }
-                                    if more > 0 { span { class: "inbox-more", "+{more}" } }
-                                }
+                                span { class: "inbox-title", "{item.title}" }
+                                if repository.is_some() { span { class: "agent-title", "{agent.row.title}" } }
                             };
                             rsx! {
                                 SidebarMenuItem { key: "{address.host}:{address.pane}", class: "waiting-agent", "data-open": open,

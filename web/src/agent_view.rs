@@ -278,7 +278,6 @@ pub(crate) fn PendingMessage(text: String, label: String, detail: String) -> Ele
     rsx! {
         article { class: "conversation-event conversation-owner conversation-pending", aria_label: "You",
             span { class: "conversation-time", aria_hidden: "true" }
-            div { class: "conversation-axis", aria_hidden: "true", i {} }
             div { class: "conversation-body",
                 div { class: "conversation-meta", strong { "You" }
                     span { class: "conversation-delivery", role: "status", title: "{detail}", "{label}" } }
@@ -1006,6 +1005,13 @@ fn AgentSession(
             }
         }
     };
+    let wide = width() >= 1400;
+    let now = rsx! {
+        LiveActivity { live, snapshot: retained.clone(), coarse: coarse.clone(),
+            connected: loading() || (reachable() && stream_error().is_none()),
+            waiting: pending.as_ref().map(|pending| pending.state().to_owned()),
+            step: todo_title.map(str::to_owned) }
+    };
     let chat = rsx! {
         div { class: "lead-chat",
                 if tab == Tab::Pending {
@@ -1034,9 +1040,8 @@ fn AgentSession(
                 }
             if tab == Tab::Conversation {
                 footer { class: "conversation-footer",
-                    LiveActivity { live, snapshot: retained.clone(), coarse: coarse.clone(),
-                        connected: loading() || (reachable() && stream_error().is_none()),
-                        waiting: pending.as_ref().map(|pending| pending.state().to_owned()) }
+                    // A wide console shows Now in its right column instead.
+                    if !wide { {now.clone()} }
                     Composer { draft, images, uploading, disabled, busy: busy(), placeholder: placeholder.clone(), history: history.clone(), on_error: move |message| action_error.set(Some(message)),
                         model_picker: picker.clone(), on_send: { let mut send = conversation_send.clone(); move |_| send(false) } }
                 }
@@ -1055,9 +1060,10 @@ fn AgentSession(
                     }
                 } else {
                     div { class: "lead-heading", h1 { "{title}" }
-                        p { class: "lead-meta", "{state} · {role}"
-                            if let Some(harness) = harness { " · {harness}" }
-                            if let Some(branch) = branch { " · {branch}" }
+                        p { class: "lead-meta",
+                            span { "{state}" }
+                            span { "{role} on {address.host}" if let Some(harness) = harness { " · {harness}" } }
+                            if let Some(branch) = branch { code { "{branch}" } }
                         }
                     }
                 }
@@ -1077,7 +1083,7 @@ fn AgentSession(
                     }
                 }
                 div { class: "lead-actions",
-                    span { class: "lead-meta", "Lead host: {lead_hostname}" }
+                    if worker_view { span { class: "lead-meta", "Lead host: {lead_hostname}" } }
                     if tab == Tab::Pending {
                         Button { class: "icon-button", variant: ButtonVariant::Ghost, r#type: "button",
                             aria_label: if plan_open { "Close plan review" } else { "Show conversation" },
@@ -1148,9 +1154,13 @@ fn AgentSession(
                     }
                 }
             } else {
-                if width() >= 1400 {
+                if wide {
                     {chat.clone()}
                     aside { class: "console-todos",
+                        section { class: "now-panel", aria_label: "Now",
+                            h2 { class: "detail-heading", "Now" }
+                            {now}
+                        }
                         Tabs { class: "lead-detail", horizontal: true, value: Some(detail().value().to_owned()),
                             on_value_change: move |value: String| {
                                 let next = match value.as_str() {
@@ -1600,7 +1610,6 @@ fn MessageRecord(turn: Turn, assistant: String) -> Element {
         article { class: if owner { "conversation-event conversation-owner" } else if turn.role == Role::Thinking { "conversation-event conversation-thought" } else { "conversation-event" },
             "data-record-id": turn.id, aria_label: author.clone(),
             ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
-            div { class: "conversation-axis", aria_hidden: "true", i {} }
             div { class: "conversation-body",
                 div { class: "conversation-meta", strong { "{author}" } span { "{source}" } }
                 div { class: "markdown-body", dangerous_inner_html: markdown() }
@@ -1611,9 +1620,14 @@ fn MessageRecord(turn: Turn, assistant: String) -> Element {
 
 #[component]
 fn ToolRecords(turns: Vec<Turn>, assistant: String, label: String) -> Element {
+    // The fold sits on the timeline at the time its work started.
+    let first = turns.first();
     rsx! {
-        div { class: "conversation-work",
-            Collapsible { keep_mounted: true,
+        div { class: "conversation-event conversation-work",
+            if let Some(first) = first {
+                ConversationTime { timestamp: first.timestamp.clone(), role: first.role, source: first.source.clone() }
+            }
+            Collapsible { class: "conversation-body", keep_mounted: true,
                 CollapsibleTrigger { "{label}" }
                 CollapsibleContent { "data-part": "turn-work",
                     for turn in &turns { {conversation_record(turn, &assistant)} }
@@ -1640,7 +1654,6 @@ fn ToolRecord(turn: Turn) -> Element {
         article { class: "conversation-event conversation-tool", "data-record-id": turn.id,
             "data-error": error,
             ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
-            div { class: "conversation-axis", aria_hidden: "true", i {} }
             div { class: "conversation-body",
                 div { class: "conversation-tool-panel",
                     pre { class: "conversation-call", "{call}" }
@@ -1783,7 +1796,7 @@ fn LiveThought(text: String) -> Element {
     }
 }
 
-/// A timer updates only the footer; unchanged history Markdown stays memoized.
+/// A timer updates only this panel; unchanged history Markdown stays memoized.
 #[component]
 fn LiveActivity(
     live: ReadSignal<Live>,
@@ -1791,6 +1804,7 @@ fn LiveActivity(
     coarse: String,
     connected: bool,
     waiting: Option<String>,
+    #[props(default)] step: Option<String>,
 ) -> Element {
     let mut now = use_signal(now_ms);
     use_interval(Duration::from_secs(1), move |()| now.set(now_ms()));
@@ -1810,7 +1824,7 @@ fn LiveActivity(
         .zip(end)
         .and_then(|(start, end)| end.checked_sub(start.ms))
         .map(|ms| ms / 1000);
-    rsx! { ActivityRow { live, coarse, connected, waiting, turns: turn.to_vec(), elapsed_seconds } }
+    rsx! { ActivityRow { live, coarse, connected, waiting, turns: turn.to_vec(), elapsed_seconds, step } }
 }
 
 fn current_turn(turns: &[Turn]) -> &[Turn] {
@@ -1841,6 +1855,9 @@ pub(crate) fn ActivityRow(
     waiting: Option<String>,
     #[props(default)] turns: Vec<Turn>,
     #[props(default)] elapsed_seconds: Option<u64>,
+    /// The agent's current todo, the step this turn works on.
+    #[props(default)]
+    step: Option<String>,
 ) -> Element {
     let (phase, detail) = activity_label(&live, &coarse, connected, waiting.as_deref());
     let turns = current_turn(&turns);
@@ -1868,14 +1885,32 @@ pub(crate) fn ActivityRow(
             })
             .count();
     }
+    let state = if detail == "Needs you" {
+        "blocked"
+    } else if phase == "Disconnected" {
+        "disconnected"
+    } else {
+        coarse.as_str()
+    };
     rsx! {
-        div { class: "conversation-activity", "data-state": if detail == "Needs you" { "blocked" } else if phase == "Disconnected" { "disconnected" } else { coarse.as_str() },
-            p { role: "status", aria_live: "polite", aria_atomic: "true", "{phase}" }
-            if detail == "Live" {
-                if let Some(seconds) = elapsed_seconds { p { class: "activity-elapsed", "{elapsed_label(seconds)}" } }
-                p { class: "activity-counts", "{count_label(thoughts, calls)}" }
+        div { class: "conversation-activity", "data-state": state,
+            span { class: "activity-dot", aria_hidden: "true" }
+            div { class: "activity-what",
+                p { class: "activity-phase", role: "status", aria_live: "polite", aria_atomic: "true", "{phase}" }
+                if let Some(step) = step.filter(|step| !step.trim().is_empty()) {
+                    p { class: "activity-step", "{step}" }
+                }
+                if detail == "Live" { p { class: "activity-counts", "{count_label(thoughts, calls)}" } }
             }
-            p { class: "activity-detail", "{detail}" }
+            div { class: "activity-clock",
+                if detail == "Live" && let Some(seconds) = elapsed_seconds {
+                    // Green means running, so a finished turn's time stays white.
+                    p { class: "activity-elapsed", "data-running": phase != "Idle", "{elapsed_label(seconds)}" }
+                    p { class: "activity-detail", if phase == "Idle" { "last turn" } else { "this turn" } }
+                } else {
+                    p { class: "activity-detail", "{detail}" }
+                }
+            }
         }
     }
 }
@@ -2056,12 +2091,6 @@ pub(crate) fn Composer(
                         }
                     },
                 }
-                // Enter sends, so Tab goes from the message to the controls below it.
-                Button { class: "icon-button send-button", r#type: "button", aria_label: "Send message", title: "Send message", tabindex: "-1",
-                    onclick: move |_| if !disabled && !busy && !uploading() { on_send.call(()); },
-                    disabled: disabled || busy || uploading() || (draft().trim().is_empty() && images().is_empty()),
-                    ArrowUp { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
-                }
             }
             div { class: "composer-toolbar",
                 {controls}
@@ -2070,6 +2099,12 @@ pub(crate) fn Composer(
                     aria_label: "Attach images", title: "Attach images", disabled: disabled || busy || uploading(),
                     onclick: move |_| { let _ = document::eval("document.getElementById('composer-images').click()"); },
                     Paperclip { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
+                }
+                // Enter sends, so Tab goes from the message to the controls, never to this button.
+                Button { class: "icon-button send-button", r#type: "button", aria_label: "Send message", title: "Send message", tabindex: "-1",
+                    onclick: move |_| if !disabled && !busy && !uploading() { on_send.call(()); },
+                    disabled: disabled || busy || uploading() || (draft().trim().is_empty() && images().is_empty()),
+                    ArrowUp { size: 16, attributes: attributes!(svg { "aria-hidden": "true" }) }
                 }
                 Input { key: "{round}", id: "composer-images", name: "images", r#type: "file", hidden: true,
                     accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
