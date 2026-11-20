@@ -587,9 +587,21 @@ fn observation_herdr_status_event_wakes_local_collection() {
     let mut panes = observer.rig.read("panes.json");
     panes["result"]["panes"][0]["name"] = json!("changed");
     observer.rig.put("panes.json", &panes);
+    let sent = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     observer.event("pane.agent_status_changed");
-    observer.wait(|frame| frame["local"]["host"]["probe"]["panes"][0]["name"] == "changed");
-    assert_eq!(observer.samples(), before + 1);
+    // The reconcile pass of the new subscription can still be due on a loaded host, and it
+    // coalesces with this event. Either way, a local collection that started after the event
+    // samples the host and reads the changed pane. The coalescing test owns the pass count.
+    let frame = observer.wait(|frame| {
+        frame["local"]["host"]["probe"]["panes"][0]["name"] == "changed"
+            && frame["local"]["host"]["sampled_ms"]
+                .as_u64()
+                .is_some_and(|at| u128::from(at) >= sent)
+    });
+    assert!(observer.samples() > before, "{frame}");
 }
 
 #[test]
