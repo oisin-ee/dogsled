@@ -47,8 +47,16 @@ const CONTENT_TYPES: [(&str, &str); 18] = [
 /// The type of a file whose extension the table does not name.
 const DEFAULT_TYPE: &str = "application/octet-stream";
 
+// Lint the real handler and embedding code without producing the portal. All binary
+// builds still require a complete bundle, including the entry point.
+#[cfg(all(portal_index_missing, not(clippy)))]
+compile_error!(
+    "web/public/index.html is missing; run 'moon run :web-build' before building dogsled"
+);
+
 /// The embedded bundle.
 #[derive(RustEmbed)]
+#[cfg_attr(clippy, allow_missing = true)]
 #[folder = "web/public/"]
 struct Bundle;
 

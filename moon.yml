@@ -48,10 +48,6 @@ tasks:
     command: cargo clippy --all-targets -- -D warnings
     description: Run Clippy with warnings as errors, on every target.
     tags: [precommit]
-    # The server embeds the web bundle, so the bundle must exist before
-    # Clippy reads the sources that embed it.
-    deps:
-      - web-build
     inputs:
       - "src/**/*"
       - "tests/**/*"
@@ -61,7 +57,6 @@ tasks:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "clippy.toml"
-      - "web/public/**/*"
   test:
     command: cargo test
     description: Run the Rust unit and integration tests.
