@@ -1181,7 +1181,8 @@ fn run_teardown(
     if let Err(error) = teardown(shell, &settings, tree) {
         return Err(if let Some(operation) = operation.as_deref_mut() {
             operation.blocker = Some(format!(
-                "failed teardown: {error}; hook will not be rerun automatically"
+                "{}{error}; hook will not be rerun automatically; fix its cause, then close with --retry-teardown",
+                crate::preservation::TEARDOWN_FAILED
             ));
             operation.save(ledger)?;
             operation.refusal(error)

@@ -412,6 +412,39 @@ fn p3_failed_or_unknown_teardown_keeps_checkout() {
 }
 
 #[test]
+fn p3_retry_teardown_runs_a_failed_teardown_once_more() {
+    let (rig, tree) = p3_rig("p3-retry-teardown");
+    fs::write(tree.join("draft"), b"live work\n").unwrap();
+    fs::write(rig.dir.join("hook-fails"), b"").unwrap();
+    assert!(!rig.run(&["close", "w2:p1"]).status.success());
+    assert_p3_kept(&rig, &tree);
+    let before = rig.log("hook.log");
+    let out = rig.run(&["close", "w2:p1", "--retry-teardown"]);
+    assert!(!out.status.success(), "the hook still fails");
+    assert_ne!(before, rig.log("hook.log"), "the retry runs the hook");
+    assert_p3_kept(&rig, &tree);
+    fs::remove_file(rig.dir.join("hook-fails")).unwrap();
+    let (code, closed) = rig.json(&["close", "w2:p1", "--retry-teardown"]);
+    assert_eq!(code, 0, "{closed}");
+    assert!(!tree.exists());
+    assert!(closed["recovery"]["id"].is_string(), "{closed}");
+}
+
+#[test]
+fn p3_retry_teardown_never_repeats_an_unknown_teardown() {
+    let (rig, tree) = p3_rig("p3-retry-unknown");
+    fs::write(tree.join("draft"), b"live work\n").unwrap();
+    interrupt_p3(&rig, "TEARDOWN_ENTERED");
+    let before = rig.log("hook.log");
+    let out = rig.run(&["close", "w2:p1", "--retry-teardown"]);
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(error.contains("--retry-teardown needs"), "{error}");
+    assert_eq!(before, rig.log("hook.log"));
+    assert_p3_kept(&rig, &tree);
+}
+
+#[test]
 fn p3_crash_boundaries_keep_a_recoverable_copy() {
     for phase in ["INTENT", "AFTER_PIN", "BEFORE_NORMALIZE", "AFTER_REMOVE"] {
         let (rig, tree) = p3_rig(&format!("p3-crash-{phase}"));

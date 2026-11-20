@@ -400,6 +400,7 @@ pub fn close(
     fleet: &Fleet,
     target: &str,
     host: Option<&str>,
+    retry_teardown: bool,
 ) -> Result<(crate::close::Closed, String)> {
     let pane = target;
     // A local lead's name closes its pane only while the stored terminal still runs there.
@@ -437,6 +438,7 @@ pub fn close(
                 crate::close::Options {
                     guard: crate::close::Guard::Clean,
                     request: request.as_ref(),
+                    retry_teardown,
                 },
                 |closed| {
                     items::close_result(fleet.ledger, &host.id, &closed, now_ms())?;
@@ -450,6 +452,9 @@ pub fn close(
                     "--preservation-request".into(),
                     serde_json::to_string(request)?,
                 ]);
+            }
+            if retry_teardown {
+                args.push("--retry-teardown".into());
             }
             let closed = fleet.remote_setup(&host, &args)?;
             items::close_result(fleet.ledger, &host.id, &closed, now_ms())?;
@@ -840,8 +845,12 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             }
             crate::print(true, &item, String::new)?;
         }
-        Command::Close { pane, host } => {
-            let (closed, label) = close(fleet, &pane, host.as_deref())?;
+        Command::Close {
+            pane,
+            host,
+            retry_teardown,
+        } => {
+            let (closed, label) = close(fleet, &pane, host.as_deref(), retry_teardown)?;
             crate::print(json_output, &closed, || closed_line(&closed, &label))?;
         }
         command => return inspect(fleet, command, json_output),

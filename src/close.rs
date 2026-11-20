@@ -197,6 +197,7 @@ pub fn with_local<T>(
         Options {
             guard: mode,
             request: None,
+            retry_teardown: false,
         },
         reconcile,
     )
@@ -206,6 +207,8 @@ pub fn with_local<T>(
 pub struct Options<'a> {
     pub guard: Guard<'a>,
     pub request: Option<&'a crate::preservation::CloseRequest>,
+    /// The caller fixed the cause of a failed teardown and asks to run it once more.
+    pub retry_teardown: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +232,7 @@ pub fn with_request<T>(
     let Options {
         guard: mode,
         request,
+        ..
     } = options;
     if caller.pane.as_deref() == Some(pane) {
         return Err(refuse("cannot close the caller pane"));
@@ -272,6 +276,13 @@ pub fn with_request<T>(
     } else {
         None
     };
+    let existing = if options.retry_teardown {
+        Some(retry_failed_teardown(
+            shell, ledger, pane, mode, request, existing,
+        )?)
+    } else {
+        existing
+    };
     with_expected(
         shell,
         ledger,
@@ -281,6 +292,34 @@ pub fn with_request<T>(
         existing.as_ref(),
         reconcile,
     )
+}
+
+/// Return a failed teardown to the captured stage, so this close runs it once more. The initial
+/// capture stays pinned, and the teardown checks the live checkout against it again.
+fn retry_failed_teardown(
+    shell: &dyn crate::shell::Shell,
+    ledger: &Ledger,
+    pane: &str,
+    mode: Guard,
+    request: Option<&crate::preservation::CloseRequest>,
+    existing: Option<crate::preservation::Operation>,
+) -> Result<crate::preservation::Operation> {
+    let refused = || refuse("--retry-teardown needs an owner close of a teardown that failed");
+    if mode != Guard::Clean {
+        return Err(refused());
+    }
+    let existing = existing.ok_or_else(refused)?;
+    let repo = existing.expectation.tree.repo.clone();
+    worktree::with_lifecycle(shell, ledger, Path::new(&repo), |_| {
+        let mut operation =
+            crate::preservation::operation(ledger, pane, request)?.ok_or_else(refused)?;
+        if !operation.teardown_failed() {
+            return Err(refused());
+        }
+        operation.blocker = None;
+        operation.advance(ledger, crate::preservation::Stage::Captured)?;
+        Ok(operation)
+    })
 }
 
 struct CapturedClose {
@@ -370,6 +409,7 @@ fn with_expected<T>(
     let Options {
         guard: mode,
         request,
+        ..
     } = options;
     let CapturedClose {
         panes,
