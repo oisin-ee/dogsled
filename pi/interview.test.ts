@@ -207,6 +207,34 @@ test("an aborted interview withdraws its form", async t => {
 	assert.ok(p.calls.some(call => call.method === "DELETE" && call.path === "/api/questions/q-1"), JSON.stringify(p.calls));
 });
 
+test("a serve restart during the long poll keeps the interview waiting for its answer", async t => {
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-interview-restart-"));
+	const socket = join(directory, "producer.sock");
+	const p = portal(poll => {
+		if (poll === 1) {
+			// Serve stops while the poll waits, and a new serve binds the socket later.
+			setImmediate(() => {
+				p.server.closeAllConnections();
+				p.server.close(() => { setTimeout(() => p.server.listen(socket), 700); });
+			});
+			return { status: 0 };
+		}
+		// The next serve stops gracefully once before the owner's answer is read.
+		return poll === 2 ? { status: 503 } : { status: 200, body: ANSWER };
+	});
+	await new Promise<void>(resolve => p.server.listen(socket, resolve));
+	t.after(async () => {
+		await new Promise<void>(resolve => { p.server.closeAllConnections(); p.server.close(() => resolve()); });
+		rmSync(directory, { recursive: true, force: true });
+	});
+	const tool = new InterviewTool(new ServeClient({ DOGSLED_STATE: directory }));
+	const result = await tool.run({ questions }, context(), undefined);
+	assert.equal(result.details.status, "completed");
+	assert.deepEqual(result.details.responses, ANSWER.responses);
+	assert.equal(p.polls(), 3);
+	assert.ok(p.calls.every(call => call.method !== "DELETE"), JSON.stringify(p.calls));
+});
+
 test("a withdrawn form ends gracefully", async t => {
 	const p = portal(() => ({ status: 410 }));
 	const port = await listen(p.server);

@@ -5,11 +5,16 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { type PortalClient, portalUrl, sleep, startOneShot } from "./portal-client.ts";
+import { type PortalClient, PortalDown, portalUrl, sleep, startOneShot } from "./portal-client.ts";
 import { ServeClient, ServeDown } from "./serve-client.ts";
 
-/** How long the tool waits between two polls for the answers. */
+/** How long the tool waits between two polls for the answers, and before it reconnects. */
 const POLL_MS = 500;
+
+/** Whether a poll failed only because the server that holds the question was not there. */
+function serverAway(error: unknown): boolean {
+	return error instanceof ServeDown || error instanceof PortalDown;
+}
 
 /** The parameter schema of pi-interview 0.13.0, so the model calls it the same way. */
 const interviewParameters = {
@@ -464,7 +469,14 @@ export class InterviewTool {
 		return undefined;
 	}
 
-	/** No implicit deadline: the owner can leave the form in the inbox until ready. */
+	/**
+	 * No implicit deadline: the owner can leave the form in the inbox until ready.
+	 *
+	 * The server keeps the question in its store across a restart, and the owner can
+	 * answer it while the server is away. A lost connection, or the 503 of a server that
+	 * is stopping, ends one poll and never the interview: the tool polls again until the
+	 * server is back, so the agent never asks the same form twice.
+	 */
 	private async wait(id: string, file: QuestionsFile, signal: AbortSignal, timeout: number | undefined): Promise<Outcome> {
 		const deadline = new AbortController();
 		const timer = timeout === undefined ? undefined : setTimeout(() => deadline.abort(), timeout * 1000);
@@ -473,8 +485,16 @@ export class InterviewTool {
 		try {
 			for (;;) {
 				operation.throwIfAborted();
-				const response = await this.client.request("GET", `/api/questions/${encodeURIComponent(id)}/answer`, { signal: operation });
-				if (response.status === 204) {
+				let response: Response;
+				try {
+					response = await this.client.request("GET", `/api/questions/${encodeURIComponent(id)}/answer`, { signal: operation });
+				} catch (error) {
+					if (!serverAway(error)) throw error;
+					await sleep(POLL_MS, operation);
+					continue;
+				}
+				if (response.status === 204 || response.status === 503) {
+					await response.body?.cancel();
 					await sleep(POLL_MS, operation);
 					continue;
 				}
