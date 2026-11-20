@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.41.1](https://github.com/oisin-ee/dogsled/compare/v0.41.0...v0.41.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **portal:** identify sidebar agents and branches to review ([#409](https://github.com/oisin-ee/dogsled/issues/409)) ([8d8bea6](https://github.com/oisin-ee/dogsled/commit/8d8bea6e1127975f8787f2416183d44b89c77dd8))
+* **portal:** show per-turn time in worker rows ([#407](https://github.com/oisin-ee/dogsled/issues/407)) ([a04fc7e](https://github.com/oisin-ee/dogsled/commit/a04fc7e5d22a87dc09fe095965d09fc90a375099))
+
 ## [0.41.0](https://github.com/oisin-ee/dogsled/compare/v0.40.0...v0.41.0) (2026-11-20)
 
 
