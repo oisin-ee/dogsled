@@ -1,13 +1,15 @@
-//! The metrics report: tool calls, owner wait, and agent runs over one window.
+//! The metrics report: tool calls, context size, owner wait, and agent runs over one window.
 //!
 //! Each host builds its own report from its transcripts and `state.db`. The portal merges
 //! the reports of every host. Durations travel as fixed-bucket histograms, so a merge adds
 //! counts exactly and every host computes the same percentile.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Metrics payload version; independent of [`crate::PORTAL_VERSION`].
-pub const METRICS_VERSION: u32 = 1;
+pub const METRICS_VERSION: u32 = 2;
 
 /// Ten steps per decade, each at most 27% above the last, so a reported percentile is at most
 /// 27% above the true value.
@@ -118,6 +120,55 @@ impl Histogram {
     }
 }
 
+/// Sparse character-count buckets used to recompute a median when reports merge.
+/// Sizes up to 100 are exact; larger sizes use ten buckets per decade.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharHistogram {
+    counts: BTreeMap<u64, u64>,
+    max: u64,
+}
+
+impl CharHistogram {
+    /// Count one text size, including empty text.
+    pub fn record(&mut self, chars: u64) {
+        let bucket = if chars <= 100 {
+            chars
+        } else {
+            let index = BUCKET_BOUNDS_MS.partition_point(|bound| *bound < chars);
+            BUCKET_BOUNDS_MS.get(index).copied().unwrap_or(u64::MAX)
+        };
+        let count = self.counts.entry(bucket).or_default();
+        *count = count.saturating_add(1);
+        self.max = self.max.max(chars);
+    }
+
+    /// Add another host's size distribution.
+    pub fn merge(&mut self, other: &Self) {
+        for (&bucket, &add) in &other.counts {
+            let count = self.counts.entry(bucket).or_default();
+            *count = count.saturating_add(add);
+        }
+        self.max = self.max.max(other.max);
+    }
+
+    /// Upper bound of the bucket containing the lower median, capped at the maximum.
+    #[must_use]
+    pub fn p50(&self) -> Option<u64> {
+        let count = self.counts.values().copied().fold(0, u64::saturating_add);
+        let mut rank = count.div_ceil(2);
+        if rank == 0 {
+            return None;
+        }
+        for (&bucket, &size) in &self.counts {
+            if rank <= size {
+                return Some(bucket.min(self.max));
+            }
+            rank -= size;
+        }
+        None
+    }
+}
+
 /// The period a report covers, ending at [`MetricsReport::until_ms`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,6 +229,8 @@ pub struct MetricsReport {
     pub hosts: Vec<HostCoverage>,
     /// Sorted by calls, most first.
     pub tools: Vec<ToolRow>,
+    /// Recorded context injections by kind, largest total first.
+    pub injections: Vec<InjectionRow>,
     /// One row per kind.
     pub owner_waits: Vec<WaitRow>,
     pub runs: Vec<RunRow>,
@@ -208,6 +261,23 @@ pub struct ToolRow {
     /// Calls with no result yet; they have no duration.
     pub running: u64,
     pub duration: Histogram,
+    /// Approximate median text size of results received in the window.
+    pub result_p50: Option<u64>,
+    /// Exact number of text characters received in the window.
+    pub result_total: u64,
+    /// Distribution for fleet aggregation; do not merge the per-host medians.
+    pub result_sizes: CharHistogram,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectionRow {
+    pub kind: String,
+    pub count: u64,
+    /// Approximate median characters per injection.
+    pub p50: Option<u64>,
+    pub total: u64,
+    /// Distribution for fleet aggregation.
+    pub sizes: CharHistogram,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

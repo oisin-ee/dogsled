@@ -8,7 +8,12 @@ import {
   canonicalToolName,
   commandsFromToolInput,
 } from "./tool-inputs.ts";
-import { codeWaitViolation, enforceTimeout, toolWaitViolation } from "./tool-timeouts.ts";
+import {
+  MAX_TIMEOUT_SECONDS,
+  codeWaitViolation,
+  enforceTimeout,
+  toolWaitViolation,
+} from "./tool-timeouts.ts";
 import { classifyEdits, editInputsFromPayload } from "../policies/edit.ts";
 import { SHELL_CLASSIFIERS } from "../policies/shell.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -25,6 +30,7 @@ interface ToolCall {
 
 // A codemode script's nested calls nest at most this deep before the gate stops looking.
 const MAX_NESTING = 8,
+  BASH_TIMEOUT_GUIDELINE = `The bash timeout limit is ${MAX_TIMEOUT_SECONDS} s. Use mcp__dogsled__run for longer work.`,
   /**
    * The block message of the first shell policy that refuses one of `commands`.
    * @param {readonly Command[]} commands The commands a tool call runs.
@@ -102,6 +108,10 @@ const MAX_NESTING = 8,
  * @param {GuardrailsAPI} pi The extension API methods used here.
  */
 export default function piGuardrails(pi: GuardrailsAPI): void {
+  pi.on("before_agent_start", ({ systemPromptOptions }) => {
+    const { toolGuidelines } = systemPromptOptions;
+    toolGuidelines["bash"] = [...(toolGuidelines["bash"] ?? []), BASH_TIMEOUT_GUIDELINE];
+  });
   pi.on("tool_call", (event, ctx) => {
     try {
       const message = toolViolation(event, ctx.cwd);

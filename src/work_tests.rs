@@ -801,13 +801,9 @@ fn fifo_admission_rechecks_reservations_and_notifies_once_the_owner_reads_its_in
     assert!(work::queue(&ledger).unwrap()[0].notified);
     let told = crate::inbox::received(&ledger, "term_owner").unwrap();
     assert_eq!(told.len(), 1);
-    let result = tickets[0].result.as_ref().unwrap();
     assert_eq!(
         told[0].text,
-        format!(
-            "dogsled: ticket {} admitted on local: {result}",
-            tickets[0].id
-        )
+        format!("dogsled: ticket {} admitted on local", tickets[0].id)
     );
     work::tick(
         &actions(&fleet, 102),

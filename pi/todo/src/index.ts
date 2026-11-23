@@ -10,7 +10,6 @@ import type { WorkHost } from "./work.ts";
 import { WorkerImport } from "./handoff.ts";
 import { parameters } from "./schema.ts";
 import { registerGate } from "./gate.ts";
-import { workUnitGuidance } from "./guidance.ts";
 
 type TodoAPI = WorkHost & { readonly events: Readonly<ExtensionAPI["events"]> } & Readonly<
     Pick<
@@ -51,7 +50,7 @@ const createTodo = (
   provider.register();
   registerGate(pi, provider);
   pi.registerTool({
-    description: `Keep branch-local outcomes and executable contracts. Use returned IDs, not labels. Draft creation is pending. Start one complete self-assigned leaf; workers require their assigned profile through the executor. Update replaces pending contract fields and may set or clear an open item's description. Done takes a short note. Parents require explicit integration review after children close. ${workUnitGuidance}`,
+    description: "Track branch work by ID.",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = provider.run(params, ctx);
       work.publish(ctx);

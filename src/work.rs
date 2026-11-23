@@ -3436,14 +3436,7 @@ pub fn tick(
                 .or_else(|| ticket.diagnostic.as_ref().and_then(|d| d.host.as_deref()))
                 .or(ticket.request.host.as_deref())
                 .unwrap_or("unselected");
-            let summary = ticket
-                .error
-                .clone()
-                .unwrap_or_else(|| result.map_or_else(String::new, Value::to_string));
-            let text = format!(
-                "dogsled: ticket {} {} on {host}: {summary}",
-                ticket.id, ticket.state
-            );
+            let text = ticket_notice(&ticket, host);
             // The owner's inbox reader shows it. An owner without a reader hears nothing until
             // it has one; nothing types into its terminal.
             let id = format!("ticket-{}", ticket.id);
@@ -3467,6 +3460,35 @@ pub fn tick(
     settle_failed_jobs(fleet.ledger)?;
     repair_cancellations(fleet)?;
     release_unstarted_jobs(fleet)
+}
+
+fn ticket_notice(ticket: &Ticket, host: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = format!("dogsled: ticket {} {} on {host}", ticket.id, ticket.state);
+    if let Some(error) = &ticket.error {
+        let _ = write!(
+            text,
+            ": {}",
+            error.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+        return text;
+    }
+    if let Some(branch) = &ticket.request.branch {
+        let _ = write!(text, "; branch {branch}");
+    }
+    let name = ticket
+        .result
+        .as_ref()
+        .and_then(|result| result["name"].as_str())
+        .or(match &ticket.request.action {
+            Action::Agent { name, .. } => Some(name.as_str()),
+            _ => None,
+        });
+    if let Some(name) = name {
+        let _ = write!(text, "; item {name}");
+    }
+    text
 }
 
 pub fn job_host(fleet: &Fleet<'_>, id: &str) -> Result<Host> {

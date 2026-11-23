@@ -470,8 +470,7 @@ test("classifyGit relaxes staging and branch creation only inside a linked workt
 
 test("classifyCiWait blocks every command that waits instead of working", async () => {
   const { classifyCiWait, WAIT_MSG } = await import("./shell.ts");
-  assert.match(WAIT_MSG, /in Claude Code, `run_in_background` or Monitor/u);
-  assert.match(WAIT_MSG, /in Codex, exec_command, then empty write_stdin calls/u);
+  assert.match(WAIT_MSG, /`mcp__dogsled__run`.*`mcp__dogsled__read`/u);
   assert.match(
     WAIT_MSG,
     /`gh run watch <run-id> --exit-status` in the repository with Dogsled `run`/u,

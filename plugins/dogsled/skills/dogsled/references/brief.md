@@ -14,3 +14,12 @@ Write these sections in this order:
 
 Before you send the brief, check it against the code. Confirm that the paths exist. For a writer, also confirm that the exemplar compiles and no lint or generator rule conflicts with the brief.
 Keep the brief under 60 lines. If it needs more, split the unit.
+
+## Size a unit
+
+- Give each executable unit one deliverable, repository-relative scope, acceptance condition, and assignment. For a worker, name its profile.
+- Fit the unit into one agent session. Keep small steps and tests with the deliverable. Split independent outcomes and delegate them separately when they need parallel writers.
+- Order dependent units by prerequisite ID. Use local keys for new prerequisites and `start` to create and activate a unit in one call.
+- Use a short imperative headline (aim for under 60 characters). Put context and acceptance details in the description.
+- Update drafts before activation. Use returned IDs. Start one complete local leaf before shell, code, or mutation tools outside `tier/plan-claude` and `tier/plan-gpt`.
+- Close leaves with `done` and evidence, or `drop`. Close children before the parent integration review.

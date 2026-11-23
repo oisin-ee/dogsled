@@ -45,14 +45,24 @@ export default function dogsled(pi: ExtensionAPI) {
 	let board: Board = { hosts: [], rows: [] };
 	let failure: string | undefined;
 
-	// The dogsled commands as tools, declared to the model like built-ins (`mcp__dogsled__*`).
+	// Keep everyday tools direct and let tool search discover infrequent operations.
 	// The server reads HERDR_PANE_ID from this process's environment to know its caller.
 	pi.registerMcpServer("dogsled", {
 		command: binary,
 		args: ["mcp"],
 		exposure: "direct",
-		// The native `end_turn` below replaces the server's: it ends the run when it succeeds.
-		toolExposure: { end_turn: "hidden" },
+		toolExposure: {
+			// The native `end_turn` below replaces the server's: it ends the run when it succeeds.
+			end_turn: "hidden",
+			"transfer_*": "deferred",
+			"recovery_*": "deferred",
+			claim: "deferred",
+			accept: "deferred",
+			lead: "deferred",
+			retire_preparation: "deferred",
+			repo_open: "deferred",
+			drop: "deferred",
+		},
 		// Close, lead, and repo_open run for up to the server's ten-minute setup budget. The
 		// default 60 s request timeout would report them failed while they still run.
 		timeout: MCP_TIMEOUT_S,
@@ -362,17 +372,25 @@ export default function dogsled(pi: ExtensionAPI) {
 			continue: true,
 		};
 	});
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("before_agent_start", async (_event, ctx) => {
 		if (!units.guard(ctx)) return;
 		try { await units.ready(ctx); } catch (error) { ctx.ui.notify(`Dogsled preparation recovery pending: ${String(error)}`, "warning"); }
 		// Context is optional, including when the binary is absent or fails.
+		let status: string;
 		try {
 			const result = await pi.exec(binary, ["hook", "context", "--harness", "pi"], { timeout: 6_000 });
-			if (result.code !== 0 || !result.stdout.trim()) return;
-			return { systemPrompt: `${event.systemPrompt}\n\n## Your work and fleet status\n${result.stdout.trim()}\n` };
+			if (result.code !== 0) return;
+			status = result.stdout.trim();
 		} catch {
 			return;
 		}
+		if (!status) return;
+		const content = `## Your work and fleet status\n${status}`;
+		// Read the active branch, not a process-local cache: resume and /tree can select a different history.
+		const previous = ctx.sessionManager.getBranch().findLast(entry =>
+			entry.type === "custom_message" && entry.customType === MESSAGE_TYPE && !entry.display);
+		if (previous?.type === "custom_message" && previous.content === content) return;
+		return { message: { customType: MESSAGE_TYPE, content, display: false } };
 	});
 	async function toggleWork(ctx: ExtensionContext): Promise<void> {
 		if (workOpen) collapseWork(ctx);

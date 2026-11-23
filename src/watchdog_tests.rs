@@ -657,10 +657,13 @@ fn immediate_stall_waits_for_a_turn_that_ended_and_survives_restart_without_repe
         tick(&rig.fleet(), &reports, now).unwrap();
         assert_eq!(rig.prompts(), count);
     }
-    let log = rig.check_ins().join("\n");
-    assert!(log.contains("test-child on local: stalled; age 11m; transcript changed 11m ago"));
-    assert!(log.contains("line5"));
-    assert!(log.contains("dogsled send"));
+    let check_ins = rig.check_ins();
+    let note = &check_ins[0];
+    assert_eq!(
+        note.trim_end(),
+        "test-child on local: stalled; age 11m; last change 11m ago. `dogsled read test-child` shows output."
+    );
+    assert!(note.chars().count() <= 250, "{note}");
     // Unknown/working changes within the same stall do not rearm its event.
     let reports = rig.reports(840_001, "idle", "unknown", Some(1));
     tick(&rig.fleet(), &reports, 840_001).unwrap();
@@ -794,7 +797,7 @@ fn an_owner_without_an_inbox_reader_gets_no_check_in_until_it_has_one() {
 }
 
 #[test]
-fn remote_stall_uses_report_state_and_bounded_remote_tail() {
+fn remote_stall_uses_report_state_without_fetching_output() {
     let rig = Rig::new();
     let mut reports = rig.reports(600_001, "idle", "working", Some(1));
     let mut peer = reports[0].clone();
@@ -828,8 +831,8 @@ fn remote_stall_uses_report_state_and_bounded_remote_tail() {
     tick(&rig.fleet(), &reports, 600_001).unwrap();
     let log = rig.shell.calls.lock().unwrap().join("\n");
     assert!(rig.check_ins()[0].contains("remote-child on peer: stalled"));
-    assert!(log.contains("host tail agent child"));
-    assert!(rig.check_ins()[0].contains("peer log line"));
+    assert!(!log.contains("host tail agent child"));
+    assert!(rig.check_ins()[0].contains("`dogsled read remote-child` shows output."));
     assert!(!log.contains("herdr notification"));
 }
 

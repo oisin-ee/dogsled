@@ -54,15 +54,15 @@ fn metrics_indexes_native_transcripts_and_reports_known_and_unknown_status() -> 
     let ledger = Ledger::temporary();
     let mut connection = store::open(&ledger)?;
     let shell = crate::shell::System::default();
-    for (harness, content, name, error) in [
-        ("pi", PI, "read", Some(true)),
-        ("claude", CLAUDE, "Read", Some(false)),
-        ("codex", CODEX, "exec_command", None),
+    for (harness, content, name, error, chars) in [
+        ("pi", PI, "read", Some(true), 14),
+        ("claude", CLAUDE, "Read", Some(false), 13),
+        ("codex", CODEX, "exec_command", None, 16),
     ] {
         let path = file(&ledger, &format!("{harness}.jsonl"), content)?;
         index::file(&mut connection, &path, harness, NOW, &shell)?;
         let row = connection.query_row(
-            "SELECT tool,started_ms,ended_ms,error,model FROM tool_calls WHERE path=?1",
+            "SELECT tool,started_ms,ended_ms,error,model,result_chars FROM tool_calls WHERE path=?1",
             [path.to_str()],
             |row| {
                 Ok((
@@ -71,6 +71,7 @@ fn metrics_indexes_native_transcripts_and_reports_known_and_unknown_status() -> 
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<bool>>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )?;
@@ -81,7 +82,8 @@ fn metrics_indexes_native_transcripts_and_reports_known_and_unknown_status() -> 
                 crate::rows::integer(START)?,
                 crate::rows::integer(START + 1000)?,
                 error,
-                format!("{harness}-model")
+                format!("{harness}-model"),
+                chars
             )
         );
         index::file(&mut connection, &path, harness, NOW, &shell)?;
@@ -117,12 +119,13 @@ fn metrics_indexes_native_transcripts_and_reports_known_and_unknown_status() -> 
     let mut merged = local.clone();
     report::merge(&mut merged, local, "peer")?;
     assert_eq!(merged.hosts.len(), 2);
-    assert!(
-        merged
-            .tools
-            .iter()
-            .all(|row| row.calls == 2 && row.duration.count() == 2)
-    );
+    assert!(merged.tools.iter().all(|row| {
+        row.calls == 2
+            && row.duration.count() == 2
+            && row
+                .result_p50
+                .is_some_and(|p50| row.result_total == p50 * 2)
+    }));
     let grouped = report::local(
         &mut connection,
         &Options {
@@ -156,6 +159,7 @@ fn metrics_pairs_appended_results_and_commits_only_complete_lines() -> Result<()
     let initial = report::local(&mut connection, &Options::default(), NOW)?;
     assert_eq!(initial.tools[0].running, 1);
     assert_eq!(initial.tools[0].duration.count(), 0);
+    assert_eq!(initial.tools[0].result_p50, None);
     let mut writer = std::fs::OpenOptions::new().append(true).open(&path)?;
     writer.write_all(lines[2].as_bytes())?;
     index::file(&mut connection, &path, "pi", NOW, &shell)?;
@@ -169,6 +173,57 @@ fn metrics_pairs_appended_results_and_commits_only_complete_lines() -> Result<()
     assert_eq!(complete.tools[0].errors, 1);
     assert_eq!(complete.tools[0].running, 0);
     assert_eq!(complete.tools[0].duration.count(), 1);
+    assert_eq!(complete.tools[0].result_p50, Some(14));
+    assert_eq!(complete.tools[0].result_total, 14);
+    let options = Options::default();
+    let after_start = report::local(
+        &mut connection,
+        &options,
+        START + options.window.as_ms() + 500,
+    )?;
+    assert_eq!(after_start.tools[0].calls, 0);
+    assert_eq!(after_start.tools[0].result_total, 14);
+    Ok(())
+}
+
+#[test]
+fn metrics_counts_injected_text_once_and_merges_size_distributions() -> Result<()> {
+    let ledger = Ledger::temporary();
+    let mut connection = store::open(&ledger)?;
+    let shell = crate::shell::System::default();
+    let path = file(
+        &ledger,
+        "context.jsonl",
+        concat!(
+            "{\"type\":\"custom_message\",\"customType\":\"dogsled\",\"timestamp\":\"2026-11-17T12:00:02Z\",\"display\":false,\"content\":\"a🙂\"}\n",
+            "{\"type\":\"custom_message\",\"customType\":\"dogsled\",\"timestamp\":\"2026-11-17T12:00:02Z\",\"content\":[{\"type\":\"text\",\"text\":\"café\"},{\"type\":\"image\",\"data\":\"ignored\"},{\"type\":\"text\",\"text\":\"dog\"}]}\n",
+            "{\"type\":\"custom_message\",\"customType\":\"old\",\"timestamp\":\"2026-11-09T12:00:00Z\",\"content\":\"old\"}\n",
+        ),
+    )?;
+    index::file(&mut connection, &path, "pi", NOW, &shell)?;
+    index::file(&mut connection, &path, "pi", NOW, &shell)?;
+    let mut local = report::local(&mut connection, &Options::default(), NOW)?;
+    assert_eq!(local.injections.len(), 1);
+    let row = &local.injections[0];
+    assert_eq!(
+        (row.kind.as_str(), row.count, row.p50, row.total),
+        ("dogsled", 2, Some(2), 9)
+    );
+
+    let peer_ledger = Ledger::temporary();
+    let mut peer_connection = store::open(&peer_ledger)?;
+    let peer_path = file(
+        &peer_ledger,
+        "context.jsonl",
+        "{\"type\":\"custom_message\",\"customType\":\"dogsled\",\"timestamp\":\"2026-11-17T12:00:02Z\",\"content\":\"1234567890\"}\n",
+    )?;
+    index::file(&mut peer_connection, &peer_path, "pi", NOW, &shell)?;
+    let peer = report::local(&mut peer_connection, &Options::default(), NOW)?;
+    report::merge(&mut local, peer, "peer")?;
+    assert_eq!(local.injections.len(), 1);
+    let row = &local.injections[0];
+    assert_eq!((row.count, row.p50, row.total), (3, Some(7), 19));
+    assert!(report::render(&local).contains("dogsled\t3\t7\t19\n"));
     Ok(())
 }
 
@@ -414,7 +469,7 @@ fn metrics_old_schema_rebuilds_and_retention_expires_derived_rows() -> Result<()
     let path = file(&ledger, "old.jsonl", PI)?;
     let shell = crate::shell::System::default();
     index::file(&mut connection, &path, "pi", NOW, &shell)?;
-    connection.execute_batch("CREATE TABLE obsolete(value); PRAGMA user_version=0;")?;
+    connection.execute_batch("CREATE TABLE obsolete(value); PRAGMA user_version=1;")?;
     drop(connection);
     let mut connection = store::open(&ledger)?;
     assert_eq!(
@@ -441,14 +496,14 @@ fn metrics_old_schema_rebuilds_and_retention_expires_derived_rows() -> Result<()
         params![path.to_str(), crate::rows::integer(START)?],
     )?;
     store::retain(&mut connection, NOW + crate::jobs::RECORD_KEEP_MS + 1)?;
-    for table in ["tool_calls", "transcripts", "input_entries"] {
+    for table in ["tool_calls", "transcripts", "input_entries", "injections"] {
         assert_eq!(
             connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
                 .get::<_, i64>(0))?,
             0
         );
     }
-    connection.pragma_update(None, "user_version", 2)?;
+    connection.pragma_update(None, "user_version", 3)?;
     drop(connection);
     assert!(store::open(&ledger).is_err());
     Ok(())

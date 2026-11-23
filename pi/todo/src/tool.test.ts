@@ -31,6 +31,44 @@ describe("executable todo contracts", () => {
   });
 });
 
+describe("mutation summaries", () => {
+  const parts = 9,
+    summaryBudget = 400,
+    finishFirst = (): { done: ReturnType<typeof runTodo>; id: string; view: string } => {
+      const { session } = fixture(),
+        created = runTodo(
+          {
+            items: Array.from({ length: parts }, (_unused, index) => ({
+              content: `Build part ${index}`,
+              contract: contract(),
+            })),
+            op: "init",
+          },
+          session,
+        ),
+        id = firstId(created.details),
+        done = runTodo({ evidence: "passed", op: "done", task: id }, session);
+      return { done, id, view: runTodo({ op: "view" }, session).content.at(first)?.text ?? "" };
+    };
+
+  it("reports only the changed item", { timeout: 5000 }, () => {
+    expect.hasAssertions();
+    const { done, id } = finishFirst(),
+      [summary] = done.content;
+    expect(summary.text.length).toBeLessThanOrEqual(summaryBudget);
+    expect(summary.text).toContain(`Todo list: 1/${parts} completed\n[x] Build part 0`);
+    expect(summary.text).toContain(id);
+    expect(summary.text).not.toContain("Build part 1");
+  });
+
+  it("keeps the full list for the renderer and view", { timeout: 5000 }, () => {
+    expect.hasAssertions();
+    const { done, view } = finishFirst();
+    expect(done.details.tasks).toHaveLength(parts);
+    expect(view).toContain("Build part 1");
+  });
+});
+
 describe("lead closure", () => {
   it("completes an unstarted leaf with a note and requires the note", { timeout: 5000 }, () => {
     expect.hasAssertions();

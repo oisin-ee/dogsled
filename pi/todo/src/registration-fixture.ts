@@ -25,6 +25,7 @@ type TodoAPI = Readonly<
   >
 >;
 interface Registered {
+  readonly description: string;
   readonly name: string;
   readonly parameters: TSchema;
   readonly execute: (params: TodoParams, ctx: ExtensionToolContext) => Promise<unknown>;
@@ -53,7 +54,7 @@ const silent = (): void => {
    */
   metadata = (tools: readonly Registered[]): ToolInfo[] =>
     tools.map((tool) => ({
-      description: "Registered test tool",
+      description: tool.description,
       exposure: "direct",
       name: tool.name,
       parameters: tool.parameters,
@@ -70,8 +71,14 @@ const silent = (): void => {
    * @returns {Registered} Captured registration.
    */
   registeredTool = <Params extends TSchema, Details, State>(
-    tool: Readonly<Pick<ToolDefinition<Params, Details, State>, "execute" | "name" | "parameters">>,
+    tool: Readonly<
+      Pick<
+        ToolDefinition<Params, Details, State>,
+        "description" | "execute" | "name" | "parameters"
+      >
+    >,
   ): Registered => ({
+    description: tool.description,
     execute: async (params, ctx) =>
       tool.execute("test", parse(tool.parameters, params), undefined, undefined, ctx),
     name: tool.name,
@@ -109,7 +116,10 @@ const silent = (): void => {
         },
         registerTool: <Params extends TSchema, Details, State>(
           tool: Readonly<
-            Pick<ToolDefinition<Params, Details, State>, "execute" | "name" | "parameters">
+            Pick<
+              ToolDefinition<Params, Details, State>,
+              "description" | "execute" | "name" | "parameters"
+            >
           >,
         ): void => {
           tools.push(registeredTool(tool));

@@ -51,7 +51,7 @@ test("pi never registers a terminal handler or creates recursive follow-ups", as
   await pi.trigger("agent_end", event, context);
   await pi.trigger("agent_end", event, context);
 
-  assert.deepEqual(pi.registeredEvents(), ["tool_call"]);
+  assert.deepEqual(pi.registeredEvents(), ["before_agent_start", "tool_call"]);
   assert.deepEqual(pi.followUps, []);
 });
 
@@ -237,7 +237,7 @@ test("pi blocks shell timeouts above ten minutes and names the unit", async () =
   }
 });
 
-test("pi directs blocked long jobs and waits to Dogsled run, read, and stop", async () => {
+test("pi directs blocked long jobs and waits to Dogsled run and read", async () => {
   const pi = fakePi();
   install(pi);
   for (const [toolName, input] of [
@@ -256,9 +256,11 @@ test("pi directs blocked long jobs and waits to Dogsled run, read, and stop", as
   ] as [string, Record<string, unknown>][]) {
     const result = await pi.trigger("tool_call", { input, toolName }, { cwd: "/repo" });
     assert.equal(result?.block, true, toolName);
-    assert.match(result?.reason ?? "", /Dogsled `run` \(mcp__dogsled__run\)/u);
-    assert.match(result?.reason ?? "", /`read` \(mcp__dogsled__read\)/u);
-    assert.match(result?.reason ?? "", /`stop` \(mcp__dogsled__stop\)/u);
+    assert.match(result?.reason ?? "", /\bmcp__dogsled__run\b/u);
+    assert.match(result?.reason ?? "", /\bmcp__dogsled__read\b/u);
+    if (input["command"] !== "sleep 1" && input["language"] !== "shell") {
+      assert.match(result?.reason ?? "", /\bmcp__dogsled__stop\b/u);
+    }
     assert.doesNotMatch(result?.reason ?? "", /wrangle|Wrangle|bg_task|bg_status/u);
   }
 });
