@@ -56,6 +56,11 @@ A refused call returns an error, records nothing, and pins nothing.
 A successful call pins its message as the reply of the turn.
 The portal, `read`, and the inbox show the pinned message, even after later check-ins, reminders, or work.
 The portal folds that later content under "N follow-ups". Only a new `end_turn` call replaces the pinned message.
+A successful call also ends the run where the harness lets it:
+
+- Pi: the native tool ends the run.
+- Claude Code: the plugin's `PostToolUse` hook returns `continue: false`, so Claude writes nothing after the reply. If inbox records or a stop reminder wait, the hook gives them to Claude instead, and the run continues. Claude Code runs no Stop hook after this stop.
+- Codex: a hook cannot end the run. Codex can write after the call, and the portal folds that text.
 The todo reminder does not fire after a successful `end_turn`.
 Without `end_turn`, each check-in or reminder starts a new group, so the reply to the owner stays visible.
 A `done` call also saves its message on the done mark, and the handoff uses it as the final reply.

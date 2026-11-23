@@ -99,6 +99,14 @@ fn main() -> ExitCode {
     let hook = matches!(cli.command, Command::Hook(_));
     let peer = matches!(cli.command, Command::Host(_));
     if hook && std::env::var_os("HERDR_ENV").is_none() {
+        // Outside Herdr there is no inbox, but `end_turn` still ends a Claude Code run.
+        let end_turn = inbox::HookEvent::PostToolUse;
+        if let Command::Hook(HookCommand::Inbox { event, .. }) = &cli.command
+            && *event == end_turn
+            && let Some(output) = inbox::hook_output(&[], end_turn, None)
+        {
+            print!("{output}");
+        }
         return ExitCode::SUCCESS;
     }
     let started = std::time::Instant::now();
@@ -660,7 +668,7 @@ fn hook(cmd: HookCommand, ledger: &Ledger, shell: &System) -> Result<()> {
     match cmd {
         HookCommand::Inbox { harness, event } => {
             // Keep inbox delivery working even when fleet status is unavailable.
-            let published = if event == inbox::HookEvent::Stop {
+            let published = if event.ends_turn() {
                 sweep::request_at_stop(ledger);
                 client.current(&gate::select()).ok()
             } else {

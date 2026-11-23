@@ -133,14 +133,27 @@ impl<'a> From<&'a Record> for Claimed<'a> {
 pub enum HookEvent {
     Stop,
     UserPromptSubmit,
+    /// After a successful `end_turn` in Claude Code, which keeps generating after a tool
+    /// result unless a hook stops it. Its Stop hooks do not run after that stop.
+    PostToolUse,
+}
+
+impl HookEvent {
+    /// The turn ends here, so stop reminders and cleanup belong to this event.
+    pub fn ends_turn(self) -> bool {
+        matches!(self, Self::Stop | Self::PostToolUse)
+    }
 }
 
 /// The hook output that hands a stop reminder and `records` to Claude Code or Codex, or
 /// `None` when both are absent. At `Stop`, `decision: block` continues the turn with the reason as the next prompt;
 /// at `UserPromptSubmit`, `additionalContext` sits beside the user's text and never replaces it.
+/// At `PostToolUse`, `additionalContext` keeps the turn going beside the `end_turn` result;
+/// with nothing to hand over, `continue: false` ends the run so nothing follows the reply.
 pub fn hook_output(records: &[Record], event: HookEvent, reminder: Option<&str>) -> Option<String> {
     if records.is_empty() && reminder.is_none() {
-        return None;
+        return (event == HookEvent::PostToolUse)
+            .then(|| format!("{}\n", serde_json::json!({ "continue": false })));
     }
     let text = reminder
         .map(str::to_owned)
@@ -153,6 +166,12 @@ pub fn hook_output(records: &[Record], event: HookEvent, reminder: Option<&str>)
         HookEvent::UserPromptSubmit => serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
+                "additionalContext": text,
+            }
+        }),
+        HookEvent::PostToolUse => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
                 "additionalContext": text,
             }
         }),
@@ -179,7 +198,7 @@ pub fn hook(
         }
         Ok(())
     };
-    if event == HookEvent::Stop {
+    if event.ends_turn() {
         let (board, notices) = match published {
             Some(published) => (
                 crate::observation::read::board(published, Some(&pane))?,
