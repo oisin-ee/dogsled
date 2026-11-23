@@ -32,6 +32,13 @@ struct Socket {
 
 impl Socket {
     fn start(rig: &Rig) -> Self {
+        rig.script(
+            "pi",
+            r#"#!/bin/sh
+cat > "$RIG/name-input.json"
+echo release-checklist
+"#,
+        );
         let path = rig.dir.join("h.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -136,8 +143,11 @@ fn lead_reuses_matching_main_checkout_preserves_branch_and_prompts_once() {
     let (code, started) = lead(&rig, &socket, SLUG, prompt);
     assert_eq!(code, 0, "{started}");
     let name = started["name"].as_str().unwrap().to_owned();
-    // A readable name: the repository, then the prompt's first words without filler.
-    assert_eq!(name, "repo-plan-release-keep");
+    assert_eq!(
+        rig.read("name-input.json"),
+        json!({"opening_message":prompt})
+    );
+    assert_eq!(name, "release-checklist");
     assert_eq!(started["host"], "local");
     assert_eq!(started["pane"], "w2:p1");
     let log = rig.log("herdr.log");
@@ -152,10 +162,10 @@ fn lead_reuses_matching_main_checkout_preserves_branch_and_prompts_once() {
     assert_eq!(
         starts(&rig),
         [format!(
-            "agent start {name} --kind pi --pane w2:p1 --timeout 120000"
+            "agent start {name} --kind pi --pane w2:p1 --timeout 120000 -- --name {name}"
         )]
     );
-    assert_eq!(rig.log("typed.log"), "pi\n");
+    assert_eq!(rig.log("typed.log"), format!("pi '--name' '{name}'\n"));
     assert_eq!(socket.prompts(), [json!({"target":"w2:p1","text":prompt})]);
     assert_eq!(socket.methods(), ["agent.list", "agent.prompt"]);
     let saved = leads(&rig);
@@ -279,9 +289,15 @@ fn lead_partial_failures_keep_phase_and_cause_without_retrying() {
     checkout(&rig, "repo", ORIGIN);
     let _observer = observer(&rig);
     let socket = Socket::start(&rig);
+    rig.script("pi", "#!/bin/sh\ncat >/dev/null\necho 'invalid output!'\n");
     fs::write(rig.dir.join("prompt-error"), "").unwrap();
     let (code, error) = lead(&rig, &socket, SLUG, "go");
     assert_ne!(code, 0, "{error}");
+    let saved = &leads(&rig)[0];
+    assert_eq!(
+        saved["name"],
+        format!("lead-{}", saved["id"].as_str().unwrap())
+    );
     assert!(error.to_string().contains("prompt refused"), "{error}");
     assert!(error.to_string().contains("phase prompting"), "{error}");
     assert_eq!(socket.prompts().len(), 1);
@@ -447,7 +463,7 @@ fn lead_chooses_roomiest_over_limit_host_and_starts_through_peer_ingress() {
     assert_eq!(code, 0, "{started}");
     assert_eq!(started["host"], "netcup");
     assert_eq!(started["pane"], "w9:p1");
-    assert_eq!(started["name"], "repo-remote-first-prompt");
+    assert_eq!(started["name"], "release-checklist");
     assert_eq!(leads(&rig), Vec::<Value>::new());
     assert_eq!(records(&rig, "peer-state")[0]["phase"], "ready");
     assert!(rig.dir.join("peer-home/dev/repo/.git").is_dir());

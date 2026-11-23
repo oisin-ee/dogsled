@@ -470,9 +470,13 @@ pub fn repository_name(repository: &str) -> &str {
     repository.rsplit('/').next().unwrap_or(repository)
 }
 
-/// The title of an agent: its todo, then its first message, then its Herdr
-/// name, then its worktree folder, then the folder it runs in.
+/// A named lead keeps its session name even when its current todo changes.
 pub fn agent_title(todo: Option<&str>, agent: &AgentView) -> String {
+    if agent.launch.is_none()
+        && let Some(name) = readable(agent.name.as_deref())
+    {
+        return name.to_owned();
+    }
     readable(todo)
         .or_else(|| readable(agent.title.as_deref()))
         .or_else(|| readable(agent.name.as_deref()))
@@ -953,7 +957,7 @@ mod shell_tests {
     }
 
     #[test]
-    fn a_lead_title_falls_back_from_todo_to_first_message_to_name_to_worktree() {
+    fn a_lead_keeps_its_session_name_and_an_unnamed_lead_uses_task_context() {
         let mut agent = AgentView {
             host: "local".into(),
             pane: "p".to_owned(),
@@ -972,6 +976,8 @@ mod shell_tests {
         agent.name = Some("reviewer".to_owned());
         assert_eq!(agent_title(None, &agent), "reviewer");
         agent.title = Some("Ship the redesign".to_owned());
+        assert_eq!(agent_title(Some("Verify it"), &agent), "reviewer");
+        agent.name = None;
         assert_eq!(agent_title(Some(" "), &agent), "Ship the redesign");
         assert_eq!(agent_title(Some("Verify it"), &agent), "Verify it");
         agent.title = None;
