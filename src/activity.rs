@@ -811,7 +811,7 @@ fn newline_before(file: &mut std::fs::File, at: u64) -> std::io::Result<bool> {
     Ok(byte[0] == b'\n')
 }
 
-/// The task an agent was given: the first line of its first own message.
+/// The initial Pi session name, or the first line of the first user message.
 ///
 /// Headings and tags are skipped, so a brief that opens with `## Outcome`
 /// gives the sentence under it. Only the first [`TITLE_BYTES`] are read.
@@ -823,6 +823,15 @@ pub fn title(agent: &str, path: &str) -> Option<String> {
         let Ok(value) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
+        if agent == "pi"
+            && value["type"] == "session_info"
+            && let Some(name) = value["name"].as_str().map(str::trim)
+            && !name.is_empty()
+            && !name.starts_with("u-")
+            && !name.starts_with("lead-r-")
+        {
+            return Some(short(name, TITLE_CHARS));
+        }
         let Some(found) = turn(agent, &value, 0) else {
             continue;
         };
@@ -2634,6 +2643,11 @@ mod tests {
             title("pi", &path).as_deref(),
             Some("Ship the portal redesign")
         );
+        let named = transcript(&[
+            json!({"type":"session_info","name":"release-checklist"}),
+            json!({"type":"message","message":{"role":"user","content":"Some background first"}}),
+        ]);
+        assert_eq!(title("pi", &named).as_deref(), Some("release-checklist"));
         let long = transcript(&[
             json!({"type":"message","message":{"role":"user","content":"y".repeat(200)}}),
         ]);

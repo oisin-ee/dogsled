@@ -21,7 +21,8 @@ If that path already exists, Dogsled uses `~/dev/owner-name`. If both paths are 
 
 The selected host keeps the lead record and its Herdr pane. The result includes `host`, `pane`, and `name`.
 Dogsled sends the first prompt once. An uncertain start or lost peer response does not trigger another host selection or delivery.
-The lead's name is readable: the repository name, then the first words of the prompt, such as `zoomies-fix-login-redirect`.
+Pi summarizes the full opening message into a short session name, such as `login-redirect-loop`. Later messages do not change it.
+If naming fails, the lead still starts with its request ID instead of copying prompt text.
 A `-<n>` suffix keeps it unique on its host.
 A lead stays open until an explicit `dogsled close <name>` request closes its idle pane. The pane and `lead-<id>` also name the lead.
 

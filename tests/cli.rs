@@ -630,7 +630,7 @@ printf '%s %s\n' "${DOGSLED_TEST_ROLE:-actor}" "$*" >> "$RIG/herdr-roles.log"
 # A terminal refuses a line over 1024 bytes, so a longer one fails like the real thing.
 if test "$1 $2" = 'agent start'; then
   (
-    # A child passes its arguments after `--`; a lead passes none. Herdr's
+    # Harness arguments follow `--`. Herdr's
     # `--timeout <ms>` sets its start wait and types nothing.
     kind=$5; shift 7
     if test "$1" = --timeout; then shift 2; fi

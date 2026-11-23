@@ -130,22 +130,23 @@ fn lead_launch_passes_model_settings_to_native_pi() {
             "selected",
             Some(&model),
             Some(ThinkingLevel::High),
-            " -- --model openai/gpt-5 --thinking high",
+            " --model openai/gpt-5 --thinking high",
         ),
         (
             "thinking",
             None,
             Some(ThinkingLevel::Off),
-            " -- --thinking off",
+            " --thinking off",
         ),
-        ("model", Some(&model), None, " -- --model openai/gpt-5"),
+        ("model", Some(&model), None, " --model openai/gpt-5"),
     ] {
         let mut saved = record(id);
         saved.repository.path.clone_from(&path);
         saved.validity = Validity::new(crate::ledger::now_ms());
         lead_store::insert(&ledger, &saved).unwrap();
-        let command =
-            format!("herdr agent start lead-{id} --kind pi --pane w1:p1 --timeout 120000{suffix}");
+        let command = format!(
+            "herdr agent start lead-{id} --kind pi --pane w1:p1 --timeout 120000 -- --name lead-{id}{suffix}"
+        );
         shell.on(&command, r#"{"result":{}}"#);
         launch(&context, &mut saved, selected, thinking).unwrap();
         assert_eq!(saved.phase, Phase::Ready);
@@ -156,39 +157,13 @@ fn lead_launch_passes_model_settings_to_native_pi() {
 }
 
 #[test]
-fn lead_names_are_readable_valid_and_unique() {
-    let free = |_: &str| false;
-    let name = |repo, prompt| readable_name(repo, prompt, &free).unwrap();
-    assert_eq!(
-        name("oisin-ee/zoomies", "Please fix the login redirect loop"),
-        "zoomies-fix-login-redirect"
-    );
-    assert_eq!(name("owner/My.Repo", "  \n"), "my-repo");
-    assert_eq!(name("owner/u-tools", "go"), "lead-u-tools-go");
-    assert_eq!(name("owner/---", "Ship it"), "lead-ship");
-    // Long words stop the name before Herdr's limit, with room left for a suffix.
-    let long = name(
-        "owner/a-very-long-repository-name-indeed",
-        "implementation details",
-    );
-    assert!(long.len() <= 29 && valid_name(&long), "{long}");
-    assert_eq!(
-        name(
-            "owner/dogsled",
-            "Investigate supercalifragilisticexpialidocious"
-        ),
-        "dogsled-investigate"
-    );
-    // A taken name gets the next free suffix.
-    let taken = |name: &str| matches!(name, "zoomies-fix" | "zoomies-fix-2");
-    assert_eq!(
-        readable_name("owner/zoomies", "fix", &taken).unwrap(),
-        "zoomies-fix-3"
-    );
-    assert!(readable_name("owner/zoomies", "fix", &|_| true).is_err());
-    assert!(!valid_name(""));
-    assert!(!valid_name("Upper"));
-    assert!(!valid_name(&"a".repeat(33)));
+fn generated_names_stay_unique_within_the_herdr_limit() {
+    let base = "a-name-that-uses-all-32-lettersx";
+    assert_eq!(base.len(), 32);
+    let next = naming::unique(base, |n| n == base || n.ends_with("-2")).unwrap();
+    assert_eq!(next.len(), 32);
+    assert!(valid_name(&next) && next.ends_with("-3"));
+    assert!(naming::unique(base, |_| true).is_err());
 }
 
 #[test]
