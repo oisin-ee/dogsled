@@ -1690,15 +1690,18 @@ fn MessageRecord(
     kind: Option<String>,
 ) -> Element {
     let (author, source, owner) = source_label(&turn, &assistant);
+    let event = crate::conversation_events::delivery(&turn.source)
+        .map(|(tone, label)| (tone, label.to_owned()));
     // Polls, activity, and attribution changes must not reparse unchanged Markdown.
     let markdown = use_memo(use_reactive(&turn.text, |text| {
         crate::review_view::render_markdown(&text)
     }));
     rsx! {
-        article { class: if owner { "conversation-event conversation-owner" } else if turn.role == Role::Thinking { "conversation-event conversation-thought" } else { "conversation-event" },
-            "data-record-id": turn.id, aria_label: author.clone(),
+        article { class: if owner { "conversation-event conversation-owner" } else if turn.role == Role::Thinking { "conversation-event conversation-thought" } else if event.is_some() { "conversation-event ds-delivery" } else { "conversation-event" },
+            "data-tone": event.as_ref().map(|(tone, _)| tone.class()), "data-record-id": turn.id, aria_label: author.clone(),
             ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
             div { class: "conversation-body",
+                if let Some((tone, label)) = &event { crate::conversation_events::DeliveryLabel { tone: *tone, label: label.clone() } }
                 div { class: "conversation-meta", strong { "{author}" } span { "{source}" }
                     if let Some(kind) = kind { Badge { variant: BadgeVariant::Outline, "data-part": "end-turn-kind", "{kind}" } }
                 }
@@ -1733,6 +1736,19 @@ fn ToolRecords(turns: Vec<Turn>, assistant: String, label: String) -> Element {
 #[component]
 fn ToolRecord(turn: Turn) -> Element {
     let tool = turn.tool.as_ref();
+    if let Some(tool) = tool
+        && let Some(method) = tool
+            .name
+            .as_deref()
+            .and_then(crate::conversation_events::operation)
+    {
+        return rsx! {
+            article { class: "conversation-event conversation-tool ds-call", "data-record-id": turn.id,
+                ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
+                crate::conversation_events::CallPanel { tool: tool.clone(), method: method.to_owned() }
+            }
+        };
+    }
     let call = tool
         .and_then(|tool| tool.call.as_deref().or(tool.name.as_deref()))
         .unwrap_or("Unnamed tool");
@@ -1868,9 +1884,16 @@ pub(crate) fn LiveEdge(live: ReadSignal<Live>, #[props(default)] last: Option<Tu
                 LiveThought { text }
             }
             for tool in state.active_tools {
-                div { key: "{tool.call_id}", class: "conversation-live-tool",
-                    p { class: "conversation-meta", "Running · {tool.name}" }
-                    pre { class: "conversation-call", "{tool.call.as_deref().unwrap_or(&tool.name)}" }
+                if let Some(method) = crate::conversation_events::operation(&tool.name) {
+                    div { key: "{tool.call_id}", class: "ds-call-panel",
+                        crate::conversation_events::CallHeading { method: method.to_owned(), name: tool.name.clone(), call: tool.call.clone() }
+                        div { class: "ds-receipt", "Running call…" }
+                    }
+                } else {
+                    div { key: "{tool.call_id}", class: "conversation-live-tool",
+                        p { class: "conversation-meta", "Running · {tool.name}" }
+                        pre { class: "conversation-call", "{tool.call.as_deref().unwrap_or(&tool.name)}" }
+                    }
                 }
             }
         }

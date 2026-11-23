@@ -875,6 +875,43 @@ dogsled-read-edge { display: block; height: 1px; }
   :is(.conversation-output, .conversation-tool-outcome) {
   color: var(--primary-error-color);
 }
+/* Recorded Dogsled traffic: outbound action and receipt share a surface. A separate
+   inbound delivery has an edge; a routine notice yields to the conversation. */
+.console-shell .ds-call-panel,
+.console-shell .ds-delivery > .conversation-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  background: var(--console-panel);
+  border: 1px solid var(--console-line-strong);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+.console-shell .ds-delivery { --event-color: var(--console-accent); }
+.console-shell .ds-delivery[data-tone="attention"] { --event-color: var(--console-waiting); }
+.console-shell .ds-delivery[data-tone="error"] { --event-color: var(--primary-error-color); }
+.console-shell .ds-delivery > .conversation-body { border-left: 3px solid var(--event-color); }
+.console-shell .ds-delivery[data-tone="notice"] { --event-color: var(--console-muted); }
+.console-shell .ds-delivery[data-tone="notice"] > .conversation-body { background: transparent; border: 0; border-left: 2px solid var(--console-line-strong); border-radius: 0; padding-block: 3px; }
+.console-shell .ds-event-kind, .console-shell .ds-receipt {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+}
+.console-shell .ds-event-kind { margin-bottom: 5px; font: 600 11px/1.4 var(--console-ui); text-transform: uppercase; letter-spacing: .09em; color: var(--event-color, var(--console-accent)); }
+.console-shell .ds-event-title { font-weight: 600; }
+.console-shell .ds-event-title code { margin-left: .7em; font: 12px var(--console-mono); }
+.console-shell .ds-command { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; margin-block: 8px; }
+.console-shell .ds-command code { max-width: 100%; padding: 2px 6px; background: var(--console-raised); border-radius: 4px; font: 12px/1.6 var(--console-mono); white-space: pre-wrap; }
+.console-shell .ds-call-fields { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 6px 0; }
+.console-shell .ds-call-fields:empty { display: none; }
+.console-shell .ds-call-fields div { display: flex; gap: 6px; min-width: 0; align-items: baseline; }
+.console-shell .ds-call-fields dt, .console-shell .ds-event-detail summary, .console-shell .ds-event-detail small { color: var(--console-muted); font-size: 12px; }
+.console-shell .ds-call-fields dd, .console-shell .ds-receipt code { margin: 0; font: 12px/1.5 var(--console-mono); }
+.console-shell .ds-event-detail { margin-top: 6px; }
+.console-shell .ds-event-detail summary { cursor: pointer; width: fit-content; }
+.console-shell .ds-event-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px; background: var(--console-bg); font: 12px/1.5 var(--console-mono); }
+.console-shell .ds-receipt { margin: 10px -14px -10px; padding: 7px 14px; border-top: 1px solid var(--console-line); background: var(--console-raised); border-radius: 0 0 10px 10px; font-size: 13px; }
+.console-shell .ds-call-panel[data-error="true"] .ds-receipt { color: var(--primary-error-color); }
+.console-shell .ds-result { margin-top: 16px; }
+.console-provider .console-shell .ds-result-note { margin: 16px 0 0; padding-left: 10px; border-left: 2px solid var(--console-line-strong); white-space: pre-wrap; }
 .console-provider .console-shell .conversation-live-edge {
   display: flex;
   flex-direction: column;

@@ -8,6 +8,7 @@ mod board;
 #[cfg(test)]
 mod component_tests;
 pub mod components;
+mod conversation_events;
 mod conversations;
 mod files;
 mod highlight;
