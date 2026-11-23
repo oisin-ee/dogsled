@@ -27,6 +27,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_dogsled_dogsled__end_turn|mcp__dogsled__end_turn",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PLUGIN_ROOT/hooks/inbox.sh\" --harness claude --event PostToolUse || true",
+            "timeout": 6
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -94,7 +94,11 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
         } else {
             json("plugins/dogsled/hooks/hooks.json")
         };
-        assert_eq!(hooks["hooks"].as_object().unwrap().len(), 3);
+        // Claude Code also ends the run after `end_turn`; Codex keeps generating either way.
+        assert_eq!(
+            hooks["hooks"].as_object().unwrap().len(),
+            if codex { 3 } else { 4 }
+        );
         let (harness, variable) = if codex {
             ("codex", "$PLUGIN_ROOT")
         } else {
@@ -106,7 +110,11 @@ fn marketplaces_and_manifests_resolve_the_single_skill_and_hooks() {
             ("UserPromptSubmit", 0, "context"),
             ("UserPromptSubmit", 1, "inbox"),
             ("Stop", 0, "inbox"),
+            ("PostToolUse", 0, "inbox"),
         ] {
+            if codex && event == "PostToolUse" {
+                continue;
+            }
             let handler = &hooks["hooks"][event][0]["hooks"][index];
             assert_eq!(handler["type"], "command");
             assert_eq!(handler["timeout"], 6);
