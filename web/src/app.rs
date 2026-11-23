@@ -283,6 +283,8 @@ pub(crate) struct PortalState {
     inbox: InboxState,
     pub(crate) catalogue: CatalogueState,
     paused: bool,
+    /// The Dogsled release of the service that serves this portal.
+    dogsled: Option<String>,
 }
 
 impl PortalState {
@@ -297,6 +299,9 @@ impl PortalState {
         });
         match result {
             Ok(snapshot) => {
+                if !snapshot.dogsled.is_empty() {
+                    self.dogsled = Some(snapshot.dogsled.clone());
+                }
                 let gaps = snapshot
                     .gaps
                     .iter()
@@ -385,6 +390,7 @@ pub fn App() -> Element {
     let board = use_memo(move || publication.read().board.clone());
     let board_error = use_memo(move || publication.read().board_error.clone());
     let stream_paused = use_memo(move || publication.read().paused);
+    let dogsled = use_memo(move || publication.read().dogsled.clone());
     let catalogue = use_memo(move || publication.read().catalogue.clone());
     use_context_provider(|| CataloguePortal(catalogue));
     let mut panel = use_context_provider(|| Signal::new(LeadPanel::Chat));
@@ -655,8 +661,18 @@ pub fn App() -> Element {
                 panel.set(next);
             },
             header { class: "console-topbar",
-                a { href: "/", aria_label: "Homepage", "Dogsled" }
+                div { class: "console-brand",
+                    a { href: "/", aria_label: "Homepage", "Dogsled" }
+                    if let Some(version) = dogsled() {
+                        Badge { class: "console-version", variant: BadgeVariant::Outline, title: "Dogsled {version}", "v{version}" }
+                    }
+                }
                 div { class: "console-actions",
+                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
+                        onclick: move |_| start_new(),
+                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                        "New"
+                    }
                     Button { class: "console-metrics", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: metrics_open(),
                         onclick: move |_| {
                             selected.set(None);
@@ -666,11 +682,6 @@ pub fn App() -> Element {
                             panel.set(LeadPanel::Chat);
                         },
                         "Metrics"
-                    }
-                    Button { class: "console-new", variant: ButtonVariant::Secondary, r#type: "button", aria_pressed: composing(),
-                        onclick: move |_| start_new(),
-                        Plus { size: 16, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
-                        "New"
                     }
                 }
                 p { class: "console-tally", aria_label: "Fleet",
@@ -789,7 +800,7 @@ pub(crate) fn NeedsYou(
                                 }
                                 span { class: "inbox-title", "{item.title}" }
                                 if repository.is_some() { span { class: "agent-title", "{agent.row.title}" } }
-                                span { class: "agent-runtime", title: "{agent.row.runtime}", "{agent.row.runtime}" }
+                                crate::board::RuntimeChips { runtime: agent.row.runtime.clone() }
                             };
                             rsx! {
                                 SidebarMenuItem { key: "{address.host}:{address.pane}", class: "waiting-agent", "data-open": open,
@@ -939,6 +950,7 @@ mod shell_tests {
         }]))?;
         let snapshot = portal_types::PortalSnapshot {
             version: portal_types::PORTAL_VERSION,
+            dogsled: "0.42.0".into(),
             epoch: "serve".into(),
             revision: 1,
             published_ms: 1,
@@ -964,6 +976,7 @@ mod shell_tests {
         let gapped = |revision, gaps| {
             PortalEvent::Snapshot(Box::new(PortalSnapshot {
                 version: portal_types::PORTAL_VERSION,
+                dogsled: "0.42.0".to_owned(),
                 epoch: "serve".to_owned(),
                 revision,
                 published_ms: revision,

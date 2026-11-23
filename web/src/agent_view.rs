@@ -1475,43 +1475,35 @@ pub(crate) fn Conversation(
         conversation_record(turn, &assistant, receipt)
     };
     let records = groups.iter().enumerate().skip(first).flat_map(|(index, group)| {
-        let mut records = Vec::new();
-        if active && index + 1 == groups.len() {
-            records.extend(group.iter().map(&record));
-        } else if let Some(pin) = group.iter().rposition(|turn| turn.pinned().is_some()) {
-            // The agent said how its turn ends. Its message stays the reply, and whatever
-            // came after it, such as a check-in and the answer to it, folds below.
-            let start = usize::from(group[0].role == Role::User);
-            records.extend(group[..start].iter().map(&record));
-            if pin > start {
-                let label = worked_label(&group[0], &group[..pin]);
+        // The newest turn stays open while the agent works. History without its opening
+        // message, such as the start of a truncated window, has nothing to fold under.
+        let live = active && index + 1 == groups.len();
+        let head = &group[0];
+        if live || !(head.role == Role::User || head.is_nudge()) {
+            return group.iter().map(&record).collect::<Vec<_>>();
+        }
+        let mut records = vec![record(head)];
+        let rest = &group[1..];
+        let mut previous = head;
+        let mut replied = false;
+        let mut seen = 0;
+        // Every message between the owner and the agent stays on the timeline. Each stretch
+        // of thinking, tool calls, and check-ins between two messages folds on its own.
+        for stretch in rest.chunk_by(|a, b| is_message(a) == is_message(b)) {
+            seen += stretch.len();
+            if is_message(&stretch[0]) {
+                records.extend(stretch.iter().map(&record));
+                previous = &stretch[stretch.len() - 1];
+                replied |= stretch.iter().any(|turn| turn.pinned().is_some());
+            } else if seen < rest.len() || replied {
+                // Work after the last message is the agent's final state unless the agent
+                // already ended its turn, so it folds only then.
+                let label = fold_label(previous, stretch);
                 records.push(rsx! {
-                    ToolRecords { key: "work:{group[pin].id}", turns: group[start..pin].to_vec(), assistant: assistant.clone(), label }
+                    ToolRecords { key: "work:{stretch[0].id}", turns: stretch.to_vec(), assistant: assistant.clone(), label }
                 });
-            }
-            records.push(record(&group[pin]));
-            let after = &group[pin + 1..];
-            if !after.is_empty() {
-                records.push(rsx! {
-                    ToolRecords { key: "follow:{group[pin].id}", turns: after.to_vec(), assistant: assistant.clone(), label: follow_up_label(after) }
-                });
-            }
-        } else {
-            // Without one, each system nudge starts its own run, so each answer stays the
-            // reply of the run it answers.
-            for run in group.chunk_by(|_, next| !next.is_nudge()) {
-                let head = run[0].role == Role::User || run[0].is_nudge();
-                match run.iter().rposition(|turn| turn.role == Role::Assistant) {
-                    Some(reply) if head && run[1..reply].iter().any(is_work) => {
-                        records.push(record(&run[0]));
-                        let label = worked_label(&run[0], run);
-                        records.push(rsx! {
-                            ToolRecords { key: "work:{run[0].id}", turns: run[1..reply].to_vec(), assistant: assistant.clone(), label }
-                        });
-                        records.extend(run[reply..].iter().map(&record));
-                    }
-                    _ => records.extend(run.iter().map(&record)),
-                }
+            } else {
+                records.extend(stretch.iter().map(&record));
             }
         }
         records
@@ -1542,20 +1534,26 @@ pub(crate) fn Conversation(
     }
 }
 
-fn is_work(turn: &Turn) -> bool {
-    matches!(turn.role, Role::Thinking | Role::Tool)
+/// A message between the owner and the agent: what the owner sent, what the agent wrote,
+/// and how the agent ended its turn. Everything else is work that folds.
+fn is_message(turn: &Turn) -> bool {
+    matches!(turn.role, Role::User | Role::Assistant) || turn.pinned().is_some()
 }
 
-/// The label of the fold after a pinned message: the nudges and answers in it.
-fn follow_up_label(turns: &[Turn]) -> String {
-    let count = turns
-        .iter()
-        .filter(|turn| turn.is_nudge() || turn.role == Role::Assistant)
-        .count();
-    match count {
-        0 => "Follow-up work".to_owned(),
-        1 => "1 follow-up".to_owned(),
-        count => format!("{count} follow-ups"),
+/// The label of one folded stretch: how long it ran from the message before it, and what it
+/// holds.
+fn fold_label(previous: &Turn, turns: &[Turn]) -> String {
+    let (thoughts, calls) = work_counts(turns);
+    let check_ins = match turns.iter().filter(|turn| turn.is_nudge()).count() {
+        0 => None,
+        1 => Some("1 check-in".to_owned()),
+        count => Some(format!("{count} check-ins")),
+    };
+    match (thoughts + calls, check_ins) {
+        (0, Some(check_ins)) => check_ins,
+        (0, None) => "Context".to_owned(),
+        (_, None) => worked_label(previous, turns),
+        (_, Some(check_ins)) => format!("{} · {check_ins}", worked_label(previous, turns)),
     }
 }
 

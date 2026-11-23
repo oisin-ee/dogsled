@@ -3,6 +3,7 @@ use super::*;
 fn snapshot() -> PortalSnapshot {
     PortalSnapshot {
         version: PORTAL_VERSION,
+        dogsled: "0.42.0".to_owned(),
         epoch: "service".to_owned(),
         revision: 3,
         published_ms: 7,

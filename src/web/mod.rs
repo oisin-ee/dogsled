@@ -396,7 +396,10 @@ fn reader(ledger: &Ledger, sender: &watch::Sender<PortalState>, stop: &Cancellat
                             return Err(crate::error::Error::Invalid(detail));
                         }
                         if last != Some(connection.publication.revision) {
-                            let snapshot = read::view(&connection.publication, "portal")?;
+                            let mut snapshot: PortalSnapshot =
+                                read::view(&connection.publication, "portal")?;
+                            // The release that serves this portal, not the observer's.
+                            env!("CARGO_PKG_VERSION").clone_into(&mut snapshot.dogsled);
                             sender.send_replace(PortalState {
                                 snapshot: Some(snapshot),
                                 error: None,

@@ -1090,7 +1090,10 @@ fn worker_lead() -> crate::board::NavigationRow {
     crate::board::NavigationRow {
         pane: Some("lead".into()),
         title: "Ship the portal".into(),
-        runtime: "Host: local · Model: unknown".into(),
+        runtime: crate::board::Runtime {
+            host: "local".into(),
+            model: None,
+        },
         role: "lead".into(),
         host: "local".into(),
         state: "working".into(),
@@ -1330,11 +1333,17 @@ fn sidebar_identifies_agents_and_retained_branches() -> Result<(), serde_json::E
         "<details",
         "1 branch to review",
         "fix/checkout",
-        "Host: MacBook · Model: opus 5",
-        "Host: netcup · Model: unknown",
+        r#"title="Host MacBook""#,
+        r#"title="Model opus 5""#,
+        r#"title="Host netcup""#,
     ] {
         assert!(html.contains(label), "missing {label}: {html}");
     }
+    assert!(
+        !html.contains("Host:") && !html.contains("Model:"),
+        "{html}"
+    );
+    assert_eq!(html.matches(r#"data-part="model""#).count(), 1, "{html}");
     Ok(())
 }
 
@@ -2297,17 +2306,24 @@ fn worked_history(timed: bool) -> portal_types::agents::Conversation {
 }
 
 #[test]
-fn finished_turn_work_folds_with_counts_and_only_recorded_time_spans() {
+fn finished_turn_work_folds_between_messages_with_counts_and_only_recorded_time_spans() {
     for (timed, expected) in [
-        (true, "Worked for 6s · 2 thoughts · 2 tool calls"),
-        (false, "Worked · 2 thoughts · 2 tool calls"),
+        (true, "Worked for 2s · 1 thought · 1 tool call"),
+        (false, "Worked · 1 thought · 1 tool call"),
     ] {
         let html = render_timeline(worked_history(timed));
-        assert!(html.contains(expected), "{html}");
-        assert_eq!(html.matches("aria-expanded=false").count(), 1, "{html}");
+        // The agent's message between the two stretches of work stays outside both folds.
+        let folds = html
+            .match_indices(expected)
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        assert_eq!(folds.len(), 2, "{html}");
+        assert_eq!(html.matches("aria-expanded=false").count(), 2, "{html}");
         assert!(html.contains("data-open=false"), "{html}");
         assert!(html.contains("data-part=\"turn-work\""), "{html}");
-        assert!(html.find("Please check.") < html.find(expected), "{html}");
+        assert!(html.find("Please check.") < Some(folds[0]), "{html}");
+        let commentary = html.find("One more check.").unwrap();
+        assert!(folds[0] < commentary && commentary < folds[1], "{html}");
         assert!(
             html.find("Confirming.") < html.find("Finished reply."),
             "{html}"
@@ -2319,12 +2335,12 @@ fn finished_turn_work_folds_with_counts_and_only_recorded_time_spans() {
     // Neither a missing owner time nor missing record times supplies a span.
     let mut missing_owner = worked_history(true);
     missing_owner.turns[0].timestamp = None;
-    assert!(render_timeline(missing_owner).contains("Worked · 2 thoughts · 2 tool calls"));
+    assert!(render_timeline(missing_owner).contains("Worked · 1 thought · 1 tool call"));
     let mut missing_records = worked_history(true);
     for turn in missing_records.turns.iter_mut().skip(1) {
         turn.timestamp = None;
     }
-    assert!(render_timeline(missing_records).contains("Worked · 2 thoughts · 2 tool calls"));
+    assert!(render_timeline(missing_records).contains("Worked · 1 thought · 1 tool call"));
 }
 
 #[test]
@@ -2338,7 +2354,7 @@ fn worked_span_uses_the_latest_record_time_even_when_the_final_reply_time_is_ear
     snapshot.turns[4].timestamp = None;
     let html = render_timeline(snapshot);
     assert!(
-        html.contains("Worked for 11s · 2 thoughts · 2 tool calls"),
+        html.contains("Worked for 11s · 1 thought · 1 tool call"),
         "{html}"
     );
     assert!(!html.contains("Worked for 6s"), "{html}");
@@ -2354,7 +2370,7 @@ fn nudge(id: &str, text: &str) -> portal_types::agents::Turn {
 }
 
 #[test]
-fn an_end_turn_message_stays_the_reply_and_later_runs_fold_as_follow_ups() {
+fn an_end_turn_message_stays_the_reply_and_later_check_ins_fold_without_the_answers() {
     use portal_types::agents::{EndTurnKind, Role, ToolStatus};
     let mut ended = tool_turn("end", Some("end_turn"), ToolStatus::Completed);
     ended.text = "The real answer.".into();
@@ -2371,7 +2387,7 @@ fn an_end_turn_message_stays_the_reply_and_later_runs_fold_as_follow_ups() {
         history_turn("cruft", Role::Assistant, "No action needed."),
     ]));
     let answer = html.find("The real answer.").unwrap();
-    let label = html.find("2 follow-ups").unwrap();
+    let label = html.find(">1 check-in<").unwrap();
     assert!(
         html.find("Worked · 0 thoughts · 2 tool calls").unwrap() < answer,
         "{html}"
@@ -2392,7 +2408,7 @@ fn an_end_turn_message_stays_the_reply_and_later_runs_fold_as_follow_ups() {
 }
 
 #[test]
-fn without_end_turn_each_nudge_starts_a_run_that_keeps_its_own_reply() {
+fn without_end_turn_every_answer_stays_shown_and_check_ins_fold_with_work() {
     use portal_types::agents::{Role, ToolStatus};
     let html = render_timeline(history(vec![
         history_turn("input", Role::User, "Please check."),
@@ -2407,6 +2423,13 @@ fn without_end_turn_each_nudge_starts_a_run_that_keeps_its_own_reply() {
     assert!(first < html.find("Two jobs closed.").unwrap(), "{html}");
     assert!(
         html.find("Worked · 0 thoughts · 1 tool call").unwrap() < first,
+        "{html}"
+    );
+    assert!(
+        first
+            < html
+                .find("Worked · 0 thoughts · 1 tool call · 1 check-in")
+                .unwrap(),
         "{html}"
     );
 }
@@ -2472,7 +2495,7 @@ fn newest_active_turn_stays_open_and_live_thought_and_calls_are_at_the_edge() {
             turn
         }));
     let html = render_live_timeline(two_turns, Live::Pending);
-    assert_eq!(html.matches("Worked for 6s").count(), 1, "{html}");
+    assert_eq!(html.matches("Worked for 2s").count(), 2, "{html}");
     assert!(!html.contains("Worked ·"), "{html}");
 }
 
