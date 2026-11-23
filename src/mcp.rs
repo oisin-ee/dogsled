@@ -129,10 +129,8 @@ pub struct LegacySpawn {
     /// A short name for the child.
     pub name: String,
     /// A Pi profile from `dogsled profiles`.
-    #[serde(default)]
     pub profile: Option<String>,
     /// `pi` (default), `claude`, or `codex`.
-    #[serde(default)]
     pub kind: Option<String>,
     #[serde(flatten)]
     pub placement: Placement,
@@ -140,17 +138,13 @@ pub struct LegacySpawn {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Placement {
-    /// Pin to a host label, such as `netcup`. Default: the host with the most room.
-    #[serde(default)]
+    /// A host label. Default: the roomiest host.
     pub host: Option<String>,
-    /// Create or reuse this branch in a linked worktree; a child with a branch is a writer.
-    #[serde(default)]
+    /// A branch for a linked worktree; it makes the child a writer.
     pub branch: Option<String>,
-    /// The base of a new branch. Default: the repository's default branch.
-    #[serde(default)]
+    /// The base of a new branch. Default: the default branch.
     pub base: Option<String>,
-    /// The repository or directory to work in. Default: the server's working directory.
-    #[serde(default)]
+    /// The repository or directory. Default: the server's cwd.
     pub cwd: Option<String>,
 }
 
@@ -514,7 +508,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Queue a Pi, Claude, or Codex child. Returns a ticket. The outcome and final reply go to your inbox."
+        description = "Queue a Pi, Claude, or Codex child. Returns a ticket; the outcome and reply go to your inbox."
     )]
     async fn spawn(&self, Parameters(args): Parameters<SpawnArgs>) -> Result<String, String> {
         self.call(move |fleet| {
