@@ -116,9 +116,10 @@ An agent `working` or `unknown` with an unchanged transcript for ten minutes is 
 ```sh
 dogsled doctor --host HOST --json
 dogsled prune --host HOST worktrees jobs
+dogsled prune --path PATH
 ```
 
-Doctor removes nothing, but refreshes remote refs. Prune shows candidates and asks. `--yes` skips only the question. Never close working or blocked agents through cleanup.
+Doctor removes nothing, but refreshes remote refs. Prune shows candidates and asks. `--yes` skips only the question. `--path` limits prune to one checkout: its linked worktree and its build output. Never close working or blocked agents through cleanup.
 Worktrees, detached HEADs, branches, and orphan close use the loss rule in Closing. Prune and the sweep use identical worktree and branch decisions.
 Holds protect active panes or processes, the caller, open agent items (only `close` ends them; a live owner also holds until landing), and pending preparations or launches. An unreadable process table also holds worktrees. An idle shell, an idle agent's own processes, or a workspace alone does not.
 Doctor reports unheld dirty checkouts whose work is in the default branch as `landed_dirty`, with up to ten dirty paths. Missing repositories produce warnings, and the survey continues.

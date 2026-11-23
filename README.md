@@ -553,6 +553,7 @@ dogsled doctor --host netcup
 dogsled prune worktrees jobs
 dogsled prune --host netcup --yes panes
 dogsled prune targets
+dogsled prune --path .worktrees/fix-x
 ```
 
 Doctor changes no candidates. It reports `worktrees`, `branches`, `workspaces`, `panes`, `jobs`, `targets`, `disk`, `processes`, and `repositories`.
@@ -607,6 +608,8 @@ Prune removes it after it checks the tag again. A worktree that the same plan re
 Processes above 100% CPU outside Herdr pane ancestry are report-only. Prune never kills processes or frees arbitrary disk paths.
 
 Prune displays a plan and asks before removal. `--yes` skips that question, not safety checks.
+`--path <checkout>` limits prune to one checkout. For a linked worktree, on a branch or detached, the plan has the worktree entry and its build output. For a main checkout, it has only the build output, because prune never removes a main checkout.
+It selects from the repositories that doctor surveys, and the selected entries get the same holds and rechecks as a full prune. Class arguments still filter the selection. A path with no entry is an error. On another host, give the absolute path on that host.
 Each removal rechecks current state. Working or blocked panes, held worktrees, dirty worktrees, and local-only commits remain untouched.
 Removal rechecks Git path, branch, HEAD, and repository against the approved plan. Any change stops removal. A changed repository, path, or branch is an identity change and a failure. A HEAD that moved because of a new commit is live work and a skip, on every check: the plan comparison, the removal recheck, and the branch-tip check.
 Worktree removal is the same as `close`: `teardown`, the panes and workspace, unlock, `git worktree remove`, the branch when its commits are held, and the idle anchor. Dogsled checks that the worktree is gone afterwards.

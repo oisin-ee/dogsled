@@ -170,6 +170,10 @@ pub enum Command {
         host: Option<String>,
         #[arg(long)]
         yes: bool,
+        /// Prune only this checkout: one linked worktree, or the build output of one checkout.
+        /// On another host, give its absolute path there.
+        #[arg(long)]
+        path: Option<String>,
         #[arg(value_parser = ["worktrees", "branches", "workspaces", "panes", "jobs", "targets", "disk", "processes", "resources"])]
         classes: Vec<String>,
     },
