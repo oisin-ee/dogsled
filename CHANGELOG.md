@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.42.0](https://github.com/oisin-ee/dogsled/compare/v0.41.0...v0.42.0) (2026-11-23)
+
+
+### Features
+
+* cut agent context and report its size in metrics ([#415](https://github.com/oisin-ee/dogsled/issues/415)) ([789ddb2](https://github.com/oisin-ee/dogsled/commit/789ddb2d1d41d2a329b85183e4e3e074434539cd))
+* **leads:** name sessions from an AI summary of the opening message ([#410](https://github.com/oisin-ee/dogsled/issues/410)) ([7ebc0b0](https://github.com/oisin-ee/dogsled/commit/7ebc0b06928f8f1fe10081d7ad571f9b6edfc569))
+* **prune:** prune one checkout with --path ([#411](https://github.com/oisin-ee/dogsled/issues/411)) ([44d0b62](https://github.com/oisin-ee/dogsled/commit/44d0b62bad7dadae66e1eb2c9f29f4e5c366bf5d))
+* **turns:** end every turn with end_turn and keep its message as the reply ([#414](https://github.com/oisin-ee/dogsled/issues/414)) ([89be831](https://github.com/oisin-ee/dogsled/commit/89be831b39acedef400e94361b131c651deef8d3))
+
+
+### Bug Fixes
+
+* **context:** keep failing service lanes in hook context ([a3387be](https://github.com/oisin-ee/dogsled/commit/a3387be66206055b0d3bc867f22cd65a785254bf))
+* **portal:** identify sidebar agents and branches to review ([#409](https://github.com/oisin-ee/dogsled/issues/409)) ([8d8bea6](https://github.com/oisin-ee/dogsled/commit/8d8bea6e1127975f8787f2416183d44b89c77dd8))
+* **portal:** show per-turn time in worker rows ([#407](https://github.com/oisin-ee/dogsled/issues/407)) ([a04fc7e](https://github.com/oisin-ee/dogsled/commit/a04fc7e5d22a87dc09fe095965d09fc90a375099))
+
 ## [0.41.0](https://github.com/oisin-ee/dogsled/compare/v0.40.0...v0.41.0) (2026-11-20)
 
 
