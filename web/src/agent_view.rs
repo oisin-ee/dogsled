@@ -1489,9 +1489,12 @@ pub(crate) fn Conversation(
         let mut seen = 0;
         // Every message between the owner and the agent stays on the timeline. Each stretch
         // of thinking, tool calls, and check-ins between two messages folds on its own.
-        for stretch in rest.chunk_by(|a, b| is_message(a) == is_message(b)) {
+        let shown = shown_messages(rest);
+        let positions = (0..rest.len()).collect::<Vec<_>>();
+        for span in positions.chunk_by(|&a, &b| shown[a] == shown[b]) {
+            let stretch = &rest[span[0]..=span[span.len() - 1]];
             seen += stretch.len();
-            if is_message(&stretch[0]) {
+            if shown[span[0]] {
                 records.extend(stretch.iter().map(&record));
                 previous = &stretch[stretch.len() - 1];
                 replied |= stretch.iter().any(|turn| turn.pinned().is_some());
@@ -1540,6 +1543,23 @@ fn is_message(turn: &Turn) -> bool {
     matches!(turn.role, Role::User | Role::Assistant) || turn.pinned().is_some()
 }
 
+/// Which turns stay on the timeline. A successful `end_turn` message is the reply, so text
+/// the agent writes after it, before anything new arrives, folds: it repeats the reply.
+fn shown_messages(turns: &[Turn]) -> Vec<bool> {
+    let mut ended = false;
+    turns
+        .iter()
+        .map(|turn| {
+            if turn.role == Role::User || turn.is_nudge() {
+                ended = false;
+            }
+            let shown = is_message(turn) && (!ended || turn.pinned().is_some());
+            ended |= turn.pinned().is_some();
+            shown
+        })
+        .collect()
+}
+
 /// The label of one folded stretch: how long it ran from the message before it, and what it
 /// holds.
 fn fold_label(previous: &Turn, turns: &[Turn]) -> String {
@@ -1549,11 +1569,23 @@ fn fold_label(previous: &Turn, turns: &[Turn]) -> String {
         1 => Some("1 check-in".to_owned()),
         count => Some(format!("{count} check-ins")),
     };
-    match (thoughts + calls, check_ins) {
-        (0, Some(check_ins)) => check_ins,
-        (0, None) => "Context".to_owned(),
-        (_, None) => worked_label(previous, turns),
-        (_, Some(check_ins)) => format!("{} · {check_ins}", worked_label(previous, turns)),
+    let later = match turns.iter().filter(|turn| is_message(turn)).count() {
+        0 => None,
+        1 => Some("1 message after the reply".to_owned()),
+        count => Some(format!("{count} messages after the reply")),
+    };
+    let parts = [
+        (thoughts + calls > 0).then(|| worked_label(previous, turns)),
+        check_ins,
+        later,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if parts.is_empty() {
+        "Context".to_owned()
+    } else {
+        parts.join(" · ")
     }
 }
 
