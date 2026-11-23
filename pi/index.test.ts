@@ -73,7 +73,7 @@ function rig() {
 	const receipts: { customType: string; data: unknown }[] = [];
 	const userMessages: string[] = [];
 	let code = 0;
-	let context = "local 3/8\n";
+	let context = "local service: up · agents 0\n";
 	let gate = "";
 	let missing = false;
 	let sessionRunning = false;
@@ -420,18 +420,35 @@ test("end_turn records the kind and ends the run, and a refusal ends nothing", a
 	assert.equal(r.calls.length, calls);
 });
 
-test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
+test("sends hidden context only when it changes on the active branch", async () => {
 	const r = rig();
 	await r.tools.get("todo").execute("setup", { op: "view" }, undefined, undefined, r.ctx);
 	assert.equal(r.calls.length, 0);
-	assert.deepEqual(await r.invoke("before_agent_start", { systemPrompt: "base" }), { systemPrompt: "base\n\n## Your work and fleet status\nlocal 3/8\n" });
+	const start = () => r.invoke("before_agent_start", { systemPrompt: "base" });
+	const message = (status: string) => ({ customType: "dogsled", display: false, content: `## Your work and fleet status\n${status}` });
+	const up = message("local service: up · agents 0");
+	assert.deepEqual(await start(), { message: up });
 	assert.deepEqual(r.calls.map(call => call.slice(1)), [["unit", "prepared"], ["unit", "settlements"], ["hook", "context", "--harness", "pi"]]);
+	const session = r.ctx.sessionManager;
+	const upEntry = session.appendCustomMessageEntry(up.customType, up.content, up.display);
+	session.appendCustomMessageEntry("dogsled", "Inbox message", true);
+	assert.equal(await start(), undefined);
+
+	r.context("local service: down · agents ?\n");
+	const down = message("local service: down · agents ?");
+	assert.deepEqual(await start(), { message: down });
+	session.appendCustomMessageEntry(down.customType, down.content, down.display);
+	assert.equal(await start(), undefined);
+	session.branch(upEntry);
+	assert.deepEqual(await start(), { message: down });
+
 	r.context("");
-	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
+	assert.equal(await start(), undefined);
+	r.context("local service: down · agents ?\n");
 	r.fail();
-	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
+	assert.equal(await start(), undefined);
 	r.missing();
-	assert.equal(await r.invoke("before_agent_start", { systemPrompt: "base" }), undefined);
+	assert.equal(await start(), undefined);
 });
 
 test("stop gate continues with a visible reminder and preserves prior boundary entries", async t => {

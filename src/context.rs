@@ -82,19 +82,19 @@ fn text(
         return String::new();
     }
     let mut text = board.map_or_else(String::new, crate::board::Board::owner_lines);
-    let mut rows = display.fleet(crate::ledger::now_ms());
-    if let Some(sweep) = &status.sweep
-        && (!found.failures.is_empty() || !found.holds.is_empty())
-    {
-        rows.push(format!(
-            "Cleanup at {} ms: {} failures and {} held worktrees in your work. Run `dogsled status` for details.",
-            sweep.finished_ms,
+    for row in display.context_rows() {
+        text.push_str(&row);
+        text.push('\n');
+    }
+    if status.sweep.is_some() && (!found.failures.is_empty() || !found.holds.is_empty()) {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            text,
+            "Cleanup: {} failures and {} held worktrees in your work. Run `dogsled status` for details.",
             found.failures.len(),
             found.holds.len()
-        ));
+        );
     }
-    text.push_str(&rows.join("\n"));
-    text.push('\n');
     match harness {
         Harness::Pi => text,
         Harness::Claude | Harness::Codex => format!(
@@ -114,6 +114,11 @@ mod tests {
     use super::*;
     use crate::commands::brief;
     use crate::hosts::{Host, HostReport};
+
+    const DOWN_CONTEXT: &str = concat!(
+        "local service: down · agents ?\n",
+        "0 open items · 0 queued · 0 stalls. Run `dogsled status` for details.\n",
+    );
 
     fn format(
         harness: Harness,
@@ -179,7 +184,7 @@ mod tests {
                     serde_json::json!({
                         "hookSpecificOutput": {
                             "hookEventName": event,
-                            "additionalContext": brief(&status),
+                            "additionalContext": DOWN_CONTEXT,
                         }
                     })
                 );
@@ -198,8 +203,53 @@ mod tests {
                 None,
                 &Findings::default()
             ),
-            brief(&status)
+            DOWN_CONTEXT
         );
+    }
+
+    #[test]
+    fn hook_context_ignores_volatile_probe_fields_but_tracks_service_state() {
+        let mut status = status();
+        status.hosts[0].service = "up".into();
+        status.hosts[0].probe = Some(crate::probe::Probe {
+            host: "local".into(),
+            label: "local".into(),
+            load1: 1.0,
+            cores: 8,
+            cpu_ticks: None,
+            busy: Some(0.125),
+            memory: crate::probe::Memory {
+                used_bytes: 1024,
+                total_bytes: 2048,
+                pressure_level: None,
+            },
+            disk_free_percent: 90.0,
+            agents: crate::probe::AgentCounts::from_agents(&[]),
+            agent_panes: Vec::new(),
+            reservations: Vec::new(),
+            panes: Vec::new(),
+        });
+        let hook = |status: &Status| {
+            format(
+                Harness::Pi,
+                Event::UserPromptSubmit,
+                status,
+                None,
+                &Findings::default(),
+            )
+        };
+        let before = hook(&status);
+        assert!(before.starts_with("local service: up · agents 0\n"));
+        let status_before = brief(&status);
+        status.hosts[0].sampled_ms = Some(30_100);
+        let probe = status.hosts[0].probe.as_mut().unwrap();
+        probe.busy = Some(0.875);
+        probe.memory.used_bytes += 512;
+        probe.disk_free_percent = 80.0;
+        assert_eq!(hook(&status), before);
+        assert_ne!(brief(&status), status_before);
+        status.hosts[0].service = "down".into();
+        assert!(hook(&status).starts_with("local service: down · agents 0\n"));
     }
 
     #[test]

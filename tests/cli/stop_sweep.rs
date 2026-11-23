@@ -623,10 +623,10 @@ fn cleanup_notice_reaches_only_the_agent_that_created_the_work() {
     drop(publisher);
     rig.snapshot("state", now(), 0.0, 8);
     let publisher = findings_publication(&rig);
-    assert!(!context("w1:p1").contains("Cleanup at"));
-    assert!(
-        context("w3:p1").contains("Cleanup at 2 ms: 1 failures and 1 held worktrees in your work")
-    );
+    assert!(!context("w1:p1").contains("Cleanup:"));
+    assert!(context("w3:p1").contains(
+        "Cleanup: 1 failures and 1 held worktrees in your work. Run `dogsled status` for details."
+    ));
     let owner = gate(&rig, "w3:p1");
     assert!(owner.contains("child teardown refused"), "{owner}");
     assert!(!owner.contains("host survey failed"), "{owner}");

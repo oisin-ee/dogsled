@@ -1,7 +1,7 @@
 //! Status display facts are classified once by the producer. Formatting uses only these
 //! facts and the reader's clock; it never calls lifecycle, settlement or eligibility rules.
 
-use crate::commands::{HostBrief, Status};
+use crate::commands::{HostBrief, HostState, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -208,7 +208,15 @@ impl Display {
         )
     }
 
-    pub(crate) fn fleet(&self, now: u64) -> Vec<String> {
+    /// Hook context uses observed states, not metrics, ages, or failure diagnostics.
+    pub(crate) fn context_rows(&self) -> impl Iterator<Item = String> + '_ {
+        self.hosts
+            .iter()
+            .map(Host::context_line)
+            .chain(std::iter::once(self.counts_line()))
+    }
+
+    fn fleet(&self, now: u64) -> Vec<String> {
         let mut rows = vec![String::new(); self.hosts.len().min(5)];
         let count = rows.len();
         for (i, host) in self.hosts.iter().enumerate() {
@@ -219,6 +227,11 @@ impl Display {
             row.push_str(&host.summary(now));
         }
         rows.extend(self.hosts.iter().flat_map(Host::lane_failures));
+        rows.push(self.counts_line());
+        rows
+    }
+
+    fn counts_line(&self) -> String {
         let c = &self.counts;
         let finished = if c.finished == 0 {
             String::new()
@@ -228,8 +241,10 @@ impl Display {
         let orphans = c
             .orphans
             .map_or_else(String::new, |count| format!(" · {count} orphaned"));
-        rows.push(format!("{} open items{finished}{orphans} · {} queued · {} stalls. Run `dogsled status` for details.", c.open, c.queued, c.stalls));
-        rows
+        format!(
+            "{} open items{finished}{orphans} · {} queued · {} stalls. Run `dogsled status` for details.",
+            c.open, c.queued, c.stalls
+        )
     }
 
     pub fn brief(&self, now: u64) -> String {
@@ -456,6 +471,30 @@ impl Host {
         }
     }
 
+    fn context_line(&self) -> String {
+        // HostState groups unreachable and service-down; admission headroom does not affect liveness.
+        let service = match self.brief.state {
+            HostState::Unreachable => "down",
+            HostState::NoHeadroom | HostState::Eligible => "up",
+        };
+        let agents = if !self.brief.measured {
+            "?".to_owned()
+        } else if self.states.is_empty() {
+            self.agents.len().to_string()
+        } else {
+            format!("{} ({})", self.agents.len(), self.state_counts())
+        };
+        format!("{} service: {service} · agents {agents}", self.brief.label)
+    }
+
+    fn state_counts(&self) -> String {
+        self.states
+            .iter()
+            .map(|(state, count)| format!("{} {count}", one_line(state)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn summary(&self, now: u64) -> String {
         let details = self.metrics.as_ref().map_or_else(
             || "mem ? disk ? agents ?".into(),
@@ -467,11 +506,7 @@ impl Host {
                     metrics.memory.total_bytes as f64 / gib,
                     metrics.disk_free_percent,
                     self.agents.len(),
-                    self.states
-                        .iter()
-                        .map(|(state, count)| format!("{} {count}", one_line(state)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    self.state_counts()
                 )
             },
         );
