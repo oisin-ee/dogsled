@@ -1447,12 +1447,12 @@ fn queue_admission_is_fifo_and_the_owner_hears_through_its_inbox() {
     assert!(rig.run(&["serve", "--once"]).status.success());
     assert_eq!(rig.tickets()[0]["notified"], true);
     let (_, claimed) = rig.json(&["inbox", "claim", "--harness", "pi"]);
-    assert!(
-        claimed[0]["text"].as_str().unwrap().starts_with(&format!(
+    assert_eq!(
+        claimed[0]["text"].as_str().unwrap(),
+        format!(
             "dogsled: ticket {} admitted on local",
             first["ticket"].as_str().unwrap()
-        )),
-        "{claimed}"
+        )
     );
     assert!(!rig.log("herdr.log").contains("agent prompt"));
     assert_eq!(

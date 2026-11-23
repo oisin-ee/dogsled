@@ -315,13 +315,70 @@ fn mcp_request_deadline_is_checked_before_each_receive() {
 }
 
 #[test]
+fn mcp_status_counts_fleet_gaps_but_only_details_owned_resources() {
+    let rig = Rig::new("mcp-status-gaps");
+    let mut frame = super::observation::publication(1);
+    let resources = [
+        "job-validity/owned",
+        "branch feature/owned",
+        "checkout /owned/tree",
+    ];
+    let holds: Vec<_> = resources
+        .iter()
+        .map(|resource| {
+            json!({
+                "host":"local", "resource":resource, "code":"unreadable", "owner":"w1:p1",
+                "reason":"unavailable", "next_command":"dogsled doctor", "command_host":"local",
+                "command_argv":["dogsled","doctor"], "request_id":"owned"
+            })
+        })
+        .collect();
+    frame["views"]["boards"]["data"]["w1:p1"]["rows"] = json!([{
+        "holds":holds, "group":"attention", "kind":"agent", "id":"owned", "name":"worker",
+        "what":"pi", "host":"local", "state":"unknown", "activity":"unavailable", "age_ms":0
+    }]);
+    let gap = |domain: &str, detail: &str| json!({"domain":domain,"detail":detail,"availability":"failed"});
+    let owned: Vec<_> = resources
+        .iter()
+        .map(|resource| gap(&format!("holds/{resource}"), "owned detail"))
+        .collect();
+    let all: Vec<_> = owned
+        .iter()
+        .cloned()
+        .chain([
+            gap("holds/job-validity/owned-other", "foreign job detail"),
+            gap("holds/branch feature/owned-other", "foreign branch detail"),
+            gap(
+                "holds/checkout /owned/tree-other",
+                "foreign checkout detail",
+            ),
+            gap("peer:remote:branches", "peer detail"),
+        ])
+        .collect();
+    frame["gaps"] = json!(all);
+    let _publication = super::observation::Supplied::start(&rig, frame);
+    let mut client = Client::start(&rig);
+    let (scoped, failed) = client.call("status", &json!({}));
+    assert!(!failed, "{scoped}");
+    assert_eq!(scoped["gaps"], json!(owned));
+    assert_eq!(scoped["gap_counts"], json!({"holds":6,"peer":1}));
+    assert!(scoped.to_string().chars().count() <= 2000, "{scoped}");
+    let (fleet, failed) = client.call("status", &json!({"all":true}));
+    assert!(!failed, "{fleet}");
+    assert_eq!(fleet["gaps"], json!(all));
+}
+
+#[test]
 fn mcp_lists_the_tools_with_their_schemas() {
     let rig = Rig::new("mcp-list");
     let mut client = Client::start(&rig);
     let tools = client.request("tools/list", &json!({}));
-    let mut names: Vec<(String, Vec<String>)> = tools["tools"]
-        .as_array()
-        .unwrap()
+    let tools = tools["tools"].as_array().unwrap();
+    let spawn = tools.iter().find(|tool| tool["name"] == "spawn").unwrap();
+    let declaration = spawn.to_string();
+    assert!(declaration.chars().count() <= 1500, "{declaration}");
+    assert!(!declaration.contains("preparedUnit"), "{declaration}");
+    let mut names: Vec<(String, Vec<String>)> = tools
         .iter()
         .map(|t| {
             let mut required: Vec<String> = t["inputSchema"]["required"]
@@ -369,22 +426,25 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("transfer_show", &["id"]),
         ]
     );
-    let spawn = tools["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["name"] == "spawn")
-        .unwrap();
-    let alternatives = spawn["inputSchema"]["anyOf"].as_array().unwrap();
-    assert_eq!(alternatives.len(), 3, "{spawn}");
     let schema = &spawn["inputSchema"];
-    let legacy = alternatives[2]["$ref"]
-        .as_str()
-        .map_or(&alternatives[2], |reference| {
-            schema
-                .pointer(reference.strip_prefix('#').unwrap())
-                .unwrap()
-        });
+    let alternatives = schema["anyOf"].as_array().unwrap();
+    assert_eq!(alternatives.len(), 2, "{spawn}");
+    let resolve = |alternative: &Value| {
+        alternative["$ref"].as_str().map_or_else(
+            || alternative.clone(),
+            |reference| {
+                schema
+                    .pointer(reference.strip_prefix('#').unwrap())
+                    .unwrap()
+                    .clone()
+            },
+        )
+    };
+    assert!(
+        resolve(&alternatives[0])["properties"]["unit"].is_object(),
+        "{spawn}"
+    );
+    let legacy = resolve(&alternatives[1]);
     assert_eq!(legacy["additionalProperties"], false, "{schema}");
     for field in ["profile", "kind", "host", "branch", "base", "cwd"] {
         assert!(legacy["properties"][field].is_object(), "{spawn}");

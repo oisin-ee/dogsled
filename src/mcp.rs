@@ -44,11 +44,59 @@ pub struct StatusArgs {
     pub all: bool,
 }
 
+fn status_text(
+    board: &crate::board::Board,
+    gaps: &[crate::observation::Gap],
+    all: bool,
+) -> crate::error::Result<String> {
+    let mut value = serde_json::to_value(board)?;
+    if all {
+        if !gaps.is_empty() {
+            value["gaps"] = serde_json::to_value(gaps)?;
+        }
+    } else if !gaps.is_empty() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Collection names per-resource gaps `holds/<resource>`. The scoped board already
+        // correlates holds to its items (including queued requests and detached branches).
+        let resources: BTreeSet<_> = board
+            .rows
+            .iter()
+            .flat_map(|row| {
+                row.holds
+                    .iter()
+                    .map(|hold| hold.resource.as_str())
+                    .chain((row.kind == "hold").then_some(row.name.as_str()))
+            })
+            .collect();
+        let mut counts = BTreeMap::new();
+        let mut matching = Vec::new();
+        for gap in gaps {
+            let prefix = gap.domain.split(['/', ':']).next().unwrap_or_default();
+            *counts.entry(prefix).or_insert(0) += 1;
+            if gap
+                .domain
+                .strip_prefix("holds/")
+                .is_some_and(|resource| resources.contains(resource))
+            {
+                matching.push(gap);
+            }
+        }
+        value["gap_counts"] = serde_json::to_value(counts)?;
+        if !matching.is_empty() {
+            value["gaps"] = serde_json::to_value(matching)?;
+        }
+    }
+    Ok(value.to_string())
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(untagged)]
 #[schemars(extend("type" = "object"))]
 pub enum SpawnArgs {
     Unit(UnitSpawn),
+    // The Pi bridge sends this after it claims the unit. It is not a model input.
+    #[schemars(skip)]
     Prepared(Box<PreparedSpawn>),
     Legacy(LegacySpawn),
 }
@@ -67,7 +115,7 @@ pub struct UnitSpawn {
     pub placement: crate::unit_transport::Placement,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparedSpawn {
     pub prepared_unit: crate::unit_transport::CommitInput,
@@ -76,11 +124,11 @@ pub struct PreparedSpawn {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LegacySpawn {
-    /// The task, as the child's first prompt. Multi-line text is fine.
+    /// The child's first prompt.
     pub task: String,
-    /// A short name for the child; `send`, `read`, and `close` accept it.
+    /// A short name for the child.
     pub name: String,
-    /// A profile from `dogsled profiles` (Pi only): it sets model, thinking, and system prompt.
+    /// A Pi profile from `dogsled profiles`.
     #[serde(default)]
     pub profile: Option<String>,
     /// `pi` (default), `claude`, or `codex`.
@@ -442,8 +490,8 @@ impl Server {
     }
 
     #[tool(
-        description = "Your children, jobs, and queued work, grouped by what needs you: to land, \
-        attention, running, waiting. Each row has its harness, model, host, and state.",
+        description = "Your children, jobs, and queue, with fleet gap counts and details for your resources. \
+        Set `all` for the full fleet and all gap details.",
         annotations(read_only_hint = true)
     )]
     async fn status(&self, Parameters(args): Parameters<StatusArgs>) -> Result<String, String> {
@@ -458,11 +506,7 @@ impl Server {
                 Some(crate::inbox::own_pane(None)?)
             };
             let board = crate::observation::read::board(&published, owner.as_deref())?;
-            let mut value = serde_json::to_value(board)?;
-            if !published.gaps.is_empty() {
-                value["gaps"] = serde_json::to_value(&published.gaps)?;
-            }
-            Ok::<_, crate::error::Error>(value.to_string())
+            status_text(&board, &published.gaps, args.all)
         })
         .await
         .map_err(|error| error.to_string())?
@@ -470,8 +514,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Start a Pi, Claude, or Codex child on the host with room, with its task. \
-        Returns a durable queued ticket at once. The service starts the child and reports its outcome; its final reply reaches your inbox."
+        description = "Queue a Pi, Claude, or Codex child. Returns a ticket. The outcome and final reply go to your inbox."
     )]
     async fn spawn(&self, Parameters(args): Parameters<SpawnArgs>) -> Result<String, String> {
         self.call(move |fleet| {
