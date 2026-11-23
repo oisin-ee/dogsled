@@ -74,6 +74,21 @@ fn task_validation_checks_labels_identity_scope_and_activation() {
 }
 
 #[test]
+fn invalid_scope_names_the_path_and_examples() {
+    let mut task = task();
+    task.unit.as_mut().unwrap().draft.scope = Some(crate::Scope {
+        repository_id: "org/repo".to_owned(),
+        owns: vec![".".to_owned()],
+        reads: vec![],
+        generates: vec![],
+    });
+    assert_eq!(
+        validate_task(&task).unwrap_err().to_string(),
+        "INVALID_SCOPE: rejected \".\". Use a repository-relative path like src/ or pi/index.ts."
+    );
+}
+
+#[test]
 fn task_validation_rejects_a_binding_without_its_frozen_export() {
     let mut task = task();
     let unit = task.unit.as_mut().unwrap();

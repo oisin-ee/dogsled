@@ -17,6 +17,14 @@ describe("extension registration", () => {
         },
       },
     ]);
+    const [tool] = registered.tools,
+      declarationBudget = 2000,
+      declaration = {
+        description: tool?.description,
+        name: tool?.name,
+        parameters: tool?.parameters,
+      };
+    expect(JSON.stringify(declaration).length).toBeLessThanOrEqual(declarationBudget);
     expect(registered.events).toStrictEqual([
       "tool_call",
       "tool_execution_end",

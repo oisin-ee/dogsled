@@ -59,26 +59,29 @@ describe("todo owner collision", () => {
 });
 
 describe("missing activation", () => {
-  it("allows Dogsled completion while keeping shell blocked", { timeout: 20_000 }, async () => {
+  it.each([
+    "end_turn",
+    "mcp__dogsled__end_turn",
+    "hindsight_search_pages",
+  ])("allows %s while keeping shell blocked", { timeout: 20_000 }, async (name) => {
     expect.hasAssertions();
     let ran = false;
     const test = await runtimeFixture((pi) => {
       pi.registerTool({
-        description: "Report worker completion",
+        description: "Observe a control call",
         execute: async () => {
           ran = true;
           return emptyResult();
         },
-        label: "Done",
-        name: "end_turn",
+        label: "Control",
+        name,
         parameters: emptyParameters,
       });
     });
     try {
-      await test.call("end_turn", {});
+      await test.call(name, {});
       expect(ran).toBe(true);
       expect(results(test).at(last)).toMatchObject({ isError: false });
-
       await test.call("bash", { command: "printf should-not-run" });
       expect(JSON.stringify(results(test).at(last))).toContain(
         "Start a complete self-assigned leaf with todo before shell, code, mutation, or unknown tools.",

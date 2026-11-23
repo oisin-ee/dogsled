@@ -231,14 +231,7 @@ export const CI_WAIT_ADVICE =
   "For CI, get the run ID from ci_find, then start `gh run watch <run-id> --exit-status` in the repository " +
   "with Dogsled `run`.";
 
-export const WAIT_MSG =
-  "wait-gate: blocked a command that waits instead of working (sleep, watch, a follow flag, a --watch or --wait " +
-  "flag, or a wait subcommand). Never hold a tool call to wait, and never re-read a log to check progress. " +
-  "For long work in pi, use Dogsled `run` (mcp__dogsled__run) and continue other work. " +
-  "Use `read` (mcp__dogsled__read) for output and `stop` (mcp__dogsled__stop) to cancel the job. " +
-  "Start long work so the host reports its exit: in Claude Code, `run_in_background` " +
-  "or Monitor (the exit arrives as a message); in Codex, exec_command, then empty write_stdin calls, which " +
-  `return when the process exits. ${CI_WAIT_ADVICE}`;
+export const WAIT_MSG = `wait-gate: blocked a command that waits instead of working. For long work, use \`mcp__dogsled__run\` for the job and \`mcp__dogsled__read\` for its output. ${CI_WAIT_ADVICE}`;
 
 const GH_VALUE_OPTIONS: ReadonlySet<string> = new Set(["-R", "--repo", "--hostname"]),
   FOLLOW_FLAGS: ReadonlySet<string> = new Set(["-f", "-F", "--follow", "--retry"]),

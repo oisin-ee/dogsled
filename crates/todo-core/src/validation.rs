@@ -26,9 +26,9 @@ fn path(value: &str, cwd: bool) -> Result<(), TodoError> {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
     {
-        return Err(error(
-            "INVALID_SCOPE: use repository-relative files or directory prefixes",
-        ));
+        return Err(error(&format!(
+            "INVALID_SCOPE: rejected {value:?}. Use a repository-relative path like src/ or pi/index.ts."
+        )));
     }
     Ok(())
 }
@@ -38,7 +38,7 @@ fn paths(values: &[String]) -> Result<(), TodoError> {
     for value in values {
         path(value, false)?;
         if !seen.insert(value.trim_end_matches('/')) {
-            return Err(error("INVALID_SCOPE: duplicate path"));
+            return Err(error(&format!("INVALID_SCOPE: duplicate path {value:?}")));
         }
     }
     Ok(())

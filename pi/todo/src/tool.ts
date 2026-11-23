@@ -4,8 +4,8 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Static } from "typebox";
 import type { TodoDelta } from "./state.ts";
 import type { TodoList } from "./wasm.ts";
+import { mutationSummary } from "./tool-summary.ts";
 import type { parameters } from "./schema.ts";
-import { workUnitGuidance } from "./guidance.ts";
 
 /** One `todo` call, as the schema in `index.ts` admits it. */
 type TodoParams = Static<typeof parameters>;
@@ -24,38 +24,32 @@ interface TodoResult {
 }
 
 /**
- * The result for `list`.
- * @param {TodoList} list A valid list.
- * @param {boolean} creation Whether the call created work.
- * @returns {TodoResult} The summary and the list.
+ * Runs one call. A rejected operation throws the core's message, so pi marks
+ * the result failed, and nothing is stored.
+ * @param {TodoParams} params The validated tool arguments.
+ * @param {TodoSession} session The branch to read and the entry writer.
+ * @returns {TodoResult} The result for the model and the renderer.
  */
-const result = (list: TodoList, creation: boolean): TodoResult => ({
+const runTodo = (params: TodoParams, session: TodoSession): TodoResult => {
+  const current = branchSnapshot(session.branch()),
+    { list, persist } = apply(current, params, {
+      mutationId: crypto.randomUUID(),
+      sessionId: session.sessionId,
+    });
+  if (persist) {
+    saveState(current, list, session);
+  }
+  const details = persist ? branchSnapshot(session.branch()) : list;
+  return {
     content: [
-      { text: creation ? `${view(list)}\n\n${workUnitGuidance}` : view(list), type: "text" },
+      {
+        text: params.op === "view" ? view(details) : mutationSummary(current, details),
+        type: "text",
+      },
     ],
-    details: list,
-  }),
-  /**
-   * Runs one call. A rejected operation throws the core's message, so pi marks
-   * the result failed, and nothing is stored.
-   * @param {TodoParams} params The validated tool arguments.
-   * @param {TodoSession} session The branch to read and the entry writer.
-   * @returns {TodoResult} The result for the model and the renderer.
-   */
-  runTodo = (params: TodoParams, session: TodoSession): TodoResult => {
-    const current = branchSnapshot(session.branch()),
-      { list, persist } = apply(current, params, {
-        mutationId: crypto.randomUUID(),
-        sessionId: session.sessionId,
-      });
-    if (persist) {
-      saveState(current, list, session);
-    }
-    return result(
-      persist ? branchSnapshot(session.branch()) : list,
-      params.op === "init" || params.op === "append",
-    );
+    details,
   };
+};
 
 export { runTodo };
 export type { TodoParams, TodoResult, TodoSession };

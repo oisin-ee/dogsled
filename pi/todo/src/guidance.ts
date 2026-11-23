@@ -1,4 +1,4 @@
-/** Shared instructions for creation results, tool calls, and approved plans. */
+/** Work-unit instructions for the approved-plan handoff. */
 const workUnitGuidance =
   "Size each executable unit for one agent session, with one deliverable, clear scope, and an acceptance condition. " +
   "Split independent outcomes or work that needs another session. Combine trivial steps with their deliverable and tests. " +
