@@ -393,8 +393,18 @@ test("registers the dogsled tools, the panel command, and the message renderer",
 	// Longer than the server's ten-minute setup budget (`budget::SETUP_LIMIT`).
 	assert.ok(Number(config["timeout"]) > 600);
 	assert.match(String(config["description"]), /End every turn with the native end_turn tool/);
-	// The native end_turn replaces the server's, so the model sees one.
-	assert.deepEqual(config["toolExposure"], { end_turn: "hidden" });
+	// The native end_turn replaces the server's, so the model sees one. Rare tools load on demand.
+	assert.deepEqual(config["toolExposure"], {
+		end_turn: "hidden",
+		"transfer_*": "deferred",
+		"recovery_*": "deferred",
+		claim: "deferred",
+		accept: "deferred",
+		lead: "deferred",
+		retire_preparation: "deferred",
+		repo_open: "deferred",
+		drop: "deferred",
+	});
 	assert.ok(r.tools.has("end_turn"));
 	assert.ok(!String(config["description"]).includes("dogsled done"));
 	assert.ok(r.commands.has("dogsled"));
