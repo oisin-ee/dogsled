@@ -210,6 +210,10 @@ fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
     drop(observer);
     let _publisher = super::observation::Supplied::start(&rig, publication);
     let brief = String::from_utf8(rig.run(&["status", "--brief"]).stdout).unwrap();
+    // Hook context is the stable subset of the brief: service state, agent states and counts.
+    let counts = brief.lines().last().unwrap();
+    let expected = format!("local service: up · agents 0\n{counts}\n");
+    assert!(brief.contains("snapshot"), "{brief}");
     for harness in ["claude", "codex", "pi"] {
         for event in ["SessionStart", "UserPromptSubmit"] {
             let mut cmd = rig.cmd(&["hook", "context", "--harness", harness, "--event", event]);
@@ -218,12 +222,12 @@ fn context_uses_status_brief_for_every_harness_and_lifecycle_event() {
             assert!(out.status.success());
             assert_eq!(out.stderr, [] as [u8; 0]);
             if harness == "pi" {
-                assert_eq!(String::from_utf8(out.stdout).unwrap(), brief);
+                assert_eq!(String::from_utf8(out.stdout).unwrap(), expected);
             } else {
                 assert_eq!(
                     serde_json::from_slice::<Value>(&out.stdout).unwrap(),
                     json!({
-                        "hookSpecificOutput": {"hookEventName": event, "additionalContext": brief}
+                        "hookSpecificOutput": {"hookEventName": event, "additionalContext": expected}
                     })
                 );
             }
@@ -307,7 +311,9 @@ fn context_names_only_the_callers_children_with_work_to_land() {
         "{out}"
     );
     assert!(!out.contains("other"), "{out}");
-    assert!(out.ends_with(&status), "{out}");
+    let counts = format!("{}\n", status.lines().last().unwrap());
+    assert!(out.ends_with(&counts), "{out}");
+    assert!(!out.contains("snapshot"), "{out}");
     let (code, board) = rig.json(&["board"]);
     assert_eq!(code, 0);
     assert_eq!(board["rows"].as_array().unwrap().len(), 1);
