@@ -2408,6 +2408,33 @@ fn an_end_turn_message_stays_the_reply_and_later_check_ins_fold_without_the_answ
 }
 
 #[test]
+fn text_written_after_an_end_turn_reply_folds_instead_of_repeating_it() {
+    use portal_types::agents::{EndTurnKind, Role, ToolStatus};
+    let mut ended = tool_turn("end", Some("end_turn"), ToolStatus::Completed);
+    ended.text = "The real answer.".into();
+    ended.end_turn = Some(EndTurnKind::Reply);
+    let html = render_timeline(history(vec![
+        history_turn("input", Role::User, "Please check."),
+        tool_turn("call", Some("read"), ToolStatus::Completed),
+        ended,
+        history_turn("repeat", Role::Assistant, "The answer again."),
+        nudge("check-in", "Two jobs closed."),
+        history_turn("answer", Role::Assistant, "Nothing to act on."),
+    ]));
+    let answer = html.find("The real answer.").unwrap();
+    let label = html.find("1 check-in · 1 message after the reply").unwrap();
+    let repeat = html.find("The answer again.").unwrap();
+    assert!(answer < label && label < repeat, "{html}");
+    // The repeat sits inside the closed fold; the answer to the check-in stays shown.
+    assert!(
+        html[label..repeat].contains("data-part=\"turn-work\""),
+        "{html}"
+    );
+    assert_eq!(html.matches("aria-expanded=false").count(), 2, "{html}");
+    assert!(html.find("Nothing to act on.").unwrap() > repeat, "{html}");
+}
+
+#[test]
 fn without_end_turn_every_answer_stays_shown_and_check_ins_fold_with_work() {
     use portal_types::agents::{Role, ToolStatus};
     let html = render_timeline(history(vec![
