@@ -1,6 +1,7 @@
 //! Repository navigation, joined by the server's explicit owner relationships.
 
 use dioxus::prelude::*;
+use dioxus_icons::lucide::{Cpu, Server};
 use portal_types::agents::{AgentAddress, AgentView};
 use portal_types::{BoardView, GroupView, HostView, RowView, TodoView};
 
@@ -36,12 +37,19 @@ impl NavigationRepo {
     }
 }
 
+/// Where an agent runs and which model it uses. A job has no model.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Runtime {
+    pub host: String,
+    pub model: Option<String>,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct NavigationRow {
     pub pane: Option<String>,
     pub title: String,
     pub role: String,
-    pub runtime: String,
+    pub runtime: Runtime,
     pub host: String,
     pub state: String,
     pub worker: bool,
@@ -415,16 +423,42 @@ fn host_name<'a>(hosts: &'a [HostView], label: &'a str) -> &'a str {
         .unwrap_or(label)
 }
 
-fn runtime(hosts: &[HostView], host: &str, agent: Option<&AgentView>, job: bool) -> String {
-    let host = host_name(hosts, host);
-    if job {
-        return format!("Host: {host}");
+fn runtime(hosts: &[HostView], host: &str, agent: Option<&AgentView>, job: bool) -> Runtime {
+    Runtime {
+        host: host_name(hosts, host).to_owned(),
+        model: agent
+            .filter(|_| !job)
+            .and_then(|a| a.model.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
     }
-    let model = agent
-        .and_then(|a| a.model.as_deref())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("unknown");
-    format!("Host: {host} · Model: {model}")
+}
+
+/// The host and model of an agent, each a chip with its icon, without text labels.
+#[component]
+pub(crate) fn RuntimeChips(runtime: Runtime) -> Element {
+    rsx! {
+        span { class: "agent-runtime",
+            HostChip { host: runtime.host }
+            if let Some(model) = runtime.model {
+                span { class: "runtime-chip", "data-part": "model", title: "Model {model}",
+                    Cpu { size: 12, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+                    span { "{model}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn HostChip(host: String) -> Element {
+    rsx! {
+        span { class: "runtime-chip", "data-part": "host", title: "Host {host}",
+            Server { size: 12, attributes: dioxus_primitives::dioxus_attributes::attributes!(svg { "aria-hidden": "true" }) }
+            span { "{host}" }
+        }
+    }
 }
 
 fn navigation_row(
@@ -538,7 +572,7 @@ pub fn RepoGroup(group: NavigationRepo, inbox: Vec<InboxItem>) -> Element {
                         for branch in &group.to_land {
                             li { key: "{branch.id}",
                                 strong { "{branch.title}" }
-                                span { "Host: {branch.host}" }
+                                HostChip { host: branch.host.clone() }
                                 if !branch.detail.is_empty() { span { "{branch.detail}" } }
                             }
                         }
@@ -602,7 +636,7 @@ fn NavigationAgent(row: NavigationRow) -> Element {
             if let Some((done, total)) = row.progress { small { "{done}/{total}" } }
             span { class: "agent-now", "data-status": status, "{now}" }
         }
-        span { class: "agent-runtime", title: "{row.runtime}", "{row.runtime}" }
+        RuntimeChips { runtime: row.runtime.clone() }
         if let Some(pane) = &row.pane {
             crate::unread::UnreadDot { host: row.host.clone(), pane: pane.clone() }
         }

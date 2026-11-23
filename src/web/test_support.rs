@@ -22,6 +22,7 @@ pub(super) fn publish(
     );
     let snapshot = portal_types::PortalSnapshot {
         version: portal_types::PORTAL_VERSION,
+        dogsled: String::new(),
         epoch: String::new(),
         revision: 0,
         published_ms: board.generated_ms,
