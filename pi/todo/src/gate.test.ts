@@ -59,37 +59,37 @@ describe("todo owner collision", () => {
 });
 
 describe("missing activation", () => {
-  it.each([
-    "end_turn",
-    "mcp__dogsled__end_turn",
-    "hindsight_search_pages",
-  ])("allows %s while keeping shell blocked", { timeout: 20_000 }, async (name) => {
-    expect.hasAssertions();
-    let ran = false;
-    const test = await runtimeFixture((pi) => {
-      pi.registerTool({
-        description: "Observe a control call",
-        execute: async () => {
-          ran = true;
-          return emptyResult();
-        },
-        label: "Control",
-        name,
-        parameters: emptyParameters,
+  it.each(["end_turn", "mcp__dogsled__end_turn", "hindsight_search_pages"])(
+    "allows %s while keeping shell blocked",
+    { timeout: 20_000 },
+    async (name) => {
+      expect.hasAssertions();
+      let ran = false;
+      const test = await runtimeFixture((pi) => {
+        pi.registerTool({
+          description: "Observe a control call",
+          execute: async () => {
+            ran = true;
+            return emptyResult();
+          },
+          label: "Control",
+          name,
+          parameters: emptyParameters,
+        });
       });
-    });
-    try {
-      await test.call(name, {});
-      expect(ran).toBe(true);
-      expect(results(test).at(last)).toMatchObject({ isError: false });
-      await test.call("bash", { command: "printf should-not-run" });
-      expect(JSON.stringify(results(test).at(last))).toContain(
-        "Start a complete self-assigned leaf with todo before shell, code, mutation, or unknown tools.",
-      );
-    } finally {
-      test.session.dispose();
-    }
-  });
+      try {
+        await test.call(name, {});
+        expect(ran).toBe(true);
+        expect(results(test).at(last)).toMatchObject({ isError: false });
+        await test.call("bash", { command: "printf should-not-run" });
+        expect(JSON.stringify(results(test).at(last))).toContain(
+          "Start a complete self-assigned leaf with todo before shell, code, mutation, or unknown tools.",
+        );
+      } finally {
+        test.session.dispose();
+      }
+    },
+  );
 
   it("blocks direct and nested shell without local work", { timeout: 20_000 }, async () => {
     expect.hasAssertions();
