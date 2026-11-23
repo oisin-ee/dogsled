@@ -208,11 +208,12 @@ impl Display {
         )
     }
 
-    /// Hook context uses observed states, not metrics, ages, or failure diagnostics.
+    /// Hook context uses observed states and failing lanes, not metrics, ages, or repeat counts.
     pub(crate) fn context_rows(&self) -> impl Iterator<Item = String> + '_ {
         self.hosts
             .iter()
             .map(Host::context_line)
+            .chain(self.hosts.iter().flat_map(|host| host.lane_lines(false)))
             .chain(std::iter::once(self.counts_line()))
     }
 
@@ -226,7 +227,7 @@ impl Display {
             }
             row.push_str(&host.summary(now));
         }
-        rows.extend(self.hosts.iter().flat_map(Host::lane_failures));
+        rows.extend(self.hosts.iter().flat_map(|host| host.lane_lines(true)));
         rows.push(self.counts_line());
         rows
     }
@@ -261,7 +262,7 @@ impl Display {
         let mut lines = self.cleanup();
         for host in &self.hosts {
             lines.push(host.summary(now));
-            lines.extend(host.lane_failures());
+            lines.extend(host.lane_lines(true));
             if let Some(reason) = &host.reason {
                 lines.push(format!("  {reason}"));
             }
@@ -523,8 +524,9 @@ impl Host {
         )
     }
 
-    fn lane_failures(&self) -> impl Iterator<Item = String> + '_ {
-        self.lanes.iter().map(|lane| {
+    /// A lane's repeat count grows on every failure, so hook context omits it.
+    fn lane_lines(&self, repeats: bool) -> impl Iterator<Item = String> + '_ {
+        self.lanes.iter().map(move |lane| {
             let since = lane
                 .since_ms
                 .and_then(|ms| chrono::DateTime::from_timestamp_millis(i64::try_from(ms).ok()?))
@@ -532,11 +534,15 @@ impl Host {
                     || "unknown".into(),
                     |time| time.format("%H:%M UTC").to_string(),
                 );
+            let count = if repeats {
+                format!(" (x{})", lane.repeats)
+            } else {
+                String::new()
+            };
             format!(
-                "{} service: {} lane failing since {since} (x{}): {}",
+                "{} service: {} lane failing since {since}{count}: {}",
                 one_line(&self.brief.label),
                 one_line(&lane.lane),
-                lane.repeats,
                 one_line(lane.error.as_deref().unwrap_or_default())
             )
         })

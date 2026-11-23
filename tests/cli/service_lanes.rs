@@ -129,8 +129,11 @@ fn lane_errors_persist_across_service_runs_and_recover_once() {
         let out = rig.start(&args).output().0;
         assert!(out.contains(&expected), "{out}");
     }
+    // Hook context keeps the failure but not its growing repeat count.
     let context = context(&rig);
-    assert!(context.contains(&expected), "{context}");
+    let stable = format!("local service: quota lane failing since {time}: {error}");
+    assert!(context.contains(&stable), "{context}");
+    assert!(!context.contains("(x3)"), "{context}");
     let (_, snapshot) = rig.json(&["host", "snapshot"]);
     assert_eq!(snapshot["service_lanes"], failing);
 
@@ -200,7 +203,10 @@ fn remote_lane_failures_reach_full_brief_and_context_status() {
         assert!(!out.contains("local service:"), "{out}");
     }
     let context = context(&rig);
-    assert!(context.contains(expected), "{context}");
+    assert!(
+        context.contains("netcup service: admission lane failing since 12:01 UTC: remote admission cannot read state"),
+        "{context}"
+    );
     let (_, status) = rig.json(&["status"]);
     assert_eq!(status["hosts"][1]["service_lanes"], remote["service_lanes"]);
 }
