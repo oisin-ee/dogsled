@@ -84,6 +84,26 @@ pub struct Plan {
     pub entries: Vec<Entry>,
 }
 
+impl Plan {
+    /// Keep only the entries of the checkout at `path`: its linked worktree, on a branch or
+    /// detached, and the build output in it. A main checkout has only build output. `same`
+    /// compares two checkout paths on the surveyed host. A selection with no entry is an error,
+    /// so a mistyped path never reads as "nothing to remove".
+    pub fn retain_checkout(&mut self, path: &str, same: impl Fn(&str, &str) -> bool) -> Result<()> {
+        self.entries.retain(|e| match e.class.as_str() {
+            "worktrees" => same(&e.id, path),
+            "targets" => e.tree.as_ref().is_some_and(|t| same(&t.path, path)),
+            _ => false,
+        });
+        if self.entries.is_empty() {
+            return Err(Error::Invalid(format!(
+                "no cleanup candidate in checkout {path}; dogsled doctor lists the candidates"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Who reads a survey. `Prune` is `doctor` and `prune`: every class, with removal after a
 /// person confirms it. `Sweep` is the `serve` sweep: only entries whose removal loses nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3592,6 +3612,73 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|c| c.contains("pane close wVR:p1"))
+        );
+    }
+
+    #[test]
+    fn checkout_selection_keeps_one_worktree_and_its_build_output() {
+        let tree = |path: &str| Tree {
+            repo: "/repo".into(),
+            path: path.into(),
+            branch: "work".into(),
+            head: "abc".into(),
+            identity: None,
+        };
+        let mut target = entry(
+            "targets",
+            "/repo/.worktrees/a/target".into(),
+            String::new(),
+            true,
+        );
+        target.tree = Some(tree("/repo/.worktrees/a"));
+        let mut main_target = entry("targets", "/repo/target".into(), String::new(), true);
+        main_target.tree = Some(tree("/repo"));
+        let mut branch = entry("branches", "/repo work".into(), String::new(), true);
+        branch.tree = Some(tree(""));
+        let plan = || Plan {
+            entries: vec![
+                entry(
+                    "worktrees",
+                    "/repo/.worktrees/a".into(),
+                    String::new(),
+                    true,
+                ),
+                entry(
+                    "worktrees",
+                    "/repo/.worktrees/b".into(),
+                    String::new(),
+                    true,
+                ),
+                target.clone(),
+                main_target.clone(),
+                branch.clone(),
+                entry("panes", "w1:p1".into(), String::new(), true),
+            ],
+        };
+        let same = |a: &str, b: &str| a == b;
+        let ids = |plan: &Plan| {
+            plan.entries
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut one = plan();
+        one.retain_checkout("/repo/.worktrees/a", same).unwrap();
+        assert_eq!(
+            ids(&one),
+            ["/repo/.worktrees/a", "/repo/.worktrees/a/target"]
+        );
+
+        let mut main = plan();
+        main.retain_checkout("/repo", same).unwrap();
+        assert_eq!(ids(&main), ["/repo/target"]);
+
+        let error = plan().retain_checkout("/elsewhere", same).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no cleanup candidate in checkout /elsewhere")
         );
     }
 }

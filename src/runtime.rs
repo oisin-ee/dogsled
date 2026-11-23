@@ -794,8 +794,26 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             };
             crate::print(json_output, &plan, || crate::cleanup::render(&plan))?;
         }
-        Command::Prune { host, yes, classes } => {
+        Command::Prune {
+            host,
+            yes,
+            path,
+            classes,
+        } => {
             let host = crate::hosts::command_host(fleet, host.as_deref().unwrap_or("local"))?;
+            // A local path may be relative; another host's path means nothing here.
+            let path = match path {
+                Some(path) if host.is_local() => {
+                    Some(std::path::absolute(&path)?.display().to_string())
+                }
+                Some(path) if !std::path::Path::new(&path).is_absolute() => {
+                    return Err(Error::Invalid(format!(
+                        "--path {path}: give the absolute path on {}",
+                        host.label
+                    )));
+                }
+                path => path,
+            };
             let mut plan: crate::cleanup::Plan = if host.is_local() {
                 crate::cleanup::doctor(&fleet.node(), now_ms())?
             } else {
@@ -803,6 +821,15 @@ fn cleanup_command(fleet: &Fleet, command: Command, json_output: bool) -> Result
             };
             plan.entries
                 .retain(|e| classes.is_empty() || classes.contains(&e.class));
+            if let Some(path) = &path {
+                if host.is_local() {
+                    plan.retain_checkout(path, crate::worktree::same)?;
+                } else {
+                    plan.retain_checkout(path, |a, b| {
+                        std::path::Path::new(a) == std::path::Path::new(b)
+                    })?;
+                }
+            }
             crate::print(json_output, &plan, || crate::cleanup::render(&plan))?;
             if !yes {
                 eprint!("Remove these eligible entries? [y/N] ");
