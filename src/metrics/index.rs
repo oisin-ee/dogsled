@@ -179,6 +179,9 @@ pub(super) fn file(
             if harness == "codex" && value["type"] == "turn_context" {
                 model = value["payload"]["model"].as_str().map(str::to_owned);
             }
+            if harness == "pi" && value["type"] == "custom_message" {
+                pi_injection(tx, path_text, &value)?;
+            }
             if let Some(entry) = crate::activity::decode_entry(harness, &value) {
                 if harness == "codex" && entry.model.is_some() {
                     model.clone_from(&entry.model);
@@ -262,6 +265,42 @@ pub(super) fn repository(shell: &crate::shell::System, cwd: &str) -> Result<Opti
         .and_then(|identity| identity.split_once('/').map(|(_, slug)| slug.to_owned())))
 }
 
+fn text_chars(content: &Value, text_block: &str) -> u64 {
+    if let Some(text) = content.as_str() {
+        return text.chars().count() as u64;
+    }
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == text_block)
+        .filter_map(|block| block["text"].as_str())
+        .map(|text| text.chars().count() as u64)
+        .sum()
+}
+
+// Pi gives each injection a separate entry, including those hidden from the UI.
+// The shared decoder does not identify Claude or Codex hook injections.
+fn pi_injection(tx: &Transaction<'_>, path: &str, value: &Value) -> Result<()> {
+    let timestamp = &value["timestamp"];
+    let at_ms = timestamp.as_u64().or_else(|| {
+        let time = chrono::DateTime::parse_from_rfc3339(timestamp.as_str()?).ok()?;
+        u64::try_from(time.timestamp_millis()).ok()
+    });
+    if let Some((kind, at_ms)) = value["customType"].as_str().zip(at_ms) {
+        tx.execute(
+            "INSERT INTO injections(path,kind,at_ms,chars) VALUES(?1,?2,?3,?4)",
+            params![
+                path,
+                kind,
+                crate::rows::integer(at_ms)?,
+                crate::rows::integer(text_chars(&value["content"], "text"))?
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn events(
     tx: &Transaction<'_>,
     path: &str,
@@ -284,7 +323,13 @@ fn events(
             }
         } else {
             let error = (harness != "codex").then_some(tool.status == ToolStatus::Error);
-            tx.execute("UPDATE tool_calls SET ended_ms=?3,error=?4 WHERE path=?1 AND call_id=?2 AND ended_ms IS NULL", params![path,tool.call_id,at_ms,error])?;
+            let (content, text_block) = if harness == "codex" {
+                ("output", "input_text")
+            } else {
+                ("content", "text")
+            };
+            let chars = crate::rows::integer(text_chars(&tool.block[content], text_block))?;
+            tx.execute("UPDATE tool_calls SET ended_ms=?3,error=?4,result_chars=?5 WHERE path=?1 AND call_id=?2 AND ended_ms IS NULL", params![path,tool.call_id,at_ms,error,chars])?;
         }
     }
     Ok(())

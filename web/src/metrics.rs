@@ -4,7 +4,7 @@ use std::cmp::Ordering;
 
 use dioxus::prelude::*;
 use portal_types::metrics::{
-    Histogram, MetricsReport, RunGroup, ToolGroup, ToolRow, WaitKind, Window,
+    Histogram, InjectionRow, MetricsReport, RunGroup, ToolGroup, ToolRow, WaitKind, Window,
 };
 
 use crate::api;
@@ -138,6 +138,8 @@ enum Column {
     P50,
     P95,
     Max,
+    ResultP50,
+    ResultTotal,
 }
 
 impl Column {
@@ -150,6 +152,8 @@ impl Column {
             Self::P50 => "p50",
             Self::P95 => "p95",
             Self::Max => "Max",
+            Self::ResultP50 => "Result p50 (chars)",
+            Self::ResultTotal => "Result total (chars)",
         }
     }
 
@@ -176,6 +180,8 @@ impl Column {
                 .duration
                 .quantile(1.0)
                 .cmp(&right.duration.quantile(1.0)),
+            Self::ResultP50 => left.result_p50.cmp(&right.result_p50),
+            Self::ResultTotal => left.result_total.cmp(&right.result_total),
         }
     }
 }
@@ -241,7 +247,7 @@ pub(crate) fn MetricsReportView(
                         div { class: "metrics-table-scroll", role: "region", aria_label: "Tool calls", tabindex: "0",
                             table {
                                 thead { tr {
-                                    for field in [Column::Tool, Column::Group, Column::Calls, Column::Error, Column::P50, Column::P95, Column::Max].into_iter().filter(|field| grouped || *field != Column::Group) {
+                                    for field in [Column::Tool, Column::Group, Column::Calls, Column::Error, Column::P50, Column::P95, Column::Max, Column::ResultP50, Column::ResultTotal].into_iter().filter(|field| grouped || *field != Column::Group) {
                                         th { scope: "col", aria_sort: if column != field { "none" } else if descending { "descending" } else { "ascending" },
                                             Button { variant: ButtonVariant::Ghost, onclick: move |_| sort.set((field, if column == field { !descending } else { !matches!(field, Column::Tool | Column::Group) })),
                                                 {if field == Column::Group { group_label } else { field.label() }}
@@ -264,6 +270,8 @@ pub(crate) fn MetricsReportView(
                                             td { "{duration(row.duration.quantile(0.5))}" }
                                             td { "{duration(row.duration.quantile(0.95))}" }
                                             td { "{duration(row.duration.quantile(1.0))}" }
+                                            td { "{optional_chars(row.result_p50)}" }
+                                            td { "{row.result_total}" }
                                         }
                                     }
                                 }
@@ -272,6 +280,7 @@ pub(crate) fn MetricsReportView(
                     }
                 }
             }
+            {injection_table(&report.injections)}
             Card { class: "metrics-section",
                 CardHeader { CardTitle { h2 { "Waiting on you" } } }
                 CardContent {
@@ -333,6 +342,44 @@ pub(crate) fn MetricsReportView(
                                                 {percentiles(histogram)}
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn optional_chars(chars: Option<u64>) -> String {
+    chars.map_or_else(|| "—".to_owned(), |chars| chars.to_string())
+}
+
+fn injection_table(rows: &[InjectionRow]) -> Element {
+    rsx! {
+        Card { class: "metrics-section",
+            CardHeader { CardTitle { h2 { "Injected messages" } } }
+            CardContent {
+                if rows.is_empty() {
+                    p { class: "metrics-empty", "No injected messages recorded in this window." }
+                } else {
+                    div { class: "metrics-table-scroll", role: "region", aria_label: "Injected messages", tabindex: "0",
+                        table {
+                            thead { tr {
+                                th { scope: "col", "Kind" }
+                                th { scope: "col", "Count" }
+                                th { scope: "col", "p50 (chars)" }
+                                th { scope: "col", "Total (chars)" }
+                            } }
+                            tbody {
+                                for row in rows {
+                                    tr { key: "{row.kind}",
+                                        th { scope: "row", "{row.kind}" }
+                                        td { "{row.count}" }
+                                        td { "{optional_chars(row.p50)}" }
+                                        td { "{row.total}" }
                                     }
                                 }
                             }

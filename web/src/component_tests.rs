@@ -15,8 +15,8 @@ fn metrics_filtered_root() -> Element {
 
 fn metrics_report() -> portal_types::metrics::MetricsReport {
     use portal_types::metrics::{
-        Histogram, HostCoverage, METRICS_VERSION, MetricsReport, RunGroup, ToolGroup, ToolRow,
-        Window,
+        CharHistogram, Histogram, HostCoverage, InjectionRow, METRICS_VERSION, MetricsReport,
+        RunGroup, ToolGroup, ToolRow, Window,
     };
     let mut duration = Histogram::default();
     for ms in [850; 10].into_iter().chain([12_000; 9]).chain([342_000]) {
@@ -51,6 +51,9 @@ fn metrics_report() -> portal_types::metrics::MetricsReport {
                 unknown_status: 4,
                 running: 1,
                 duration,
+                result_p50: Some(48),
+                result_total: 375,
+                result_sizes: CharHistogram::default(),
             },
             ToolRow {
                 tool: "unknown".into(),
@@ -60,8 +63,18 @@ fn metrics_report() -> portal_types::metrics::MetricsReport {
                 unknown_status: 3,
                 running: 1,
                 duration: Histogram::default(),
+                result_p50: None,
+                result_total: 0,
+                result_sizes: CharHistogram::default(),
             },
         ],
+        injections: vec![InjectionRow {
+            kind: "dogsled".into(),
+            count: 2,
+            p50: Some(53),
+            total: 107,
+            sizes: CharHistogram::default(),
+        }],
         owner_waits: Vec::new(),
         runs: Vec::new(),
     }
@@ -87,6 +100,13 @@ fn metrics_report_excludes_unknown_and_running_calls_and_renders_histogram_p95()
     assert!(html.contains("—"), "{html}");
     assert!(html.contains("local · indexed 1 min ago"), "{html}");
     assert!(html.contains("netcup · unreachable: timeout"), "{html}");
+    assert!(html.contains("Result total (chars)"), "{html}");
+    assert!(html.contains("<td>48</td><td>375</td>"), "{html}");
+    assert!(html.contains("Injected messages"), "{html}");
+    assert!(
+        html.contains(">dogsled</th><td>2</td><td>53</td><td>107</td>"),
+        "{html}"
+    );
 }
 
 type ModelChangeHandle =

@@ -4,7 +4,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 
-const VERSION: i64 = 1;
+// Rebuild the derived store so existing transcripts are replayed with size accounting.
+const VERSION: i64 = 2;
 const SCHEMA: &str = "
 CREATE TABLE transcripts (
  path TEXT PRIMARY KEY NOT NULL,
@@ -17,9 +18,17 @@ CREATE TABLE tool_calls (
  path TEXT NOT NULL REFERENCES transcripts(path) ON DELETE CASCADE,
  call_id TEXT NOT NULL, tool TEXT NOT NULL, model TEXT,
  started_ms INTEGER NOT NULL, ended_ms INTEGER, error INTEGER CHECK(error IN (0,1)),
+ result_chars INTEGER CHECK(result_chars >= 0),
  PRIMARY KEY(path,call_id)
 ) STRICT;
 CREATE INDEX tool_calls_started ON tool_calls(started_ms);
+CREATE INDEX tool_calls_ended ON tool_calls(ended_ms) WHERE result_chars IS NOT NULL;
+CREATE TABLE injections (
+ path TEXT NOT NULL REFERENCES transcripts(path) ON DELETE CASCADE,
+ kind TEXT NOT NULL, at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
+ chars INTEGER NOT NULL CHECK(chars >= 0)
+) STRICT;
+CREATE INDEX injections_at ON injections(at_ms);
 CREATE TABLE index_state (
  id INTEGER PRIMARY KEY CHECK(id=1), indexed_ms INTEGER NOT NULL CHECK(indexed_ms>=0)
 ) STRICT;
@@ -104,8 +113,9 @@ pub(super) fn retain(connection: &mut Connection, now: u64) -> Result<()> {
     let before = crate::rows::integer(now.saturating_sub(crate::jobs::RECORD_KEEP_MS))?;
     write(connection, |tx| {
         for (table, column) in [
-            ("tool_calls", "started_ms"),
+            ("tool_calls", "COALESCE(ended_ms,started_ms)"),
             ("input_entries", "at_ms"),
+            ("injections", "at_ms"),
             ("owner_waits", "started_ms"),
             ("runs", "created_ms"),
         ] {

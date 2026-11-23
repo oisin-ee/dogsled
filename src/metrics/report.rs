@@ -1,7 +1,9 @@
 //! Local queries and histogram-preserving fleet aggregation.
+use std::collections::BTreeMap;
+
 use portal_types::metrics::{
-    Histogram, HostCoverage, METRICS_VERSION, MetricsReport, Outcomes, RunGroup, RunRow, ToolGroup,
-    ToolRow, UNATTRIBUTED, WaitKind, WaitRow,
+    CharHistogram, Histogram, HostCoverage, InjectionRow, METRICS_VERSION, MetricsReport, Outcomes,
+    RunGroup, RunRow, ToolGroup, ToolRow, UNATTRIBUTED, WaitKind, WaitRow,
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 
@@ -39,6 +41,7 @@ pub(super) fn local(
             error: None,
         }],
         tools: Vec::new(),
+        injections: injections(&tx, since, until)?,
         owner_waits: Vec::new(),
         runs: Vec::new(),
     };
@@ -65,7 +68,14 @@ fn tools(
         ToolGroup::Lead => "t.lead",
         ToolGroup::Harness => "t.harness",
     };
-    let mut statement = connection.prepare(&format!("SELECT c.tool,{group},c.ended_ms,c.error,c.started_ms FROM tool_calls c JOIN transcripts t ON t.path=c.path WHERE c.started_ms>=?1 AND c.started_ms<=?2 AND (?3 IS NULL OR c.tool=?3)"))?;
+    // Calls are attributed by their start; result sizes are attributed by their arrival.
+    let mut statement = connection.prepare(&format!(
+        "SELECT c.tool,{group},c.ended_ms,c.error,c.started_ms,c.result_chars
+         FROM tool_calls c JOIN transcripts t ON t.path=c.path
+         WHERE (c.started_ms BETWEEN ?1 AND ?2
+             OR (c.result_chars IS NOT NULL AND c.ended_ms BETWEEN ?1 AND ?2))
+           AND (?3 IS NULL OR c.tool=?3)"
+    ))?;
     let mut values = statement.query(params![since, until, options.tool])?;
     while let Some(value) = values.next()? {
         let tool: String = value.get(0)?;
@@ -90,17 +100,30 @@ fn tools(
                     unknown_status: 0,
                     running: 0,
                     duration: Histogram::default(),
+                    result_p50: None,
+                    result_total: 0,
+                    result_sizes: CharHistogram::default(),
                 });
                 rows.len() - 1
             });
         let row = &mut rows[index];
-        row.calls += 1;
         let ended: Option<i64> = value.get(2)?;
-        let error: Option<bool> = value.get(3)?;
+        let started: i64 = value.get(4)?;
+        if ended.is_some_and(|ended| (since..=until).contains(&ended))
+            && let Some(chars) = value.get::<_, Option<i64>>(5)?
+        {
+            let chars = super::store::unsigned(chars)?;
+            row.result_sizes.record(chars);
+            row.result_total = row.result_total.saturating_add(chars);
+        }
+        if !(since..=until).contains(&started) {
+            continue;
+        }
+        row.calls += 1;
         if let Some(ended) = ended.filter(|ended| *ended <= until) {
+            let error: Option<bool> = value.get(3)?;
             row.errors += u64::from(error == Some(true));
             row.unknown_status += u64::from(error.is_none());
-            let started: i64 = value.get(4)?;
             if let Ok(duration) = u64::try_from(ended - started) {
                 row.duration.record(duration);
             }
@@ -109,6 +132,28 @@ fn tools(
         }
     }
     Ok(())
+}
+
+fn injections(connection: &Connection, since: i64, until: i64) -> Result<Vec<InjectionRow>> {
+    let mut statement =
+        connection.prepare("SELECT kind,chars FROM injections WHERE at_ms BETWEEN ?1 AND ?2")?;
+    let mut values = statement.query(params![since, until])?;
+    let mut rows = BTreeMap::new();
+    while let Some(value) = values.next()? {
+        let kind: String = value.get(0)?;
+        let chars = super::store::unsigned(value.get(1)?)?;
+        let row = rows.entry(kind.clone()).or_insert_with(|| InjectionRow {
+            kind,
+            count: 0,
+            p50: None,
+            total: 0,
+            sizes: CharHistogram::default(),
+        });
+        row.count += 1;
+        row.total = row.total.saturating_add(chars);
+        row.sizes.record(chars);
+    }
+    Ok(rows.into_values().collect())
 }
 
 fn waits(connection: &Connection, since: i64, until: i64, rows: &mut Vec<WaitRow>) -> Result<()> {
@@ -230,8 +275,23 @@ pub(crate) fn merge(report: &mut MetricsReport, mut peer: MetricsReport, host: &
             target.unknown_status += row.unknown_status;
             target.running += row.running;
             target.duration.merge(&row.duration);
+            target.result_sizes.merge(&row.result_sizes);
+            target.result_total = target.result_total.saturating_add(row.result_total);
         } else {
             report.tools.push(row);
+        }
+    }
+    for row in peer.injections {
+        if let Some(target) = report
+            .injections
+            .iter_mut()
+            .find(|target| target.kind == row.kind)
+        {
+            target.count += row.count;
+            target.total = target.total.saturating_add(row.total);
+            target.sizes.merge(&row.sizes);
+        } else {
+            report.injections.push(row);
         }
     }
     for row in peer.owner_waits {
@@ -266,6 +326,18 @@ pub(crate) fn merge(report: &mut MetricsReport, mut peer: MetricsReport, host: &
 }
 
 fn sort(report: &mut MetricsReport) {
+    for row in &mut report.tools {
+        row.result_p50 = row.result_sizes.p50();
+    }
+    for row in &mut report.injections {
+        row.p50 = row.sizes.p50();
+    }
+    report.injections.sort_by(|left, right| {
+        right
+            .total
+            .cmp(&left.total)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
     report.tools.sort_by(|left, right| {
         right
             .calls
@@ -302,9 +374,15 @@ fn quantiles(histogram: &Histogram) -> String {
     )
 }
 
+fn optional_chars(chars: Option<u64>) -> String {
+    chars.map_or_else(|| "-".into(), |chars| chars.to_string())
+}
+
 pub(crate) fn render(report: &MetricsReport) -> String {
     use std::fmt::Write as _;
-    let mut text = String::from("Tools\nTool\tGroup\tCalls\tError %\tRunning\tp50\tp95\tMax\n");
+    let mut text = String::from(
+        "Tools\nTool\tGroup\tCalls\tError %\tRunning\tp50\tp95\tMax\tResult p50 (chars)\tResult total (chars)\n",
+    );
     for row in &report.tools {
         let known = row
             .calls
@@ -317,12 +395,25 @@ pub(crate) fn render(report: &MetricsReport) -> String {
         };
         let _ = writeln!(
             text,
-            "{}\t{}\t{}\t{error}\t{}\t{}",
+            "{}\t{}\t{}\t{error}\t{}\t{}\t{}\t{}",
             row.tool,
             row.group.as_deref().unwrap_or("-"),
             row.calls,
             row.running,
-            quantiles(&row.duration)
+            quantiles(&row.duration),
+            optional_chars(row.result_p50),
+            row.result_total
+        );
+    }
+    text.push_str("\nInjected messages\nKind\tCount\tp50 (chars)\tTotal (chars)\n");
+    for row in &report.injections {
+        let _ = writeln!(
+            text,
+            "{}\t{}\t{}\t{}",
+            row.kind,
+            row.count,
+            optional_chars(row.p50),
+            row.total
         );
     }
     text.push_str("\nOwner wait\nKind\tAnswered\tOpen\tp50\tp95\tMax\n");
