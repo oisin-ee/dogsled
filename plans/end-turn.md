@@ -114,3 +114,9 @@ The parts share one wire field and one CLI command, but together they fit in one
 ## Delivery
 
 Run the moon checks locally, open a PR, and merge it to `main`. The change ships with the next release.
+
+## Implementation notes
+
+- The `done` mark keeps the call's message in a new column, `end_turn_message` (store version 8). The handoff prefers the sealed unit receipt, then this message, then the transcript. Setting `mark.reply` early would have changed the meaning of `native_done`, so the plan's "save the reply on the mark" uses its own field.
+- Codex in code mode calls MCP tools from an `exec` script, so its transcript has no separate `end_turn` call. Real rollouts show `tools.<server>__<tool>(…)` inside `exec`. For Codex the portal and `read` use the fallback, but the `done` handoff uses the saved message. No logged-in Claude or Codex is available on this host, so the live transcript check is still open.
+- Claude plugin servers name tools `mcp__plugin_<plugin>_<server>__<tool>`. The reader accepts any `mcp__…dogsled__end_turn`.

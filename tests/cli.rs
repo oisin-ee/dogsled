@@ -621,7 +621,7 @@ fn now() -> u64 {
 }
 
 /// What dogsled tells each child at launch: `src/done.rs`'s `CONTRACT`, as Herdr logs it.
-const CONTRACT: &str = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use the native tools. Commit your changes before done. Call done once during the turn that completes the whole task, then end the turn with your final reply. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not call done when you need an answer, cannot continue, or own open children.";
+const CONTRACT: &str = "End every turn with the native end_turn tool. Its kind says how the turn ends: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), waiting (for your own open children), or reply (anything else). Its message is what your owner reads, so put your whole final reply in it and write nothing after it. Commit your changes before done. Use done once, in the turn that completes the whole task. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not use done when you need an answer, cannot continue, or own open children. If a check-in or reminder needs no action, do not call end_turn again: your earlier message stays.";
 
 const HERDR_SCRIPT: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$RIG/herdr.log"

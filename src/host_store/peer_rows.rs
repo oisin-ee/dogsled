@@ -296,6 +296,8 @@ pub(super) fn handoffs(
                     None
                 },
                 native_done: row.get("native_done")?,
+                // Only the owning host reads the message; peers need the handoff state.
+                end_turn_message: None,
                 closed_ms: optional_number::<u64>(row, "closed_ms")?,
                 dropped_ms: optional_number::<u64>(row, "dropped_ms")?,
             },

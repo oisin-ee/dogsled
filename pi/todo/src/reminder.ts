@@ -5,6 +5,7 @@ import { branchList } from "./state.ts";
 import { completionReminder } from "./wasm.ts";
 
 const REMINDER_ENTRY = "todo-reminder",
+  END_TURN = "end_turn",
   absent = -1,
   first = 0,
   step = 1;
@@ -75,6 +76,26 @@ const reminderFacts = (
   reminder = (
     branch: readonly SessionEntry[],
     drafts: readonly SessionBoundaryDraft[],
-  ): string | undefined => completionReminder({ facts: reminderFacts(branch, drafts) });
+  ): string | undefined => completionReminder({ facts: reminderFacts(branch, drafts) }),
+  /**
+   * Whether the agent ended this turn with a successful `end_turn` call. Its message is
+   * the turn's reply, so a reminder after it would only bury that reply.
+   * @param {readonly SessionEntry[]} branch Persisted entries.
+   * @returns {boolean} Whether the newest tool result since the owner's message is `end_turn`.
+   */
+  endedTurn = (branch: readonly SessionEntry[]): boolean => {
+    for (const entry of branch.toReversed()) {
+      if (entry.type === "message") {
+        const { message } = entry;
+        if (message.role === "user") {
+          return false;
+        }
+        if (message.role === "toolResult") {
+          return message.toolName === END_TURN && !message.isError;
+        }
+      }
+    }
+    return false;
+  };
 
-export { REMINDER_ENTRY, reminder, reminderFacts };
+export { REMINDER_ENTRY, endedTurn, reminder, reminderFacts };

@@ -217,6 +217,7 @@ mod tests {
                     meaning: TimeMeaning::Message,
                 }),
                 tool: None,
+                end_turn: None,
             }],
             truncated: false,
         }

@@ -1,4 +1,4 @@
-import { REMINDER_ENTRY, reminder } from "./reminder.ts";
+import { REMINDER_ENTRY, endedTurn, reminder } from "./reminder.ts";
 import { describe, expect, it } from "vitest";
 import { STATE_ENTRY } from "./state.ts";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -113,4 +113,37 @@ describe("reminder replay", () => {
       reminder([snapshot({ tasks: [{ content: "a", status: "invalid" }] })], []),
     ).toThrow("unknown variant");
   });
+});
+
+describe("end of turn", () => {
+  it.each([false, true])(
+    "an end_turn ends the turn unless it was refused (refused: %s)",
+    { timeout: 5000 },
+    (isError) => {
+      expect.hasAssertions();
+      const ended: SessionEntry = {
+          id: "ended",
+          message: {
+            content: [{ text: "Turn ended. Write nothing more.", type: "text" }],
+            isError,
+            role: "toolResult",
+            timestamp: 0,
+            toolCallId: "call",
+            toolName: "end_turn",
+          },
+          parentId: null,
+          timestamp: "2026-10-16T00:00:00Z",
+          type: "message",
+        },
+        prompt: SessionEntry = {
+          id: "prompt",
+          message: { content: "Next", role: "user", timestamp: 0 },
+          parentId: null,
+          timestamp: "2026-10-16T00:00:00Z",
+          type: "message",
+        };
+      expect(endedTurn([snapshot(open), ended, storedReminder])).toBe(!isError);
+      expect(endedTurn([ended, prompt])).toBe(false);
+    },
+  );
 });

@@ -144,11 +144,12 @@ Dogsled validates the seal entry's identity and ordering, not task state. The pr
 
 ### `done` before the unit returns
 
-A seeded worker can call native `done` before its unit is sealed.
+A seeded worker can call native `end_turn` with kind `done` before its unit is sealed.
 The worker host does not treat that mark as finished until the launch has a terminal receipt.
 Until then, the pane stays open, `done` is false in the host snapshot, and the board shows `finishing`.
-Managed workers use the native tool for the final handoff, not shell `dogsled done`.
-Questions and blockers use native `ask` and `blocked`. Neither signal releases the task binding.
+Managed workers use the native `end_turn` tool for the final handoff, not shell `dogsled done`.
+The terminal receipt accepts either a final assistant text or a final `end_turn` call with kind `done`; its message is the reply.
+Questions and blockers use `end_turn` with kind `ask` or `blocked`. Neither signal releases the task binding.
 See [Agent lifecycle and recovery](lifecycle.md) for turn signals and resource closure.
 
 Only the execution owner can continue such a worker. The owner is the originating pane ID (`execution.ownerId`) on the originating host. The launch record stores both, and the host compares the full sender (pane and hostname) before it changes anything, because a pane ID is unique only on its own host. A launch record from an earlier release has no owner host, so it refuses every sender. The owner sends a message or a task to the same pane. The worker host then removes the mark, and the same execution continues in the same session, worktree, and branch. The host refuses input from any other sender, and the worker's own inbox claim, and changes nothing. A mark sealed by an earlier release without a receipt follows the same rule.

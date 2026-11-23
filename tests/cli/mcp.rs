@@ -343,13 +343,11 @@ fn mcp_lists_the_tools_with_their_schemas() {
         names,
         [
             expect("accept", &["evidence", "item", "result"]),
-            expect("ask", &["question"]),
-            expect("blocked", &["reason"]),
             expect("cancel", &["id"]),
             expect("claim", &["item"]),
             expect("close", &["pane"]),
-            expect("done", &[]),
             expect("drop", &["id"]),
+            expect("end_turn", &["kind", "message"]),
             expect("inbox", &[]),
             expect("lead", &["message", "repo"]),
             expect("place", &[]),
@@ -391,6 +389,23 @@ fn mcp_lists_the_tools_with_their_schemas() {
     for field in ["profile", "kind", "host", "branch", "base", "cwd"] {
         assert!(legacy["properties"][field].is_object(), "{spawn}");
     }
+}
+
+#[test]
+fn mcp_end_turn_ends_a_reply_turn_and_refuses_an_unknown_kind() {
+    let rig = Rig::new("mcp-end-turn");
+    let mut client = Client::start(&rig);
+    let (ended, failed) = client.call("end_turn", &json!({"kind":"reply","message":"Answer."}));
+    assert!(!failed, "{ended}");
+    assert_eq!(ended["note"], "Turn ended. Write nothing more.");
+    let response = client.request(
+        "tools/call",
+        &json!({"name":"end_turn","arguments":{"kind":"finished","message":"Answer."}}),
+    );
+    assert!(
+        response.is_null() || response["isError"] == true,
+        "{response}"
+    );
 }
 
 #[test]

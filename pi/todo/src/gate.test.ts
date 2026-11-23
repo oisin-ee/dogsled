@@ -70,12 +70,12 @@ describe("missing activation", () => {
           return emptyResult();
         },
         label: "Done",
-        name: "mcp__dogsled__done",
+        name: "end_turn",
         parameters: emptyParameters,
       });
     });
     try {
-      await test.call("mcp__dogsled__done", {});
+      await test.call("end_turn", {});
       expect(ran).toBe(true);
       expect(results(test).at(last)).toMatchObject({ isError: false });
 

@@ -289,9 +289,11 @@ Marks in `done.json` use the launch/item id, pane, and `agent_session.value`, no
 
 New inbox work accepted during that same working turn cancels its mark. After that turn ends, the mark is terminal. Senders receive `<name> finished; start a new child for more work`.
 
-End each turn with native `done`, `ask`, or `blocked`, or wait for owned child work.
-`ask` sends a question to the owner. `blocked` records an external blocker. Neither completes the task.
-Dogsled derives `waiting` from open items and pending or admitting child tickets. There is no `waiting` command.
+End each turn with the native `end_turn` tool: `end_turn({ kind, message })`. The message is the turn's final reply.
+The portal, `read`, and the inbox show that message as the reply, even when a check-in, a reminder, or more work follows it. That later content folds under "N follow-ups". Only a new `end_turn` call replaces the message.
+`kind` is `done`, `ask`, `blocked`, `waiting`, or `reply`. `ask` sends a question to the owner. `blocked` records an external blocker. Neither completes the task.
+`waiting` is refused unless the caller owns open children or queued work. `reply` records no signal. A refused call returns an error and pins nothing.
+Dogsled also derives `waiting` from open items and pending or admitting child tickets.
 Identical same-turn signals replay successfully. Conflicting signals refuse without a change.
 The next positively identified turn clears a visible question or blocker, but not its pending delivery.
 
@@ -320,7 +322,8 @@ See [Agent lifecycle and recovery](docs/lifecycle.md) for the state signals and 
 dogsled close w2:p1
 dogsled close w9:p1 --host netcup --json
 dogsled drop <item-id> --host netcup
-dogsled done                       # CLI completion signal; managed agents use the native tool
+dogsled end-turn --kind done --message "Merged in #12."  # managed agents use the native end_turn tool
+dogsled done                       # the same signals for scripts
 dogsled ask "Which API owns this operation?"
 dogsled blocked "The required host is unavailable."
 ```
@@ -875,7 +878,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 ### Tools
 
-`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `done`, `ask`, `blocked`, `stop`, `cancel`, and `place`.
+`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `end_turn`, `stop`, `cancel`, and `place`.
 Tools share the CLI action code. `spawn` returns a durable queued ticket, even when a host has room.
 The service owns startup confirmation outside the MCP call budget. `dogsled agent` still starts synchronously under `--max`.
 Startup errors include recent pane output in the launch record and ticket when the pane read succeeds.

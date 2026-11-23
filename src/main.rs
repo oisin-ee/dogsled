@@ -209,6 +209,17 @@ fn done_command(ledger: &Ledger, shell: &System, json: bool) -> Result<()> {
 fn turn_command(ledger: &Ledger, shell: &System, json: bool, command: Command) -> Result<()> {
     let (kind, text) = match command {
         Command::Done => return done_command(ledger, shell, json),
+        Command::EndTurn { kind, message } => {
+            let ended = done::end_turn(
+                ledger,
+                shell,
+                inbox::own_pane(None),
+                kind,
+                &message,
+                now_ms(),
+            )?;
+            return print(json, &ended, || format!("{}\n", ended.note));
+        }
         Command::Ask { question } => (lifecycle::Signal::Ask, question),
         Command::Blocked { reason } => (lifecycle::Signal::Blocked, reason),
         _ => return Err(Error::Invalid("not a turn signal command".into())),
@@ -310,7 +321,7 @@ fn run(cli: Cli, budget: budget::Budget) -> Result<ExitCode> {
             let dropped = drop::drop(&fleet, &id, host.as_deref())?;
             print(cli.json, &dropped, || dropped.line())?;
         }
-        command @ (Command::Done | Command::Ask { .. } | Command::Blocked { .. }) => {
+        command if command.ends_turn() => {
             turn_command(&ledger, &shell, cli.json, command)?;
         }
         Command::Send {

@@ -142,13 +142,22 @@ pub struct RetirementArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct AskArgs {
-    pub question: String,
+pub struct EndTurnArgs {
+    /// How the turn ends: `done` (whole task complete), `ask` (you need an answer from your
+    /// owner), `blocked` (you cannot continue), `waiting` (for your own open children), or
+    /// `reply` (anything else).
+    #[schemars(schema_with = "end_turn_kind")]
+    pub kind: portal_types::agents::EndTurnKind,
+    /// Your whole final reply, in Markdown. It is what your owner reads for this turn.
+    pub message: String,
 }
 
-#[derive(Deserialize, JsonSchema)]
-pub struct BlockedArgs {
-    pub reason: String,
+fn end_turn_kind(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let kinds: Vec<&str> = portal_types::agents::EndTurnKind::ALL
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect();
+    schemars::json_schema!({ "type": "string", "enum": kinds })
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -642,49 +651,16 @@ impl Server {
     }
 
     #[tool(
-        description = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use this native done tool once when the whole task is complete, then end the turn with your final reply. Commit your changes first. Dogsled closes you after that turn and keeps your branch for the owner to land."
+        description = "End every turn with this tool, as your last action. Put your whole final reply in `message`: it is what your owner reads, even when a check-in or reminder arrives later. `kind` says how the turn ends: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), waiting (for your own open children), or reply (anything else). Commit before done: dogsled closes you after that turn and keeps your branch. A refusal records nothing: fix the cause and call again. Write nothing after a successful call."
     )]
-    async fn done(&self) -> Result<String, String> {
+    async fn end_turn(&self, Parameters(args): Parameters<EndTurnArgs>) -> Result<String, String> {
         self.call(move |fleet| {
-            let pane = crate::inbox::own_pane(None)?;
-            Ok(serde_json::to_value(crate::done::mark(
+            Ok(serde_json::to_value(crate::done::end_turn(
                 fleet.ledger,
                 fleet.shell,
-                &pane,
-                now_ms(),
-            )?)?)
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Ask your owner a question with this native tool. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Does not seal or close input; works with dirty work and open children."
-    )]
-    async fn ask(&self, Parameters(args): Parameters<AskArgs>) -> Result<String, String> {
-        self.call(move |fleet| {
-            Ok(serde_json::to_value(crate::done::signal(
-                fleet.ledger,
-                fleet.shell,
-                &crate::inbox::own_pane(None)?,
-                crate::lifecycle::Signal::Ask,
-                &args.question,
-                now_ms(),
-            )?)?)
-        })
-        .await
-    }
-
-    #[tool(
-        description = "Report why you cannot continue with this native tool. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Does not seal or close input; works with dirty work and open children."
-    )]
-    async fn blocked(&self, Parameters(args): Parameters<BlockedArgs>) -> Result<String, String> {
-        self.call(move |fleet| {
-            Ok(serde_json::to_value(crate::done::signal(
-                fleet.ledger,
-                fleet.shell,
-                &crate::inbox::own_pane(None)?,
-                crate::lifecycle::Signal::Blocked,
-                &args.reason,
+                crate::inbox::own_pane(None),
+                args.kind,
+                &args.message,
                 now_ms(),
             )?)?)
         })
@@ -898,7 +874,7 @@ impl Server {
     its task; its final reply reaches your inbox when it finishes, so do not poll. `send` reaches \
     any agent through its inbox; nothing is typed into its terminal. `status` shows your \
     children, jobs, and queue. Nothing here waits: a full fleet queues the work and returns \
-    `queued`."
+    `queued`. End every turn with `end_turn`, and put your final reply in its message."
 )]
 impl ServerHandler for Server {}
 

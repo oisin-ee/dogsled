@@ -774,6 +774,7 @@ mod tests {
                 done: true,
             }),
             native_done: true,
+            end_turn_message: None,
             closed_ms: None,
             dropped_ms: None,
         });
@@ -847,6 +848,7 @@ mod tests {
                 done: true,
             }),
             native_done: true,
+            end_turn_message: None,
             closed_ms: None,
             dropped_ms: None,
         });

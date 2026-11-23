@@ -1,7 +1,7 @@
 
 # Dogsled: children, jobs, and messages
 
-Use dogsled to delegate, run jobs, and message other agents. Prefer the tools (`status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `done`, `stop`, `cancel`, `place`); each matches a CLI command and returns the same JSON. In Pi they are `mcp__dogsled__<tool>`.
+Use dogsled to delegate, run jobs, and message other agents. Prefer the tools (`status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `end_turn`, `stop`, `cancel`, `place`); each matches a CLI command and returns the same JSON. In Pi they are `mcp__dogsled__<tool>`, except `end_turn`, which is native.
 
 Never type into another agent's terminal (`herdr agent prompt`, `herdr pane send-text`, `send-keys`): it mixes your text into the user's draft. Use `send`.
 
@@ -74,7 +74,9 @@ A transfer does not complete a task. Commit and report as usual.
 
 Without its own `done`, a child stays open. Questions and orchestration do not authorize closure. Busy panes and the caller never close automatically. Shared worktrees stay. A primary pane stays if its closure would close linked workspaces.
 
-When you are a child, call `done` once, in the turn that completes your whole task, then end the turn with your final reply. Do not call it when you ask a question or wait for your own children; `done` is refused while you own open children or queued work. To end a child now:
+End every turn with `end_turn({ kind, message })`, as your last action. The message is your final reply: your owner reads it even when a check-in or reminder arrives later, so write nothing after it. If a later check-in needs no action, do not call `end_turn` again. Kinds: `done` (whole task complete), `ask` (a question for your owner), `blocked` (you cannot continue), `waiting` (for your own open children), and `reply` (anything else).
+
+When you are a child, use kind `done` once, in the turn that completes your whole task. Do not use it when you ask a question or wait for your own children; `done` is refused while you own open children or queued work. To end a child now:
 
 ```sh
 dogsled close PANE [--host HOST]
