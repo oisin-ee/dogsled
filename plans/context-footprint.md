@@ -1,6 +1,6 @@
 # Cut the context that agent tooling spends
 
-Status: proposed. No part of this plan is approved or implemented.
+Status: approved on 2026-11-23 with the recommended decisions. Implementation in progress.
 
 ## Goal
 
