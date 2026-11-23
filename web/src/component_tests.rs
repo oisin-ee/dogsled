@@ -2202,6 +2202,46 @@ fn tool_turn(
 }
 
 #[test]
+fn dogsled_job_launch_shows_argv_and_placement_without_claiming_the_job_finished() {
+    use portal_types::agents::ToolStatus;
+    let name = "mcp__dogsled__run";
+    let mut turn = tool_turn("launch", Some(name), ToolStatus::Completed);
+    let tool = turn.tool.as_mut().expect("tool");
+    let arguments = serde_json::json!({"cmd":["bash","-lc","exec build > /tmp/portal-dev.log 2>&1"],"cwd":"/work/portal/.worktrees/event-card","host":"local","timeout":"35m"});
+    tool.call = Some(format!("{name} {arguments}"));
+    tool.output = Some(r#"{"queued":true,"ticket":"ticket-184"}"#.into());
+    let html = render_timeline(history(vec![turn]));
+    for expected in [
+        "Run job",
+        "<code>bash</code>",
+        "<code>-lc</code>",
+        ">Directory</dt>",
+        ">local</dd>",
+        ">35m</dd>",
+        "Ticket returned",
+        "ticket-184",
+        "Recorded call",
+    ] {
+        assert!(html.contains(expected), "missing {expected}: {html}");
+    }
+    assert!(!html.contains("Job finished") && !html.contains("Launch confirmed"));
+}
+
+#[test]
+fn dogsled_truncated_call_and_error_keep_the_recorded_evidence() {
+    use portal_types::agents::ToolStatus;
+    let mut turn = tool_turn("launch", Some("mcp__dogsled__run"), ToolStatus::Error);
+    let tool = turn.tool.as_mut().expect("tool");
+    tool.call = Some("mcp__dogsled__run {truncated".into());
+    tool.output = Some("Could not find requested host".into());
+    let html = render_timeline(history(vec![turn]));
+    for expected in ["Call failed", "{truncated", "Could not find requested host"] {
+        assert!(html.contains(expected), "{html}");
+    }
+    assert!(!html.contains("<dt>Host</dt>"));
+}
+
+#[test]
 fn tools_render_individually_in_recorded_order_with_name_fallbacks_and_outcomes() {
     use portal_types::agents::{Role, ToolStatus};
     let html = render_timeline(history(vec![
