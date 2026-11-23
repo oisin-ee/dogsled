@@ -16,7 +16,7 @@ mod tests;
 pub const MINUTE: u64 = 60_000;
 pub const IDLE_SHELL: u64 = 15 * MINUTE;
 const CHECK_IN: u64 = 30 * MINUTE;
-const STOPPED_PROMPT: &str = "End your turn with done, ask, or blocked, or wait for your children.";
+const STOPPED_PROMPT: &str = "End your turn with end_turn: done, ask, blocked, waiting, or reply.";
 const PROMPT_WINDOW: u64 = 2 * MINUTE;
 
 fn stall_limit() -> u64 {

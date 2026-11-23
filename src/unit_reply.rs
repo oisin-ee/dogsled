@@ -178,6 +178,8 @@ fn correlated_reply(
     let mut current = ack.session_leaf_id.as_str();
     let mut seen = BTreeSet::new();
     let mut reply = None;
+    // A successful `end_turn` result at the tail waits for the call it answers.
+    let mut ended: Option<&str> = None;
     loop {
         if !seen.insert(current) {
             return Err(conflict("cyclic transcript ancestry"));
@@ -213,33 +215,89 @@ fn correlated_reply(
         }
         if reply.is_none() && entry["type"] == "message" {
             let message = &entry["message"];
-            if message["role"] != "assistant" || message["stopReason"] != "stop" {
-                return Err(conflict(
-                    "acknowledged boundary has no final assistant reply",
-                ));
+            if let Some(call) = ended {
+                reply = Some((current.to_owned(), end_turn_reply(message, call)?));
+            } else if message["role"] == "toolResult"
+                && message["toolName"]
+                    .as_str()
+                    .is_some_and(portal_types::agents::is_end_turn_tool)
+            {
+                if message["isError"] == true {
+                    return Err(conflict("the final end_turn call was refused"));
+                }
+                ended = Some(
+                    message["toolCallId"]
+                        .as_str()
+                        .ok_or_else(|| conflict("end_turn result has no call identity"))?,
+                );
+            } else {
+                reply = Some((current.to_owned(), text_reply(message)?));
             }
-            let blocks = message["content"]
-                .as_array()
-                .ok_or_else(|| conflict("final reply has no content"))?;
-            if blocks.iter().any(|b| b["type"] == "toolCall") {
-                return Err(conflict("tool-call message is not a final reply"));
-            }
-            let text = blocks
-                .iter()
-                .filter(|b| b["type"] == "text")
-                .filter_map(|b| b["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            if text.trim().is_empty() {
-                return Err(conflict("final reply is empty"));
-            }
-            reply = Some((current.to_owned(), text));
         }
         current = entry["parentId"]
             .as_str()
             .ok_or_else(|| conflict("seal is not an ancestor of the final reply"))?;
     }
     reply.ok_or_else(|| conflict("no reply after seal on acknowledged branch"))
+}
+
+/// The text of a final assistant message that makes no tool call.
+fn text_reply(message: &Value) -> Result<String> {
+    if message["role"] != "assistant" || message["stopReason"] != "stop" {
+        return Err(conflict(
+            "acknowledged boundary has no final assistant reply",
+        ));
+    }
+    let blocks = message["content"]
+        .as_array()
+        .ok_or_else(|| conflict("final reply has no content"))?;
+    if blocks.iter().any(|b| b["type"] == "toolCall") {
+        return Err(conflict("tool-call message is not a final reply"));
+    }
+    let text = blocks
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.trim().is_empty() {
+        return Err(conflict("final reply is empty"));
+    }
+    Ok(text)
+}
+
+/// The message of the `end_turn(done)` call that `message` makes as its only tool call.
+fn end_turn_reply(message: &Value, call: &str) -> Result<String> {
+    if message["role"] != "assistant" {
+        return Err(conflict("end_turn result does not follow its call"));
+    }
+    let calls: Vec<&Value> = message["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "toolCall")
+        .collect();
+    let [block] = calls.as_slice() else {
+        return Err(conflict(
+            "the final end_turn call is not the only tool call",
+        ));
+    };
+    if block["id"] != call
+        || !block["name"]
+            .as_str()
+            .is_some_and(portal_types::agents::is_end_turn_tool)
+    {
+        return Err(conflict("end_turn result does not follow its call"));
+    }
+    if block["arguments"]["kind"] != "done" {
+        return Err(conflict("the final end_turn is not done"));
+    }
+    block["arguments"]["message"]
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| conflict("final reply is empty"))
 }
 
 #[cfg(test)]
@@ -287,6 +345,31 @@ mod tests {
             session_id: "r-1".into(),
             reply_entry_id: "reply".into(),
             text: "FINAL".into(),
+        }
+    }
+
+    #[test]
+    fn a_final_end_turn_done_is_the_reply_and_other_tails_are_refused() {
+        let entries = |kind: &str, error: bool, calls: usize| {
+            let call = serde_json::json!({"type":"toolCall","id":"c","name":"end_turn",
+                "arguments":{"kind":kind,"message":" FINAL "}});
+            [
+                serde_json::json!({"type":"custom","id":"seal","parentId":null}),
+                serde_json::json!({"type":"message","id":"reply","parentId":"seal","message":{"role":"assistant","stopReason":"toolUse","content":vec![call; calls]}}),
+                serde_json::json!({"type":"message","id":"result","parentId":"reply","message":{"role":"toolResult","toolCallId":"c","toolName":"end_turn","isError":error,"content":[]}}),
+                serde_json::json!({"type":"custom","id":"leaf","parentId":"result"}),
+            ]
+            .into_iter()
+            .map(|entry| (entry["id"].as_str().unwrap().to_owned(), entry))
+            .collect::<BTreeMap<_, _>>()
+        };
+        let ack = receipt().ack;
+        assert_eq!(
+            correlated_reply(&entries("done", false, 1), &ack).unwrap(),
+            ("reply".to_owned(), "FINAL".to_owned())
+        );
+        for (kind, error, calls) in [("reply", false, 1), ("done", true, 1), ("done", false, 2)] {
+            assert!(correlated_reply(&entries(kind, error, calls), &ack).is_err());
         }
     }
 

@@ -389,7 +389,7 @@ pub(crate) fn resolve_local(
 /// A lead has no completion contract: it never signals done, ask, or blocked.
 pub(crate) fn refuse_signal(pane: &str, signal: &str) -> crate::error::Error {
     crate::error::Error::Invalid(format!(
-        "{pane} is a lead; leads have no {signal}. Close it explicitly with dogsled close"
+        "{pane} is a lead; leads have no {signal}. End its turn with end_turn kind reply or waiting, and close it explicitly with dogsled close"
     ))
 }
 

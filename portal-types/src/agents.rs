@@ -152,8 +152,78 @@ pub struct ToolSummary {
     pub output_lines: Option<u32>,
 }
 
+/// How an agent said its turn ends, with the `end_turn` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndTurnKind {
+    /// The turn ends with this message, and nothing else.
+    Reply,
+    /// The whole task is complete.
+    Done,
+    /// The agent needs an answer from its owner.
+    Ask,
+    /// The agent cannot continue.
+    Blocked,
+    /// The agent waits for its own open children.
+    Waiting,
+}
+
+impl EndTurnKind {
+    pub const ALL: [Self; 5] = [
+        Self::Reply,
+        Self::Done,
+        Self::Ask,
+        Self::Blocked,
+        Self::Waiting,
+    ];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reply => "reply",
+            Self::Done => "done",
+            Self::Ask => "ask",
+            Self::Blocked => "blocked",
+            Self::Waiting => "waiting",
+        }
+    }
+
+    /// The label the portal shows on a pinned message. A plain reply has none.
+    #[must_use]
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Reply => None,
+            Self::Done => Some("Done"),
+            Self::Ask => Some("Question"),
+            Self::Blocked => Some("Blocked"),
+            Self::Waiting => Some("Waiting"),
+        }
+    }
+}
+
+impl std::str::FromStr for EndTurnKind {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == text)
+            .ok_or_else(|| {
+                format!("unknown end_turn kind {text:?}; use reply, done, ask, blocked or waiting")
+            })
+    }
+}
+
+/// The tool names that end a turn: Pi's native tool, and the dogsled MCP tool under any
+/// server prefix, such as `mcp__dogsled__end_turn` or Claude's plugin prefix.
+#[must_use]
+pub fn is_end_turn_tool(name: &str) -> bool {
+    name == "end_turn" || (name.starts_with("mcp__") && name.ends_with("dogsled__end_turn"))
+}
+
 /// One chronological record: message text, thinking, attributed context, or tool detail.
-/// Tool records have empty text; their bounded call and result are in `tool`.
+/// Tool records have empty text; their bounded call and result are in `tool`. An `end_turn`
+/// call is a tool record whose text is the message it ends the turn with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
     pub id: String,
@@ -164,6 +234,30 @@ pub struct Turn {
     pub timestamp: Option<Timestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<ToolSummary>,
+    /// Set on an `end_turn` call record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_turn: Option<EndTurnKind>,
+}
+
+impl Turn {
+    /// The kind of the end-of-turn message this record pins: an `end_turn` call with a
+    /// recorded result that is not an error. A refused call pins nothing.
+    #[must_use]
+    pub fn pinned(&self) -> Option<EndTurnKind> {
+        self.end_turn.filter(|_| {
+            self.tool
+                .as_ref()
+                .is_some_and(|tool| tool.status == ToolStatus::Completed)
+        })
+    }
+
+    /// A displayed system message that started another run: an extension message such as
+    /// a todo reminder, or a dogsled delivery.
+    #[must_use]
+    pub fn is_nudge(&self) -> bool {
+        self.role == Role::Context
+            && matches!(self.source, Source::Custom { .. } | Source::Dogsled { .. })
+    }
 }
 
 /// Transcript clock for the latest user turn. Running clocks use the viewer's wall clock;
@@ -210,6 +304,25 @@ pub fn current_turn(turns: &[Turn]) -> &[Turn] {
         .iter()
         .rposition(|turn| turn.role == Role::User)
         .unwrap_or(0)..]
+}
+
+/// The record that holds an agent's final reply in `turns` (oldest first): the newest
+/// pinned `end_turn` since the newest owner message. Without one, the newest record that is
+/// not context, when it is an assistant message. The host computes the same record from the
+/// raw transcript for the reply stamp.
+#[must_use]
+pub fn reply_edge(turns: &[Turn]) -> Option<&Turn> {
+    current_turn(turns)
+        .iter()
+        .rev()
+        .find(|turn| turn.pinned().is_some())
+        .or_else(|| {
+            turns
+                .iter()
+                .rev()
+                .find(|turn| turn.role != Role::Context)
+                .filter(|turn| turn.role == Role::Assistant)
+        })
 }
 
 #[must_use]

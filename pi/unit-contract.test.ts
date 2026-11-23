@@ -16,14 +16,15 @@ import { imported as importedUnit } from "./todo/src/wasm.ts";
 import { branchSnapshot } from "./todo/src/state.ts";
 
 test("native turn guidance agrees across launch, MCP, and Pi without changing todo", async () => {
-	const guidance = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children.";
-	for (const path of ["../src/done.rs", "../src/mcp.rs", "./index.ts"]) {
+	const guidance = "done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), waiting (for your own open children), or reply (anything else).";
+	for (const path of ["../src/done.rs", "../src/mcp.rs", "./end-turn.ts"]) {
 		const text = await readFile(new URL(path, import.meta.url), "utf8");
 		assert.ok(text.includes(guidance), path);
 		assert.ok(!text.includes("or run `dogsled done`"), path);
 	}
 	const mcp = await readFile(new URL("../src/mcp.rs", import.meta.url), "utf8");
-	for (const name of ["done", "ask", "blocked"]) assert.ok(mcp.includes(`async fn ${name}(`), name);
+	assert.ok(mcp.includes("async fn end_turn("));
+	for (const name of ["done", "ask", "blocked"]) assert.ok(!mcp.includes(`async fn ${name}(`), name);
 });
 
 // Git hooks export repository selectors; fixture subprocesses must address only their own checkouts.

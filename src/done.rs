@@ -9,7 +9,68 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One line because Herdr refuses newlines in an argument.
-pub const CONTRACT: &str = "End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Use the native tools. Commit your changes before done. Call done once during the turn that completes the whole task, then end the turn with your final reply. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not call done when you need an answer, cannot continue, or own open children.";
+pub const CONTRACT: &str = "End every turn with the native end_turn tool. Its kind says how the turn ends: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), waiting (for your own open children), or reply (anything else). Its message is what your owner reads, so put your whole final reply in it and write nothing after it. Commit your changes before done. Use done once, in the turn that completes the whole task. Dogsled closes you after that turn and keeps your branch for the owner to land. Do not use done when you need an answer, cannot continue, or own open children. If a check-in or reminder needs no action, do not call end_turn again: your earlier message stays.";
+
+/// What `end_turn` recorded. The message itself is in the transcript, which is its record.
+#[derive(Debug, Clone, Serialize)]
+pub struct Ended {
+    pub kind: portal_types::agents::EndTurnKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Mark>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<Signal>,
+    /// What the agent reads back. A harness that cannot stop the turn must still stop.
+    pub note: &'static str,
+}
+
+/// End the caller's turn. `reply` needs no pane, so a session outside Herdr can use it;
+/// every other kind refuses without one. A refusal records nothing, so the agent can fix
+/// the cause and call again.
+pub fn end_turn(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    pane: Result<String>,
+    kind: portal_types::agents::EndTurnKind,
+    message: &str,
+    now: u64,
+) -> Result<Ended> {
+    use portal_types::agents::EndTurnKind;
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(Error::Invalid(
+            "end_turn needs a message: the reply your owner reads".into(),
+        ));
+    }
+    let mut ended = Ended {
+        kind,
+        mark: None,
+        signal: None,
+        note: "Turn ended. Write nothing more.",
+    };
+    match kind {
+        EndTurnKind::Reply => {}
+        EndTurnKind::Waiting => {
+            let pane = pane?;
+            if !owners(ledger)?.contains_key(&pane) {
+                return Err(Error::Invalid(format!(
+                    "{pane} owns no open children or queued work; end the turn with another kind"
+                )));
+            }
+        }
+        EndTurnKind::Done => {
+            ended.mark = Some(mark_with(ledger, shell, &pane?, Some(message), now)?);
+        }
+        EndTurnKind::Ask | EndTurnKind::Blocked => {
+            let signal_kind = if kind == EndTurnKind::Ask {
+                crate::lifecycle::Signal::Ask
+            } else {
+                crate::lifecycle::Signal::Blocked
+            };
+            ended.signal = Some(signal(ledger, shell, &pane?, signal_kind, message, now)?);
+        }
+    }
+    Ok(ended)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {
@@ -109,6 +170,10 @@ pub struct Mark {
     /// handoff. Marks from before this field load with `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub native_done: bool,
+    /// The message of the `end_turn` call that marked this turn done. It is the final reply,
+    /// also for a harness whose transcript does not show the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_turn_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -340,13 +405,24 @@ pub fn mark(
     pane: &str,
     now: u64,
 ) -> Result<Mark> {
+    mark_with(ledger, shell, pane, None, now)
+}
+
+/// `mark`, with the final reply the agent gave through `end_turn`.
+fn mark_with(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    pane: &str,
+    message: Option<&str>,
+    now: u64,
+) -> Result<Mark> {
     let agent = crate::inbox::local_agent(shell, pane)?;
     if crate::leads::on_pane(ledger, pane, agent.terminal_id.as_deref())?.is_some() {
         return Err(crate::leads::refuse_signal(pane, "done"));
     }
     if agent.state != "working" {
         return Err(Error::Invalid(format!(
-            "{pane} is {}; call done during the turn that completes your task",
+            "{pane} is {}; end the turn that completes your task with end_turn kind done",
             agent.state
         )));
     }
@@ -384,6 +460,7 @@ pub fn mark(
         detached,
         reply: None,
         native_done: false,
+        end_turn_message: message.map(str::to_owned),
         closed_ms: None,
         dropped_ms: None,
     };
@@ -510,6 +587,7 @@ pub fn signal(
             detached: false,
             reply: None,
             native_done: false,
+            end_turn_message: None,
             closed_ms: None,
             dropped_ms: None,
         };
@@ -1103,6 +1181,24 @@ fn on_lead(leads: &[crate::leads::Record], agents: &[Agent], pane: &str) -> bool
     crate::leads::protected(leads, pane, terminal)
 }
 
+/// The final reply of a handoff: the sealed unit receipt, then what the agent said with
+/// `end_turn`, then the transcript.
+fn final_reply(
+    ledger: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    mark: &Mark,
+) -> Result<Option<crate::sweep::Final>> {
+    if let Some(text) =
+        crate::launch::handoff_reply(ledger, &mark.pane)?.or_else(|| mark.end_turn_message.clone())
+    {
+        return Ok(Some(crate::sweep::Final {
+            seq: mark.sealed.unwrap_or(0),
+            text,
+        }));
+    }
+    crate::sweep::local_reply(shell, ledger, &mark.pane)
+}
+
 fn handoff_locked(
     ledger: &Ledger,
     shell: &dyn crate::shell::Shell,
@@ -1150,14 +1246,7 @@ fn handoff_locked(
             continue;
         }
         if mark.reply.is_none() {
-            let reply = if let Some(text) = crate::launch::handoff_reply(ledger, &mark.pane)? {
-                crate::sweep::Final {
-                    seq: mark.sealed.unwrap_or(0),
-                    text,
-                }
-            } else if let Some(reply) = crate::sweep::local_reply(shell, ledger, &mark.pane)? {
-                reply
-            } else {
+            let Some(reply) = final_reply(ledger, shell, &mark)? else {
                 continue;
             };
             mark.reply = Some(crate::items::Reply {

@@ -23,6 +23,7 @@ use crate::activity::{Gap, Live, use_live_activity};
 use crate::api;
 use crate::components::{
     accordion::{Accordion, AccordionContent, AccordionItem, AccordionTrigger},
+    badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
     collapsible::{Collapsible, CollapsibleContent, CollapsibleTrigger},
     input::Input,
@@ -1466,7 +1467,7 @@ pub(crate) fn Conversation(
     let earlier = groups.get(..first).map_or(0, |groups| {
         groups.iter().map(|group| group.len()).sum::<usize>()
     });
-    let edge_turn = turns.iter().rev().find(|turn| turn.role != Role::Context);
+    let edge_turn = wire::reply_edge(turns);
     let record = |turn: &Turn| {
         let receipt = (!active && edge_turn.is_some_and(|edge| std::ptr::eq(edge, turn)))
             .then(|| read_edge.clone())
@@ -1474,21 +1475,44 @@ pub(crate) fn Conversation(
         conversation_record(turn, &assistant, receipt)
     };
     let records = groups.iter().enumerate().skip(first).flat_map(|(index, group)| {
-        let final_reply = group.iter().rposition(|turn| turn.role == Role::Assistant);
-        let finished = !(active && index + 1 == groups.len());
         let mut records = Vec::new();
-        if let Some(final_reply) = final_reply.filter(|&reply| {
-            finished && group[0].role == Role::User && group[1..reply].iter().any(is_work)
-        }) {
-            records.push(record(&group[0]));
-            let work = &group[1..final_reply];
-            let label = worked_label(&group[0], group);
-            records.push(rsx! {
-                ToolRecords { key: "work:{group[0].id}", turns: work.to_vec(), assistant: assistant.clone(), label }
-            });
-            records.extend(group[final_reply..].iter().map(&record));
-        } else {
+        if active && index + 1 == groups.len() {
             records.extend(group.iter().map(&record));
+        } else if let Some(pin) = group.iter().rposition(|turn| turn.pinned().is_some()) {
+            // The agent said how its turn ends. Its message stays the reply, and whatever
+            // came after it, such as a check-in and the answer to it, folds below.
+            let start = usize::from(group[0].role == Role::User);
+            records.extend(group[..start].iter().map(&record));
+            if pin > start {
+                let label = worked_label(&group[0], &group[..pin]);
+                records.push(rsx! {
+                    ToolRecords { key: "work:{group[pin].id}", turns: group[start..pin].to_vec(), assistant: assistant.clone(), label }
+                });
+            }
+            records.push(record(&group[pin]));
+            let after = &group[pin + 1..];
+            if !after.is_empty() {
+                records.push(rsx! {
+                    ToolRecords { key: "follow:{group[pin].id}", turns: after.to_vec(), assistant: assistant.clone(), label: follow_up_label(after) }
+                });
+            }
+        } else {
+            // Without one, each system nudge starts its own run, so each answer stays the
+            // reply of the run it answers.
+            for run in group.chunk_by(|_, next| !next.is_nudge()) {
+                let head = run[0].role == Role::User || run[0].is_nudge();
+                match run.iter().rposition(|turn| turn.role == Role::Assistant) {
+                    Some(reply) if head && run[1..reply].iter().any(is_work) => {
+                        records.push(record(&run[0]));
+                        let label = worked_label(&run[0], run);
+                        records.push(rsx! {
+                            ToolRecords { key: "work:{run[0].id}", turns: run[1..reply].to_vec(), assistant: assistant.clone(), label }
+                        });
+                        records.extend(run[reply..].iter().map(&record));
+                    }
+                    _ => records.extend(run.iter().map(&record)),
+                }
+            }
         }
         records
     }).collect::<Vec<_>>();
@@ -1522,8 +1546,30 @@ fn is_work(turn: &Turn) -> bool {
     matches!(turn.role, Role::Thinking | Role::Tool)
 }
 
+/// The label of the fold after a pinned message: the nudges and answers in it.
+fn follow_up_label(turns: &[Turn]) -> String {
+    let count = turns
+        .iter()
+        .filter(|turn| turn.is_nudge() || turn.role == Role::Assistant)
+        .count();
+    match count {
+        0 => "Follow-up work".to_owned(),
+        1 => "1 follow-up".to_owned(),
+        count => format!("{count} follow-ups"),
+    }
+}
+
 fn conversation_record(turn: &Turn, assistant: &str, receipt: Option<String>) -> Element {
-    if turn.role == Role::Tool {
+    if let Some(kind) = turn.pinned() {
+        // The pinned message is the agent's reply, not a tool record.
+        let reply = Turn {
+            role: Role::Assistant,
+            tool: None,
+            ..turn.clone()
+        };
+        let kind = kind.label().map(str::to_owned);
+        rsx! { MessageRecord { key: "{turn.id}", turn: reply, assistant: assistant.to_owned(), receipt, kind } }
+    } else if turn.role == Role::Tool {
         rsx! { ToolRecord { key: "{turn.id}", turn: turn.clone() } }
     } else {
         rsx! { MessageRecord { key: "{turn.id}", turn: turn.clone(), assistant: assistant.to_owned(), receipt } }
@@ -1605,7 +1651,14 @@ fn source_label(turn: &Turn, assistant: &str) -> (String, String, bool) {
 }
 
 #[component]
-fn MessageRecord(turn: Turn, assistant: String, receipt: Option<String>) -> Element {
+fn MessageRecord(
+    turn: Turn,
+    assistant: String,
+    receipt: Option<String>,
+    /// How an `end_turn` message ends the turn, when it is not a plain reply.
+    #[props(default)]
+    kind: Option<String>,
+) -> Element {
     let (author, source, owner) = source_label(&turn, &assistant);
     // Polls, activity, and attribution changes must not reparse unchanged Markdown.
     let markdown = use_memo(use_reactive(&turn.text, |text| {
@@ -1616,7 +1669,9 @@ fn MessageRecord(turn: Turn, assistant: String, receipt: Option<String>) -> Elem
             "data-record-id": turn.id, aria_label: author.clone(),
             ConversationTime { timestamp: turn.timestamp, role: turn.role, source: turn.source }
             div { class: "conversation-body",
-                div { class: "conversation-meta", strong { "{author}" } span { "{source}" } }
+                div { class: "conversation-meta", strong { "{author}" } span { "{source}" }
+                    if let Some(kind) = kind { Badge { variant: BadgeVariant::Outline, "data-part": "end-turn-kind", "{kind}" } }
+                }
                 div { class: "markdown-body", dangerous_inner_html: markdown() }
                 if let Some(receipt) = receipt {
                     dogsled-read-edge { key: "{receipt}", "data-receipt": receipt, "aria-hidden": "true" }
@@ -2923,6 +2978,7 @@ mod tests {
             source,
             timestamp: None,
             tool: None,
+            end_turn: None,
         }
     }
 

@@ -1974,6 +1974,7 @@ fn history_turn(
         },
         timestamp: None,
         tool: None,
+        end_turn: None,
     }
 }
 
@@ -2321,6 +2322,73 @@ fn worked_span_uses_the_latest_record_time_even_when_the_final_reply_time_is_ear
         "{html}"
     );
     assert!(!html.contains("Worked for 6s"), "{html}");
+}
+
+fn nudge(id: &str, text: &str) -> portal_types::agents::Turn {
+    let mut turn = history_turn(id, portal_types::agents::Role::Context, text);
+    turn.source = portal_types::agents::Source::Dogsled {
+        sender: "dogsled".into(),
+        delivery_kind: "check-in".into(),
+    };
+    turn
+}
+
+#[test]
+fn an_end_turn_message_stays_the_reply_and_later_runs_fold_as_follow_ups() {
+    use portal_types::agents::{EndTurnKind, Role, ToolStatus};
+    let mut ended = tool_turn("end", Some("end_turn"), ToolStatus::Completed);
+    ended.text = "The real answer.".into();
+    ended.end_turn = Some(EndTurnKind::Done);
+    let mut refused = tool_turn("refused", Some("end_turn"), ToolStatus::Error);
+    refused.text = "Refused answer.".into();
+    refused.end_turn = Some(EndTurnKind::Done);
+    let html = render_timeline(history(vec![
+        history_turn("input", Role::User, "Please check."),
+        tool_turn("call", Some("read"), ToolStatus::Completed),
+        refused,
+        ended,
+        nudge("check-in", "Two jobs closed."),
+        history_turn("cruft", Role::Assistant, "No action needed."),
+    ]));
+    let answer = html.find("The real answer.").unwrap();
+    let label = html.find("2 follow-ups").unwrap();
+    assert!(
+        html.find("Worked · 0 thoughts · 2 tool calls").unwrap() < answer,
+        "{html}"
+    );
+    assert!(
+        answer < label && label < html.find("No action needed.").unwrap(),
+        "{html}"
+    );
+    assert!(
+        html.find("Refused answer.").is_none(),
+        "a refused call is a tool record: {html}"
+    );
+    assert!(
+        html.contains("data-part=\"end-turn-kind\"") && html.contains(">Done<"),
+        "{html}"
+    );
+    assert_eq!(html.matches("aria-expanded=false").count(), 2, "{html}");
+}
+
+#[test]
+fn without_end_turn_each_nudge_starts_a_run_that_keeps_its_own_reply() {
+    use portal_types::agents::{Role, ToolStatus};
+    let html = render_timeline(history(vec![
+        history_turn("input", Role::User, "Please check."),
+        tool_turn("call", Some("read"), ToolStatus::Completed),
+        history_turn("answer", Role::Assistant, "The first answer."),
+        nudge("check-in", "Two jobs closed."),
+        tool_turn("call-two", Some("bash"), ToolStatus::Completed),
+        history_turn("cruft", Role::Assistant, "No action needed."),
+    ]));
+    assert_eq!(html.matches("aria-expanded=false").count(), 2, "{html}");
+    let first = html.find("The first answer.").unwrap();
+    assert!(first < html.find("Two jobs closed.").unwrap(), "{html}");
+    assert!(
+        html.find("Worked · 0 thoughts · 1 tool call").unwrap() < first,
+        "{html}"
+    );
 }
 
 fn live_timeline_root(

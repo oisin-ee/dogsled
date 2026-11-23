@@ -43,26 +43,39 @@ Source: [`src/lifecycle.rs`](../src/lifecycle.rs) and [`src/board.rs`](../src/bo
 
 ## End a turn
 
-End each turn with one of four outcomes:
+End each turn with the native `end_turn` tool, `end_turn({ kind, message })`.
+The message is the turn's final reply. Its kind is one of five:
 
-- Call the native `done` tool for the final handoff.
-- Call the native `ask` tool for a question to the owner.
-- Call the native `blocked` tool for an external blocker.
-- Wait for child work that the agent owns.
+- `done`: the final handoff.
+- `ask`: a question to the owner.
+- `blocked`: an external blocker.
+- `waiting`: wait for child work that the agent owns. It is refused when the agent owns none.
+- `reply`: any other turn. It records no signal.
 
-There is no `waiting` command. Dogsled derives that state from ownership records.
-The CLI also exposes these signals:
+A refused call returns an error, records nothing, and pins nothing.
+A successful call pins its message as the reply of the turn.
+The portal, `read`, and the inbox show the pinned message, even after later check-ins, reminders, or work.
+The portal folds that later content under "N follow-ups". Only a new `end_turn` call replaces the pinned message.
+The todo reminder does not fire after a successful `end_turn`.
+Without `end_turn`, each check-in or reminder starts a new group, so the reply to the owner stays visible.
+A `done` call also saves its message on the done mark, and the handoff uses it as the final reply.
+Codex in code mode calls tools from a script, so its transcript does not show the call.
+For Codex, the portal and `read` use the fallback, but the `done` handoff still uses the saved message.
+
+Dogsled also derives `waiting` from ownership records.
+The CLI exposes the same signals:
 
 ```sh
+dogsled end-turn --kind done --message "Merged in #12."
 dogsled done
 dogsled ask "Which API owns this operation?"
 dogsled blocked "The required host is unavailable."
 dogsled send CHILD --message "Use the repository API."
 ```
 
-For managed agents, use the native tool, not shell `dogsled done`, for final completion.
+For managed agents, use the native `end_turn` tool, not the shell commands, for final completion.
 The native tool preserves the harness handoff boundary.
-Call it during the final turn, then end that turn with the final reply.
+Call `end_turn` with kind `done` as the last action of the final turn, with the final reply as its message.
 
 `done` refuses open children, pending or admitting child tickets, and uncommitted work in a managed agent checkout.
 A local retained branch protects commits during normal handoff.
@@ -86,7 +99,7 @@ Source: [`src/done.rs`](../src/done.rs), [`src/items.rs`](../src/items.rs), and 
 
 The watchdog sends a recorded prompt for an eligible stop:
 
-> End your turn with done, ask, or blocked, or wait for your children.
+> End your turn with end_turn: done, ask, blocked, waiting, or reply.
 
 The prompt uses a stable message ID. Delivery retries do not create another prompt.
 The watchdog limits prompts across the same session to prevent a prompt loop.

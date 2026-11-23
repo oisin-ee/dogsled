@@ -6,7 +6,7 @@ import type {
   SessionEntry,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { REMINDER_ENTRY, reminder } from "./reminder.ts";
+import { REMINDER_ENTRY, endedTurn, reminder } from "./reminder.ts";
 import { parse, view, widget } from "./wasm.ts";
 import { TodoWidget } from "./widget.ts";
 import { isOwnSource } from "./source.ts";
@@ -64,10 +64,11 @@ const ownsTodo = (pi: TodoHost): boolean =>
    * @returns {BoundaryResult} The unchanged boundary or an added visible reminder.
    */
   settle = (pi: TodoHost, event: SettleEvent, ctx: TodoContext): BoundaryResult => {
-    if (event.outcome !== "completed" || event.continue || !ownsTodo(pi)) {
+    const branch = ctx.sessionManager.getBranch();
+    if (event.outcome !== "completed" || event.continue || !ownsTodo(pi) || endedTurn(branch)) {
       return {};
     }
-    const content = reminder(ctx.sessionManager.getBranch(), event.entries);
+    const content = reminder(branch, event.entries);
     return typeof content === "string"
       ? {
           continue: true,

@@ -480,6 +480,7 @@ r#"CREATE TABLE host_marks_entries (
  native_done INTEGER NOT NULL CHECK (native_done IN (0,1)),
  closed_ms INTEGER CHECK (closed_ms >= 0),
  dropped_ms INTEGER CHECK (dropped_ms >= 0),
+ end_turn_message TEXT,
  PRIMARY KEY(owner,position),
  UNIQUE(owner,pane,item,session)
 ) STRICT;
@@ -2686,6 +2687,9 @@ fn put_marks_entries(
         columns.flag("reply_done", value.done);
     }
     columns.flag("native_done", value.native_done);
+    if let Some(value) = &value.end_turn_message {
+        columns.text("end_turn_message", Some(value));
+    }
     if let Some(value) = &value.closed_ms {
         columns.number("closed_ms", Some(*value))?;
     }
@@ -2779,6 +2783,7 @@ fn load_marks_entries(
                     None
                 },
                 native_done: row.get("native_done")?,
+                end_turn_message: rows::text(row, "end_turn_message")?,
                 closed_ms: optional_number::<u64>(row, "closed_ms")?,
                 dropped_ms: optional_number::<u64>(row, "dropped_ms")?,
             },

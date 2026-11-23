@@ -313,15 +313,27 @@ pub enum Command {
     Cancel {
         ticket: String,
     },
-    /// Say that this agent's whole task is complete. Call it during the turn that completes the
-    /// task; dogsled closes the child after that turn ends and keeps its branch. Without
+    /// End this agent's turn with its final reply. Agents use the native `end_turn` tool;
+    /// the transcript records its message. `done`, `ask` and `blocked` record the same
+    /// signals as the commands of those names.
+    EndTurn {
+        #[arg(long)]
+        kind: portal_types::agents::EndTurnKind,
+        /// The final reply the owner reads.
+        #[arg(long)]
+        message: String,
+    },
+    /// Say that this agent's whole task is complete, for scripts; agents use `end-turn --kind
+    /// done`. Dogsled closes the child after that turn ends and keeps its branch. Without
     /// it, an idle child waits for input and stays open. Refused while it owns open children.
     Done,
-    /// Ask your owner a question without completing the task.
+    /// Ask your owner a question without completing the task, for scripts; agents use
+    /// `end-turn --kind ask`.
     Ask {
         question: String,
     },
-    /// Report why you cannot continue without completing the task.
+    /// Report why you cannot continue without completing the task, for scripts; agents use
+    /// `end-turn --kind blocked`.
     Blocked {
         reason: String,
     },
@@ -393,6 +405,17 @@ pub enum Command {
     /// Inspect or repair this host's `state.db` records as JSON.
     #[command(subcommand, hide = true)]
     State(StateCommand),
+}
+
+impl Command {
+    /// Whether the command ends the caller's turn: `end-turn` and the signals it routes to.
+    #[must_use]
+    pub fn ends_turn(&self) -> bool {
+        matches!(
+            self,
+            Self::Done | Self::EndTurn { .. } | Self::Ask { .. } | Self::Blocked { .. }
+        )
+    }
 }
 
 #[derive(Debug, Subcommand)]

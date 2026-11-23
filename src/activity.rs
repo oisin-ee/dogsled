@@ -1,7 +1,7 @@
 //! Bounded, display-only transcript activity. Unknown formats fall back to pane text.
 use portal_types::agents::{
-    BlockedPrompt, PromptOption, Role, Source, TimeMeaning, Timestamp, ToolStatus, ToolSummary,
-    Turn,
+    BlockedPrompt, EndTurnKind, PromptOption, Role, Source, TimeMeaning, Timestamp, ToolStatus,
+    ToolSummary, Turn, is_end_turn_tool,
 };
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
@@ -64,6 +64,7 @@ pub(crate) fn session_tail(agent: &str, path: &str) -> Option<(Vec<Value>, Optio
     let len = file.metadata().ok()?.len();
     let mut values = Vec::new();
     let mut latest = None;
+    let mut pin = Pin::default();
     lines_backwards_file(
         &mut file,
         len,
@@ -71,12 +72,16 @@ pub(crate) fn session_tail(agent: &str, path: &str) -> Option<(Vec<Value>, Optio
         262_144,
         |offset, line| {
             if let Ok(value) = serde_json::from_slice(line) {
-                if latest.is_none() && !agent.is_empty() {
-                    latest = records(agent, &value, offset, &mut false)
-                        .into_iter()
-                        .rev()
-                        .find(|turn| turn.role != Role::Context)
-                        .map(|turn| (turn.role == Role::Assistant).then_some(turn.id));
+                if !agent.is_empty() && !pin.finished() {
+                    let found = records(agent, &value, offset, &mut false);
+                    if latest.is_none() {
+                        latest = found
+                            .iter()
+                            .rev()
+                            .find(|turn| turn.role != Role::Context)
+                            .map(|turn| (turn.role == Role::Assistant).then(|| turn.id.clone()));
+                    }
+                    pin.feed(found);
                 }
                 values.push(value);
             }
@@ -85,7 +90,69 @@ pub(crate) fn session_tail(agent: &str, path: &str) -> Option<(Vec<Value>, Optio
         |_, _| {},
     )
     .ok()?;
-    Some((values, latest.flatten()))
+    // The pinned end-of-turn message stays the reply through later follow-ups.
+    let reply = pin.pinned().map(|turn| turn.id).or(latest.flatten());
+    Some((values, reply))
+}
+
+/// Reads records newest first, back to the newest owner message, and keeps the newest
+/// `end_turn` call whose recorded result is not an error. Results come before their calls
+/// in this order, so each result's status waits for its call.
+#[derive(Debug, Default)]
+struct Pin {
+    results: std::collections::HashMap<String, ToolStatus>,
+    found: Option<Turn>,
+    boundary: bool,
+}
+
+impl Pin {
+    fn finished(&self) -> bool {
+        self.found.is_some() || self.boundary
+    }
+
+    /// One transcript line's records, in their transcript order.
+    fn feed(&mut self, records: Vec<Turn>) {
+        for mut record in records.into_iter().rev() {
+            if self.finished() {
+                return;
+            }
+            if record.role == Role::User {
+                self.boundary = true;
+                return;
+            }
+            let Some(tool) = &mut record.tool else {
+                continue;
+            };
+            if tool.status != ToolStatus::Unknown {
+                self.results.insert(tool.call_id.clone(), tool.status);
+            }
+            if record.end_turn.is_some()
+                && let Some(status) = self.results.get(&tool.call_id)
+            {
+                tool.status = *status;
+                if record.pinned().is_some() {
+                    self.found = Some(record);
+                }
+            }
+        }
+    }
+
+    fn pinned(self) -> Option<Turn> {
+        self.found
+    }
+}
+
+/// The newest end-of-turn message since the newest owner message, in `values` (newest
+/// first).
+fn pinned(agent: &str, values: &[Value]) -> Option<Turn> {
+    let mut pin = Pin::default();
+    for value in values {
+        if pin.finished() {
+            break;
+        }
+        pin.feed(records(agent, value, 0, &mut false));
+    }
+    pin.pinned()
 }
 
 /// One step of an agent's work: a tool call or a message.
@@ -157,9 +224,13 @@ pub fn latest(agent: &str, values: &[Value]) -> Option<Step> {
     })
 }
 
-/// The agent's final reply: the text of its newest assistant message, in `values` (newest
-/// first). Tool calls and thinking are not part of it.
+/// The agent's final reply, in `values` (newest first): the message of its newest
+/// successful `end_turn` since the newest owner message. Without one, the text of its newest
+/// assistant message. Other tool calls and thinking are not part of it.
 pub fn reply(agent: &str, values: &[Value]) -> Option<String> {
+    if let Some(turn) = pinned(agent, values) {
+        return Some(turn.text);
+    }
     let texts = |content: &Value| -> Vec<String> {
         if let Some(text) = content.as_str() {
             return vec![text.to_owned()];
@@ -958,6 +1029,7 @@ fn envelope(agent: &str, value: &Value, offset: u64) -> Turn {
         },
         timestamp,
         tool: None,
+        end_turn: None,
     }
 }
 
@@ -989,6 +1061,7 @@ fn custom_records(value: &Value, offset: u64) -> Vec<Turn> {
                     },
                     timestamp: milliseconds(&record["created_ms"], TimeMeaning::Created),
                     tool: None,
+                    end_turn: None,
                 })
             })
             .collect();
@@ -1177,6 +1250,10 @@ fn tool_record(agent: &str, value: &Value, tool: &DecodedTool<'_>, offset: u64) 
         } else {
             &block["arguments"]
         };
+        if let Some((kind, message)) = end_turn_call(name.as_deref(), arguments) {
+            record.end_turn = Some(kind);
+            record.text = message;
+        }
         prefix(
             &call_line(name.as_deref().unwrap_or_default(), arguments),
             4 * 1024,
@@ -1211,6 +1288,20 @@ fn tool_record(agent: &str, value: &Value, tool: &DecodedTool<'_>, offset: u64) 
         output_lines,
     });
     record
+}
+
+/// The kind and message of an `end_turn` call. Codex sends its arguments as a JSON string.
+fn end_turn_call(name: Option<&str>, arguments: &Value) -> Option<(EndTurnKind, String)> {
+    if !name.is_some_and(is_end_turn_tool) {
+        return None;
+    }
+    let decoded = arguments
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let arguments = decoded.as_ref().unwrap_or(arguments);
+    let kind = arguments["kind"].as_str()?.parse().ok()?;
+    let message = arguments["message"].as_str()?.trim();
+    (!message.is_empty()).then(|| (kind, message.to_owned()))
 }
 
 fn result_status(error: &Value) -> ToolStatus {
@@ -1537,6 +1628,59 @@ mod tests {
         }
         std::fs::write(&path, text).expect("the transcript");
         path.to_string_lossy().into_owned()
+    }
+
+    /// The shape of a real session: the answer, a check-in after it, and an answer to that.
+    fn ended_session(error: bool) -> Vec<Value> {
+        vec![
+            json!({"type":"message","id":"u","message":{"role":"user","content":"Prune one checkout."}}),
+            json!({"type":"message","id":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Checking."},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}]}}),
+            json!({"type":"message","id":"r1","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","isError":false,"content":[{"type":"text","text":"ok"}]}}),
+            json!({"type":"message","id":"a2","message":{"role":"assistant","content":[{"type":"toolCall","id":"c2","name":"end_turn","arguments":{"kind":"reply","message":"I added `dogsled prune --path`."}}]}}),
+            json!({"type":"message","id":"r2","message":{"role":"toolResult","toolCallId":"c2","toolName":"end_turn","isError":error,"content":[{"type":"text","text":"Turn ended."}]}}),
+            json!({"type":"custom_message","id":"n","customType":"dogsled","display":true,"details":{"records":[{"id":"check","sender":"dogsled","kind":"check-in","created_ms":7,"text":"Two jobs closed."}]}}),
+            json!({"type":"message","id":"a3","message":{"role":"assistant","content":[{"type":"text","text":"Both are my cargo jobs."}]}}),
+        ]
+    }
+
+    #[test]
+    fn an_end_turn_message_stays_the_reply_through_later_runs() {
+        let lines = ended_session(false);
+        let newest: Vec<Value> = lines.iter().rev().cloned().collect();
+        assert_eq!(
+            reply("pi", &newest).as_deref(),
+            Some("I added `dogsled prune --path`.")
+        );
+        let path = transcript(&lines);
+        let history = conversation("pi", &path);
+        let edge = portal_types::agents::reply_edge(&history.turns).unwrap();
+        assert_eq!(edge.pinned(), Some(EndTurnKind::Reply));
+        assert_eq!(edge.text, "I added `dogsled prune --path`.");
+        // The reply stamp names the same record, so a later run is not a new reply.
+        assert_eq!(session_tail("pi", &path).unwrap().1, Some(edge.id.clone()));
+        std::fs::remove_file(path).unwrap();
+        // A new owner message starts a turn that the old message does not end.
+        let mut asked = newest.clone();
+        asked.insert(0, lines[0].clone());
+        assert_eq!(
+            reply("pi", &asked).as_deref(),
+            Some("Both are my cargo jobs.")
+        );
+    }
+
+    #[test]
+    fn a_refused_end_turn_pins_nothing() {
+        let lines = ended_session(true);
+        let newest: Vec<Value> = lines.iter().rev().cloned().collect();
+        assert_eq!(
+            reply("pi", &newest).as_deref(),
+            Some("Both are my cargo jobs.")
+        );
+        let path = transcript(&lines);
+        let history = conversation("pi", &path);
+        assert!(history.turns.iter().all(|turn| turn.pinned().is_none()));
+        assert_eq!(session_tail("pi", &path).unwrap().1.as_deref(), Some("a3"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2243,7 +2387,7 @@ mod tests {
         let gate = json!({
             "type":"custom_message",
             "customType":"dogsled",
-            "content":"End your turn with done, ask, or blocked, or wait for your children.",
+            "content":"End your turn with end_turn: done, ask, blocked, waiting, or reply.",
             "display":true,
             "id":"gate-entry",
             "parentId":"previous-entry",
@@ -2273,7 +2417,7 @@ mod tests {
         );
         assert_eq!(
             record.text,
-            "End your turn with done, ask, or blocked, or wait for your children."
+            "End your turn with end_turn: done, ask, blocked, waiting, or reply."
         );
         assert_eq!(record.tool, None);
     }

@@ -378,6 +378,66 @@ fn signal_refuses_missing_session_and_nonworking_agents() {
 }
 
 #[test]
+fn end_turn_routes_each_kind_and_a_refusal_records_nothing() {
+    use portal_types::agents::EndTurnKind;
+    let ledger = ledger();
+    let shell = Fake::new();
+    let child = agent("working");
+    live_signal_agent(&shell, &child);
+    let pane = || Ok(child.pane.clone());
+    // A reply needs no pane, and no kind accepts an empty message.
+    let no_pane = || Err(Error::Invalid("no pane".into()));
+    let reply = end_turn(&ledger, &shell, no_pane(), EndTurnKind::Reply, "answer", 1).unwrap();
+    assert!(reply.mark.is_none() && reply.signal.is_none());
+    for (kind, message) in [(EndTurnKind::Reply, " "), (EndTurnKind::Waiting, "waiting")] {
+        assert!(end_turn(&ledger, &shell, pane(), kind, message, 1).is_err());
+    }
+    assert_eq!(list(&ledger).unwrap(), []);
+    let asked = end_turn(&ledger, &shell, pane(), EndTurnKind::Ask, "which one?", 1).unwrap();
+    let signal = asked.signal.unwrap();
+    assert_eq!(signal.kind, crate::lifecycle::Signal::Ask);
+    assert_eq!(signal.text, "which one?");
+    crate::items::record(
+        &ledger,
+        crate::items::Item {
+            id: "open-child".into(),
+            kind: "agent".into(),
+            host: "local".into(),
+            pane: "w3:p1".into(),
+            owner_pane: child.pane.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    end_turn(&ledger, &shell, pane(), EndTurnKind::Waiting, "waiting", 2).unwrap();
+}
+
+#[test]
+fn end_turn_done_keeps_its_message_as_the_final_reply() {
+    use portal_types::agents::EndTurnKind;
+    let ledger = ledger();
+    let shell = Fake::new();
+    live_signal_agent(&shell, &agent("working"));
+    shell.on("herdr pane list", r#"{"result":{"panes":[]}}"#);
+    let pane = || Ok("w2:p1".to_owned());
+    end_turn(&ledger, &shell, pane(), EndTurnKind::Done, "First.", 1).unwrap();
+    // Only a new call replaces the message.
+    end_turn(
+        &ledger,
+        &shell,
+        pane(),
+        EndTurnKind::Done,
+        " Merged in #12. ",
+        2,
+    )
+    .unwrap();
+    let marks = list(&ledger).unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].end_turn_message.as_deref(), Some("Merged in #12."));
+    assert!(marks[0].reply.is_none() && !marks[0].native_done);
+}
+
+#[test]
 fn signals_do_not_require_clean_source_or_finished_children() {
     let ledger = ledger();
     let shell = Fake::new();
@@ -740,6 +800,7 @@ fn mark_at() -> Mark {
         detached: false,
         reply: None,
         native_done: false,
+        end_turn_message: None,
         closed_ms: None,
         dropped_ms: None,
     }
@@ -1363,7 +1424,7 @@ fn done_refuses_every_nonworking_state_without_recording() {
             mark(&ledger, &shell, "w2:p1", 1)
                 .unwrap_err()
                 .to_string()
-                .contains("call done during the turn")
+                .contains("with end_turn kind done")
         );
         assert_eq!(crate::host_store::marks(&ledger).unwrap(), BTreeMap::new());
     }

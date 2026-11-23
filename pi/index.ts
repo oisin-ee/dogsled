@@ -14,6 +14,7 @@ import { registerInterview } from "./interview.ts";
 import { registerPlanMode } from "./plan-mode.ts";
 import { registerActivity } from "./activity.ts";
 import { registerSettings } from "./settings.ts";
+import { registerEndTurn } from "./end-turn.ts";
 import { ServeClient } from "./serve-client.ts";
 import { createTodo } from "./todo/src/index.ts";
 
@@ -50,11 +51,14 @@ export default function dogsled(pi: ExtensionAPI) {
 		command: binary,
 		args: ["mcp"],
 		exposure: "direct",
+		// The native `end_turn` below replaces the server's: it ends the run when it succeeds.
+		toolExposure: { end_turn: "hidden" },
 		// Close, lead, and repo_open run for up to the server's ten-minute setup budget. The
 		// default 60 s request timeout would report them failed while they still run.
 		timeout: MCP_TIMEOUT_S,
-		description: "Use the native done, ask, and blocked tools for turn signals. End every turn with exactly one of: done (whole task complete), ask (you need an answer from your owner), blocked (you cannot continue), or waiting for your own open children. Spawn Pi, Claude, and Codex children and jobs on Herdr hosts, and message any agent through its inbox.",
+		description: "Spawn Pi, Claude, and Codex children and jobs on Herdr hosts, and message any agent through its inbox. End every turn with the native end_turn tool, and put your final reply in its message.",
 	});
+	registerEndTurn(pi, args => pi.exec(binary, args));
 
 	async function exec(args: string[]) {
 		const result = await pi.exec(binary, args);

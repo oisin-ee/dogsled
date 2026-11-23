@@ -138,7 +138,7 @@ fn corrective_messages(rig: &Rig) -> Vec<Value> {
         .unwrap()
         .iter()
         .filter(|record| {
-            record["text"] == "End your turn with done, ask, or blocked, or wait for your children."
+            record["text"] == "End your turn with end_turn: done, ask, blocked, waiting, or reply."
         })
         .cloned()
         .collect()

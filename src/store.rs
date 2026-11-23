@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 
 /// Version 6 upgrades in place. Earlier versions retain their existing reset policy.
-const VERSION: i64 = 7;
+const VERSION: i64 = 8;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -74,12 +74,15 @@ fn open(ledger: &Ledger) -> Result<Connection> {
         ledger.with_lock("state-db", || {
             let current = version(&connection)?;
             connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-            if current == 6 {
+            if current == 6 || current == 7 {
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                tx.execute_batch(
-                    "ALTER TABLE host_snapshot_probe_agent_panes ADD COLUMN session_reply_id TEXT;
-                     UPDATE host_snapshot_probe_agent_panes SET transcript_modified=NULL WHERE transcript IS NOT NULL;",
-                )?;
+                if current == 6 {
+                    tx.execute_batch(
+                        "ALTER TABLE host_snapshot_probe_agent_panes ADD COLUMN session_reply_id TEXT;
+                         UPDATE host_snapshot_probe_agent_panes SET transcript_modified=NULL WHERE transcript IS NOT NULL;",
+                    )?;
+                }
+                tx.execute_batch("ALTER TABLE host_marks_entries ADD COLUMN end_turn_message TEXT;")?;
                 tx.pragma_update(None, "user_version", VERSION)?;
                 tx.commit()?;
             } else if current < VERSION {
@@ -552,7 +555,7 @@ mod tests {
         write(&ledger, |tx| sync_items(tx, &[item("keep")])).unwrap();
         release();
         let conn = Connection::open(ledger.dir.join("state.db")).unwrap();
-        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; PRAGMA user_version=6;").unwrap();
+        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; ALTER TABLE host_marks_entries DROP COLUMN end_turn_message; PRAGMA user_version=6;").unwrap();
         drop(conn);
         assert_eq!(items(&ledger).unwrap(), json!([item("keep")]));
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -626,7 +629,7 @@ mod tests {
         write(&ledger, |tx| {
             let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             assert_eq!(version, VERSION);
-            assert_eq!(version, 7);
+            assert_eq!(version, 8);
             assert!(!crate::lead_store::exists_in(tx, "absent")?);
             let columns: Vec<String> = tx
                 .prepare("PRAGMA table_info(leads)")?

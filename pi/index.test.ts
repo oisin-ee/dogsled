@@ -392,8 +392,10 @@ test("registers the dogsled tools, the panel command, and the message renderer",
 	assert.deepEqual([config["args"], config["exposure"]], [["mcp"], "direct"]);
 	// Longer than the server's ten-minute setup budget (`budget::SETUP_LIMIT`).
 	assert.ok(Number(config["timeout"]) > 600);
-	assert.match(String(config["description"]), /native done, ask, and blocked tools/);
-	assert.match(String(config["description"]), /End every turn with exactly one of: done \(whole task complete\), ask \(you need an answer from your owner\), blocked \(you cannot continue\), or waiting for your own open children/);
+	assert.match(String(config["description"]), /End every turn with the native end_turn tool/);
+	// The native end_turn replaces the server's, so the model sees one.
+	assert.deepEqual(config["toolExposure"], { end_turn: "hidden" });
+	assert.ok(r.tools.has("end_turn"));
 	assert.ok(!String(config["description"]).includes("dogsled done"));
 	assert.ok(r.commands.has("dogsled"));
 	// The card names the sender and kind and shows the text, folded past 12 lines.
@@ -404,6 +406,18 @@ test("registers the dogsled tools, the panel command, and the message renderer",
 	assert.ok(lines.includes("line 11") && !lines.includes("line 12") && lines.includes("… 8 more lines"));
 	const open = r.renderers.get("dogsled")(message, { expanded: true, outputPad: 1 }, plain).render(60).map((l: string) => l.trim());
 	assert.ok(open.includes("line 19"));
+});
+
+test("end_turn records the kind and ends the run, and a refusal ends nothing", async () => {
+	const r = rig();
+	const tool = r.tools.get("end_turn") as { execute: (id: string, params: unknown) => Promise<{ terminate?: boolean }> };
+	const result = await tool.execute("call", { kind: "done", message: "All merged." });
+	assert.equal(result.terminate, true);
+	assert.deepEqual(r.calls.at(-1)?.slice(1), ["end-turn", "--kind", "done", "--message", "All merged.", "--json"]);
+	const calls = r.calls.length;
+	await assert.rejects(tool.execute("call", { kind: "finished", message: "x" }), /kind must be one of/);
+	await assert.rejects(tool.execute("call", { kind: "reply", message: " " }), /needs a message/);
+	assert.equal(r.calls.length, calls);
 });
 
 test("uses the shared context hook and leaves prompts unchanged when unavailable", async () => {
