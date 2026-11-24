@@ -567,12 +567,19 @@ impl<'a> Fleet<'a> {
             .chain(args.iter().cloned())
             .chain(["--json".into()])
             .collect();
+        // A shared master outlives network changes. Without keepalives it cannot tell that its
+        // transport died, and every call through it waits for the whole call budget. Three
+        // missed 5 s probes close it, so the next call opens a fresh connection.
         let mut options = vec![
             "-T".into(),
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
             "ConnectTimeout=5".into(),
+            "-o".into(),
+            "ServerAliveInterval=5".into(),
+            "-o".into(),
+            "ServerAliveCountMax=3".into(),
         ];
         options.extend(multiplexing(&self.ledger.dir));
         options.extend([
