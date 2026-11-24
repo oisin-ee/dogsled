@@ -45,8 +45,8 @@ pub enum PortalAvailability {
 pub struct PortalSnapshot {
     pub version: u32,
     /// The Dogsled release of the server that serves the portal, such as `0.42.0`. The
-    /// observation leaves it empty; the portal server sets it.
-    #[serde(default)]
+    /// observation leaves it out; the portal server sets it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dogsled: String,
     pub epoch: String,
     pub revision: u64,
