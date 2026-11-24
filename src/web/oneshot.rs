@@ -260,6 +260,16 @@ mod tests {
         }))?)
     }
 
+    /// The serving process stamps its own release on what it streams.
+    fn stamped(
+        snapshot: Option<portal_types::PortalSnapshot>,
+    ) -> Option<portal_types::PortalSnapshot> {
+        snapshot.map(|mut snapshot| {
+            env!("CARGO_PKG_VERSION").clone_into(&mut snapshot.dogsled);
+            snapshot
+        })
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporary_portal_receives_publication_updates() -> Result<()> {
         use std::io::BufRead as _;
@@ -331,7 +341,7 @@ mod tests {
                 .await
                 .expect("initial publication")
                 .expect("stream open");
-            assert_eq!(Some(first), initial.snapshot);
+            assert_eq!(Some(first), stamped(initial.snapshot));
             board.generated_ms = 8;
             let changed =
                 super::super::test_support::publish(&mut publisher, &ledger, board, agents)?;
@@ -341,7 +351,7 @@ mod tests {
                 .expect("stream open");
             assert_eq!(second.revision, 2);
             assert_eq!(second.inbox.as_ref().expect("published inbox").count, 1);
-            assert_eq!(Some(second), changed.snapshot);
+            assert_eq!(Some(second), stamped(changed.snapshot));
             let pending = super::super::store::pending(&ledger)?;
             let response = post(
                 port,
