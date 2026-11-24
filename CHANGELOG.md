@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.43.0](https://github.com/oisin-ee/dogsled/compare/v0.42.0...v0.43.0) (2026-11-24)
+
+
+### Features
+
+* **portal:** distinguish Dogsled calls, receipts and incoming messages ([#425](https://github.com/oisin-ee/dogsled/issues/425)) ([9c2f7da](https://github.com/oisin-ee/dogsled/commit/9c2f7da992bdea1dae24896923263d36850e6e06))
+* **portal:** show agent messages between work folds, the Dogsled version, and host and model chips ([#421](https://github.com/oisin-ee/dogsled/issues/421)) ([144fd4f](https://github.com/oisin-ee/dogsled/commit/144fd4fb4bed5d9c783eb681b0926a5fcc2fe8fd))
+
+
+### Bug Fixes
+
+* **plugin:** end the Claude Code run after end_turn ([#424](https://github.com/oisin-ee/dogsled/issues/424)) ([9501db6](https://github.com/oisin-ee/dogsled/commit/9501db64a6bacce280611c2385ad97269f0674e1))
+* **portal:** fold text an agent writes after its end_turn reply ([#423](https://github.com/oisin-ee/dogsled/issues/423)) ([bc2e1d1](https://github.com/oisin-ee/dogsled/commit/bc2e1d1c4bd44095eee08219a77b07a5c1733c85))
+* **portal:** leave the version out of the observation snapshot ([aad6921](https://github.com/oisin-ee/dogsled/commit/aad6921f36bbb045127429a42f1beb10d03c4120))
+
 ## [0.42.0](https://github.com/oisin-ee/dogsled/compare/v0.41.0...v0.42.0) (2026-11-23)
 
 
