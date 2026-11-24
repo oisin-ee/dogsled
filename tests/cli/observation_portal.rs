@@ -174,8 +174,11 @@ impl Http {
         loop {
             let (kind, data) = self.event();
             assert_eq!(kind, "portal", "{kind}: {data}");
-            let frame: Value = serde_json::from_str(&data).unwrap();
+            let mut frame: Value = serde_json::from_str(&data).unwrap();
             if frame.get("observation").is_none() {
+                // The serving process stamps its release; the rest is the observation's.
+                let stamp = frame.as_object_mut().unwrap().remove("dogsled");
+                assert_eq!(stamp, Some(json!(env!("CARGO_PKG_VERSION"))), "{data}");
                 return frame;
             }
             assert!(frame["error"].is_string());
