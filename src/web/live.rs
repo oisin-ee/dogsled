@@ -180,6 +180,28 @@ impl Selection {
 
 type Update<T> = Result<T, String>;
 
+/// The wait before one failed interest is tried again: 1 s, doubling to 30 s, and 1 s again
+/// after the interest delivered a value. An unreachable host is not asked every two seconds.
+struct Backoff(Duration);
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self(Duration::from_secs(1))
+    }
+}
+
+impl Backoff {
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.0;
+        self.0 = (delay * 2).min(Duration::from_secs(30));
+        delay
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 async fn follow<T, W>(
     state: AppState,
     address: AgentAddress,
@@ -193,6 +215,7 @@ async fn follow<T, W>(
     W: ipc::Wire + Send + Sync + 'static,
 {
     let mut last_error = None;
+    let mut backoff = Backoff::default();
     loop {
         let error = if address.host == crate::hosts::LOCAL {
             let mut updates = local(&state, address.pane.clone(), open, project);
@@ -222,6 +245,10 @@ async fn follow<T, W>(
             )
             .await
         };
+        // A delivered value clears the last error, so this attempt worked before it failed.
+        if last_error.is_none() {
+            backoff.reset();
+        }
         if last_error.as_ref() != Some(&error) {
             last_error = Some(error.clone());
             if sender.send(frame(Err(error))).await.is_err() {
@@ -229,7 +256,7 @@ async fn follow<T, W>(
             }
         }
         // Retry only the failed interest. The portal and the other interest keep flowing.
-        tokio::time::sleep(super::RETRY).await;
+        tokio::time::sleep(backoff.next_delay()).await;
     }
 }
 
@@ -463,6 +490,16 @@ pub(super) mod tests {
             _ => None,
         })
         .await
+    }
+
+    #[test]
+    fn retry_backoff_doubles_caps_and_resets_after_a_value() {
+        let mut backoff = Backoff::default();
+        let delays: Vec<_> = (0..8).map(|_| backoff.next_delay().as_secs()).collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30, 30]);
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
     }
 
     #[tokio::test]
