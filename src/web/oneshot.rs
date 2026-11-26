@@ -272,8 +272,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn temporary_portal_receives_publication_updates() -> Result<()> {
-        use std::io::BufRead as _;
-
         let ledger = Ledger::temporary();
         let mut publisher = crate::observation::Publisher::new()?;
         let mut board = super::super::board::view(
@@ -320,20 +318,18 @@ mod tests {
                 .expect("URL port")
                 .parse()
                 .expect("port number");
-            let client = tokio::task::spawn_blocking(move || {
-                let mut socket =
-                    std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
-                socket
-                    .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
-                    .expect("timeout");
-                write!(socket, "GET /api/stream HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").expect("request SSE");
-                for line in std::io::BufReader::new(socket).lines() {
-                    let line = line.expect("SSE line");
-                    if let Some(data) = line.strip_prefix("data: ")
-                        && let Ok(snapshot) =
-                            serde_json::from_str::<portal_types::PortalSnapshot>(data)
+            let client = tokio::spawn(async move {
+                use super::super::live::tests as live;
+                use portal_types::live::ServerFrame;
+                let mut socket = live::connect(port, &format!("http://localhost:{port}"))
+                    .await
+                    .unwrap();
+                while let Some(frame) = live::read(&mut socket).await {
+                    if let ServerFrame::Portal {
+                        event: portal_types::PortalEvent::Snapshot(snapshot),
+                    } = frame
                     {
-                        events.send(snapshot).expect("report publication");
+                        events.send(*snapshot).expect("report publication");
                     }
                 }
             });
