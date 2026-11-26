@@ -1,0 +1,2422 @@
+{
+  "app": "squig",
+  "version": 1,
+  "fileName": "autonomous-toggle",
+  "look": {
+    "theme": "graphite",
+    "paper": "white",
+    "font": "sans",
+    "grid": false
+  },
+  "nodes": {
+    "desktop-page-title": {
+      "id": "desktop-page-title",
+      "type": "text",
+      "text": "Autonomous toggle \u2014 lead page, switch on, Decisions open",
+      "fontSize": 22,
+      "x": 0,
+      "y": 0,
+      "w": 900,
+      "h": 36,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-scope": {
+      "id": "desktop-page-scope",
+      "type": "text",
+      "text": "Autonomous toggle \u00b7 Desktop \u00b7 1600 \u00d7 1000. New parts: the two Autonomous switches, the Auto badge, the Decisions tab.",
+      "fontSize": 14,
+      "x": 0,
+      "y": 40,
+      "w": 900,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-frame": {
+      "id": "desktop-page-frame",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 110,
+      "w": 1600,
+      "h": 1000,
+      "locked": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-top": {
+      "id": "desktop-page-top",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 110,
+      "w": 1600,
+      "h": 48,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-brand": {
+      "id": "desktop-page-brand",
+      "type": "text",
+      "text": "Dogsled   v0.44",
+      "fontSize": 14,
+      "x": 16,
+      "y": 123,
+      "w": 150,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-new": {
+      "id": "desktop-page-new",
+      "type": "component",
+      "kind": "button",
+      "x": 170,
+      "y": 118,
+      "w": 76,
+      "h": 32,
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "left",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-metrics": {
+      "id": "desktop-page-metrics",
+      "type": "component",
+      "kind": "button",
+      "x": 252,
+      "y": 118,
+      "w": 84,
+      "h": 32,
+      "props": {
+        "label": "Metrics",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none"
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-fleet": {
+      "id": "desktop-page-fleet",
+      "type": "component",
+      "kind": "switch",
+      "x": 352,
+      "y": 120,
+      "w": 150,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": false,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-tally": {
+      "id": "desktop-page-tally",
+      "type": "text",
+      "text": "2 need you   4 working   3 idle",
+      "fontSize": 13,
+      "x": 530,
+      "y": 124,
+      "w": 330,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-hosts": {
+      "id": "desktop-page-hosts",
+      "type": "text",
+      "text": "netcup 41%   momokaya-2 8%   mac 12%",
+      "fontSize": 13,
+      "x": 1300,
+      "y": 124,
+      "w": 284,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-side": {
+      "id": "desktop-page-side",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 158,
+      "w": 292,
+      "h": 952,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-side-h": {
+      "id": "desktop-page-side-h",
+      "type": "text",
+      "text": "Agents",
+      "fontSize": 14,
+      "x": 16,
+      "y": 174,
+      "w": 260,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-side-n": {
+      "id": "desktop-page-side-n",
+      "type": "text",
+      "text": "Needs you",
+      "fontSize": 12,
+      "x": 16,
+      "y": 210,
+      "w": 260,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-need": {
+      "id": "desktop-page-need",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "light",
+      "x": 12,
+      "y": 234,
+      "w": 268,
+      "h": 68,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-need-t": {
+      "id": "desktop-page-need-t",
+      "type": "text",
+      "text": "Question \u00b7 rondo \u00b7 4m\nWhich calendar is the default?",
+      "fontSize": 12,
+      "x": 24,
+      "y": 242,
+      "w": 244,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-side-r": {
+      "id": "desktop-page-side-r",
+      "type": "text",
+      "text": "dogsled",
+      "fontSize": 12,
+      "x": 16,
+      "y": 322,
+      "w": 260,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-sel": {
+      "id": "desktop-page-sel",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "strong",
+      "x": 12,
+      "y": 346,
+      "w": 268,
+      "h": 64,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-sel-t": {
+      "id": "desktop-page-sel-t",
+      "type": "text",
+      "text": "CSV export for metrics",
+      "fontSize": 14,
+      "x": 24,
+      "y": 354,
+      "w": 172,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-sel-b": {
+      "id": "desktop-page-sel-b",
+      "type": "component",
+      "kind": "badge",
+      "x": 208,
+      "y": 354,
+      "w": 60,
+      "h": 22,
+      "props": {
+        "label": "Auto",
+        "variant": "outline",
+        "dot": false
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-sel-m": {
+      "id": "desktop-page-sel-m",
+      "type": "text",
+      "text": "working \u00b7 3 workers \u00b7 1 working",
+      "fontSize": 12,
+      "x": 24,
+      "y": 380,
+      "w": 244,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-row2": {
+      "id": "desktop-page-row2",
+      "type": "text",
+      "text": "Self-update from releases\nidle",
+      "fontSize": 12,
+      "x": 24,
+      "y": 426,
+      "w": 244,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-side-r2": {
+      "id": "desktop-page-side-r2",
+      "type": "text",
+      "text": "rondo",
+      "fontSize": 12,
+      "x": 16,
+      "y": 486,
+      "w": 260,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-row3": {
+      "id": "desktop-page-row3",
+      "type": "text",
+      "text": "Live Activities for Practice\nworking",
+      "fontSize": 12,
+      "x": 24,
+      "y": 510,
+      "w": 244,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-head": {
+      "id": "desktop-page-head",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 292,
+      "y": 158,
+      "w": 908,
+      "h": 64,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-head-t": {
+      "id": "desktop-page-head-t",
+      "type": "text",
+      "text": "CSV export for metrics",
+      "fontSize": 18,
+      "x": 312,
+      "y": 166,
+      "w": 420,
+      "h": 30,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-head-m": {
+      "id": "desktop-page-head-m",
+      "type": "text",
+      "text": "working \u00b7 lead on netcup \u00b7 pi     feat/metrics-csv",
+      "fontSize": 12,
+      "x": 312,
+      "y": 194,
+      "w": 520,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-lead": {
+      "id": "desktop-page-lead",
+      "type": "component",
+      "kind": "switch",
+      "x": 894,
+      "y": 176,
+      "w": 150,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": true,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-act0": {
+      "id": "desktop-page-act0",
+      "type": "component",
+      "kind": "icon-button",
+      "x": 1060,
+      "y": 172,
+      "w": 36,
+      "h": 36,
+      "props": {
+        "icon": "square",
+        "variant": "outline",
+        "shape": "square"
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-act1": {
+      "id": "desktop-page-act1",
+      "type": "component",
+      "kind": "icon-button",
+      "x": 1104,
+      "y": 172,
+      "w": 36,
+      "h": 36,
+      "props": {
+        "icon": "arrow-square-out",
+        "variant": "outline",
+        "shape": "square"
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-act2": {
+      "id": "desktop-page-act2",
+      "type": "component",
+      "kind": "icon-button",
+      "x": 1148,
+      "y": 172,
+      "w": 36,
+      "h": 36,
+      "props": {
+        "icon": "x",
+        "variant": "outline",
+        "shape": "square"
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-t1": {
+      "id": "desktop-page-t1",
+      "type": "text",
+      "text": "You   13:58\nThe plan is approved. Build it. I am away until tonight.",
+      "fontSize": 14,
+      "x": 308,
+      "y": 260,
+      "w": 876,
+      "h": 45,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-t2": {
+      "id": "desktop-page-t2",
+      "type": "text",
+      "text": "Dogsled   13:58\nAutonomous is on for this lead. Open questions become recorded decisions.",
+      "fontSize": 13,
+      "x": 308,
+      "y": 330,
+      "w": 876,
+      "h": 42,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-p1": {
+      "id": "desktop-page-p1",
+      "type": "component",
+      "kind": "paragraph",
+      "x": 308,
+      "y": 400,
+      "w": 876,
+      "h": 80,
+      "props": {},
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-ev": {
+      "id": "desktop-page-ev",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "light",
+      "x": 308,
+      "y": 504,
+      "w": 876,
+      "h": 60,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-ev-t": {
+      "id": "desktop-page-ev-t",
+      "type": "text",
+      "text": "Decision recorded   14:02\nExport UTC timestamps, not local time",
+      "fontSize": 13,
+      "x": 322,
+      "y": 512,
+      "w": 848,
+      "h": 42,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-p2": {
+      "id": "desktop-page-p2",
+      "type": "component",
+      "kind": "paragraph",
+      "x": 308,
+      "y": 588,
+      "w": 876,
+      "h": 100,
+      "props": {},
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-composer": {
+      "id": "desktop-page-composer",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 308,
+      "y": 960,
+      "w": 876,
+      "h": 110,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-composer-t": {
+      "id": "desktop-page-composer-t",
+      "type": "text",
+      "text": "Message the lead\u2026",
+      "fontSize": 14,
+      "x": 324,
+      "y": 972,
+      "w": 500,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-composer-m": {
+      "id": "desktop-page-composer-m",
+      "type": "text",
+      "text": "claude-opus-5-5 \u00b7 high",
+      "fontSize": 12,
+      "x": 324,
+      "y": 1038,
+      "w": 500,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-right": {
+      "id": "desktop-page-right",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 1200,
+      "y": 158,
+      "w": 400,
+      "h": 952,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-now-h": {
+      "id": "desktop-page-now-h",
+      "type": "text",
+      "text": "Now",
+      "fontSize": 12,
+      "x": 1216,
+      "y": 172,
+      "w": 300,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-now": {
+      "id": "desktop-page-now",
+      "type": "text",
+      "text": "Working \u00b7 34m\nRunning cargo test -p portal-types",
+      "fontSize": 13,
+      "x": 1216,
+      "y": 194,
+      "w": 300,
+      "h": 42,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-col-note": {
+      "id": "desktop-page-col-note",
+      "type": "text",
+      "text": "Right column: 400px, was 300px. Session text: full width, 16px side padding (was a centred 704px column with 28px).",
+      "fontSize": 12,
+      "x": 292,
+      "y": 1122,
+      "w": 1308,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-tabs": {
+      "id": "desktop-page-tabs",
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "x": 1212,
+      "y": 258,
+      "w": 376,
+      "h": 34,
+      "props": {
+        "labels": "Todos 2/6, Workers 3, Files 4, Decisions 3",
+        "active": 4,
+        "container": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0": {
+      "id": "desktop-page-d0",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "light",
+      "x": 1212,
+      "y": 306,
+      "w": 376,
+      "h": 300,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0t": {
+      "id": "desktop-page-d0t",
+      "type": "text",
+      "text": "Keep the CSV column order of v1",
+      "fontSize": 14,
+      "x": 1224,
+      "y": 316,
+      "w": 352,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0m": {
+      "id": "desktop-page-d0m",
+      "type": "text",
+      "text": "14:31 \u00b7 worker csv-writer \u00b7 question",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 340,
+      "w": 352,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0q": {
+      "id": "desktop-page-d0q",
+      "type": "text",
+      "text": "Question\nThe plan does not say whether v2 keeps the\nv1 column order.",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 368,
+      "w": 352,
+      "h": 56,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0a": {
+      "id": "desktop-page-d0a",
+      "type": "text",
+      "text": "Decision\nKeep the v1 order. Add new columns last.",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 432,
+      "w": 352,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0w": {
+      "id": "desktop-page-d0w",
+      "type": "text",
+      "text": "Why\nExisting dashboards read columns by\nposition. The plan forbids breaking\nexports that users already have.",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 478,
+      "w": 352,
+      "h": 74,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d0o": {
+      "id": "desktop-page-d0o",
+      "type": "text",
+      "text": "Other options: alphabetical; group by host.",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 560,
+      "w": 352,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d1": {
+      "id": "desktop-page-d1",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 1212,
+      "y": 614,
+      "w": 376,
+      "h": 60,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d1t": {
+      "id": "desktop-page-d1t",
+      "type": "text",
+      "text": "Approved its own plan: plans/export.md",
+      "fontSize": 14,
+      "x": 1224,
+      "y": 622,
+      "w": 352,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d1m": {
+      "id": "desktop-page-d1m",
+      "type": "text",
+      "text": "14:10 \u00b7 lead \u00b7 plan",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 646,
+      "w": 352,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d2": {
+      "id": "desktop-page-d2",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 1212,
+      "y": 682,
+      "w": 376,
+      "h": 60,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d2t": {
+      "id": "desktop-page-d2t",
+      "type": "text",
+      "text": "Export UTC timestamps, not local time",
+      "fontSize": 14,
+      "x": 1224,
+      "y": 690,
+      "w": 352,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-d2m": {
+      "id": "desktop-page-d2m",
+      "type": "text",
+      "text": "14:02 \u00b7 lead \u00b7 question",
+      "fontSize": 12,
+      "x": 1224,
+      "y": 714,
+      "w": 352,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-page-right-f": {
+      "id": "desktop-page-right-f",
+      "type": "text",
+      "text": "Newest first \u00b7 Read only",
+      "fontSize": 12,
+      "x": 1216,
+      "y": 1070,
+      "w": 300,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-page"
+      ]
+    },
+    "desktop-states-title": {
+      "id": "desktop-states-title",
+      "type": "text",
+      "text": "Decisions tab \u2014 states",
+      "fontSize": 22,
+      "x": 1700,
+      "y": 0,
+      "w": 1100,
+      "h": 36,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-scope": {
+      "id": "desktop-states-scope",
+      "type": "text",
+      "text": "Autonomous toggle \u00b7 Desktop right column \u00b7 400 \u00d7 560 each.",
+      "fontSize": 14,
+      "x": 1700,
+      "y": 40,
+      "w": 1100,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-l0": {
+      "id": "desktop-states-l0",
+      "type": "text",
+      "text": "Empty, switch off",
+      "fontSize": 14,
+      "x": 1700,
+      "y": 110,
+      "w": 336,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-f0": {
+      "id": "desktop-states-f0",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 1700,
+      "y": 142,
+      "w": 400,
+      "h": 560,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-tabs0": {
+      "id": "desktop-states-tabs0",
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "x": 1712,
+      "y": 154,
+      "w": 376,
+      "h": 34,
+      "props": {
+        "labels": "Todos 2/6, Workers 3, Files 4, Decisions 0",
+        "active": 4,
+        "container": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-b0": {
+      "id": "desktop-states-b0",
+      "type": "text",
+      "text": "No decisions.\nThis agent asks you when a question is open.\nSwitch Autonomous on to let it decide\nand record each decision here.",
+      "fontSize": 13,
+      "x": 1720,
+      "y": 214,
+      "w": 360,
+      "h": 79,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-l1": {
+      "id": "desktop-states-l1",
+      "type": "text",
+      "text": "Empty, switch on",
+      "fontSize": 14,
+      "x": 2132,
+      "y": 110,
+      "w": 336,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-f1": {
+      "id": "desktop-states-f1",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 2132,
+      "y": 142,
+      "w": 400,
+      "h": 560,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-tabs1": {
+      "id": "desktop-states-tabs1",
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "x": 2144,
+      "y": 154,
+      "w": 376,
+      "h": 34,
+      "props": {
+        "labels": "Todos 2/6, Workers 3, Files 4, Decisions 0",
+        "active": 4,
+        "container": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-b1": {
+      "id": "desktop-states-b1",
+      "type": "text",
+      "text": "No decisions yet.\nAutonomous is on. The agent records each\nopen question it settles here.",
+      "fontSize": 13,
+      "x": 2152,
+      "y": 214,
+      "w": 360,
+      "h": 61,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-l2": {
+      "id": "desktop-states-l2",
+      "type": "text",
+      "text": "Unavailable",
+      "fontSize": 14,
+      "x": 2564,
+      "y": 110,
+      "w": 336,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-f2": {
+      "id": "desktop-states-f2",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 2564,
+      "y": 142,
+      "w": 400,
+      "h": 560,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-tabs2": {
+      "id": "desktop-states-tabs2",
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "x": 2576,
+      "y": 154,
+      "w": 376,
+      "h": 34,
+      "props": {
+        "labels": "Todos 2/6, Workers 3, Files 4, Decisions 0",
+        "active": 4,
+        "container": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-states-b2": {
+      "id": "desktop-states-b2",
+      "type": "text",
+      "text": "Decisions are unavailable.\nHost momokaya-2 did not answer.\nThe last known list is not shown as current.",
+      "fontSize": 13,
+      "x": 2584,
+      "y": 214,
+      "w": 360,
+      "h": 61,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-states"
+      ]
+    },
+    "desktop-switches-title": {
+      "id": "desktop-switches-title",
+      "type": "text",
+      "text": "The two switches \u2014 states",
+      "fontSize": 22,
+      "x": 1700,
+      "y": 790,
+      "w": 1100,
+      "h": 36,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-scope": {
+      "id": "desktop-switches-scope",
+      "type": "text",
+      "text": "Autonomous toggle \u00b7 Desktop top bar and lead header. The fleet switch wins over the agent switch.",
+      "fontSize": 14,
+      "x": 1700,
+      "y": 830,
+      "w": 1100,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-l0": {
+      "id": "desktop-switches-l0",
+      "type": "text",
+      "text": "Top bar, off",
+      "fontSize": 13,
+      "x": 1700,
+      "y": 904,
+      "w": 250,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-s0": {
+      "id": "desktop-switches-s0",
+      "type": "component",
+      "kind": "switch",
+      "x": 1960,
+      "y": 900,
+      "w": 230,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": false,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-n0": {
+      "id": "desktop-switches-n0",
+      "type": "text",
+      "text": "Every agent asks you as usual, unless its own switch is on.",
+      "fontSize": 13,
+      "x": 2210,
+      "y": 904,
+      "w": 560,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-l1": {
+      "id": "desktop-switches-l1",
+      "type": "text",
+      "text": "Top bar, on",
+      "fontSize": 13,
+      "x": 1700,
+      "y": 956,
+      "w": 250,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-s1": {
+      "id": "desktop-switches-s1",
+      "type": "component",
+      "kind": "switch",
+      "x": 1960,
+      "y": 952,
+      "w": 230,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": true,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-n1": {
+      "id": "desktop-switches-n1",
+      "type": "text",
+      "text": "Every lead and worker on every host decides and records.",
+      "fontSize": 13,
+      "x": 2210,
+      "y": 956,
+      "w": 560,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-l2": {
+      "id": "desktop-switches-l2",
+      "type": "text",
+      "text": "Lead header, off",
+      "fontSize": 13,
+      "x": 1700,
+      "y": 1008,
+      "w": 250,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-s2": {
+      "id": "desktop-switches-s2",
+      "type": "component",
+      "kind": "switch",
+      "x": 1960,
+      "y": 1004,
+      "w": 230,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": false,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-n2": {
+      "id": "desktop-switches-n2",
+      "type": "text",
+      "text": "This lead and its workers ask you.",
+      "fontSize": 13,
+      "x": 2210,
+      "y": 1008,
+      "w": 560,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-l3": {
+      "id": "desktop-switches-l3",
+      "type": "text",
+      "text": "Lead header, on",
+      "fontSize": 13,
+      "x": 1700,
+      "y": 1060,
+      "w": 250,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-s3": {
+      "id": "desktop-switches-s3",
+      "type": "component",
+      "kind": "switch",
+      "x": 1960,
+      "y": 1056,
+      "w": 230,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": true,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-n3": {
+      "id": "desktop-switches-n3",
+      "type": "text",
+      "text": "This lead and its workers decide and record.",
+      "fontSize": 13,
+      "x": 2210,
+      "y": 1060,
+      "w": 560,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-l4": {
+      "id": "desktop-switches-l4",
+      "type": "text",
+      "text": "Lead header, fleet switch on",
+      "fontSize": 13,
+      "x": 1700,
+      "y": 1112,
+      "w": 250,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-s4": {
+      "id": "desktop-switches-s4",
+      "type": "component",
+      "kind": "switch",
+      "x": 1960,
+      "y": 1108,
+      "w": 230,
+      "h": 28,
+      "props": {
+        "label": "Autonomous \u00b7 fleet",
+        "on": true,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-n4": {
+      "id": "desktop-switches-n4",
+      "type": "text",
+      "text": "Locked on. Switch the top bar off to change it.",
+      "fontSize": 13,
+      "x": 2210,
+      "y": 1112,
+      "w": 560,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-l5": {
+      "id": "desktop-switches-l5",
+      "type": "text",
+      "text": "Worker header",
+      "fontSize": 13,
+      "x": 1700,
+      "y": 1164,
+      "w": 250,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-s5": {
+      "id": "desktop-switches-s5",
+      "type": "component",
+      "kind": "switch",
+      "x": 1960,
+      "y": 1160,
+      "w": 230,
+      "h": 28,
+      "props": {
+        "label": "Autonomous \u00b7 from lead",
+        "on": true,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "desktop-switches-n5": {
+      "id": "desktop-switches-n5",
+      "type": "text",
+      "text": "Read only. A worker follows its lead.",
+      "fontSize": 13,
+      "x": 2210,
+      "y": 1164,
+      "w": 560,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "desktop-switches"
+      ]
+    },
+    "compact-page-title": {
+      "id": "compact-page-title",
+      "type": "text",
+      "text": "Autonomous toggle \u2014 lead page below 1400px, Decisions tab open",
+      "fontSize": 22,
+      "x": 0,
+      "y": 1220,
+      "w": 900,
+      "h": 36,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-scope": {
+      "id": "compact-page-scope",
+      "type": "text",
+      "text": "Autonomous toggle \u00b7 Compact \u00b7 1280 \u00d7 800. The right column becomes header tabs; Decisions is the fifth tab.",
+      "fontSize": 14,
+      "x": 0,
+      "y": 1260,
+      "w": 900,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-frame": {
+      "id": "compact-page-frame",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 1330,
+      "w": 1280,
+      "h": 800,
+      "locked": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-top": {
+      "id": "compact-page-top",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 1330,
+      "w": 1280,
+      "h": 48,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-brand": {
+      "id": "compact-page-brand",
+      "type": "text",
+      "text": "Dogsled   v0.44",
+      "fontSize": 14,
+      "x": 16,
+      "y": 1343,
+      "w": 150,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-new": {
+      "id": "compact-page-new",
+      "type": "component",
+      "kind": "button",
+      "x": 170,
+      "y": 1338,
+      "w": 76,
+      "h": 32,
+      "props": {
+        "label": "New",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "left",
+        "glyph": "plus"
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-metrics": {
+      "id": "compact-page-metrics",
+      "type": "component",
+      "kind": "button",
+      "x": 252,
+      "y": 1338,
+      "w": 84,
+      "h": 32,
+      "props": {
+        "label": "Metrics",
+        "variant": "outline",
+        "size": "sm",
+        "icon": "none"
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-fleet": {
+      "id": "compact-page-fleet",
+      "type": "component",
+      "kind": "switch",
+      "x": 352,
+      "y": 1340,
+      "w": 150,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": false,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-tally": {
+      "id": "compact-page-tally",
+      "type": "text",
+      "text": "2 need you   4 working   3 idle",
+      "fontSize": 13,
+      "x": 530,
+      "y": 1344,
+      "w": 330,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-hosts": {
+      "id": "compact-page-hosts",
+      "type": "text",
+      "text": "netcup 41%   momokaya-2 8%   mac 12%",
+      "fontSize": 13,
+      "x": 980,
+      "y": 1344,
+      "w": 284,
+      "h": 23,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-side": {
+      "id": "compact-page-side",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 0,
+      "y": 1378,
+      "w": 292,
+      "h": 752,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-side-h": {
+      "id": "compact-page-side-h",
+      "type": "text",
+      "text": "Agents",
+      "fontSize": 14,
+      "x": 16,
+      "y": 1394,
+      "w": 260,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-side-n": {
+      "id": "compact-page-side-n",
+      "type": "text",
+      "text": "Needs you",
+      "fontSize": 12,
+      "x": 16,
+      "y": 1430,
+      "w": 260,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-need": {
+      "id": "compact-page-need",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "light",
+      "x": 12,
+      "y": 1454,
+      "w": 268,
+      "h": 68,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-need-t": {
+      "id": "compact-page-need-t",
+      "type": "text",
+      "text": "Question \u00b7 rondo \u00b7 4m\nWhich calendar is the default?",
+      "fontSize": 12,
+      "x": 24,
+      "y": 1462,
+      "w": 244,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-side-r": {
+      "id": "compact-page-side-r",
+      "type": "text",
+      "text": "dogsled",
+      "fontSize": 12,
+      "x": 16,
+      "y": 1542,
+      "w": 260,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-sel": {
+      "id": "compact-page-sel",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "strong",
+      "x": 12,
+      "y": 1566,
+      "w": 268,
+      "h": 64,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-sel-t": {
+      "id": "compact-page-sel-t",
+      "type": "text",
+      "text": "CSV export for metrics",
+      "fontSize": 14,
+      "x": 24,
+      "y": 1574,
+      "w": 172,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-sel-b": {
+      "id": "compact-page-sel-b",
+      "type": "component",
+      "kind": "badge",
+      "x": 208,
+      "y": 1574,
+      "w": 60,
+      "h": 22,
+      "props": {
+        "label": "Auto",
+        "variant": "outline",
+        "dot": false
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-sel-m": {
+      "id": "compact-page-sel-m",
+      "type": "text",
+      "text": "working \u00b7 3 workers \u00b7 1 working",
+      "fontSize": 12,
+      "x": 24,
+      "y": 1600,
+      "w": 244,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-row2": {
+      "id": "compact-page-row2",
+      "type": "text",
+      "text": "Self-update from releases\nidle",
+      "fontSize": 12,
+      "x": 24,
+      "y": 1646,
+      "w": 244,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-side-r2": {
+      "id": "compact-page-side-r2",
+      "type": "text",
+      "text": "rondo",
+      "fontSize": 12,
+      "x": 16,
+      "y": 1706,
+      "w": 260,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-row3": {
+      "id": "compact-page-row3",
+      "type": "text",
+      "text": "Live Activities for Practice\nworking",
+      "fontSize": 12,
+      "x": 24,
+      "y": 1730,
+      "w": 244,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-head": {
+      "id": "compact-page-head",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 292,
+      "y": 1378,
+      "w": 988,
+      "h": 64,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-head-t": {
+      "id": "compact-page-head-t",
+      "type": "text",
+      "text": "CSV export for metrics",
+      "fontSize": 16,
+      "x": 312,
+      "y": 1386,
+      "w": 250,
+      "h": 27,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-head-m": {
+      "id": "compact-page-head-m",
+      "type": "text",
+      "text": "working \u00b7 lead on netcup \u00b7 pi",
+      "fontSize": 12,
+      "x": 312,
+      "y": 1414,
+      "w": 250,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-tabs": {
+      "id": "compact-page-tabs",
+      "type": "component",
+      "kind": "nav-tabs-pill",
+      "x": 564,
+      "y": 1394,
+      "w": 404,
+      "h": 32,
+      "props": {
+        "labels": "Chat, Todos 2/6, Workers 3, Files 4, Decisions 3",
+        "active": 5,
+        "container": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-lead": {
+      "id": "compact-page-lead",
+      "type": "component",
+      "kind": "switch",
+      "x": 982,
+      "y": 1396,
+      "w": 150,
+      "h": 28,
+      "props": {
+        "label": "Autonomous",
+        "on": true,
+        "showLabel": true
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-act0": {
+      "id": "compact-page-act0",
+      "type": "component",
+      "kind": "icon-button",
+      "x": 1148,
+      "y": 1392,
+      "w": 36,
+      "h": 36,
+      "props": {
+        "icon": "square",
+        "variant": "outline",
+        "shape": "square"
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-act1": {
+      "id": "compact-page-act1",
+      "type": "component",
+      "kind": "icon-button",
+      "x": 1190,
+      "y": 1392,
+      "w": 36,
+      "h": 36,
+      "props": {
+        "icon": "arrow-square-out",
+        "variant": "outline",
+        "shape": "square"
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-act2": {
+      "id": "compact-page-act2",
+      "type": "component",
+      "kind": "icon-button",
+      "x": 1232,
+      "y": 1392,
+      "w": 36,
+      "h": 36,
+      "props": {
+        "icon": "x",
+        "variant": "outline",
+        "shape": "square"
+      },
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0": {
+      "id": "compact-page-d0",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "light",
+      "x": 308,
+      "y": 1466,
+      "w": 956,
+      "h": 300,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0t": {
+      "id": "compact-page-d0t",
+      "type": "text",
+      "text": "Keep the CSV column order of v1",
+      "fontSize": 14,
+      "x": 320,
+      "y": 1476,
+      "w": 932,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0m": {
+      "id": "compact-page-d0m",
+      "type": "text",
+      "text": "14:31 \u00b7 worker csv-writer \u00b7 question",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1500,
+      "w": 932,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0q": {
+      "id": "compact-page-d0q",
+      "type": "text",
+      "text": "Question\nThe plan does not say whether v2 keeps the\nv1 column order.",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1528,
+      "w": 932,
+      "h": 56,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0a": {
+      "id": "compact-page-d0a",
+      "type": "text",
+      "text": "Decision\nKeep the v1 order. Add new columns last.",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1592,
+      "w": 932,
+      "h": 39,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0w": {
+      "id": "compact-page-d0w",
+      "type": "text",
+      "text": "Why\nExisting dashboards read columns by\nposition. The plan forbids breaking\nexports that users already have.",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1638,
+      "w": 932,
+      "h": 74,
+      "fixedW": true,
+      "fixedH": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d0o": {
+      "id": "compact-page-d0o",
+      "type": "text",
+      "text": "Other options: alphabetical; group by host.",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1720,
+      "w": 932,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d1": {
+      "id": "compact-page-d1",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 308,
+      "y": 1774,
+      "w": 956,
+      "h": 60,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d1t": {
+      "id": "compact-page-d1t",
+      "type": "text",
+      "text": "Approved its own plan: plans/export.md",
+      "fontSize": 14,
+      "x": 320,
+      "y": 1782,
+      "w": 932,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d1m": {
+      "id": "compact-page-d1m",
+      "type": "text",
+      "text": "14:10 \u00b7 lead \u00b7 plan",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1806,
+      "w": 932,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d2": {
+      "id": "compact-page-d2",
+      "type": "shape",
+      "shape": "rect",
+      "fill": "paper",
+      "x": 308,
+      "y": 1842,
+      "w": 956,
+      "h": 60,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d2t": {
+      "id": "compact-page-d2t",
+      "type": "text",
+      "text": "Export UTC timestamps, not local time",
+      "fontSize": 14,
+      "x": 320,
+      "y": 1850,
+      "w": 932,
+      "h": 24,
+      "fixedW": true,
+      "fixedH": true,
+      "bold": true,
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-d2m": {
+      "id": "compact-page-d2m",
+      "type": "text",
+      "text": "14:02 \u00b7 lead \u00b7 question",
+      "fontSize": 12,
+      "x": 320,
+      "y": 1874,
+      "w": 932,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    },
+    "compact-page-foot": {
+      "id": "compact-page-foot",
+      "type": "text",
+      "text": "Newest first \u00b7 Read only",
+      "fontSize": 12,
+      "x": 308,
+      "y": 1918,
+      "w": 956,
+      "h": 21,
+      "fixedW": true,
+      "fixedH": true,
+      "ink": "muted",
+      "seed": 1,
+      "groupIds": [
+        "compact-page"
+      ]
+    }
+  },
+  "order": [
+    "desktop-page-title",
+    "desktop-page-scope",
+    "desktop-page-frame",
+    "desktop-page-top",
+    "desktop-page-brand",
+    "desktop-page-new",
+    "desktop-page-metrics",
+    "desktop-page-fleet",
+    "desktop-page-tally",
+    "desktop-page-hosts",
+    "desktop-page-side",
+    "desktop-page-side-h",
+    "desktop-page-side-n",
+    "desktop-page-need",
+    "desktop-page-need-t",
+    "desktop-page-side-r",
+    "desktop-page-sel",
+    "desktop-page-sel-t",
+    "desktop-page-sel-b",
+    "desktop-page-sel-m",
+    "desktop-page-row2",
+    "desktop-page-side-r2",
+    "desktop-page-row3",
+    "desktop-page-head",
+    "desktop-page-head-t",
+    "desktop-page-head-m",
+    "desktop-page-lead",
+    "desktop-page-act0",
+    "desktop-page-act1",
+    "desktop-page-act2",
+    "desktop-page-t1",
+    "desktop-page-t2",
+    "desktop-page-p1",
+    "desktop-page-ev",
+    "desktop-page-ev-t",
+    "desktop-page-p2",
+    "desktop-page-composer",
+    "desktop-page-composer-t",
+    "desktop-page-composer-m",
+    "desktop-page-right",
+    "desktop-page-now-h",
+    "desktop-page-now",
+    "desktop-page-col-note",
+    "desktop-page-tabs",
+    "desktop-page-d0",
+    "desktop-page-d0t",
+    "desktop-page-d0m",
+    "desktop-page-d0q",
+    "desktop-page-d0a",
+    "desktop-page-d0w",
+    "desktop-page-d0o",
+    "desktop-page-d1",
+    "desktop-page-d1t",
+    "desktop-page-d1m",
+    "desktop-page-d2",
+    "desktop-page-d2t",
+    "desktop-page-d2m",
+    "desktop-page-right-f",
+    "desktop-states-title",
+    "desktop-states-scope",
+    "desktop-states-l0",
+    "desktop-states-f0",
+    "desktop-states-tabs0",
+    "desktop-states-b0",
+    "desktop-states-l1",
+    "desktop-states-f1",
+    "desktop-states-tabs1",
+    "desktop-states-b1",
+    "desktop-states-l2",
+    "desktop-states-f2",
+    "desktop-states-tabs2",
+    "desktop-states-b2",
+    "desktop-switches-title",
+    "desktop-switches-scope",
+    "desktop-switches-l0",
+    "desktop-switches-s0",
+    "desktop-switches-n0",
+    "desktop-switches-l1",
+    "desktop-switches-s1",
+    "desktop-switches-n1",
+    "desktop-switches-l2",
+    "desktop-switches-s2",
+    "desktop-switches-n2",
+    "desktop-switches-l3",
+    "desktop-switches-s3",
+    "desktop-switches-n3",
+    "desktop-switches-l4",
+    "desktop-switches-s4",
+    "desktop-switches-n4",
+    "desktop-switches-l5",
+    "desktop-switches-s5",
+    "desktop-switches-n5",
+    "compact-page-title",
+    "compact-page-scope",
+    "compact-page-frame",
+    "compact-page-top",
+    "compact-page-brand",
+    "compact-page-new",
+    "compact-page-metrics",
+    "compact-page-fleet",
+    "compact-page-tally",
+    "compact-page-hosts",
+    "compact-page-side",
+    "compact-page-side-h",
+    "compact-page-side-n",
+    "compact-page-need",
+    "compact-page-need-t",
+    "compact-page-side-r",
+    "compact-page-sel",
+    "compact-page-sel-t",
+    "compact-page-sel-b",
+    "compact-page-sel-m",
+    "compact-page-row2",
+    "compact-page-side-r2",
+    "compact-page-row3",
+    "compact-page-head",
+    "compact-page-head-t",
+    "compact-page-head-m",
+    "compact-page-tabs",
+    "compact-page-lead",
+    "compact-page-act0",
+    "compact-page-act1",
+    "compact-page-act2",
+    "compact-page-d0",
+    "compact-page-d0t",
+    "compact-page-d0m",
+    "compact-page-d0q",
+    "compact-page-d0a",
+    "compact-page-d0w",
+    "compact-page-d0o",
+    "compact-page-d1",
+    "compact-page-d1t",
+    "compact-page-d1m",
+    "compact-page-d2",
+    "compact-page-d2t",
+    "compact-page-d2m",
+    "compact-page-foot"
+  ]
+}
