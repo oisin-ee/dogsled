@@ -841,6 +841,7 @@ fn unchanged_conversation_keys_do_not_notify_session_subscribers()
 }
 
 fn unknown_session_activity_root() -> Element {
+    use_context_provider(crate::app::LivePortal::idle);
     let session = use_signal(|| None::<portal_types::agents::DetailSession>);
     let live = crate::activity::use_live_activity(
         portal_types::agents::AgentAddress::local("pane"),

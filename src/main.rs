@@ -2,6 +2,7 @@
 
 mod activity;
 mod admissions;
+mod autonomy;
 mod backoff;
 mod board;
 mod budget;
@@ -243,6 +244,71 @@ fn turn_command(ledger: &Ledger, shell: &System, json: bool, command: Command) -
     print(json, &signal, || format!("{}\n", signal.event_id))
 }
 
+fn autonomy_command(
+    ledger: &Ledger,
+    shell: &dyn shell::Shell,
+    json: bool,
+    command: Command,
+) -> Result<()> {
+    match command {
+        Command::Decide {
+            title,
+            decision,
+            why,
+            question,
+            alternatives,
+        } => {
+            use portal_types::autonomy::{DecideBody, DecisionSource};
+            let body = DecideBody {
+                title,
+                decision,
+                why,
+                question,
+                alternatives,
+            };
+            let view = autonomy::record(
+                ledger,
+                shell,
+                &inbox::own_pane(None)?,
+                &body,
+                DecisionSource::Agent,
+                None,
+                now_ms(),
+            )?;
+            print(json, &view, || format!("{}\n", view.id))
+        }
+        Command::Decisions { pane } => {
+            let decisions = autonomy::decisions(ledger, pane.as_deref())?;
+            print(json, &decisions, || {
+                decisions
+                    .iter()
+                    .map(decision_block)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        }
+        _ => Err(Error::Invalid("not an autonomy command".into())),
+    }
+}
+
+fn decision_block(view: &portal_types::autonomy::DecisionView) -> String {
+    let mut lines = vec![
+        format!("{} ({}, {})", view.title, view.pane, view.id),
+        format!("Decision: {}", view.decision),
+        format!("Why: {}", view.why),
+    ];
+    for (label, field) in [
+        ("Question", &view.question),
+        ("Alternatives", &view.alternatives),
+        ("Review", &view.review),
+    ] {
+        if let Some(value) = field {
+            lines.push(format!("{label}: {value}"));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
 fn update_command(
     shell: &System,
     policy: &config::Policy,
@@ -410,14 +476,18 @@ fn repo_command(client: &observation::ipc::Client, json: bool) -> Result<()> {
     print(json, &list, || repos::render(&list))
 }
 
-/// Route commands after fleet discovery, keeping their adapters with their owners.
+/// Route commands that use the local ledger or fleet.
 fn dispatch(fleet: &hosts::Fleet<'_>, command: Command, json: bool) -> Result<ExitCode> {
     match command {
-        command @ (Command::Claim { .. } | Command::Accept { .. }) => {
-            claim::command(fleet, command, json)
+        command @ (Command::Decide { .. } | Command::Decisions { .. }) => {
+            autonomy_command(fleet.ledger, fleet.shell, json, command)?;
         }
-        command => runtime::dispatch(fleet, command, json),
+        command @ (Command::Claim { .. } | Command::Accept { .. }) => {
+            return claim::command(fleet, command, json);
+        }
+        command => return runtime::dispatch(fleet, command, json),
     }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The shape of the status command: what to print, and whether to keep printing it.

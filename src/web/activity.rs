@@ -6,14 +6,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use portal_types::agents::{ActivityCode, ActivityError, PublishActivity, RegisterProducer};
-use tokio_stream::StreamExt as _;
 
 use super::AppState;
-use super::agents::{PeerOperation, peer_events, peer_response};
-use crate::observation::{
-    ipc,
-    live_activity::{self, Command},
-};
+use super::agents::{PeerOperation, peer_response};
+use crate::observation::live_activity::{self, Command};
 
 /// Host-qualified activity routes. Pi's unqualified producer paths are in `producer`.
 pub fn router() -> Router<AppState> {
@@ -26,7 +22,6 @@ pub fn router() -> Router<AppState> {
             "/api/agents/{host}/{pane}/activity/producer",
             post(register),
         )
-        .route("/api/agents/{host}/{pane}/activity/events", get(events))
 }
 
 pub(super) fn failure(error: ActivityError) -> Response {
@@ -109,76 +104,6 @@ async fn mutation(
         return peer_response(state, host, pane, operation).await;
     }
     super::producer::activity_command(state.web.dir.clone(), pane, command).await
-}
-
-async fn events(
-    State(state): State<AppState>,
-    Path((host, pane)): Path<(String, String)>,
-) -> Response {
-    if let Err(error) = live_activity::validate_pane(&pane) {
-        return failure(error);
-    }
-    if host != crate::hosts::LOCAL {
-        return peer_events(state, host, pane, PeerOperation::Activity, "activity").await;
-    }
-    let client = ipc::Client::at(&state.web.dir);
-    let mut subscription =
-        match tokio::task::spawn_blocking(move || client.activity_subscribe(&pane)).await {
-            Ok(Ok(subscription)) => subscription,
-            Ok(Err(error)) => return failure(error),
-            Err(error) => {
-                return failure(live_activity::error(
-                    ActivityCode::UpstreamUnavailable,
-                    &error.to_string(),
-                ));
-            }
-        };
-    let initial = subscription.current();
-    let (sender, receiver) =
-        tokio::sync::watch::channel(Some(initial.publication.as_ref().clone()));
-    let stop = state.stop.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut revision = initial.publication.revision;
-        while !stop.is_cancelled() && !sender.is_closed() {
-            let current = subscription.changed(std::time::Duration::from_millis(100));
-            if matches!(current.status, ipc::Status::Disconnected(_)) {
-                sender.send_replace(None);
-                break;
-            }
-            if current.publication.revision != revision {
-                revision = current.publication.revision;
-                sender.send_replace(Some(current.publication.as_ref().clone()));
-            }
-        }
-    });
-    let stream = tokio_stream::wrappers::WatchStream::new(receiver).map(|view| {
-        let event = match view {
-            Some(view) => axum::response::sse::Event::default()
-                .event("activity")
-                .json_data(view),
-            None => axum::response::sse::Event::default()
-                .event("error")
-                .json_data(live_activity::error(
-                    ActivityCode::UpstreamUnavailable,
-                    "activity disconnected",
-                )),
-        };
-        Ok::<_, std::convert::Infallible>(event.unwrap_or_else(|_| {
-            axum::response::sse::Event::default()
-                .event("error")
-                .data("invalid activity frame")
-        }))
-    });
-    let mut response = axum::response::sse::Sse::new(state.until_shutdown(stream))
-        .keep_alive(
-            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
-        )
-        .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
-    );
-    response
 }
 
 #[cfg(test)]
@@ -357,6 +282,9 @@ mod tests {
 
     #[tokio::test]
     async fn actual_routes_register_publish_get_and_stream_complete_values() {
+        use super::super::live::tests as live;
+        use portal_types::live::ServerFrame;
+
         let fixture = Fixture::new();
         let state = state(&fixture);
         let app = super::super::router(state.clone());
@@ -420,24 +348,34 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             tokio::task::yield_now().await;
         }
-        let response = app
-            .oneshot(request(
-                Method::GET,
-                "/api/agents/local/w1:p1/activity/events",
-                Body::empty(),
-                false,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        let mut stream = response.into_body().into_data_stream();
-        let first = stream.next().await.unwrap().unwrap();
-        let first = String::from_utf8(first.to_vec()).unwrap();
-        assert!(first.contains("event: activity"), "{first}");
-        assert!(first.contains("\"thinking\""), "{first}");
+        let server = live::Server::start(&state).await;
+        let mut socket = server.connect().await;
+        let address = portal_types::agents::AgentAddress::local("w1:p1");
+        live::select(&mut socket, 1, Some(address.clone())).await;
+        let view = live::next(&mut socket, |frame| match frame {
+            ServerFrame::Activity { id: 1, view } => Some(view),
+            _ => None,
+        })
+        .await;
+        assert!(matches!(
+            view.detail,
+            ActivityDetail::Available {
+                state: LiveState {
+                    phase: LivePhase::Thinking,
+                    ..
+                },
+                ..
+            }
+        ));
+        live::select(&mut socket, 2, None).await;
+        live::select(&mut socket, 3, Some(address)).await;
+        let reopened = live::next(&mut socket, |frame| match frame {
+            ServerFrame::Activity { id: 3, view } => Some(view),
+            _ => None,
+        })
+        .await;
+        assert_eq!(reopened.session, view.session);
         state.stop.cancel();
-        drop(stream);
     }
 
     #[tokio::test]
