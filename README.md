@@ -369,7 +369,9 @@ It verifies the pinned snapshot before normalization and unforced removal.
 A failed or unknown teardown keeps the checkout, its panes, its lock, and the item.
 Dogsled does not automatically repeat an entered teardown with an unknown outcome.
 A teardown that exited with a failure runs again on the next close, after the checkout matches its initial snapshot.
-An interrupted normalization also keeps the checkout for inspection.
+The next close resumes an interrupted normalization from its pinned snapshot.
+It continues only when each live path holds its snapshot content, its HEAD content, or nothing.
+Other content keeps the checkout for inspection.
 After removal, close drops the worktree's registration, as prune does.
 The JSON result includes `pane`, `worktree`, and `pane_closed`, with optional `retained_branch` and `recovery` metadata.
 A remote host uses the same operations over SSH.

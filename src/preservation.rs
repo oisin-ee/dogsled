@@ -401,11 +401,8 @@ impl Operation {
                     .unwrap_or("unknown teardown outcome; hook will not be rerun automatically"),
             ));
         }
-        if self.stage == Stage::Normalizing {
-            return Err(
-                self.refusal("normalization was interrupted; checkout may be partially normalized")
-            );
-        }
+        // An interrupted normalization resumes: `VerifiedRemoval::resume` proves that each
+        // live path holds its captured entry, its HEAD entry, or nothing.
         Ok(())
     }
 
@@ -1352,12 +1349,46 @@ fn unchanged(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<
     Ok(())
 }
 
+/// The live checkout is the snapshot on its way to HEAD: the pinned archive is intact, the
+/// live index is the captured index or HEAD, and each live path holds its captured entry
+/// or its HEAD entry. Any other content is unknown, so the checkout stays.
+fn partially_normalized(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
+    verify_archived(shell, checkout, snapshot)?;
+    let commit = snapshot.head.commit().ok_or(Refusal::VerificationFailed)?;
+    let head_tree = checked(
+        shell,
+        checkout,
+        None,
+        &["rev-parse", "--verify", &format!("{commit}^{{tree}}")],
+    )?
+    .trim()
+    .to_owned();
+    let live = trees(shell, checkout)?;
+    if live.head != snapshot.head
+        || (live.index_tree != snapshot.index_tree && live.index_tree != head_tree)
+    {
+        return Err(Refusal::CheckoutChanged.into());
+    }
+    let known: std::collections::BTreeSet<Listed> =
+        listing(shell, checkout, &snapshot.worktree_tree)?
+            .into_iter()
+            .chain(listing(shell, checkout, &head_tree)?)
+            .collect();
+    for entry in listing(shell, checkout, &live.worktree_tree)? {
+        if !known.contains(&entry) {
+            return Err(Refusal::CheckoutChanged.into());
+        }
+    }
+    recheck_ref(shell, checkout, snapshot)
+}
+
 /// Exact recovery proof, constructed only by checking the pinned ref and live content.
 /// It never alters ordinary branch integration evidence.
 #[derive(Debug)]
 pub struct VerifiedRemoval {
     tree: crate::cleanup::Tree,
     snapshot: Snapshot,
+    resumed: bool,
 }
 
 impl VerifiedRemoval {
@@ -1377,11 +1408,35 @@ impl VerifiedRemoval {
         Ok(Self {
             tree: tree.tree(),
             snapshot: saved.clone(),
+            resumed: false,
+        })
+    }
+
+    /// An interrupted normalization moved some paths from their captured bytes toward HEAD.
+    /// It resumes only while the pinned archive holds every captured byte, and each live
+    /// path holds its captured entry, its HEAD entry, or nothing.
+    pub fn resume(
+        shell: &dyn Shell,
+        tree: &crate::worktree::Linked,
+        saved: &Snapshot,
+    ) -> crate::error::Result<Self> {
+        crate::worktree::validate_identity(shell, tree)?;
+        if saved.head.commit() != Some(tree.head.as_str())
+            || crate::worktree::head_sha(shell, &tree.path)? != tree.head
+        {
+            return Err(close_error(Refusal::CheckoutChanged.into()));
+        }
+        partially_normalized(shell, Path::new(&tree.path), saved).map_err(close_error)?;
+        Ok(Self {
+            tree: tree.tree(),
+            snapshot: saved.clone(),
+            resumed: true,
         })
     }
 
     /// Clear only byte-exact captured files. Leave ignored files and unknown content alone.
     /// Rebuild HEAD without filters, hooks, forced removal, or recursive directory deletion.
+    /// Each step accepts the result of an interrupted run of the same normalization.
     pub fn normalize(
         &self,
         shell: &dyn Shell,
@@ -1409,9 +1464,13 @@ impl VerifiedRemoval {
             {
                 return Err(Refusal::UnsupportedFileType(checkout.into()).into());
             }
-            verify(shell, checkout, saved)?;
+            if self.resumed {
+                partially_normalized(shell, checkout, saved)?;
+            } else {
+                verify(shell, checkout, saved)?;
+            }
             pin.validate(tree)?;
-            clear_captured(tree, &pin, &captured)?;
+            clear_captured(tree, &pin, &captured, &target)?;
             pin.validate(tree)?;
             recheck_ref(shell, checkout, saved)?;
             checked(
@@ -1438,28 +1497,34 @@ impl VerifiedRemoval {
     }
 }
 
+/// An interrupted normalization can leave each captured path gone, or rebuilt as its HEAD
+/// entry. Such a path stays as it is. A path with other content refuses the clear.
 fn clear_captured(
     tree: &crate::worktree::Linked,
     pin: &crate::worktree::Pin,
     captured: &[FileEntry],
+    target: &[FileEntry],
 ) -> Result<()> {
     let checkout = Path::new(&tree.path);
+    let target: std::collections::BTreeMap<&Path, &FileEntry> = target
+        .iter()
+        .map(|file| (file.path.as_path(), file))
+        .collect();
     let mut directories = std::collections::BTreeSet::new();
     for file in captured {
         pin.validate(tree)?;
         let path = checkout.join(&file.path);
-        let metadata = worktree_metadata(checkout, &file.path)?.ok_or(Refusal::CheckoutChanged)?;
-        let same = if file.mode == "120000" {
-            metadata.is_symlink() && fs::read_link(&path)?.as_os_str().as_bytes() == file.bytes
-        } else {
-            metadata.is_file()
-                && fs::read(&path)? == file.bytes
-                && (metadata.permissions().mode() & 0o111 != 0) == (file.mode == "100755")
-        };
-        if !same {
-            return Err(Refusal::CheckoutChanged.into());
+        if let Some(metadata) = worktree_metadata(checkout, &file.path)? {
+            if holds(&path, &metadata, file)? {
+                fs::remove_file(&path)?;
+            } else if let Some(head) = target.get(file.path.as_path())
+                && holds(&path, &metadata, head)?
+            {
+                continue;
+            } else {
+                return Err(Refusal::CheckoutChanged.into());
+            }
         }
-        fs::remove_file(&path)?;
         let mut parent = file.path.parent();
         while let Some(path) = parent.filter(|p| !p.as_os_str().is_empty()) {
             directories.insert(path.to_path_buf());
@@ -1475,6 +1540,17 @@ fn clear_captured(
         }
     }
     Ok(())
+}
+
+/// The live path holds exactly this entry: its kind, its bytes, and its executable bit.
+fn holds(path: &Path, metadata: &fs::Metadata, file: &FileEntry) -> Result<bool> {
+    Ok(if file.mode == "120000" {
+        metadata.is_symlink() && fs::read_link(path)?.as_os_str().as_bytes() == file.bytes
+    } else {
+        metadata.is_file()
+            && fs::read(path)? == file.bytes
+            && (metadata.permissions().mode() & 0o111 != 0) == (file.mode == "100755")
+    })
 }
 
 fn materialize_head(
@@ -1511,6 +1587,13 @@ fn materialize_head(
             parent.validate()?;
         }
         let path = checkout.join(&file.path);
+        // An interrupted normalization can have written this entry already.
+        if let Some(metadata) = worktree_metadata(checkout, &file.path)? {
+            if holds(&path, &metadata, &file)? {
+                continue;
+            }
+            return Err(Refusal::CheckoutChanged.into());
+        }
         if file.mode == "120000" {
             std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&file.bytes), path)?;
         } else {
@@ -1739,10 +1822,19 @@ fn batch_blob<'a>(output: &'a [u8], oid: &str) -> Result<(&'a [u8], &'a [u8])> {
     Ok((&body[..size], &body[size + 1..]))
 }
 
-fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>> {
+/// One `ls-tree -r` entry. A gitlink stays listed, but its object is not a blob.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Listed {
+    path: PathBuf,
+    mode: String,
+    oid: String,
+}
+
+/// List a tree in Git's order. Refuse unsafe names, duplicates, unknown modes, and a path
+/// below a file.
+fn listing(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<Listed>> {
     let listing = raw(shell, repo, &["ls-tree", "-r", "-z", tree])?;
-    let mut files = Vec::new();
-    let mut blobs = Vec::new();
+    let mut entries = Vec::new();
     let mut paths = std::collections::BTreeSet::new();
     for entry in listing.split(|b| *b == 0).filter(|s| !s.is_empty()) {
         let tab = entry
@@ -1764,40 +1856,18 @@ fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>
         let kind = words.next().ok_or(Refusal::VerificationFailed)?;
         let oid = words.next().ok_or(Refusal::VerificationFailed)?;
         match (mode, kind) {
-            ("100644" | "100755" | "120000", "blob") => blobs.push((files.len(), oid)),
-            ("160000", "commit") => {}
+            ("100644" | "100755" | "120000", "blob") | ("160000", "commit") => {}
             _ => return Err(Refusal::VerificationFailed.into()),
         }
         let path = PathBuf::from(std::ffi::OsStr::from_bytes(name));
         if !paths.insert(path.clone()) {
             return Err(Refusal::VerificationFailed.into());
         }
-        files.push(FileEntry {
+        entries.push(Listed {
             path,
             mode: mode.into(),
-            bytes: Vec::new(),
+            oid: oid.into(),
         });
-    }
-    if !blobs.is_empty() {
-        let names = blobs.iter().fold(String::new(), |mut names, (_, oid)| {
-            let _ = writeln!(names, "{oid}");
-            names
-        });
-        let batch = raw_input(
-            shell,
-            repo,
-            &["cat-file", "--batch"],
-            Some(names.as_bytes()),
-        )?;
-        let mut rest = batch.as_slice();
-        for (file, oid) in blobs {
-            let (bytes, next) = batch_blob(rest, oid)?;
-            files[file].bytes = bytes.to_vec();
-            rest = next;
-        }
-        if !rest.is_empty() {
-            return Err(Refusal::VerificationFailed.into());
-        }
     }
     for path in &paths {
         if path
@@ -1807,6 +1877,43 @@ fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>
         {
             return Err(Refusal::VerificationFailed.into());
         }
+    }
+    Ok(entries)
+}
+
+fn manifest(shell: &dyn Shell, repo: &Path, tree: &str) -> Result<Vec<FileEntry>> {
+    let entries = listing(shell, repo, tree)?;
+    let names = entries.iter().filter(|entry| entry.mode != "160000").fold(
+        String::new(),
+        |mut names, entry| {
+            let _ = writeln!(names, "{}", entry.oid);
+            names
+        },
+    );
+    let batch = if names.is_empty() {
+        Vec::new()
+    } else {
+        raw_input(
+            shell,
+            repo,
+            &["cat-file", "--batch"],
+            Some(names.as_bytes()),
+        )?
+    };
+    let mut rest = batch.as_slice();
+    let mut files = Vec::with_capacity(entries.len());
+    for Listed { path, mode, oid } in entries {
+        let bytes = if mode == "160000" {
+            Vec::new()
+        } else {
+            let (bytes, next) = batch_blob(rest, &oid)?;
+            rest = next;
+            bytes.to_vec()
+        };
+        files.push(FileEntry { path, mode, bytes });
+    }
+    if !rest.is_empty() {
+        return Err(Refusal::VerificationFailed.into());
     }
     Ok(files)
 }
@@ -2315,15 +2422,9 @@ mod tests {
                     *snapshot
                 );
             }
-            let mut uncertain = resumed;
-            uncertain.advance(&ledger, Stage::Normalizing).unwrap();
-            assert!(
-                uncertain
-                    .check_retry(&CloseMode::Owner)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("normalization was interrupted")
-            );
+            let mut interrupted = resumed;
+            interrupted.advance(&ledger, Stage::Normalizing).unwrap();
+            interrupted.check_retry(&CloseMode::Owner).unwrap();
         }
     }
 

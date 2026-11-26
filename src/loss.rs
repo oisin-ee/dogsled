@@ -261,10 +261,18 @@ fn changes(shell: &dyn Shell, checkout: &str) -> Result<Vec<Change>> {
     if !root.ok() || top.is_empty() || !crate::worktree::same(checkout, top) {
         return Err(Error::Invalid(format!("{checkout}: not a worktree root")));
     }
+    // A read-only probe. Without this flag, status writes the refreshed index under
+    // `index.lock`, and a concurrent close then fails to normalize the checkout.
     let out = git(
         shell,
         checkout,
-        &["status", "--porcelain", "--untracked-files=all", "-z"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "-z",
+        ],
     )?;
     if !out.ok() {
         return Err(Error::Invalid(format!(

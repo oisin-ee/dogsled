@@ -146,7 +146,9 @@ After successful teardown, close saves changed content again before normalizatio
 A failed or unknown teardown keeps the checkout and its resources.
 Dogsled does not automatically repeat an entered teardown with an unknown outcome.
 A teardown that exited with a failure runs again on the next close, after the checkout matches its initial snapshot.
-An interrupted normalization also keeps the checkout for inspection.
+The next close resumes an interrupted normalization from its pinned snapshot.
+It continues only when each live path holds its snapshot content, its HEAD content, or nothing.
+Other content keeps the checkout for inspection.
 Shared ownership, changed checkout identity, and unsupported content prevent removal.
 
 Recovery snapshots keep HEAD, the staged index, and working content in local Git refs.
