@@ -38,4 +38,6 @@ Own: `src/`, `tests/`, `pi/`. Read: `portal-types/`, `plans/`. Do not change `po
 
 ## Checks
 
-`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test autonomy`, `cargo test questions`, `cargo test reviews`, `pnpm run --silent typecheck`, and `node --test pi/interview.test.ts`. Run no other test and no build.
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test autonomy`, `cargo test questions`, `cargo test reviews`, `pnpm run --silent typecheck`, and `node --test pi/interview.test.ts`. Run no other test and no other build.
+
+The root crate's tests embed the portal bundle (`src/web/assets.rs:53`, `moon.yml` task `test`). Run `moon run :web-build` once in the worktree before the first `cargo test`. `web/public/` is ignored by Git: do not commit it and do not copy it from another checkout.
