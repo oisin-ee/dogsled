@@ -462,11 +462,14 @@ fn portal_views(
         agents.as_deref_mut().unwrap_or_default(),
         !gaps.iter().any(|gap| gap.domain == "host"),
     );
+    // Owner causes use the ownership evidence, which needs the status capture. So the view
+    // carries the collection gaps beside the gaps of its own hosts.
+    let autonomy_gaps: Vec<Gap> = gaps.iter().chain(&autonomy.gaps).cloned().collect();
     insert(
         views,
         crate::autonomy::VIEW,
         Some(autonomy.published),
-        &autonomy.gaps,
+        &autonomy_gaps,
     )?;
     agents_view(views, agents.as_ref(), gaps)?;
     let mut portal = portal(

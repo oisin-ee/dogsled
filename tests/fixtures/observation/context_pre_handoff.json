@@ -9,6 +9,12 @@
       "live_agents": 1
     },
     "host": {
+      "autonomy": {
+        "agents": [],
+        "decisions": [],
+        "fleet": false,
+        "version": 1
+      },
       "handoffs": [
         {
           "after": 0,
@@ -370,6 +376,13 @@
           "state": "idle"
         }
       ],
+      "gaps": []
+    },
+    "autonomy": {
+      "data": {
+        "decisions": [],
+        "panes": {}
+      },
       "gaps": []
     },
     "board": {
@@ -898,6 +911,9 @@
             "state": "idle"
           }
         ],
+        "autonomy": {
+          "fleet": []
+        },
         "board": {
           "generated_ms": 10000,
           "hosts": [
