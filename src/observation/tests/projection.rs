@@ -904,7 +904,7 @@ fn failed_terminal_capture_gaps_agents_and_owner_findings() {
     fixture
         .shell
         .on("herdr agent list", "unavailable terminal source");
-    let mut collector = super::super::collect::Collector::default();
+    let mut collector = super::super::collect::Collector::with_scripted_shell();
     let collected = collector.collect(&fixture.fleet().node(), NOW);
     assert!(collected.sample.is_err());
     let mut input = collected.input;

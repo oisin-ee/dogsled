@@ -1,7 +1,9 @@
 //! Local measurements. The service collects agents and all panes separately.
 
 use crate::error::{Error, Result};
+use crate::herdr_socket::Client;
 use crate::ledger::Reservation;
+use crate::observation::timing::{Phases, measure};
 use crate::shell::Shell;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -115,6 +117,10 @@ pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
     let Some(info) = process_info(shell, pane)? else {
         return Ok(None);
     };
+    Ok(foreground_command(&info))
+}
+
+fn foreground_command(info: &serde_json::Value) -> Option<String> {
     let processes = info["foreground_processes"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
@@ -125,21 +131,21 @@ pub fn foreground(shell: &dyn Shell, pane: &str) -> Result<Option<String>> {
     else {
         // The root process is not the foreground: a command runs in front of it, or the
         // evidence does not say what the pane runs. Then the pane is kept.
-        return Ok(Some(
+        return Some(
             processes
                 .first()
                 .map_or_else(|| "a command".to_string(), process_name),
-        ));
+        );
     };
     if !waits_at_a_prompt(root) {
-        return Ok(Some(process_name(root)));
+        return Some(process_name(root));
     }
     // The shell waits at its prompt. Another process in the same foreground group means it
     // is not waiting.
-    Ok(processes
+    processes
         .iter()
         .find(|process| process["pid"].as_u64() != shell_pid)
-        .map(process_name))
+        .map(process_name)
 }
 
 /// The shell names Herdr can give a pane. A pane whose root process has another name runs
@@ -386,25 +392,63 @@ pub(crate) fn terminals(shell: &dyn Shell) -> Result<Terminals> {
     let agents = agent_list(shell)?;
     let panes = shell.run_ok("herdr", &["pane".into(), "list".into()])?;
     let value: serde_json::Value = serde_json::from_str(&panes.stdout)?;
-    let mut panes: Vec<Pane> = serde_json::from_value(
+    let panes: Vec<Pane> = serde_json::from_value(
         value
             .pointer("/result/panes")
             .ok_or_else(|| parse_error("herdr pane list", &panes.stdout))?
             .clone(),
     )?;
+    Ok(classify_shells(agents, panes, |pane| {
+        matches!(foreground(shell, pane), Ok(None))
+    }))
+}
+
+pub(crate) fn socket_terminals(client: &Client, phases: &mut Phases) -> Result<Terminals> {
+    #[derive(Deserialize)]
+    struct Agents {
+        agents: Vec<RawAgent>,
+    }
+    #[derive(Deserialize)]
+    struct Panes {
+        panes: Vec<Pane>,
+    }
+    let agents = measure(phases, "collect.terminals.agents", || -> Result<_> {
+        let agents: Agents =
+            serde_json::from_value(client.call("agent.list", &serde_json::json!({}))?)?;
+        Ok(observe_agents(agents.agents))
+    })?;
+    let panes = measure(phases, "collect.terminals.panes", || -> Result<_> {
+        let panes: Panes =
+            serde_json::from_value(client.call("pane.list", &serde_json::json!({}))?)?;
+        Ok(panes.panes)
+    })?;
+    Ok(measure(phases, "collect.terminals.process_info", || {
+        classify_shells(
+            agents,
+            panes,
+            |pane| matches!(client.pane_process_info(pane), Ok(Some(info)) if foreground_command(&info).is_none()),
+        )
+    }))
+}
+
+fn classify_shells(
+    agents: Vec<Agent>,
+    mut panes: Vec<Pane>,
+    is_idle: impl Fn(&str) -> bool + Sync,
+) -> Terminals {
     let mut shells: Vec<_> = panes.iter_mut().filter(|p| p.agent.is_none()).collect();
     let chunk = shells.len().div_ceil(cores() as usize).max(1);
     std::thread::scope(|scope| {
+        let is_idle = &is_idle;
         for group in shells.chunks_mut(chunk) {
             scope.spawn(move || {
                 for pane in group {
-                    // A pane closed since the list is not idle; it is gone.
-                    pane.idle_shell = matches!(foreground(shell, &pane.pane_id), Ok(None));
+                    pane.idle_shell = is_idle(&pane.pane_id);
                 }
             });
         }
     });
-    Ok(Terminals { agents, panes })
+    Terminals { agents, panes }
 }
 
 pub fn local(shell: &dyn Shell, home: &str) -> Result<Probe> {
@@ -416,20 +460,38 @@ pub(crate) fn local_with_terminals(
     home: &str,
     terminals: Terminals,
 ) -> Result<Probe> {
+    local_capacity(shell, home, terminals, &mut Vec::new(), || mac_busy(shell))
+}
+
+pub(crate) fn local_capacity(
+    shell: &dyn Shell,
+    home: &str,
+    terminals: Terminals,
+    phases: &mut Phases,
+    busy: impl FnOnce() -> Result<Option<f64>>,
+) -> Result<Probe> {
     let Terminals {
         agents: agent_panes,
         panes,
     } = terminals;
     let agents = AgentCounts::from_agents(&agent_panes);
+    let (load1, cpu_ticks, busy) = measure(phases, "collect.snapshot.cpu", || -> Result<_> {
+        let load = load1(shell)?;
+        let ticks = cpu_ticks(shell)?;
+        let busy = if ticks.is_none() { busy()? } else { None };
+        Ok((load, ticks, busy))
+    })?;
     Ok(Probe {
         host: "local".into(),
         label: "local".into(),
-        load1: load1(shell)?,
+        load1,
         cores: cores(),
-        cpu_ticks: cpu_ticks(shell)?,
-        busy: mac_busy(shell)?,
-        memory: memory(shell)?,
-        disk_free_percent: disk_free_percent(shell, home)?,
+        cpu_ticks,
+        busy,
+        memory: measure(phases, "collect.snapshot.memory", || memory(shell))?,
+        disk_free_percent: measure(phases, "collect.snapshot.disk", || {
+            disk_free_percent(shell, home)
+        })?,
         agents,
         agent_panes,
         reservations: Vec::new(),
@@ -443,8 +505,11 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
     let agents = value
         .pointer("/result/agents")
         .ok_or_else(|| parse_error("herdr agent list", &out.stdout))?;
-    let agents: Vec<RawAgent> = serde_json::from_value(agents.clone())?;
-    Ok(agents
+    Ok(observe_agents(serde_json::from_value(agents.clone())?))
+}
+
+fn observe_agents(agents: Vec<RawAgent>) -> Vec<Agent> {
+    agents
         .into_iter()
         .map(|raw| {
             let agent_session = raw.agent_session.as_ref().map(|s| s.value.clone());
@@ -487,7 +552,7 @@ pub fn agent_list(shell: &dyn Shell) -> Result<Vec<Agent>> {
                 lifecycle_gap: None,
             }
         })
-        .collect())
+        .collect()
 }
 
 fn parse_error(origin: &str, detail: &str) -> Error {
@@ -544,6 +609,51 @@ pub fn parse_proc_stat(text: &str) -> Option<CpuTicks> {
         .try_fold(0_u64, |sum, tick| sum.checked_add(*tick))?;
     let busy = total.checked_sub(ticks[3])?.checked_sub(ticks[4])?;
     Some(CpuTicks { busy, total })
+}
+
+/// The service keeps one sampler across passes. Darwin needs two observations
+/// for interval utilization; the first pass publishes no busy fraction.
+/// Linux still derives its deltas from the persisted /proc/stat baseline.
+#[cfg_attr(not(target_os = "macos"), derive(Default))]
+pub(crate) enum CpuSampler {
+    #[cfg(not(target_os = "macos"))]
+    #[default]
+    ProcStat,
+    #[cfg(target_os = "macos")]
+    Darwin(Option<(sysinfo::System, std::time::Instant, Option<f64>)>),
+}
+
+#[cfg(target_os = "macos")]
+impl Default for CpuSampler {
+    fn default() -> Self {
+        Self::Darwin(None)
+    }
+}
+
+impl CpuSampler {
+    pub(crate) fn busy(&mut self) -> Option<f64> {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Self::ProcStat => None,
+            #[cfg(target_os = "macos")]
+            Self::Darwin(state) => {
+                let Some((system, sampled, busy)) = state else {
+                    let mut system = sysinfo::System::new();
+                    system.refresh_cpu_usage();
+                    *state = Some((system, std::time::Instant::now(), None));
+                    return None;
+                };
+                if sampled.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+                    system.refresh_cpu_usage();
+                    *sampled = std::time::Instant::now();
+                    if !system.cpus().is_empty() {
+                        *busy = Some(f64::from(system.global_cpu_usage()) / 100.0);
+                    }
+                }
+                *busy
+            }
+        }
+    }
 }
 
 pub fn mac_busy(shell: &dyn Shell) -> Result<Option<f64>> {

@@ -6,6 +6,7 @@ mod owned_work_capture;
 mod peer;
 mod projection;
 mod projection_import;
+mod socket_collection;
 mod unreadable_hold;
 
 mod publication {

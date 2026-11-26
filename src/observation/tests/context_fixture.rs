@@ -206,7 +206,7 @@ impl Fixture {
     }
     fn publication(&self) -> Value {
         let node = Node::new(&self.source, &self.ledger, &self.policy, "/home");
-        let mut collector = Collector::default();
+        let mut collector = Collector::with_scripted_shell();
         let mut input = collector.collect(&node, NOW).input;
         assert_eq!(input.gaps, []);
         let mut reports = collector.reports();

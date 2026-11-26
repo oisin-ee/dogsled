@@ -5,6 +5,19 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 
+pub(crate) type Phases = Vec<(&'static str, Duration)>;
+
+pub(crate) fn measure<T>(
+    phases: &mut Phases,
+    name: &'static str,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let started = Instant::now();
+    let result = operation();
+    phases.push((name, started.elapsed()));
+    result
+}
+
 const WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const SCHEDULED: u8 = 32;
 const DOMAINS: [(&str, u8); 6] = [
