@@ -807,11 +807,23 @@ pub(crate) struct Trees {
 }
 
 pub(crate) fn trees(shell: &dyn Shell, checkout: &Path) -> Result<Trees> {
+    observed_trees(shell, checkout, None)
+}
+
+/// With `rules`, the live worktree tree is listed against that tree, and each of its
+/// `.gitignore` files that is missing from the checkout still applies.
+fn observed_trees(shell: &dyn Shell, checkout: &Path, rules: Option<&str>) -> Result<Trees> {
     preflight(shell, checkout)?;
     let before = observe(shell, checkout)?;
     let scratch = Scratch::new()?;
     let index_tree = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
-    let worktree_tree = worktree_tree(shell, checkout, &scratch, &index_tree)?;
+    let worktree_tree = worktree_tree(
+        shell,
+        checkout,
+        &scratch,
+        rules.unwrap_or(&index_tree),
+        rules.is_some(),
+    )?;
     if before != observe(shell, checkout)? {
         return Err(Refusal::CheckoutChanged.into());
     }
@@ -921,12 +933,47 @@ fn worktree_metadata(checkout: &Path, path: &Path) -> Result<Option<fs::Metadata
     }
 }
 
-fn worktree_tree(
+/// An interrupted normalization removes `.gitignore` files with the rest of the snapshot.
+/// Git reads a missing `.gitignore` from the index only when its entry is skip-worktree, so
+/// mark those entries in `index`: the files they ignore then stay ignored.
+fn keep_missing_ignores(shell: &dyn Shell, checkout: &Path, index: &Path) -> Result<()> {
+    let missing = checked(
+        shell,
+        checkout,
+        Some(index),
+        &[
+            "-c",
+            "core.quotePath=true",
+            "ls-files",
+            "--deleted",
+            "--",
+            ":(glob)**/.gitignore",
+        ],
+    )?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let args = ["update-index", "--skip-worktree", "--stdin"];
+    let out = git_input(
+        shell,
+        checkout,
+        Some(index),
+        &args,
+        Some(missing.as_bytes()),
+    )?;
+    crate::shell::checked("git", &args.map(String::from), out)?;
+    Ok(())
+}
+
+/// The scratch index that the live checkout is listed against: `staged`, and with
+/// `missing_ignores_apply`, its `.gitignore` files that the checkout lacks.
+fn working_index(
     shell: &dyn Shell,
     checkout: &Path,
     scratch: &Scratch,
     staged: &str,
-) -> Result<String> {
+    missing_ignores_apply: bool,
+) -> Result<std::path::PathBuf> {
     let index = scratch.0.join("working");
     checked(
         shell,
@@ -934,6 +981,20 @@ fn worktree_tree(
         Some(&index),
         &["-c", "core.sparseCheckout=false", "read-tree", staged],
     )?;
+    if missing_ignores_apply {
+        keep_missing_ignores(shell, checkout, &index)?;
+    }
+    Ok(index)
+}
+
+fn worktree_tree(
+    shell: &dyn Shell,
+    checkout: &Path,
+    scratch: &Scratch,
+    staged: &str,
+    missing_ignores_apply: bool,
+) -> Result<String> {
+    let index = working_index(shell, checkout, scratch, staged, missing_ignores_apply)?;
     let paths = checked(
         shell,
         checkout,
@@ -1274,7 +1335,7 @@ fn capture(
     let before = observe(shell, checkout)?;
     let scratch = Scratch::new()?;
     let staged = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
-    let working = worktree_tree(shell, checkout, &scratch, &staged)?;
+    let working = worktree_tree(shell, checkout, &scratch, &staged, false)?;
     let mut snapshot = Snapshot {
         ref_name,
         id: id.into(),
@@ -1335,7 +1396,7 @@ fn unchanged(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<
     let before = observe(shell, checkout)?;
     let scratch = Scratch::new()?;
     let current_index = index_tree(shell, checkout, &scratch, before.index.as_deref())?;
-    let current_working = worktree_tree(shell, checkout, &scratch, &current_index)?;
+    let current_working = worktree_tree(shell, checkout, &scratch, &current_index, false)?;
     if before.head != snapshot.head
         || current_index != snapshot.index_tree
         || current_working != snapshot.worktree_tree
@@ -1351,7 +1412,9 @@ fn unchanged(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<
 
 /// The live checkout is the snapshot on its way to HEAD: the pinned archive is intact, the
 /// live index is the captured index or HEAD, and each live path holds its captured entry
-/// or its HEAD entry. Any other content is unknown, so the checkout stays.
+/// or its HEAD entry. Any other content is unknown, so the checkout stays. The snapshot's
+/// ignore rules decide which live paths count, because normalization can remove the
+/// checkout's `.gitignore` files.
 fn partially_normalized(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot) -> Result<()> {
     verify_archived(shell, checkout, snapshot)?;
     let commit = snapshot.head.commit().ok_or(Refusal::VerificationFailed)?;
@@ -1363,7 +1426,7 @@ fn partially_normalized(shell: &dyn Shell, checkout: &Path, snapshot: &Snapshot)
     )?
     .trim()
     .to_owned();
-    let live = trees(shell, checkout)?;
+    let live = observed_trees(shell, checkout, Some(&snapshot.worktree_tree))?;
     if live.head != snapshot.head
         || (live.index_tree != snapshot.index_tree && live.index_tree != head_tree)
     {
@@ -2357,7 +2420,7 @@ mod tests {
             );
             assert_eq!(
                 saved.worktree_tree,
-                worktree_tree(&shell, &restored, &scratch, &saved.index_tree).unwrap()
+                worktree_tree(&shell, &restored, &scratch, &saved.index_tree, false).unwrap()
             );
             let original = tree_files(&self.path);
             let restored_files = tree_files(&restored);

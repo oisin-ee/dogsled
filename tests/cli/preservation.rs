@@ -508,19 +508,24 @@ fn p3_interrupted_normalization_resumes_from_its_snapshot() {
         let (rig, tree) = p3_rig(&format!("p3-normalizing-{progress}"));
         let repo = rig.dir.join("home/repo");
         fs::write(tree.join("tracked"), b"head\n").unwrap();
-        super::close::git(&tree, &["add", "tracked"]);
+        fs::write(tree.join(".gitignore"), b"build/\n").unwrap();
+        super::close::git(&tree, &["add", "tracked", ".gitignore"]);
         super::close::git(&tree, &["commit", "-qm", "tracked"]);
         super::close::git(&repo, &["merge", "--ff-only", "feat/x"]);
         fs::write(tree.join("tracked"), b"live\n").unwrap();
         fs::write(tree.join("draft"), b"live work\n").unwrap();
+        fs::create_dir(tree.join("build")).unwrap();
+        fs::write(tree.join("build/output"), b"ignored\n").unwrap();
         interrupt_p3(&rig, "NORMALIZING");
         let operation = operations(&rig).remove(0);
         assert_eq!(operation["stage"], "normalizing");
         // Each state is one that the interrupted normalization can leave, except `changed`.
+        // Clearing removes `.gitignore` too, and its rules must still hide `build/`.
         match progress {
             "cleared" => {
                 fs::remove_file(tree.join("draft")).unwrap();
                 fs::remove_file(tree.join("tracked")).unwrap();
+                fs::remove_file(tree.join(".gitignore")).unwrap();
             }
             "rebuilt" => {
                 fs::remove_file(tree.join("draft")).unwrap();
