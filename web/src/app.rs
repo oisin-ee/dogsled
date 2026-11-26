@@ -83,6 +83,12 @@ impl LiveSelection {
 pub(crate) struct LivePortal(Signal<LiveSelection>);
 
 impl LivePortal {
+    /// A tab's socket state before any agent is selected, for component tests.
+    #[cfg(test)]
+    pub(crate) fn idle() -> Self {
+        Self(Signal::new(LiveSelection::default()))
+    }
+
     pub(crate) fn agent(self, address: &AgentAddress) -> Option<Result<AgentEvent, String>> {
         let current = self.0.read();
         (current.address.as_ref() == Some(address))
@@ -1191,6 +1197,15 @@ mod shell_tests {
         assert!(!state.paused);
         assert!(state.board_error.is_none());
         assert!(state.agent_error.is_none());
+        // The inbox has its own frames: a portal snapshot does not clear its error.
+        assert_eq!(state.inbox.count(), None);
+        apply(
+            &mut state,
+            ServerFrame::Inbox {
+                result: Ok(InboxView::default()),
+            },
+            4,
+        )?;
         assert_eq!(state.inbox.count(), Some(0));
         assert_eq!(
             state.board.as_ref().map(|board| board.generated_ms),
