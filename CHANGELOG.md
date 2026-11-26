@@ -2,14 +2,6 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.43.1](https://github.com/oisin-ee/dogsled/compare/v0.43.0...v0.43.1) (2026-11-26)
-
-
-### Bug Fixes
-
-* **close:** resume an interrupted normalization ([#432](https://github.com/oisin-ee/dogsled/issues/432)) ([522032a](https://github.com/oisin-ee/dogsled/commit/522032a4d15ca66397bc62029f73c0dd58a048e9)), closes [#430](https://github.com/oisin-ee/dogsled/issues/430)
-* **hosts:** close dead shared ssh connections with keepalives ([#428](https://github.com/oisin-ee/dogsled/issues/428)) ([8e2e415](https://github.com/oisin-ee/dogsled/commit/8e2e415c31e77355b3591d7d6ff3d74c824d8dbc))
-
 ## [0.43.0](https://github.com/oisin-ee/dogsled/compare/v0.42.0...v0.43.0) (2026-11-24)
 
 
