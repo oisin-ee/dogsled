@@ -1,6 +1,6 @@
 # Portal speed: causes and fixes
 
-Status: proposal, revision 2, 2026-11-27. Not approved. No code changed. The owner decided the targets and the branch list on 2026-11-27 (see Decisions).
+Status: revision 3, 2026-11-27. The owner approved revision 1 in the portal on 2026-11-27 (review `842001cc`), with no notes. One item added since then is open (see Decisions). No code changed yet.
 Owner request: every portal interaction must feel as fast as Herdr.
 Related: the north-star design book (`docs/design/north-star/`, branch `design/north-star`) sets the end state and the speed budgets. This plan removes the measured causes of the delays.
 
@@ -33,6 +33,8 @@ This cause produces "Live updates paused. Reconnecting.", the 10 to 20 s load, a
 `service::run` (`src/service.rs:618`) runs one serial pass per wake. Each pass collects every domain (`Collector::refresh`, `src/observation/collect.rs:263`), composes the other machines, then publishes. The sidebar, agent states, the inbox and a new lead all wait for the pass.
 
 Log, per 60 s: `collect` uses 46 to 64 s. `collect.host` 20 to 33 s, `collect.snapshot` 14 to 34 s, `collect.terminals` 6 to 11 s.
+
+Asked over the Herdr socket, `pane.list`, `agent.list` and `pane.process_info` each answer in less than 1 ms. `probe::terminals` (`src/probe.rs:385`) and `probe::process_info` (`src/probe.rs:68`) run the `herdr` command instead.
 
 Child processes of `serve` in 20 s: `herdr pane process-info` 21 calls at about 0.4 s each (`src/probe.rs:68`, one per pane, through the `herdr` shim); `iostat -c 2 -w 1` four calls that each sleep 1 s (`src/probe.rs:554`); 23 `herdr agent list` and `herdr pane list` calls. The project already has a Herdr socket client (`src/herdr_socket.rs`) that needs no process.
 
@@ -82,17 +84,17 @@ The image-drop unit (`feat/composer-image-drop`) changes the composer in `web/sr
 
 ## Decisions
 
-Open, for the owner:
+Decided by the owner on 2026-11-27, by approving revision 1 and by the north-star decisions:
 
-1. **Transport.** Recommended: one WebSocket per tab (S1). It adds one dependency, `tokio-tungstenite`, through axum. Alternative: one combined `EventSource` per tab. It removes the stall for two tabs, still stalls at six, and keeps the inbox poll.
-2. **Jobs and "Repository unknown".** Recommended: a job shows only under the lead that started it. A job or closed item with no lead and no checkout is a dead record; the service removes it. No row has a "Repository unknown" group.
-3. **Holds.** Recommended: add to S6 that a hold of a closed worker or job is released or expires, and is never counted as "needs you".
-
-Decided by the owner on 2026-11-27, with the north-star book:
-
+- **Transport.** One WebSocket per tab (S1). It adds one dependency, `tokio-tungstenite`, through axum.
 - **Branches.** "Branches to review" leaves the sidebar. A lead's thread ends with a "Landed" receipt. A PRs tab on the lead's page lists its pull requests and those of its workers. The service deletes a record whose branch is gone from GitHub and from the machine. A branch that still has commits and has no lead becomes one Needs you item per repository with two actions: start a lead to land them, or drop them.
+- **Jobs and "Repository unknown".** A job shows only under the lead that started it. A job or closed item with no lead and no checkout is a dead record; the service removes it. No row has a "Repository unknown" group.
 - **Targets.** The targets in the table above are the acceptance test. Each unit ends with the measurement of its row.
 - **Machine names.** A machine name appears in the capacity panel and on the Herdr control of a thread header, and nowhere else.
+
+Open, added after the approval:
+
+1. **Holds.** Recommended: S6 also makes a hold of a closed worker or job release or expire, and stops counting it as "needs you". This is in the S6 row above; remove it from that row if the owner declines.
 
 ## Limits
 
