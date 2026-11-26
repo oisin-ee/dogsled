@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.43.3](https://github.com/oisin-ee/dogsled/compare/v0.43.2...v0.43.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **close:** accept directories an interrupted normalization removed ([#438](https://github.com/oisin-ee/dogsled/issues/438)) ([78346fd](https://github.com/oisin-ee/dogsled/commit/78346fdc66a021ffeaa020482257515aee14934e)), closes [#430](https://github.com/oisin-ee/dogsled/issues/430)
+
 ## [0.43.2](https://github.com/oisin-ee/dogsled/compare/v0.43.1...v0.43.2) (2026-11-26)
 
 
