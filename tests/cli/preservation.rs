@@ -514,21 +514,26 @@ fn p3_interrupted_normalization_resumes_from_its_snapshot() {
         super::close::git(&repo, &["merge", "--ff-only", "feat/x"]);
         fs::write(tree.join("tracked"), b"live\n").unwrap();
         fs::write(tree.join("draft"), b"live work\n").unwrap();
+        fs::create_dir(tree.join("notes")).unwrap();
+        fs::write(tree.join("notes/draft"), b"nested work\n").unwrap();
         fs::create_dir(tree.join("build")).unwrap();
         fs::write(tree.join("build/output"), b"ignored\n").unwrap();
         interrupt_p3(&rig, "NORMALIZING");
         let operation = operations(&rig).remove(0);
         assert_eq!(operation["stage"], "normalizing");
         // Each state is one that the interrupted normalization can leave, except `changed`.
-        // Clearing removes `.gitignore` too, and its rules must still hide `build/`.
+        // Clearing removes `.gitignore` too, and its rules must still hide `build/`. It also
+        // removes the directories it emptied.
         match progress {
             "cleared" => {
                 fs::remove_file(tree.join("draft")).unwrap();
+                fs::remove_dir_all(tree.join("notes")).unwrap();
                 fs::remove_file(tree.join("tracked")).unwrap();
                 fs::remove_file(tree.join(".gitignore")).unwrap();
             }
             "rebuilt" => {
                 fs::remove_file(tree.join("draft")).unwrap();
+                fs::remove_dir_all(tree.join("notes")).unwrap();
                 fs::write(tree.join("tracked"), b"head\n").unwrap();
                 super::close::git(&tree, &["read-tree", "HEAD"]);
             }
@@ -557,6 +562,7 @@ fn p3_interrupted_normalization_resumes_from_its_snapshot() {
         let (code, restored) = restore(&rig, &repo, &finished["latest"], &to, &[]);
         assert_eq!(code, 0, "{restored}");
         assert_eq!(fs::read(to.join("draft")).unwrap(), b"live work\n");
+        assert_eq!(fs::read(to.join("notes/draft")).unwrap(), b"nested work\n");
         assert_eq!(fs::read(to.join("tracked")).unwrap(), b"live\n");
     }
 }
