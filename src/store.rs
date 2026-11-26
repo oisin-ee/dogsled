@@ -6,8 +6,8 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 
-/// Version 6 upgrades in place. Earlier versions retain their existing reset policy.
-const VERSION: i64 = 8;
+/// Versions 6 and later upgrade in place. Earlier versions retain their reset policy.
+const VERSION: i64 = 9;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -17,6 +17,7 @@ pub(crate) fn schema() -> String {
         crate::admissions::SCHEMA,
         crate::launch_store::SCHEMA,
         crate::lead_store::SCHEMA,
+        crate::autonomy::SCHEMA,
         crate::web_store::SCHEMA,
         crate::job_store::SCHEMA,
         crate::preparation_store::SCHEMA,
@@ -74,7 +75,10 @@ fn open(ledger: &Ledger) -> Result<Connection> {
         ledger.with_lock("state-db", || {
             let current = version(&connection)?;
             connection.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-            if current == 6 || current == 7 {
+            if (6..VERSION).contains(&current) {
+                // Rebuild the question table without cascading into its answers.
+                // This setting must change before the transaction begins.
+                connection.pragma_update(None, "foreign_keys", false)?;
                 let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 if current == 6 {
                     tx.execute_batch(
@@ -82,7 +86,11 @@ fn open(ledger: &Ledger) -> Result<Connection> {
                          UPDATE host_snapshot_probe_agent_panes SET transcript_modified=NULL WHERE transcript IS NOT NULL;",
                     )?;
                 }
-                tx.execute_batch("ALTER TABLE host_marks_entries ADD COLUMN end_turn_message TEXT;")?;
+                if current < 8 {
+                    tx.execute_batch("ALTER TABLE host_marks_entries ADD COLUMN end_turn_message TEXT;")?;
+                }
+                tx.execute_batch(crate::autonomy::SCHEMA)?;
+                crate::web_store::upgrade_questions(&tx)?;
                 tx.pragma_update(None, "user_version", VERSION)?;
                 tx.commit()?;
             } else if current < VERSION {
@@ -555,7 +563,7 @@ mod tests {
         write(&ledger, |tx| sync_items(tx, &[item("keep")])).unwrap();
         release();
         let conn = Connection::open(ledger.dir.join("state.db")).unwrap();
-        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; ALTER TABLE host_marks_entries DROP COLUMN end_turn_message; PRAGMA user_version=6;").unwrap();
+        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; ALTER TABLE host_marks_entries DROP COLUMN end_turn_message; DROP TABLE autonomy_fleet; DROP TABLE autonomy_agents; DROP TABLE autonomy_decisions; PRAGMA user_version=6;").unwrap();
         drop(conn);
         assert_eq!(items(&ledger).unwrap(), json!([item("keep")]));
         std::fs::remove_dir_all(ledger.dir).unwrap();
@@ -629,7 +637,7 @@ mod tests {
         write(&ledger, |tx| {
             let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             assert_eq!(version, VERSION);
-            assert_eq!(version, 8);
+            assert_eq!(version, 9);
             assert!(!crate::lead_store::exists_in(tx, "absent")?);
             let columns: Vec<String> = tx
                 .prepare("PRAGMA table_info(leads)")?
