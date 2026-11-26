@@ -1,6 +1,6 @@
 # Portal speed: causes and fixes
 
-Status: revision 3, 2026-11-27. The owner approved revision 1 in the portal on 2026-11-27 (review `842001cc`), with no notes. One item added since then is open (see Decisions). No code changed yet.
+Status: approved, 2026-11-27. The owner approved revision 1 (portal review `842001cc`) and revision 2 (portal review `b85eecf1`), with no notes. No decision is open. No code changed yet.
 Owner request: every portal interaction must feel as fast as Herdr.
 Related: the north-star design book (`docs/design/north-star/`, branch `design/north-star`) sets the end state and the speed budgets. This plan removes the measured causes of the delays.
 
@@ -84,7 +84,7 @@ The image-drop unit (`feat/composer-image-drop`) changes the composer in `web/sr
 
 ## Decisions
 
-Decided by the owner on 2026-11-27, by approving revision 1 and by the north-star decisions:
+Decided by the owner on 2026-11-27, by approving revisions 1 and 2 and by the north-star decisions:
 
 - **Transport.** One WebSocket per tab (S1). It adds one dependency, `tokio-tungstenite`, through axum.
 - **Branches.** "Branches to review" leaves the sidebar. A lead's thread ends with a "Landed" receipt. A PRs tab on the lead's page lists its pull requests and those of its workers. The service deletes a record whose branch is gone from GitHub and from the machine. A branch that still has commits and has no lead becomes one Needs you item per repository with two actions: start a lead to land them, or drop them.
@@ -92,9 +92,7 @@ Decided by the owner on 2026-11-27, by approving revision 1 and by the north-sta
 - **Targets.** The targets in the table above are the acceptance test. Each unit ends with the measurement of its row.
 - **Machine names.** A machine name appears in the capacity panel and on the Herdr control of a thread header, and nowhere else.
 
-Open, added after the approval:
-
-1. **Holds.** Recommended: S6 also makes a hold of a closed worker or job release or expire, and stops counting it as "needs you". This is in the S6 row above; remove it from that row if the owner declines.
+- **Holds.** S6 also makes a hold of a closed worker or job release or expire, and stops counting it as "needs you".
 
 ## Limits
 
