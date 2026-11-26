@@ -32,6 +32,7 @@ fn action(method: &str) -> &str {
         "claim" => "Claim work",
         "drop" => "Drop branch",
         "end_turn" => "End turn",
+        "decide" => "Record decision",
         other => other,
     }
 }
@@ -56,6 +57,7 @@ fn receipt<'a>(
     match status {
         ToolStatus::Unknown => ("No recorded outcome", None),
         ToolStatus::Error => ("Call failed", None),
+        ToolStatus::Completed if method == "decide" => ("Decision recorded", None),
         ToolStatus::Completed => {
             if matches!(method, "run" | "spawn")
                 && result["queued"] == true
@@ -146,9 +148,13 @@ pub(crate) fn CallHeading(method: String, name: String, call: Option<String>) ->
         ("Profile", "profile"),
     ];
     let title = action(&method);
+    let decision = (method == "decide")
+        .then(|| field(&arguments, "title"))
+        .flatten();
     rsx! {
             div { class: "ds-event-kind", ArrowUpRight { size: 16 } "Dogsled call" }
             div { class: "ds-event-title", "{title}" if let Some(target) = target { code { "{target}" } } }
+            if let Some(decision) = decision { p { class: "ds-result-note", "{decision}" } }
             if let Some(argv) = argv {
                 div { class: "ds-command", aria_label: "Command arguments",
                     for arg in argv { code { "{arg}" } }

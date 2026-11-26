@@ -869,6 +869,183 @@ fn render_files(state: Option<portal_types::files::FilesState>) -> String {
     dioxus_ssr::render(&dom)
 }
 
+type DecisionsFixture = (bool, portal_types::autonomy::DecisionList);
+
+fn decisions_root((autonomous, list): DecisionsFixture) -> Element {
+    use portal_types::agents::AgentAddress;
+    rsx! {
+        crate::decisions::Decisions {
+            address: AgentAddress { host: "local".into(), pane: "lead".into() },
+            autonomous, result: Some(Ok(list)),
+        }
+    }
+}
+
+#[test]
+fn decisions_show_newest_first_with_host_qualified_authors() {
+    use portal_types::autonomy::{DecisionList, DecisionSource, DecisionView};
+    let lead = DecisionView {
+        id: "d1".into(),
+        host: "local".into(),
+        pane: "lead".into(),
+        name: None,
+        owner_host: None,
+        owner_pane: None,
+        created_ms: 10,
+        source: DecisionSource::Plan,
+        title: "Approve the export plan".into(),
+        decision: "Approve".into(),
+        why: "The plan keeps v1 support.".into(),
+        question: None,
+        alternatives: None,
+        review: Some("r1".into()),
+    };
+    let worker = DecisionView {
+        id: "d1".into(),
+        host: "netcup".into(),
+        name: Some("csv-writer".into()),
+        owner_host: Some("local".into()),
+        owner_pane: Some("lead".into()),
+        created_ms: 20,
+        source: DecisionSource::Question,
+        title: "Keep the CSV column order".into(),
+        question: Some("Does v2 change the order?".into()),
+        ..lead.clone()
+    };
+    let list = DecisionList {
+        decisions: vec![worker, lead],
+        gaps: vec![],
+    };
+    // A host that did not answer hides nothing that the other hosts returned.
+    let partial = DecisionList {
+        gaps: vec![portal_types::inbox::HostGap {
+            host: "momokaya-2".into(),
+            error: "timeout".into(),
+        }],
+        ..list.clone()
+    };
+    let mut dom = VirtualDom::new_with_props(decisions_root, (true, partial));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Some decisions are unavailable."), "{html}");
+    assert!(html.contains("Host momokaya-2 did not answer."), "{html}");
+    assert!(html.contains("Keep the CSV column order"), "{html}");
+    let mut dom = VirtualDom::new_with_props(decisions_root, (true, list));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    let worker = html
+        .find("Keep the CSV column order")
+        .expect("worker decision");
+    let lead = html.find("Approve the export plan").expect("lead decision");
+    assert!(worker < lead);
+    assert!(
+        html[worker..lead].contains("· worker csv-writer · question"),
+        "{html}"
+    );
+    assert!(html[lead..].contains("· lead · plan"), "{html}");
+}
+
+#[test]
+fn decisions_distinguish_empty_switch_states_and_gaps() {
+    use portal_types::autonomy::DecisionList;
+    use portal_types::inbox::HostGap;
+    for (on, gaps, expected) in [
+        (
+            false,
+            vec![],
+            [
+                "No decisions.",
+                "This agent asks you when a question is open.",
+                "Switch Autonomous on to let it decide and record each decision here.",
+            ],
+        ),
+        (
+            true,
+            vec![],
+            [
+                "No decisions yet.",
+                "Autonomous is on.",
+                "The agent records each open question it settles here.",
+            ],
+        ),
+        (
+            true,
+            vec![HostGap {
+                host: "netcup".into(),
+                error: "timeout".into(),
+            }],
+            [
+                "Decisions are unavailable.",
+                "Host netcup did not answer.",
+                "Recorded decisions",
+            ],
+        ),
+    ] {
+        let mut dom = VirtualDom::new_with_props(
+            decisions_root,
+            (
+                on,
+                DecisionList {
+                    decisions: vec![],
+                    gaps,
+                },
+            ),
+        );
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        for copy in expected {
+            assert!(html.contains(copy), "{html}");
+        }
+        assert_eq!(
+            html.contains("No decisions"),
+            !html.contains("Host netcup did not answer.")
+        );
+    }
+}
+
+#[test]
+fn decisions_switch_reports_and_locks_inherited_modes() {
+    use portal_types::autonomy::AutonomyCause;
+    fn root((cause, worker): (Option<AutonomyCause>, bool)) -> Element {
+        rsx! { crate::decisions::AgentAutonomySwitch { cause, worker, disabled: false, on_change: move |_| {} } }
+    }
+    for (cause, worker, locked, label) in [
+        (
+            Some(AutonomyCause::Fleet),
+            false,
+            true,
+            "Autonomous · fleet",
+        ),
+        (
+            Some(AutonomyCause::Owner),
+            true,
+            true,
+            "Autonomous · from lead",
+        ),
+        (None, true, true, "Autonomous"),
+        (Some(AutonomyCause::Agent), false, false, "Autonomous"),
+    ] {
+        let mut dom = VirtualDom::new_with_props(root, (cause, worker));
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        let button = html.split_once("<button").expect("switch button").1;
+        let attributes = button.split_once('>').expect("switch attributes").0;
+        assert!(attributes.contains("role=\"switch\""), "{html}");
+        assert_eq!(
+            attributes
+                .split_whitespace()
+                .any(|attribute| attribute == "disabled" || attribute == "disabled=true"),
+            locked,
+            "{html}"
+        );
+        assert!(
+            attributes.contains(&format!("aria-checked={}", cause.is_some())),
+            "{html}"
+        );
+        assert!(html.contains(&format!(">{label}</label>")), "{html}");
+    }
+}
+
 fn assert_accordion_has_no_inline_width(html: &str) {
     let root = html
         .split('<')
@@ -1099,6 +1276,7 @@ fn worker_lead() -> crate::board::NavigationRow {
         host: "local".into(),
         state: "working".into(),
         worker: false,
+        autonomous: false,
         unseen: false,
         workers: Vec::new(),
         jobs: Vec::new(),
@@ -2312,6 +2490,22 @@ fn dogsled_job_launch_shows_argv_and_placement_without_claiming_the_job_finished
         assert!(html.contains(expected), "missing {expected}: {html}");
     }
     assert!(!html.contains("Job finished") && !html.contains("Launch confirmed"));
+}
+
+#[test]
+fn decisions_timeline_names_the_record_and_does_not_claim_failure_was_recorded() {
+    use portal_types::agents::ToolStatus;
+    let name = "mcp__dogsled__decide";
+    for (status, recorded) in [(ToolStatus::Completed, true), (ToolStatus::Error, false)] {
+        let mut turn = tool_turn("decide", Some(name), status);
+        turn.tool.as_mut().expect("tool").call = Some(format!(
+            "{name} {}",
+            serde_json::json!({"title": "Use UTC for exports"})
+        ));
+        let html = render_timeline(history(vec![turn]));
+        assert!(html.contains(">Use UTC for exports</p>"), "{html}");
+        assert_eq!(html.contains("Decision recorded"), recorded, "{html}");
+    }
 }
 
 #[test]
