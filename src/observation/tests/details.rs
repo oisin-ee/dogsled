@@ -55,6 +55,14 @@ impl Native {
         crate::probe::agent_list(&shell).unwrap().remove(0)
     }
 
+    /// Replace the transcript in one step. A watcher wake between a truncation and its
+    /// write would read an empty file, which no agent produces: transcripts only grow.
+    fn rewrite(&self, content: &str) {
+        let next = self.directory.join("session.jsonl.next");
+        std::fs::write(&next, content).unwrap();
+        std::fs::rename(&next, self.agent().transcript.unwrap()).unwrap();
+    }
+
     fn reads(&self) -> usize {
         self.server
             .methods()
@@ -207,11 +215,9 @@ fn activity_wakes_only_its_viewed_pane() {
     let mut viewer = fixture.client.detail(pane).unwrap();
     fixture.wait(available);
 
-    std::fs::write(
-        native.agent().transcript.unwrap(),
+    native.rewrite(
         "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"new message\"}}\n",
-    )
-    .unwrap();
+    );
     *native.screen.lock().unwrap() = json!({"text":"refreshed screen", "revision":8});
     let ActivityDetail::Available { sequence, .. } = &mut views.get_mut(pane).unwrap().detail
     else {
@@ -228,7 +234,7 @@ fn activity_wakes_only_its_viewed_pane() {
         assert_eq!(connection.status, ipc::Status::Connected);
         let detail = &connection.publication.detail;
         // A filesystem wake can publish the conversation before activity refreshes the screen.
-        if matches!(&detail.conversation, Content::Available(value) if value.turns[0].text == "new message")
+        if matches!(&detail.conversation, Content::Available(value) if value.turns.first().is_some_and(|turn| turn.text == "new message"))
             && matches!(&detail.screen, Content::Available(screen) if screen.revision == 8)
         {
             break;
@@ -330,11 +336,9 @@ fn transcript_change_advances_only_the_conversation_revision() {
     let fixture = Fixture::new(native.server.client());
     let _viewer = fixture.client.detail("w1:p1").unwrap();
     let first = detail(&fixture.wait(available)).unwrap();
-    std::fs::write(
-        native.agent().transcript.unwrap(),
+    native.rewrite(
         "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"changed task\"}}\n",
-    )
-    .unwrap();
+    );
     assert!(fixture.tick("w1:p1"));
     let changed = fixture.wait(|frame| {
         detail(frame).is_some_and(|detail| detail.parts.conversation > first.parts.conversation)
@@ -461,19 +465,20 @@ fn slow_git_does_not_delay_transcript_or_screen_publication() {
         viewer.current().publication.detail.files,
         FilesState::Pending
     );
-    std::fs::write(native.agent().transcript.unwrap(),
-        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Git is still running\"}}\n").unwrap();
+    native.rewrite(
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Git is still running\"}}\n",
+    );
     *native.screen.lock().unwrap() = json!({"text":"updated while Git waits", "revision":8});
     // Behaviour budget: only the requested capture runs here; Git remains held.
     let start = Instant::now();
     fixture.tick("w1:p1");
     loop {
         let frame = viewer.current().publication;
-        if matches!(&frame.detail.conversation, Content::Available(value) if value.turns[0].text == "Git is still running")
+        // The file wake can publish the conversation before the requested capture reads
+        // the screen. Both must arrive while Git is still held.
+        if matches!(&frame.detail.conversation, Content::Available(value) if value.turns.first().is_some_and(|turn| turn.text == "Git is still running"))
+            && matches!(&frame.detail.screen, Content::Available(value) if value.revision == 8)
         {
-            assert!(
-                matches!(&frame.detail.screen, Content::Available(value) if value.revision == 8)
-            );
             assert_eq!(frame.detail.files, FilesState::Pending);
             break;
         }
@@ -764,10 +769,9 @@ async fn conversation_content_loads_only_through_detail_route() {
     let small = fixture.wait(available);
     let previous = detail(&small).unwrap().revision;
     let text = "x".repeat(4 * 1024);
-    let path = native.agent().transcript.unwrap();
     let message =
         json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":text}]}});
-    std::fs::write(path, message.to_string() + "\n").unwrap();
+    native.rewrite(&(message.to_string() + "\n"));
     fixture.tick("w1:p1");
     let large = fixture.wait(|frame| {
         detail(frame).is_some_and(|detail| {
