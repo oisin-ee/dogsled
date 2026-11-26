@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The longest `title` of a decision, in bytes. A title is one line.
 pub const TITLE_BYTES: usize = 200;
 /// The longest `decision`, `why`, `question` or `alternatives` of a decision, in bytes.
-pub const TEXT_BYTES: usize = 4096;
+pub const TEXT_BYTES: usize = 2000;
 
 /// Why an agent is autonomous. The first cause that holds is the one reported: the fleet
 /// switch, then the agent's own switch, then an autonomous owner.
@@ -186,7 +186,7 @@ mod tests {
         };
         assert_eq!(
             long.refusal().as_deref(),
-            Some("question must be at most 4096 bytes")
+            Some("question must be at most 2000 bytes")
         );
         // An optional field can be absent, but a given one is still bounded, not required.
         let blank = DecideBody {

@@ -84,6 +84,7 @@ Only an agent with no owner has an interactive switch.
 | `question` | no | The open question that it settled. |
 | `alternatives` | no | The options it did not choose. |
 
+The title is one line of at most 200 bytes. Each other field has at most 2000 bytes.
 Dogsled adds the time, the host, the pane, the harness session, the agent name, the owner pane and owner host, and the source.
 The source is `question` (after a refused or released form), `plan` (Dogsled approved a plan), or `agent` (the agent recorded it unprompted).
 `decide` works whether or not Autonomous is on. `dogsled decisions [--pane <pane>] [--json]` prints the records.
@@ -104,7 +105,7 @@ Each host's `state.db` owns the switches and the decisions of its own agents. Sc
 
 - `autonomy_fleet`: at most one row. It exists while this host holds the fleet switch on.
 - `autonomy_agents`: one row per switched-on agent, keyed by pane and harness session, as todo snapshots are.
-- `autonomy_decisions`: one row per decision, with the fields above. Each host keeps its newest 200 and drops older rows.
+- `autonomy_decisions`: one row per decision, with the fields above. Each host keeps its newest 100 and drops older rows.
 - `web_questions.state` gains `released`.
 
 A new module `src/autonomy.rs` owns reads, writes, and the rule in "Which agents are autonomous".
@@ -229,6 +230,7 @@ Read in `origin/main` at `0951ae6`:
 
 - A new exported domain would break older hosts. `Export::validate` rejects an export whose `local` holds a domain it does not know (`src/observation/peers.rs:192`).
   So the data travels inside the `host` domain, in a versioned extension that older hosts ignore, as `owned_work` does.
+  Decisions travel with it, so the bounds are 100 decisions for each host and 2000 bytes for each text field.
 - A host keeps a peer's last usable evidence while the peer is stale (`Ownership::replace`, `src/observation/peers.rs:446`). The copy is in memory.
   After a service restart, the host has none until the peer answers. This is the limit that "Limits of the first iteration" already names.
 - A launch from before `owner_host` has no resolvable owner (`owned_work::agent_executions` skips it). Such a worker follows only the fleet switch and its own state.
