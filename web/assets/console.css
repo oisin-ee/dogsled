@@ -198,6 +198,9 @@ textarea {
   border: 1px solid var(--console-line-strong);
   box-sizing: content-box;
 }
+.console-provider .console-shell .autonomy-switch .autonomy-note {
+  color: var(--console-waiting);
+}
 .console-provider .console-shell .autonomy-switch:has([role="switch"]:enabled) label {
   cursor: pointer;
 }

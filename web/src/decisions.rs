@@ -3,12 +3,42 @@
 use dioxus::prelude::*;
 use dioxus_primitives::scroll_area::ScrollDirection;
 use portal_types::agents::AgentAddress;
-use portal_types::autonomy::{AutonomyCause, DecisionList, DecisionSource, DecisionView};
+use portal_types::autonomy::{
+    AutonomyCause, AutonomyView, DecisionList, DecisionSource, DecisionView,
+};
 
 use crate::components::accordion::{Accordion, AccordionContent, AccordionItem, AccordionTrigger};
 use crate::components::scroll_area::ScrollArea;
 use crate::components::switch::Switch;
 use crate::notice::{Alert, Status};
+
+/// The fleet switch. It names the hosts whose release ignores both switches, because the
+/// agents there keep asking the owner while the switch reads on.
+#[component]
+pub(crate) fn FleetAutonomySwitch(
+    view: Option<AutonomyView>,
+    busy: bool,
+    on_change: EventHandler<bool>,
+) -> Element {
+    let known = view.is_some();
+    let on = view.as_ref().is_some_and(|view| !view.fleet.is_empty());
+    let ignored = view.map(|view| view.unsupported).unwrap_or_default();
+    let hosts = ignored.join(", ");
+    rsx! {
+        div { class: "autonomy-switch",
+            Switch { id: "fleet-autonomy", checked: Some(on), disabled: !known || busy,
+                on_checked_change: move |on| { if known && !busy { on_change.call(on); } },
+            }
+            label { r#for: "fleet-autonomy", "Autonomous" }
+            if !ignored.is_empty() {
+                span { class: "autonomy-note", "data-part": "autonomy-unsupported",
+                    title: "These hosts run a release without autonomy. Their agents still ask you.",
+                    "not on {hosts}"
+                }
+            }
+        }
+    }
+}
 
 #[component]
 pub(crate) fn AgentAutonomySwitch(

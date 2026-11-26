@@ -26,7 +26,6 @@ use crate::components::sidebar::{
     SidebarMenuButton, SidebarMenuButtonSize, SidebarMenuItem, SidebarProvider,
 };
 use crate::components::skeleton::Skeleton;
-use crate::components::switch::Switch;
 use crate::components::tabs::{TabContent, Tabs};
 use crate::conversations::Conversations;
 use crate::new_lead::{NewConversation, NewLead};
@@ -812,18 +811,14 @@ pub fn App() -> Element {
                         },
                         "Metrics"
                     }
-                    div { class: "autonomy-switch",
-                        Switch { id: "fleet-autonomy", checked: Some(autonomy.read().as_ref().is_some_and(|view| !view.fleet.is_empty())),
-                            disabled: autonomy.read().is_none() || fleet_busy(),
-                            on_checked_change: move |on| async move {
-                                if fleet_busy() || autonomy.peek().is_none() { return; }
-                                fleet_busy.set(true);
-                                action_error.set(None);
-                                action_error.set(api::switch_fleet(on).await.err());
-                                fleet_busy.set(false);
-                            },
-                        }
-                        label { r#for: "fleet-autonomy", "Autonomous" }
+                    crate::decisions::FleetAutonomySwitch { view: autonomy(), busy: fleet_busy(),
+                        on_change: move |on| async move {
+                            if fleet_busy() || autonomy.peek().is_none() { return; }
+                            fleet_busy.set(true);
+                            action_error.set(None);
+                            action_error.set(api::switch_fleet(on).await.err());
+                            fleet_busy.set(false);
+                        },
                     }
                 }
                 p { class: "console-tally", aria_label: "Fleet",

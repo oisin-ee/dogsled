@@ -1004,6 +1004,32 @@ fn decisions_distinguish_empty_switch_states_and_gaps() {
 }
 
 #[test]
+fn autonomy_fleet_switch_names_the_hosts_that_ignore_it() {
+    use portal_types::autonomy::AutonomyView;
+    fn root(view: Option<AutonomyView>) -> Element {
+        rsx! { crate::decisions::FleetAutonomySwitch { view, busy: false, on_change: move |_| {} } }
+    }
+    let render = |view| {
+        let mut dom = VirtualDom::new_with_props(root, view);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    };
+    let mixed = render(Some(AutonomyView {
+        fleet: vec!["local".into()],
+        unsupported: vec!["momokaya-2".into(), "local-mac".into()],
+    }));
+    assert!(mixed.contains("aria-checked=true"), "{mixed}");
+    assert!(mixed.contains("not on momokaya-2, local-mac"), "{mixed}");
+    let current = render(Some(AutonomyView::default()));
+    assert!(current.contains("aria-checked=false"), "{current}");
+    assert!(!current.contains("not on"), "{current}");
+    // Without a publication the switch cannot be flipped and claims nothing about hosts.
+    let unknown = render(None);
+    assert!(unknown.contains("disabled"), "{unknown}");
+    assert!(!unknown.contains("not on"), "{unknown}");
+}
+
+#[test]
 fn decisions_switch_reports_and_locks_inherited_modes() {
     use portal_types::autonomy::AutonomyCause;
     fn root((cause, worker): (Option<AutonomyCause>, bool)) -> Element {
