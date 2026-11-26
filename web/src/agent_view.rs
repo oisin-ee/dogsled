@@ -2508,6 +2508,8 @@ mod tests {
             blocked: None,
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         }
     }
 
@@ -3001,6 +3003,8 @@ mod tests {
             blocked: None,
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         };
         assert!(!is_blocked(&agent));
         agent.blocked = Some(BlockedPrompt {
