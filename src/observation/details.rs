@@ -5,10 +5,12 @@ use crate::error::{Error, Result};
 use crate::herdr_socket::Client;
 use crate::probe::Agent;
 use crate::service::wake;
+use notify::{Event, RecursiveMode, Watcher as _};
 use portal_types::agents::{Conversation, DetailRevisions, Screen};
 use portal_types::files::FilesState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -321,6 +323,7 @@ enum Tick {
     Stop,
     Files,
     Activity,
+    Transcript,
     #[cfg(test)]
     Barrier(std::sync::mpsc::SyncSender<()>),
     #[cfg(test)]
@@ -748,6 +751,62 @@ impl Drop for Collector {
     }
 }
 
+fn watch_transcript(
+    path: Option<&str>,
+    wake: std::sync::mpsc::Sender<Tick>,
+    pending: Arc<AtomicBool>,
+) -> Option<notify::RecommendedWatcher> {
+    let path = Path::new(path?);
+    match register_transcript_watch(path, wake, pending) {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            eprintln!(
+                "agent detail transcript watch {}: {error}; using periodic capture",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn register_transcript_watch(
+    path: &Path,
+    wake: std::sync::mpsc::Sender<Tick>,
+    pending: Arc<AtomicBool>,
+) -> notify::Result<notify::RecommendedWatcher> {
+    let name = path.file_name().ok_or_else(notify::Error::path_not_found)?;
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()?;
+    // FSEvents requires a UTF-8 watch path, even when a symlink resolves to a different path.
+    if directory.to_str().is_none() {
+        return Err(notify::Error::generic("transcript directory is not UTF-8"));
+    }
+    let target = directory.join(name);
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+        match event {
+            Ok(event) => {
+                // Ignore our own reads. A rescan hint may have no path.
+                if (event.need_rescan()
+                    || (!event.kind.is_access() && event.paths.contains(&target)))
+                    && !pending.swap(true, Ordering::AcqRel)
+                {
+                    let _ = wake.send(Tick::Transcript);
+                }
+            }
+            Err(error) => eprintln!(
+                "agent detail transcript watch {}: {error}",
+                target.display()
+            ),
+        }
+    })?;
+    // Watch the directory so replacing the file does not detach the watch from its name.
+    watcher.watch(&directory, RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}
+
 impl Worker {
     fn activity_changed(&self) {
         // One queued capture is enough even if activity keeps changing during slow I/O.
@@ -780,54 +839,65 @@ impl Worker {
             files_shell,
         );
         let slot = Arc::clone(&files.slot);
+        let transcript_path = session.transcript.clone();
+        let transcript_wake = wake.clone();
+        let mut detail = Detail::pending(agent);
         #[cfg(test)]
         let transcript_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         #[cfg(test)]
         let reads = Arc::clone(&transcript_reads);
         let thread = std::thread::spawn(move || {
+            let transcript_pending = Arc::new(AtomicBool::new(false));
+            // Register before the first read so an append cannot fall between read and watch.
+            let _watcher = watch_transcript(
+                transcript_path.as_deref(),
+                transcript_wake,
+                Arc::clone(&transcript_pending),
+            );
             let mut capture = Capture::default();
-            let mut detail = None;
-            let mut files_only = false;
+            let mut tick = None;
             let mut next_capture = std::time::Instant::now();
-            #[cfg(test)]
-            let manual = client.is_some();
-            #[cfg(test)]
-            let mut acknowledgement: Option<std::sync::mpsc::SyncSender<()>> = None;
+            let manual = cfg!(test) && client.is_some();
             loop {
-                if done.load(Ordering::Acquire) {
+                if done.load(Ordering::Acquire) || matches!(tick, Some(Tick::Stop)) {
                     break;
+                }
+                // Clear before capture so a change during the read can queue one more pass.
+                match tick {
+                    Some(Tick::Transcript) => transcript_pending.store(false, Ordering::Release),
+                    Some(Tick::Activity) => pending.store(false, Ordering::Release),
+                    _ => (),
                 }
                 let agent = source
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                let mut next = if files_only {
-                    detail.clone().unwrap_or_else(|| Detail::pending(&agent))
-                } else {
-                    let socket = client.clone().map_or_else(Client::discover, Ok);
-                    let captured =
-                        capture.tick(&agent, socket.as_ref().map_err(ToString::to_string));
-                    next_capture = std::time::Instant::now() + DETAIL_TICK;
-                    captured
-                };
-                next.files = slot
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .filter(|read| read.session == next.session && read.cwd == agent.cwd)
-                    .map_or(FilesState::Pending, |read| read.state.clone());
-                detail = Some(next.clone());
+                let due = !manual && std::time::Instant::now() >= next_capture;
+                match tick {
+                    Some(Tick::Files) if !due => (),
+                    Some(Tick::Transcript) if !due => {
+                        if let Some(session) = &detail.session {
+                            detail.conversation = capture.conversation(&agent, session);
+                        }
+                    }
+                    _ => {
+                        let socket = client.clone().map_or_else(Client::discover, Ok);
+                        detail = capture.tick(&agent, socket.as_ref().map_err(ToString::to_string));
+                        next_capture = std::time::Instant::now() + DETAIL_TICK;
+                    }
+                }
+                detail.files = FilesRead::state_for(&slot, detail.session.as_ref(), &agent);
                 #[cfg(test)]
                 reads.store(capture.transcript_reads, Ordering::Release);
                 if done.load(Ordering::Acquire) {
                     break;
                 }
-                Payload::publish(next, &agent, &sequence, &output, &done, &dirty);
+                Payload::publish(detail.clone(), &agent, &sequence, &output, &done, &dirty);
                 #[cfg(test)]
-                if let Some(ack) = acknowledgement.take() {
+                if let Some(Tick::Manual(ack)) = tick {
                     let _ = ack.send(());
                 }
-                let Ok(tick) = next_tick(
+                let Ok(next) = next_tick(
                     &ticks,
                     next_capture,
                     #[cfg(test)]
@@ -835,18 +905,7 @@ impl Worker {
                 ) else {
                     break;
                 };
-                files_only =
-                    matches!(tick, Some(Tick::Files)) && std::time::Instant::now() < next_capture;
-                match tick {
-                    Some(Tick::Stop) => break,
-                    Some(Tick::Files) => (),
-                    Some(Tick::Activity) => pending.store(false, Ordering::Release),
-                    #[cfg(test)]
-                    Some(Tick::Barrier(_)) => unreachable!("drained detail barrier"),
-                    #[cfg(test)]
-                    Some(Tick::Manual(ack)) => acknowledgement = Some(ack),
-                    None => (),
-                }
+                tick = next;
             }
         });
         let stop = Stop {
@@ -941,6 +1000,18 @@ struct FilesRead {
 }
 
 impl FilesRead {
+    fn state_for(
+        slot: &Mutex<Option<Self>>,
+        session: Option<&Session>,
+        agent: &Agent,
+    ) -> FilesState {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|read| read.session.as_ref() == session && read.cwd == agent.cwd)
+            .map_or(FilesState::Pending, |read| read.state.clone())
+    }
+
     fn new(agent: &Agent, capture: crate::git_status::Capture, previous: Option<&Self>) -> Self {
         let crate::git_status::Capture { root, mut state } = capture;
         let session = Session::of(agent);

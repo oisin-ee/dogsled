@@ -9,6 +9,7 @@ use crate::test_support::WAIT_DEADLINE;
 use portal_types::files::FilesState;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -226,9 +227,10 @@ fn activity_wakes_only_its_viewed_pane() {
         let connection = viewer.current();
         assert_eq!(connection.status, ipc::Status::Connected);
         let detail = &connection.publication.detail;
+        // A filesystem wake can publish the conversation before activity refreshes the screen.
         if matches!(&detail.conversation, Content::Available(value) if value.turns[0].text == "new message")
+            && matches!(&detail.screen, Content::Available(screen) if screen.revision == 8)
         {
-            assert!(matches!(&detail.screen, Content::Available(screen) if screen.revision == 8));
             break;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -341,6 +343,53 @@ fn transcript_change_advances_only_the_conversation_revision() {
     assert_eq!(updated.parts.screen, first.parts.screen);
     assert_eq!(updated.parts.conversation, updated.revision);
     assert_eq!(fixture.collector.lock().unwrap().transcript_reads(), 2);
+}
+
+#[test]
+fn transcript_append_publishes_without_a_manual_tick() {
+    let native = Native::new();
+    let fixture = Fixture::new(native.server.client());
+    let mut viewer = fixture.client.detail("w1:p1").unwrap();
+    let initial = detail(&fixture.wait(available)).unwrap();
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(native.agent().transcript.unwrap())
+        .unwrap();
+    writeln!(
+        transcript,
+        "{}",
+        json!({"type":"message","message":{"role":"assistant","content":"appended reply"}}),
+    )
+    .unwrap();
+    drop(transcript);
+
+    let deadline = Instant::now() + WAIT_DEADLINE;
+    loop {
+        let connection = viewer.current();
+        assert_eq!(connection.status, ipc::Status::Connected);
+        let frame = &connection.publication;
+        if let Content::Available(conversation) = &frame.detail.conversation
+            && conversation.turns.len() == 2
+        {
+            assert_eq!(conversation.turns[0].text, "original task");
+            assert_eq!(conversation.turns[1].text, "appended reply");
+            let parts = frame.parts.as_ref().unwrap();
+            assert!(parts.conversation > initial.parts.conversation);
+            assert_eq!(parts.screen, initial.parts.screen);
+            assert_eq!(
+                native.reads(),
+                1,
+                "a transcript wake must not read the screen"
+            );
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the append did not wake the detail worker"
+        );
+        viewer.changed(remaining);
+    }
 }
 
 #[test]
