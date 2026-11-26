@@ -698,6 +698,8 @@ fn view_of(
         blocked,
         reply: None,
         launch: None,
+        autonomous: None,
+        decisions: None,
     }
 }
 

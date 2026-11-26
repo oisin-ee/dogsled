@@ -1005,6 +1005,8 @@ mod shell_tests {
             blocked: None,
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         };
         assert_eq!(agent_title(None, &agent), "fix-portal-titles");
         agent.name = Some("reviewer".to_owned());

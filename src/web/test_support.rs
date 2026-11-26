@@ -30,6 +30,7 @@ pub(super) fn publish(
         agents: Some(agents),
         inbox: Some(inbox),
         repos: None,
+        autonomy: None,
         gaps: vec![],
     };
     let frame = publisher.replace(Publication {

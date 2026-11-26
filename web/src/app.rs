@@ -1055,6 +1055,7 @@ mod shell_tests {
             agents: Some(agents.clone()),
             inbox: None,
             repos: None,
+            autonomy: None,
             gaps: vec![],
         };
         state.update(Ok(PortalEvent::Snapshot(Box::new(snapshot))), 1);
@@ -1107,6 +1108,7 @@ mod shell_tests {
                 agents: Some(vec![]),
                 inbox: Some(InboxView::default()),
                 repos: Some(portal_types::agents::RepoList::default()),
+                autonomy: None,
                 gaps,
             }))
         };
