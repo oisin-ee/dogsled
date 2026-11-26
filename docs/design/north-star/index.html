@@ -78,7 +78,7 @@
   .colophon p { margin:0; }
   #viewer { position:fixed; inset:0; width:100%; height:100%; max-width:none; max-height:none; margin:0; padding:0; border:0; color:#e8ecf5; background:#0f1626; }
   .viewer-scroll { width:100%; height:100%; overflow:auto; }
-  #back { position:fixed; z-index:5; right:14px; bottom:12px; border:1px solid #a7afff; background:#242d48; color:white; border-radius:6px; padding:5px 12px; font-size:13px; }
+  #back { position:fixed; z-index:5; left:50%; top:9px; transform:translateX(-50%); border:1px solid #a7afff; background:#242d48; color:white; border-radius:6px; padding:5px 12px; font-size:13px; }
   @media(max-width:760px) {
     .wrap { width:calc(100% - 36px); }
     .bookbar { position:static; }
@@ -606,7 +606,7 @@
         <div class="plate-head"><span class="plate-num">H</span><h3>Less room</h3><button class="zoom" type="button" aria-label="Full size: Less room">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="capacity" data-current="audit" data-cap="low">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Onboarding audit</h4><span class="status"><i class="dot"></i>Out of reach since 10:42</span></div><p class="quiet">Its work is kept. It returns when its machine answers.</p></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Onboarding audit</h4></div><p class="quiet">Out of reach since 10:42. Its work is kept. It returns when its machine answers.</p></header>
             <div class="lead-grid">
               <div class="conversation">
                 <div class="thread"><div class="measure">
@@ -616,7 +616,7 @@
                 </div></div>
                 <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Onboarding audit…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
               </div>
-              <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Out of reach</p><p class="quiet">Last heard 10:42. Messages wait and are delivered in order.</p></div>
+              <aside class="inspector" aria-label="Lead progress" style="padding-top:128px">
                 <div class="tabs"><span class="on">Todos 2/7</span><span>Team 2</span><span>Files 3</span></div></aside>
             </div>
           </section>
