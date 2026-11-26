@@ -78,7 +78,7 @@
   .colophon p { margin:0; }
   #viewer { position:fixed; inset:0; width:100%; height:100%; max-width:none; max-height:none; margin:0; padding:0; border:0; color:#e8ecf5; background:#0f1626; }
   .viewer-scroll { width:100%; height:100%; overflow:auto; }
-  #back { position:fixed; z-index:3; right:14px; top:8px; border:1px solid #a7afff; background:#242d48; color:white; border-radius:6px; padding:5px 12px; font-size:13px; }
+  #back { position:fixed; z-index:5; right:14px; bottom:12px; border:1px solid #a7afff; background:#242d48; color:white; border-radius:6px; padding:5px 12px; font-size:13px; }
   @media(max-width:760px) {
     .wrap { width:calc(100% - 36px); }
     .bookbar { position:static; }
@@ -217,6 +217,108 @@
   .recovery-body .twocol { margin-top:18px; }
   .file-list { list-style:none; margin-top:11px !important; padding:0; }
   .file-list li { border-top:1px solid var(--line); padding:10px 0; }
+
+  /* Additions for revision 2: fonts, identity, thread rows, new plates. */
+  @font-face { font-family:"IBM Plex Sans"; src:url("../../../web/assets/fonts/ibm-plex-sans-latin.woff2") format("woff2"); font-weight:100 700; font-style:normal; }
+  @font-face { font-family:"IBM Plex Sans"; src:url("../../../web/assets/fonts/ibm-plex-sans-italic-latin.woff2") format("woff2"); font-weight:100 700; font-style:italic; }
+  @font-face { font-family:"JetBrains Mono"; src:url("../../../web/assets/fonts/jetbrains-mono-latin.woff2") format("woff2"); font-weight:100 800; font-style:normal; }
+  :root { --ui:"IBM Plex Sans",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,monospace; }
+  .refuse { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:0 0 34px; padding:0; list-style:none; }
+  .refuse li { border:1px solid var(--rule); border-radius:6px; padding:12px 14px; font-size:14px; color:var(--muted); }
+  .refuse b { display:block; color:var(--ink); }
+  .principle .forces { margin-top:8px; padding-left:10px; border-left:2px solid var(--violet); color:var(--ink); font-size:14px; }
+  .budget td:nth-child(2) { font:400 15px/1.6 var(--ui); white-space:normal; min-width:0; }
+  .budget td.num { font:700 14px/1.7 var(--mono); white-space:nowrap; }
+  .budget td.today { color:#8a3a2b; }
+  .budget small { display:block; color:var(--muted); font:400 13px/1.5 var(--ui); white-space:normal; }
+  .tag-proposed { font:600 11px/1 var(--mono); letter-spacing:.08em; text-transform:uppercase; color:var(--violet); border:1px solid var(--violet); border-radius:3px; padding:2px 5px; margin-left:8px; vertical-align:2px; }
+  .identity { display:grid; grid-template-columns:1.1fr 1fr 1fr; gap:10px; margin:0 0 30px; }
+  .idcard { border-radius:8px; min-height:170px; padding:18px; display:flex; flex-direction:column; justify-content:space-between; font-size:13px; }
+  .idcard.dark { background:#0f1626; color:#e8ecf5; } .idcard.light { background:#fff; border:1px solid var(--rule); } .idcard.accent { background:#8b95ff; color:#0b0f2a; }
+  .wordmark { display:flex; align-items:center; gap:14px; font:700 34px/1 var(--ui); letter-spacing:-.02em; }
+  .wordmark svg { width:40px; height:40px; }
+  .marks { display:flex; align-items:end; gap:18px; }
+  .states { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:22px 0 0; }
+  .statecard { background:#131b2e; color:#e8ecf5; border-radius:8px; padding:14px; font-size:13px; }
+  .statecard .screen-like { margin-top:10px; }
+  .sketches { display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  .sketch { border:1px solid var(--rule); border-radius:8px; padding:16px; }
+  .sketch .draw { height:150px; background:#0f1626; border-radius:6px; display:grid; gap:6px; padding:10px; margin-bottom:12px; }
+  .sketch .draw i { background:#1a2339; border:1px solid #2c3754; border-radius:4px; }
+  .sketch h3 { margin:0 0 4px; font-size:17px; } .sketch p { margin:0; color:var(--muted); font-size:14px; }
+  .away { width:100%; border-collapse:collapse; text-align:left; font-size:15px; }
+  .away th { font:600 12px/1.5 var(--mono); letter-spacing:.1em; text-transform:uppercase; color:var(--violet); }
+  .away th, .away td { padding:11px 14px 11px 0; border-bottom:1px solid var(--rule); vertical-align:top; }
+  .away td:first-child { color:#8a3a2b; } .away td:last-child { font:600 12px/1.8 var(--mono); color:var(--violet); white-space:nowrap; }
+  .decisions { counter-reset:d; list-style:none; padding:0; margin:0; }
+  .decisions li { counter-increment:d; border-top:1px solid var(--rule); padding:16px 0 16px 54px; position:relative; }
+  .decisions li::before { content:"D" counter(d); position:absolute; left:0; top:18px; font:600 12px/1.5 var(--mono); letter-spacing:.1em; color:var(--violet); }
+  .decisions h3 { margin:0 0 4px; font-size:18px; } .decisions p { margin:0; color:var(--muted); max-width:72ch; }
+  .decisions .rec { color:var(--ink); }
+  .film { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+  .film > div { min-width:0; } .film .stage { overflow:hidden; }
+  .film .stage { border-radius:6px; }
+  .film-label { font:700 13px/1 var(--mono); color:var(--violet); margin:0 0 8px; display:flex; justify-content:space-between; }
+  .film-label span { color:var(--muted); font-weight:400; }
+
+  /* Product: top bar */
+  .screen { grid-template:48px minmax(0,1fr) / 292px minmax(0,1fr); position:relative; }
+  .appbar { gap:14px; padding:0 14px 0 18px; }
+  .jump { display:flex; align-items:center; justify-content:space-between; width:340px; height:30px; margin-left:18px; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:var(--ground); color:var(--quiet); font-size:13px; }
+  .kbd { font:500 11px/1 "JetBrains Mono",var(--mono); color:var(--quiet); border:1px solid var(--lightline); border-radius:4px; padding:3px 5px; }
+  .cap { margin-left:auto; display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border:1px solid var(--line); border-radius:6px; font-size:12px; color:var(--quiet); }
+  .cap .bars { display:flex; gap:2px; } .cap .bars i { width:4px; height:12px; border-radius:1px; background:var(--lightline); } .cap .bars i.on { background:var(--green); }
+  .cap.low { border-color:var(--yellow); color:var(--yellow); } .cap.low .bars i.on { background:var(--yellow); }
+  /* Product: thread rows */
+  .app-sidebar { padding:16px 10px 12px; }
+  .trow { display:grid; grid-template-columns:14px minmax(0,1fr) auto; column-gap:8px; align-items:start; padding:8px 8px; border-radius:6px; border:1px solid transparent; }
+  .trow.current { background:var(--selected); border-color:var(--lightline); }
+  .trow b { display:block; font-size:14px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .trow.unread b { font-weight:700; }
+  .trow span { display:block; font-size:12.5px; color:var(--quiet); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .trow time { color:var(--quiet); font-size:11px; padding-top:3px; }
+  .st { width:8px; height:8px; margin-top:6px; border-radius:50%; }
+  .st.need { background:var(--yellow); } .st.unread { background:var(--signal); } .st.work { border:2px solid var(--green); }
+  .st.quiet { border:1px solid var(--lightline); } .st.away { border:1px dashed var(--quiet); }
+  .repo-label { margin:18px 8px 4px; }
+  .sidefoot { display:flex; justify-content:space-between; }
+  /* Product: home */
+  .home { flex:1; min-height:0; overflow:auto; display:grid; justify-content:center; align-content:start; padding:92px 0 30px; }
+  .home > div { width:720px; }
+  .home h4 { font-size:32px; margin-bottom:18px; }
+  .hint { display:flex; gap:14px; margin-top:10px; color:var(--quiet); font-size:12px; }
+  .section-label { margin:34px 0 10px; display:flex; align-items:center; gap:8px; font-size:13px; font-weight:650; }
+  .cards { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .ncard { background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--yellow); border-radius:8px; padding:14px; display:grid; gap:6px; }
+  .ncard h6 { font-size:15px; } .ncard .acts { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
+  .since { border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+  .since > div { display:grid; grid-template-columns:150px minmax(0,1fr) auto; gap:12px; padding:11px 14px; border-top:1px solid var(--line); font-size:14px; }
+  .since > div:first-child { border-top:0; } .since span { color:var(--quiet); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .since time { color:var(--quiet); }
+  /* Product: thread pieces */
+  .surface > .pagebody { flex:1; } .pagehead { padding:16px 28px 14px; } .pagehead .tabs { margin-bottom:-14px; } .screen h4 { font-size:22px; } .pagehead .quiet { margin-top:3px; font-size:13px; }
+  .live { margin:0 0 20px 54px; border:1px solid var(--line); border-left:2px solid var(--green); border-radius:6px; padding:10px 12px; font-size:13px; }
+  .live strong { display:flex; justify-content:space-between; font-weight:600; } .live ul { list-style:none; padding:0; margin-top:6px !important; color:var(--quiet); }
+  .live li { padding:2px 0; } .live li::before { content:"✓ "; color:var(--signal); } .live li.now::before { content:"● "; color:var(--green); }
+  .newline { display:flex; align-items:center; gap:10px; margin:4px 0 18px; color:var(--signal); font:600 11px/1 "JetBrains Mono",var(--mono); letter-spacing:.1em; text-transform:uppercase; }
+  .newline::before, .newline::after { content:""; flex:1; height:1px; background:var(--signal); opacity:.5; }
+  .startstrip { margin:0 0 20px 54px; display:flex; gap:22px; align-items:center; font-size:13px; color:var(--quiet); }
+  .startstrip b { color:var(--text); font-weight:600; } .startstrip .done::before { content:"✓ "; color:var(--signal); } .startstrip .now::before { content:"● "; color:var(--green); } .startstrip .next::before { content:"○ "; }
+  .receipt { margin:0 0 20px 54px; border:1px solid var(--line); border-radius:8px; padding:12px 14px; background:var(--panel); display:grid; gap:4px; font-size:13px; }
+  .receipt b { font-size:14px; } .receipt .ok { color:var(--green); }
+  .teamrow { display:grid; grid-template-columns:14px minmax(0,1fr) auto auto; gap:10px; align-items:center; padding:12px 0; border-top:1px solid var(--line); font-size:14px; }
+  .teamrow:first-of-type { border-top:0; } .teamrow small { display:block; color:var(--quiet); font-size:12.5px; } .teamrow .st { margin-top:0; }
+  .lefttable { width:100%; border-collapse:collapse; text-align:left; font-size:14px; margin-top:10px; }
+  .lefttable th { font-weight:500; color:var(--quiet); font-size:12px; } .lefttable th, .lefttable td { border-top:1px solid var(--line); padding:11px 10px 11px 0; }
+  .lefttable tr.gone td { color:var(--quiet); }
+  .pop { position:absolute; right:14px; top:44px; width:330px; background:var(--raised); border:1px solid var(--lightline); border-radius:8px; padding:14px; z-index:2; font-size:13px; }
+  .pop h6 { margin-bottom:8px; } .pop .m { display:grid; grid-template-columns:110px 1fr auto; gap:10px; align-items:center; padding:7px 0; border-top:1px solid var(--line); }
+  .pop .meter { height:5px; border-radius:3px; background:var(--selected); } .pop .meter i { display:block; height:100%; border-radius:3px; background:var(--green); }
+  .scrim { position:absolute; inset:0; background:rgb(8 12 22 / 62%); z-index:3; }
+  .palette { position:absolute; z-index:4; left:50%; top:110px; width:640px; margin-left:-320px; background:var(--raised); border:1px solid var(--lightline); border-radius:10px; overflow:hidden; }
+  .palette .q { padding:15px 16px; font-size:17px; border-bottom:1px solid var(--line); } .palette .q i { display:inline-block; width:1px; height:18px; background:var(--signal); vertical-align:-3px; margin-left:1px; }
+  .palette .grp { padding:10px 16px 4px; } .palette .it { display:grid; grid-template-columns:14px minmax(0,1fr) auto; gap:10px; align-items:center; padding:9px 16px; font-size:14px; }
+  .palette .it.on { background:var(--selected); } .palette .it small { color:var(--quiet); } .palette .it .st { margin-top:0; }
+  .palette .keys { display:flex; gap:16px; flex-wrap:wrap; padding:11px 16px; border-top:1px solid var(--line); color:var(--quiet); font-size:12px; }
 </style>
 </head>
 <body>
@@ -224,7 +326,7 @@
 <header class="bookbar">
   <div class="wrap">
     <a class="bookbrand" href="#cover"><svg aria-hidden="true" class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg> Dogsled / Design</a>
-    <nav aria-label="Book chapters"><a href="#goals">Direction</a><a href="#speed">Speed</a><a href="#visual">System</a><a href="#screens">Screens</a></nav>
+    <nav aria-label="Book chapters"><a href="#goals">Direction</a><a href="#speed">Speed</a><a href="#visual">Identity</a><a href="#screens">Screens</a><a href="#away">What goes away</a><a href="#decisions">Decisions</a></nav>
   </div>
 </header>
 <main id="main">
@@ -233,311 +335,423 @@
       <defs><pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0v32" fill="none" stroke="#d5c4f9" stroke-opacity=".12"/></pattern></defs>
       <path fill="url(#grid)" d="M0 0h720v545H0z"/>
       <g fill="none" stroke="#6b548e" opacity=".65">
-        <path d="M-50 523C110 522 172 476 231 398S401 298 437 227 454 95 549 66 656 86 764 8"/><path d="M-50 548C110 547 185 497 252 413S422 308 458 237 475 112 560 85 662 109 770 25"/><path d="M-50 573C110 572 203 509 270 429S443 318 479 247 496 129 571 104 666 132 782 42"/><path d="M-50 598C110 597 214 536 288 449S464 328 500 257 517 145 582 123 672 154 794 59"/><path d="M-50 623C110 622 220 567 306 469S485 338 521 267 538 162 593 142 678 176 806 76"/><path d="M-50 648C110 647 228 595 324 489S506 348 542 277 559 178 604 161 684 198 818 93"/>
-        <path d="M-50 468C100 470 135 437 187 372S355 274 392 205 416 69 523 38 638 46 739-25"/><path d="M-50 443C100 445 115 420 167 356S332 261 370 194 395 52 512 22 629 27 728-42"/><path d="M-50 418C100 420 96 403 147 340S310 248 348 183 375 36 499 4 620 7 717-58"/>
+        <path d="M-50 523C110 522 172 476 231 398S401 298 437 227 454 95 549 66 656 86 764 8"/><path d="M-50 548C110 547 185 497 252 413S422 308 458 237 475 112 560 85 662 109 770 25"/><path d="M-50 573C110 572 203 509 270 429S443 318 479 247 496 129 571 104 666 132 782 42"/><path d="M-50 598C110 597 214 536 288 449S464 328 500 257 517 145 582 123 672 154 794 59"/><path d="M-50 623C110 622 220 567 306 469S485 338 521 267 538 162 593 142 678 176 806 76"/>
+        <path d="M-50 468C100 470 135 437 187 372S355 274 392 205 416 69 523 38 638 46 739-25"/><path d="M-50 443C100 445 115 420 167 356S332 261 370 194 395 52 512 22 629 27 728-42"/>
       </g>
       <path d="M36 495C155 484 168 456 216 384S386 287 414 219 435 87 538 52 648 65 767-12" fill="none" stroke="#c8aaff" stroke-width="2"/>
       <g fill="#211a35" stroke="#c8aaff" stroke-width="2"><circle cx="216" cy="384" r="6"/><circle cx="414" cy="219" r="7"/><circle cx="538" cy="52" r="6"/></g>
-      <g fill="#dec9ff" font-family="monospace" font-size="11" letter-spacing="1"><text x="229" y="375">01 / RETURN</text><text x="427" y="209">02 / DECIDE</text><text x="550" y="44">03 / RESUME</text></g>
+      <g fill="#dec9ff" font-family="monospace" font-size="11" letter-spacing="1"><text x="229" y="375">01 / ASK</text><text x="427" y="209">02 / STEER</text><text x="550" y="44">03 / LANDED</text></g>
     </svg>
     <div class="wrap cover-inner">
-      <p class="overline">Dogsled · Product direction</p>
+      <p class="overline">Dogsled · Product direction · Proposal</p>
       <h1>North <em>Star.</em></h1>
-      <p class="thesis">One place to run the work. See what needs you, decide in context, and get back to your own work.</p>
-      <span class="folio">Design book / 01</span>
+      <p class="thesis">As fast as Herdr. You talk to leads. The leads use every machine as one.</p>
+      <span class="folio">Design book / revision 2</span>
     </div>
   </div>
   <nav class="index" aria-label="Reading order"><div class="wrap">
-    <a href="#goals"><span class="index-key">01</span> Goals &amp; principles</a>
+    <a href="#goals"><span class="index-key">01</span> Direction</a>
     <a href="#speed"><span class="index-key">02</span> Speed budgets</a>
-    <a href="#visual"><span class="index-key">03</span> Visual system</a>
-    <a href="#screens"><span class="index-key">04</span> Seven screens</a>
+    <a href="#visual"><span class="index-key">03</span> Identity</a>
+    <a href="#screens"><span class="index-key">04</span> Eleven screens</a>
+    <a href="#away"><span class="index-key">05</span> What goes away</a>
+    <a href="#decisions"><span class="index-key">06</span> Decisions</a>
   </div></nav>
   <div class="wrap">
     <section class="chapter" id="goals">
       <div class="chapter-num">01 / Direction</div>
       <div>
-        <h2>Run the work,<br>not the machines.</h2>
-        <p class="lede">Dogsled is the console for one developer coordinating coding agents. After time away, they need to see what changed and what only they can decide.</p>
-        <div class="goalband"><span class="overline">The owner’s loop</span><p><strong>Return → decide → resume.</strong> Find the next decision without scanning every conversation. Act inside the relevant lead, then get back to your own work.</p><p><strong>Success:</strong> Name the next decision at a glance, open it in one action, and see a receipt before leaving. No machine choice.</p></div>
+        <h2>Talk to leads.<br>Forget the machines.</h2>
+        <p class="lede">Dogsled is a layer on Herdr for one owner. The owner gives work to leads and steers them. The leads place agents on every connected machine as they see fit.</p>
+        <div class="goalband"><span class="overline">The owner’s thesis · 27 November 2026</span>
+          <p><strong>1. As fast as Herdr.</strong> Every interaction feels instant. If the portal is slower than a terminal tab, the owner goes back to the terminal.</p>
+          <p><strong>2. The owner works with leads.</strong> A lead is a conversation. Everything else is that lead’s business.</p>
+          <p><strong>3. One machine.</strong> The owner does not know and does not care where a lead or an agent runs. Machines are capacity.</p></div>
+        <span class="overline">Dogsled refuses to be</span>
+        <ul class="refuse">
+          <li><b>A fleet dashboard</b>Machines are not what the owner manages.</li>
+          <li><b>A terminal viewer</b>Herdr is that. Dogsled shows what a lead said and did.</li>
+          <li><b>A code review tool</b>Agents review and land code. The owner decides direction.</li>
+          <li><b>A place to tidy up</b>Leftover branches and jobs are a Dogsled failure, not a list.</li>
+        </ul>
         <div class="principles">
-          <div class="principle"><span class="overline">P01</span><h3>Attention has a real count.</h3><p>Keep Needs you visible. Count open owner requests, not unread replies or branches that agents must land.</p></div>
-          <div class="principle"><span class="overline">P02</span><h3>Work is the address.</h3><p>Group leads by repository and name them by outcome. Dogsled chooses where work runs. Machine names, pane IDs, and routing evidence belong in diagnostics.</p></div>
-          <div class="principle"><span class="overline">P03</span><h3>Decide where you read.</h3><p>Open questions and plans inside their lead. Keep its conversation one tab away and keep the other requests in sight.</p></div>
-          <div class="principle"><span class="overline">P04</span><h3>Show receipts, not guesses.</h3><p>Queued is not running. Sent is not delivered. A saved copy is not done. Show the evidence for each state.</p></div>
-          <div class="principle"><span class="overline">P05</span><h3>Let leads do the leading.</h3><p>Nest workers under their lead and command jobs under the agent that started them. Give a job output and a result, not a chat.</p></div>
-          <div class="principle"><span class="overline">P06</span><h3>Keep the last good view.</h3><p>When updates stop, show what is cached and when it was current. Keep safe reads available. Disable actions that cannot be verified.</p></div>
+          <div class="principle"><span class="overline">P1</span><h3>The click is the result.</h3><p>The app answers from what it already holds. The network confirms later.</p><p class="forces">Rule: every navigation paints its full result in the same frame. No request sits between a click and its content.</p></div>
+          <div class="principle"><span class="overline">P2</span><h3>It arrives before you ask.</h3><p>An unread thread already has its unread text when you open it.</p><p class="forces">Rule: the app receives the newest part of every thread as it is written, not only of the open one.</p></div>
+          <div class="principle"><span class="overline">P3</span><h3>Nothing you saw is taken away.</h3><p>Content never gives way to a spinner, a banner or an error.</p><p class="forces">Rule: a lost connection is a small mark after 2 s. The last content stays and stays readable.</p></div>
+          <div class="principle"><span class="overline">P4</span><h3>A lead is the only address.</h3><p>The list holds leads. Workers, jobs, branches and files live inside their lead.</p><p class="forces">Rule: no row without a lead. A record with no lead is removed by the service or becomes one decision.</p></div>
+          <div class="principle"><span class="overline">P5</span><h3>One machine.</h3><p>Capacity is one figure: is there room for more work?</p><p class="forces">Rule: no machine name, pane id or machine chip in any primary view. Names appear in one capacity panel only.</p></div>
+          <div class="principle"><span class="overline">P6</span><h3>Leads finish their own work.</h3><p>Landing, review and cleanup belong to agents.</p><p class="forces">Rule: the owner sees a receipt (“Landed in main”), or one decision when work is stuck. Never a to-do list of branches.</p></div>
+          <div class="principle"><span class="overline">P7</span><h3>Hands stay on the keys.</h3><p>Rows keep their place, so the hand learns them.</p><p class="forces">Rule: every lead and action is in <code>⌘K</code>. Threads switch with keys. Rows never reorder by state.</p></div>
         </div>
       </div>
     </section>
+
     <section class="chapter" id="speed">
       <div class="chapter-num">02 / Speed</div>
       <div>
-        <h2>Fast enough to trust.</h2>
-        <p class="lede">The interface must respond before the work does. These are proposed budgets, not measurements of the current portal.</p>
+        <h2>As fast as Herdr.</h2>
+        <p class="lede">A budget is what the owner sees at each moment after an input. Every budget is proposed. “Today” was measured on the live portal, version 0.43.2, on 26 November 2026.</p>
         <div class="table-wrap" tabindex="0" role="region" aria-label="Speed budget table">
-          <table class="budget"><thead><tr><th scope="col">Moment</th><th scope="col">Target</th><th scope="col">What to measure</th></tr></thead><tbody>
-            <tr><td>Find the next decision</td><td>≤ 5 s</td><td>From first view to naming the request that needs an answer. No clicks.</td></tr>
-            <tr><td>Get to the request</td><td>1 action</td><td>From any primary screen to the open question or review.</td></tr>
-            <tr><td>First useful screen</td><td>≤ 1 s</td><td>p95 warm open to usable Needs you and the Work overview. Cold open target: ≤ 2.5 s.</td></tr>
-            <tr><td>Switch leads</td><td>≤ 100 ms</td><td>p95 input to selection and any saved conversation. A previously unseen lead paints its latest slice within 600 ms p95.</td></tr>
-            <tr><td>Send or decide</td><td>≤ 100 ms</td><td>p95 input to a visible pending receipt. Durable acknowledgment has a separate 1 s p95 target.</td></tr>
-            <tr><td>Reflect a state change</td><td>≤ 2 s</td><td>p95 recorded event to visible state or inbox count. This excludes agent runtime.</td></tr>
-            <tr><td>Expose lost updates</td><td>≤ 5 s</td><td>From the last expected update signal to a visible stale state. Clear it only after a fresh snapshot.</td></tr>
+          <table class="budget"><thead><tr><th scope="col">Interaction</th><th scope="col">Same frame (0 ms)</th><th scope="col">By 100 ms</th><th scope="col">By 1 s</th><th scope="col">Budget</th><th scope="col">Today</th></tr></thead><tbody>
+            <tr><td>Open a thread</td><td>The whole known thread, with the unread part under a “New” line</td><td>Unread mark clears</td><td>No change to what you read</td><td class="num">0 requests<br>1 frame</td><td class="num today">830 ms<small>1.1–1.8 s when the lead is on another machine. Old text first.</small></td></tr>
+            <tr><td>A lead writes in the open thread</td><td>—</td><td>—</td><td>The new text</td><td class="num">300 ms</td><td class="num today">up to 5 s<small>Then the whole history (1.0–1.4 MB) is sent again.</small></td></tr>
+            <tr><td>A question or plan arrives</td><td>—</td><td>—</td><td>Its card in Needs you</td><td class="num">300 ms</td><td class="num today">3.2–7.2 s<small>Single updates of 20 s and 64 s are in the log.</small></td></tr>
+            <tr><td>Start a lead</td><td>Its thread, with your message</td><td>“Saved”</td><td>“Finding room”</td><td class="num">1 frame</td><td class="num today">4.0–7.4 s<small>The New screen blocks for this, after a naming call of up to 15 s.</small></td></tr>
+            <tr><td>Send a message</td><td>Your message in the thread</td><td>—</td><td>“Delivered”</td><td class="num">1 frame<br>300 ms</td><td class="num">not measured</td></tr>
+            <tr><td>Cold open</td><td>—</td><td>The frame and the last threads, from the browser’s own store</td><td>Live state</td><td class="num">100 ms<br>1 s live</td><td class="num today">1.5 s<small>To the first Needs you data.</small></td></tr>
+            <tr><td>A second window</td><td colspan="3">No effect on the first.</td><td class="num">0 ms</td><td class="num today">&gt; 4 s stall<small>Every request in both windows.</small></td></tr>
           </tbody></table>
         </div>
-        <p class="method"><strong>Measure before changing the portal.</strong> Run 50 warm and 50 cold trials at 1440 × 900 on the owner’s desktop. Record fleet size, network and cache state. Use at least three repositories, ten leads and two open requests. Report commands separately from agent startup and execution. Repeat with a paused stream. For the five-second goal, observe five return attempts and report misses separately.</p>
+        <p class="method"><strong>What a budget excludes.</strong> A lead needs real time to start and to think. A budget covers only the time between an event and the pixel that shows it. The causes of today’s numbers and the units that remove them are in <code>plans/portal-snappy.md</code> on the branch <code>perf/portal-snappy</code>.</p>
       </div>
     </section>
+
     <section class="chapter" id="visual">
-      <div class="chapter-num">03 / Visual system</div>
+      <div class="chapter-num">03 / Identity</div>
       <div>
-        <h2>The quiet console.</h2>
-        <p class="lede">The book uses paper and ink. The product keeps the slate console from <code>DESIGN.md</code>. Color signals a change in state, not decoration.</p>
+        <h2>Quiet, and exact.</h2>
+        <p class="lede">The mark is three runners of a sled. The console keeps the slate palette of <code>DESIGN.md</code>: no colour changes, so nothing here needs a migration. Colour reports a state and nothing else.</p>
+        <div class="identity">
+          <div class="idcard dark"><span class="wordmark"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="#8b95ff" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg>Dogsled</span><span>Wordmark · IBM Plex Sans 700 · mark in signal indigo</span></div>
+          <div class="idcard light"><span class="marks"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#201d2e" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#201d2e" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#201d2e" stroke-width="2.5"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg></span><span>Mark at 64, 32 and 16 px · sketch, not final artwork</span></div>
+          <div class="idcard accent"><svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="#0b0f2a" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg><span>App icon ground · signal indigo #8B95FF</span></div>
+        </div>
         <div class="swatches" aria-label="Console colors">
           <div class="swatch" style="--sw:#0f1626">Ground<code>#0F1626</code></div>
           <div class="swatch" style="--sw:#131b2e">Panel<code>#131B2E</code></div>
           <div class="swatch" style="--sw:#1a2339">Raised<code>#1A2339</code></div>
           <div class="swatch" style="--sw:#1f2943">Selection<code>#1F2943</code></div>
-          <div class="swatch" style="--sw:#e8ecf5;--label:#0f1626">Text<code>#E8ECF5</code></div>
-          <div class="swatch" style="--sw:#8b95ff;--label:#0b0f2a">Action / selected<code>#8B95FF</code></div>
+          <div class="swatch" style="--sw:#8b95ff;--label:#0b0f2a">Unread · action<code>#8B95FF</code></div>
           <div class="swatch" style="--sw:#f2c94c;--label:#0f1626">Needs you<code>#F2C94C</code></div>
-          <div class="swatch" style="--sw:#4cc38a;--label:#0f1626">Running / live<code>#4CC38A</code></div>
+          <div class="swatch" style="--sw:#4cc38a;--label:#0f1626">Working<code>#4CC38A</code></div>
+          <div class="swatch" style="--sw:#e8ecf5;--label:#0f1626">Text<code>#E8ECF5</code></div>
         </div>
         <div class="principles">
-          <div class="principle"><h3>Type</h3><p>Use IBM Plex Sans for UI and 15px conversation prose. Use JetBrains Mono for code, time and branch names. This offline edition uses system fallbacks when the fonts are absent.</p></div>
-          <div class="principle"><h3>Space</h3><p>Use a 4–24px spacing scale, 1px rules, and 4–12px radii. The desktop grid has a 52px bar, 292px work rail, and 300px lead inspector.</p></div>
-          <div class="principle"><h3>Signals</h3><p>Pair every state color with a label. Use muted steel <code>#9AA3B9</code> for secondary copy and <code>#222C45</code> for dividers. Make focus distinct from selection.</p></div>
-          <div class="principle"><h3>Regions</h3><p>Pin the service bar and action bars. Scroll the rail, transcript, and form inside the viewport. On narrow screens, move the inspector into tabs. Keep Needs you visible.</p></div>
+          <div class="principle"><h3>Type</h3><p>IBM Plex Sans: 13 px for the interface, 15 px for what a lead says, 22 px for a thread title. JetBrains Mono for code, commands, branches and times.</p></div>
+          <div class="principle"><h3>Space and density</h3><p>A 4 px grid. A thread row is 52 px: a name and one line of what the lead said last. A 48 px bar, a 292 px list, a 640 px reading measure, a 300 px team panel.</p></div>
+          <div class="principle"><h3>Motion</h3><p>Selection and hover: 0 ms. A panel that opens: 120 ms, ease-out. New text fades in over 150 ms and never moves the line you read. With reduced motion, all are 0 ms.</p></div>
+          <div class="principle"><h3>Four states, four marks</h3><p>Yellow dot: needs you. Indigo dot and a bold name: unread. Green ring: working. Hollow ring: quiet. A state always has its word next to it in the thread header.</p></div>
+          <div class="principle"><h3>Voice</h3><p>Receipts, in the owner’s words: “Landed in main”, “Needs your answer”, “Finding room”. No ids, no internal terms such as admission, pane, hold or publication.</p></div>
+          <div class="principle"><h3>Names</h3><p>A lead has a name of two to four words. Until the name exists, the first words of the owner’s message stand in. A pane id is never a title.</p></div>
         </div>
       </div>
     </section>
+
     <section class="gallery" id="screens" aria-labelledby="plates-title">
       <p class="overline">04 / The end state</p>
-      <h2 id="plates-title">A day in Dogsled.</h2>
-      <p class="lede">Seven desktop scenes, drawn at 1440 × 900. Full size opens the native viewport. Product controls are illustrations, not connected to a fleet.</p>
+      <h2 id="plates-title">Eleven screens.</h2>
+      <p class="lede">Each screen is drawn at 1440 × 900. “Full size” opens it at that size. The work shown is invented. The controls do nothing.</p>
       <ol class="plate-index">
-        <li><a href="#overview">01 Work overview</a></li><li><a href="#new">02 New lead</a></li><li><a href="#lead">03 Lead workspace</a></li><li><a href="#question">04 Question</a></li><li><a href="#review">05 Plan review</a></li><li><a href="#job">06 Job detail</a></li><li><a href="#recovery">07 Recovery</a></li>
+        <li><a href="#home">A Home</a></li><li><a href="#thread">B Lead at work</a></li><li><a href="#sent">C Send, at 0 ms</a></li><li><a href="#question">D Question</a></li><li><a href="#review">E Plan review</a></li><li><a href="#team">F A lead’s team</a></li><li><a href="#leftovers">G Finished work</a></li><li><a href="#capacity">H Less room</a></li><li><a href="#keys">I Keyboard</a></li><li><a href="#unread">J Unread, frame by frame</a></li>
       </ol>
 
-      <figure class="plate" id="overview">
-        <div class="plate-head"><span class="plate-num">01</span><h3>Work overview</h3><button class="zoom" type="button" aria-label="Full size: Work overview">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="overview">
-            <section class="surface">
-              <header class="pagehead">
-                <p class="product-tag">Workspace</p><div class="head-line"><h4>Work overview</h4><span class="badge">3 active leads</span></div>
-                <p class="quiet">Two decisions need your attention.</p>
-              </header>
-              <div class="pagebody overview">
-                <div class="twocol equal">
-                  <section class="box decision"><span class="product-tag need">Question · Portal delivery</span><h5>Choose a rollout</h5><p class="quiet">Pick the first audience for message receipts.</p><span class="control">Open question →</span></section>
-                  <section class="box decision"><span class="product-tag need">Plan review · Recovery flow</span><h5>Review the recovery plan</h5><p class="quiet">Revision 2 includes two changes and one note.</p><span class="control">Open plan →</span></section>
-                </div>
-                <div class="twocol">
-                  <section class="box">
-                    <h5>Work in progress</h5>
-                    <table class="work-table"><thead><tr><th scope="col">Lead</th><th scope="col">State</th><th scope="col">Todos</th></tr></thead><tbody>
-                      <tr><td>Portal delivery<br><small class="quiet">dogsled</small></td><td><span class="status need"><i class="dot"></i>Needs an answer</span></td><td>3 / 5</td></tr>
-                      <tr><td>Recovery flow<br><small class="quiet">dogsled</small></td><td><span class="status need"><i class="dot"></i>Needs review</span></td><td>1 / 3</td></tr>
-                      <tr><td>Index test suite<br><small class="quiet">trailnotes</small></td><td><span class="status"><i class="dot"></i>Waiting on a job</span></td><td>1 / 2</td></tr>
-                    </tbody></table>
-                  </section>
-                  <section class="box capacity"><h5>Capacity</h5><div class="metric">02</div><strong>Standard starts available</strong><p class="quiet">These slots do not meet every job’s requirements.</p><div class="metaline"><strong>1 job queued</strong><p class="quiet">The index tests need more memory than the available slots provide.</p></div><span class="meta quiet">Updated 8 s ago</span></section>
-                </div>
-              </div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>Return here when no item is selected. Each request names a decision. Capacity answers “Can work start?” without exposing placement.</p><span class="spec">1440 × 900</span></figcaption>
+      <figure class="plate" id="home">
+        <div class="plate-head"><span class="plate-num">A</span><h3>Home</h3><button class="zoom" type="button" aria-label="Full size: Home">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="home">
+          <section class="surface"><div class="home"><div>
+            <h4>What should a lead do?</h4>
+            <div class="draft"><div class="draft-text quiet">Describe the task…</div>
+              <div class="draft-controls"><span class="control compact">rondo ▾</span><span class="control compact">Model ▾</span><span class="control compact">Effort ▾</span><span class="push control compact">Attach</span><span class="control primary compact">↑</span></div></div>
+            <div class="hint"><span><span class="kbd">↵</span> start</span><span><span class="kbd">⇥</span> repository</span><span><span class="kbd">⌘K</span> jump</span></div>
+            <div class="section-label"><span class="need">Needs you</span><span class="count">2</span></div>
+            <div class="cards">
+              <div class="ncard"><span class="product-tag need">Question · Storyboard</span><h6>Which outline layout?</h6><p class="quiet">The storyboard column keeps moments in order. Tabs save width.</p><div class="acts"><span class="control compact primary">Storyboard column</span><span class="control compact">Tabs</span><span class="control compact">Open</span></div></div>
+              <div class="ncard"><span class="product-tag need">Plan · Portal speed</span><h6>Review the speed plan</h6><p class="quiet">Six causes, six units. Four decisions for you.</p><div class="acts"><span class="control compact">Open plan</span></div></div>
+            </div>
+            <div class="section-label">Since you left <span class="quiet" style="font-weight:400">· 2 replies</span></div>
+            <div class="since">
+              <div><b>Squad sections</b><span>Landed in main. Pull request 2368 is merged and the branch is removed.</span><time>6m</time></div>
+              <div><b>Reflex log</b><span>Android now keeps its reading position after Save. I am checking it on a device.</span><time>14m</time></div>
+            </div>
+          </div></div></section>
+        </div></div>
+        <figcaption><p>Home is the composer. The cursor is in the box. Under it: what needs the owner, answerable in place, and what leads said while the owner was away. There is no “select an agent” screen.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
-      <figure class="plate" id="new">
-        <div class="plate-head"><span class="plate-num">02</span><h3>New lead</h3><button class="zoom" type="button" aria-label="Full size: New lead">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="new">
-            <section class="surface">
-              <header class="pagehead"><p class="product-tag">Workspace / New lead</p><div class="head-line"><h4>New lead</h4><span class="badge">Draft saved</span></div></header>
-              <div class="pagebody new-body">
-                <div>
-                  <p class="product-tag accent">First message</p><h4>What needs to change?</h4><p class="quiet">Choose a repository and tell the lead what outcome you want.</p>
-                  <div class="draft">
-                    <div class="draft-text">Add a release gate for the new message receipts.<br>Show which checks must pass before rollout.</div>
-                    <div class="draft-controls"><span class="control">Attach</span><span class="control">dogsled ▾</span><span class="control">Default model ▾</span><span class="control">Default effort ▾</span><span class="push control primary">Start lead ↑</span></div>
-                  </div>
-                  <div class="notice"><strong>Using saved repositories.</strong> <span class="quiet">Catalog refresh failed at 10:43. You can still start in dogsled.</span></div>
-                </div>
+      <figure class="plate" id="thread">
+        <div class="plate-head"><span class="plate-num">B</span><h3>Lead at work</h3><button class="zoom" type="button" aria-label="Full size: Lead at work">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="thread" data-current="tactic">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="status good"><i class="dot"></i>Working · 4m 12s</span></div><p class="quiet">Opus · high effort</p></header>
+            <div class="lead-grid">
+              <div class="conversation">
+                <div class="thread"><div class="measure">
+                  <div class="msg"><time>10:17</time><div class="owner-msg"><p>Build the outline of moments for the tactic editor. A coach must reorder moments without losing a drawing.</p></div></div>
+                  <div class="msg"><time>10:21</time><div><h6>Tactic editor</h6><p>The outline now lists every moment of a tactic and reorders them by drag. The core owns the order, so iOS and Android get it without changes.</p><p>Next I will make a new tactic open on its first moment.</p></div></div>
+                  <div class="folded">▸ 14 steps · 3m 40s · 2 workers</div>
+                  <div class="live"><strong><span>Running the core tests</span><span class="quiet">38s</span></strong><ul><li>Changed the route to open the first moment</li><li>Regenerated the shell types</li><li class="now">cargo test -p rondo-core · 212 of 340</li></ul></div>
+                </div></div>
+                <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Tactic editor…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
               </div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>The owner supplies the goal and repository. Dogsled places the run. If the catalog refresh fails, the draft and valid selection stay in place.</p><span class="spec">1440 × 900</span></figcaption>
+              <aside class="inspector" aria-label="Lead progress">
+                <div class="box"><h5>Now</h5><p class="status good"><i class="dot"></i>Running the core tests</p><p class="meta quiet">Turn started 10:22</p></div>
+                <div class="tabs"><span class="on">Todos 3/5</span><span>Team 3</span><span>Files 6</span></div>
+                <div class="progress" aria-label="60 percent complete"><span></span></div>
+                <ul class="step-list"><li><span class="check">✓</span>Outline lists the moments</li><li><span class="check">✓</span>Reorder by drag</li><li><span class="check">✓</span>Core owns the order</li><li><span class="good">●</span> New tactic opens on its first moment</li><li><span class="quiet">○</span> Land</li></ul>
+              </aside>
+            </div>
+          </section>
+        </div></div>
+        <figcaption><p>The thread says what the lead did, in sentences. Live work is one block that names the current step. Tool calls fold into a line. No machine, no pane id, no “lead on local”.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
-      <figure class="plate" id="lead">
-        <div class="plate-head"><span class="plate-num">03</span><h3>Lead workspace</h3><button class="zoom" type="button" aria-label="Full size: Lead workspace">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="lead">
-            <section class="surface">
-              <header class="pagehead">
-                <p class="product-tag">dogsled / lead</p><div class="head-line"><h4>Portal delivery</h4><span class="status need"><i class="dot"></i>Needs an answer</span></div>
-                <p class="quiet"><code>work/message-receipts</code> · Pi</p>
-                <div class="tabs"><span class="on">Conversation</span><span>Question <b class="need">1</b></span></div>
-              </header>
-              <div class="lead-grid">
-                <div class="conversation">
-                  <div class="thread"><div class="measure">
-                    <div class="folded">↑ Show earlier history</div>
-                    <div class="msg"><time>10:17</time><div class="owner-msg"><h6>You</h6><p>Add a release gate for message receipts. I want to know which checks must pass before the first rollout.</p><p class="meta quiet">✓ Recorded in conversation</p></div></div>
-                    <div class="msg"><time>10:25</time><div><h6>Portal delivery</h6><p>The receipt and transcript now agree on the message ID. The focused checks passed.</p><p>I still need to set the first audience before I can write the release gate.</p></div></div>
-                    <div class="folded">▸ 3 completed steps · Show evidence</div>
-                    <div class="msg"><time>10:36</time><div><h6>Portal delivery</h6><p>Should the first rollout be for one repository or all repositories?</p><p><span class="control compact">Open question →</span></p></div></div>
-                  </div></div>
-                  <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text">Keep the gate easy to reverse.</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control compact">Default model ▾</span><span class="control primary compact">Send ↑</span></div></div></div></div>
-                </div>
-                <aside class="inspector" aria-label="Lead progress">
-                  <div class="box"><h5>Now</h5><p class="status need"><i class="dot"></i>Needs an answer</p><p>Choose the rollout scope.</p><p class="meta quiet">Requested 10:36</p></div>
-                  <div class="tabs"><span class="on">Todos 3/5</span><span>Workers 1</span><span>Files 4</span></div>
-                  <div class="progress" aria-label="60 percent complete"><span></span></div>
-                  <ul class="step-list"><li><span class="check">✓</span>Reproduce receipt gap</li><li><span class="check">✓</span>Record stable message ID</li><li><span class="check">✓</span>Run receipt checks</li><li><span class="need">○</span> Choose rollout scope</li><li><span class="quiet">○</span> Record release checks</li></ul>
-                  <p class="quiet" style="padding-top:13px"><span class="status good"><i class="dot"></i>1 worker working</span></p>
-                </aside>
+      <figure class="plate" id="sent">
+        <div class="plate-head"><span class="plate-num">C</span><h3>Send, at 0 ms</h3><button class="zoom" type="button" aria-label="Full size: Send, at 0 ms">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="sent" data-current="new" data-add="new">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">dogsled</p><div class="head-line"><h4>Add a release gate for message…</h4><span class="status"><i class="dot"></i>Starting</span></div><p class="quiet">Default model · a name follows</p></header>
+            <div class="lead-grid">
+              <div class="conversation">
+                <div class="thread"><div class="measure">
+                  <div class="msg"><time>10:40</time><div class="owner-msg"><p>Add a release gate for message receipts. Show which checks must pass before the first rollout.</p><p class="meta quiet">Sent</p></div></div>
+                  <div class="startstrip"><span class="done"><b>Saved</b></span><span class="now"><b>Finding room</b></span><span class="next">Reading your message</span></div>
+                </div></div>
+                <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Add to your message…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
               </div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>The conversation carries the reasoning and evidence. Now answers what the lead needs next. The composer stays in reach.</p><span class="spec">1440 × 900</span></figcaption>
+              <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Starting</p><p class="quiet">The lead reads your message when it is up. You can add to it now.</p></div></aside>
+            </div>
+          </section>
+        </div></div>
+        <figcaption><p>The frame after Enter. The thread exists, the message is in it, the row is in the list. The start shows as three plain steps. A failed start shows here, with Retry, and keeps the message.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
       <figure class="plate" id="question">
-        <div class="plate-head"><span class="plate-num">04</span><h3>Question</h3><button class="zoom" type="button" aria-label="Full size: Question">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="question">
-            <section class="surface">
-              <header class="pagehead">
-                <p class="product-tag">dogsled / lead</p><div class="head-line"><h4>Portal delivery</h4><span class="status need"><i class="dot"></i>Needs an answer</span></div>
-                <div class="tabs"><span>Conversation</span><span class="on">Question <b class="need">1</b></span></div>
-              </header>
-              <div class="lead-grid">
-                <div class="conversation">
-                  <div class="prompt"><div class="measure">
-                    <span class="product-tag need">Owner decision · 10:36</span><h5>Choose a rollout</h5><p>Who should get message receipts first?</p>
-                    <div class="choice recommended"><strong><span class="accent">◉</span> One repository</strong> <span class="badge accent">Recommended</span><p class="quiet">Check the receipts in Dogsled before enabling them elsewhere.</p></div>
-                    <div class="choice"><strong><span class="quiet">○</span> All repositories</strong><p class="quiet">Enable the change in one release.</p></div>
-                    <div class="context"><h6>Optional context</h6><div class="draft draft-text quiet">Add a note for the lead…</div></div>
-                  </div></div>
-                  <div class="actionbar"><span class="quiet">1 question</span><span class="control">Decline</span><span class="control primary">Submit answer</span></div>
-                </div>
-                <aside class="inspector" aria-label="Lead progress">
-                  <div class="box"><h5>Now</h5><p class="status need"><i class="dot"></i>Waiting on this answer</p><p>The lead can finish the release gate once it knows the rollout scope.</p></div>
-                  <div class="tabs"><span class="on">Todos 3/5</span><span>Workers 1</span><span>Files 4</span></div>
-                  <div class="progress" aria-label="60 percent complete"><span></span></div>
-                  <ul class="step-list"><li><span class="need">○</span> Choose rollout scope</li><li><span class="quiet">○</span> Record release checks</li></ul>
-                </aside>
+        <div class="plate-head"><span class="plate-num">D</span><h3>Question</h3><button class="zoom" type="button" aria-label="Full size: Question">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="question" data-current="story" data-request="question">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Storyboard</h4><span class="status need"><i class="dot"></i>Needs your answer</span></div><div class="tabs"><span>Conversation</span><span class="on">Question</span></div></header>
+            <div class="lead-grid">
+              <div class="conversation">
+                <div class="prompt"><div class="measure">
+                  <span class="product-tag need">Asked 10:36</span><h5>Which outline layout?</h5><p>The outline can sit beside the board or above it.</p>
+                  <div class="choice recommended"><strong><span class="accent">◉</span> Storyboard column</strong> <span class="badge accent">Recommended</span><p class="quiet">Moments stay in order beside the board. It needs 240 px of width.</p></div>
+                  <div class="choice"><strong><span class="quiet">○</span> Tabs above the board</strong><p class="quiet">The board keeps its full width. Only one moment name shows.</p></div>
+                  <div class="context"><h6>Add a note</h6><div class="draft draft-text quiet">Optional…</div></div>
+                </div></div>
+                <div class="actionbar"><span class="quiet"><span class="kbd">1</span> <span class="kbd">2</span> choose · <span class="kbd">⌘↵</span> send</span><span class="control">Decline</span><span class="control primary">Send answer</span></div>
               </div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>The open question becomes the main view. The recommendation explains its tradeoff. Decline and submit are different actions.</p><span class="spec">1440 × 900</span></figcaption>
+              <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status need"><i class="dot"></i>Waiting for this answer</p><p class="quiet">One worker continues on work that does not depend on it.</p></div>
+                <div class="tabs"><span class="on">Todos 2/4</span><span>Team 1</span><span>Files 3</span></div></aside>
+            </div>
+          </section>
+        </div></div>
+        <figcaption><p>A question opens inside its lead and fills the reading area. Number keys choose. The same question is answerable from its card on Home.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
       <figure class="plate" id="review">
-        <div class="plate-head"><span class="plate-num">05</span><h3>Plan review</h3><button class="zoom" type="button" aria-label="Full size: Plan review">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="review">
-            <section class="surface">
-              <header class="pagehead">
-                <p class="product-tag">dogsled / Recovery flow</p><div class="head-line"><h4>Preserve an interrupted run</h4><span class="badge">Revision 2 · Needs review</span></div>
-                <p class="quiet">Submitted at 10:31</p><div class="tabs"><span class="on">Plan</span><span>Changes 2</span><span>Conversation</span></div>
-              </header>
-              <div class="review-body">
-                <article class="box review-prose">
-                  <h5>Recovery plan</h5><p>If a run loses its live session, keep the work separate from the task state.</p>
-                  <h6>Steps</h6>
-                  <ol><li>Show the last verified state. Do not treat missing evidence as a completed handoff.</li><li>List the saved files and give the owner a read-only diff.</li><li class="note-line">Restore to a new branch. Keep the original branch unchanged.</li></ol>
-                  <h6>Acceptance</h6><p>After an interrupted run, the owner can read the saved changes and restore them without changing the source branch.</p>
-                  <h6>Not in this revision</h6><p>Automatic retries and restoring over an existing branch.</p>
-                </article>
-                <aside class="notes" aria-label="Review notes">
-                  <h5>Notes <span class="badge">1</span></h5><div class="box"><span class="product-tag accent">Step 3 · Revision 2</span><p>Keep the source branch visible in the recovery receipt.</p><p class="quiet">You · 10:41</p></div>
-                </aside>
-              </div>
-              <div class="actionbar"><span class="quiet">Decision applies to revision 2.</span><span class="control">Request changes</span><span class="control primary">Approve plan</span></div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>Read the revision and its notes side by side. Pin the decision to the revision shown. Keep the other open request visible.</p><span class="spec">1440 × 900</span></figcaption>
+        <div class="plate-head"><span class="plate-num">E</span><h3>Plan review</h3><button class="zoom" type="button" aria-label="Full size: Plan review">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="review" data-current="speed" data-request="review">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">dogsled · Portal speed</p><div class="head-line"><h4>Portal speed: causes and fixes</h4><span class="badge">Revision 1</span></div><div class="tabs"><span class="on">Plan</span><span>Changes</span><span>Conversation</span></div></header>
+            <div class="review-body">
+              <article class="box review-prose">
+                <h5>Causes</h5><p>Six causes explain every delay the owner reported.</p>
+                <ol><li>Three streams for each window use up the browser’s connections.</li><li class="note-line">One slow pass publishes everything.</li><li>Transcripts are read on a 5 s tick and sent whole.</li></ol>
+                <h6>Decisions</h6><ol><li>One socket for each window.</li><li>Remove “Branches to review”.</li></ol>
+              </article>
+              <aside class="notes" aria-label="Review notes"><h5>Notes <span class="badge">1</span></h5><div class="box"><span class="product-tag accent">Cause 2</span><p>Start with this one.</p><p class="quiet">You · 10:41</p></div></aside>
+            </div>
+            <div class="actionbar"><span class="quiet">Your decision applies to revision 1.</span><span class="control">Request changes</span><span class="control primary">Approve</span></div>
+          </section>
+        </div></div>
+        <figcaption><p>A plan fills everything right of the list. Notes sit beside the lines they are about. The decision bar stays in place.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
-      <figure class="plate" id="job">
-        <div class="plate-head"><span class="plate-num">06</span><h3>Job detail</h3><button class="zoom" type="button" aria-label="Full size: Job detail">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="job">
-            <section class="surface">
-              <header class="pagehead">
-                <p class="product-tag">trailnotes / Index test suite / job</p><div class="head-line"><h4>Run index documentation tests</h4><span class="badge">Queued</span></div>
-                <p class="quiet">Requested by Index test suite at 10:40</p>
-              </header>
-              <div class="pagebody twocol job-body">
-                <div>
-                  <section class="box"><h5>Queued. Not started.</h5><p>The available slots do not have enough memory for this job.</p><p class="quiet">The timeout starts when execution starts.</p></section>
-                  <section class="box"><h5>Command</h5><dl class="kv"><dt>Command</dt><dd><code>cargo test --doc</code></dd><dt>Repository</dt><dd>trailnotes</dd><dt>Branch</dt><dd><code>work/index-tests</code></dd><dt>Timeout</dt><dd>10 min</dd></dl></section>
-                  <section class="box"><h5>Output</h5><div class="output">No output yet. Execution has not started.</div></section>
-                </div>
-                <section class="box"><h5>Run stages</h5><ol class="sequence"><li><span class="seq accent">01</span><div><strong>Requested</strong><small>Recorded at 10:40</small></div></li><li><span class="seq accent">02</span><div><strong>Admission</strong><small>Waiting for eligible capacity</small></div></li><li><span class="seq quiet">03</span><div><strong>Execution</strong><small>Not started</small></div></li><li><span class="seq quiet">04</span><div><strong>Result</strong><small>Not available</small></div></li></ol></section>
-              </div>
-              <div class="actionbar"><span class="quiet">Cancel prevents future admission. It does not stop a running job.</span><span class="control">Cancel admission</span></div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>A command job has stages and output, not a conversation. The available action reflects the stage that Dogsled has verified.</p><span class="spec">1440 × 900</span></figcaption>
+      <figure class="plate" id="team">
+        <div class="plate-head"><span class="plate-num">F</span><h3>A lead’s team</h3><button class="zoom" type="button" aria-label="Full size: A lead’s team">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="team" data-current="tactic">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="status good"><i class="dot"></i>Working · 4m 12s</span></div><div class="tabs"><span>Conversation</span><span class="on">Team 5</span><span>Files 6</span></div></header>
+            <div class="pagebody twocol equal">
+              <section class="box"><h5>Workers</h5>
+                <div class="teamrow"><i class="st work"></i><div>Outline in the core<small>Writing the reorder test</small></div><span class="quiet">2m 10s</span><span class="control compact">Open</span></div>
+                <div class="teamrow"><i class="st work"></i><div>Web storyboard column<small>Fixing the drag handle in the outline</small></div><span class="quiet">58s</span><span class="control compact">Open</span></div>
+                <div class="teamrow"><i class="st quiet"></i><div>Review of the core change<small>Done. No defects found.</small></div><span class="quiet">10:31</span><span class="control compact">Open</span></div>
+              </section>
+              <section class="box"><h5>Jobs</h5>
+                <div class="teamrow"><i class="st work"></i><div><code>cargo test -p rondo-core</code><small>Running · 212 of 340 passed</small></div><span class="quiet">38s</span><span class="control compact">Stop</span></div>
+                <div class="teamrow"><i class="st quiet"></i><div><code>pnpm typecheck</code><small>Passed</small></div><span class="quiet">42s</span><span class="control compact">Output</span></div>
+              </section>
+            </div>
+            <div class="actionbar"><span class="quiet">Workers and jobs belong to this lead. They close when it closes.</span><span class="control">Close lead and team</span></div>
+          </section>
+        </div></div>
+        <figcaption><p>Workers and jobs exist only here, under the lead that started them. A job is a command with a result and a Stop control. It is not a conversation and never a row in the list.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
-      <figure class="plate" id="recovery">
-        <div class="plate-head"><span class="plate-num">07</span><h3>Recovery</h3><button class="zoom" type="button" aria-label="Full size: Recovery">Full size ↗</button></div>
-        <div class="stage">
-          <div class="screen" data-view="recovery">
-            <section class="surface">
-              <header class="pagehead">
-                <p class="product-tag">dogsled / Recovery flow / saved work</p><div class="head-line"><h4>Inspect saved work</h4><span class="badge">Current state unknown</span></div>
-                <p class="quiet">Last verified state: working at 10:42</p>
-              </header>
-              <div class="pagebody recovery-body">
-                <div class="notice"><strong>Live updates paused.</strong> <span class="quiet">Showing the last known state from 10:42. Sending messages and changing runs are unavailable.</span></div>
-                <div class="twocol">
-                  <section class="box"><span class="product-tag accent">Recovery copy · Saved at 10:39</span><h5>Restore notes for interrupted runs</h5><p class="quiet">Source <code>work/recovery-notes</code> · 4 saved files</p><ul class="file-list"><li><code>docs/lifecycle.md</code></li><li><code>web/src/recovery.rs</code></li><li><code>web/assets/recovery.css</code></li><li><code>plans/recovery-receipts.md</code></li></ul><span class="control">Inspect saved diff →</span></section>
-                  <section class="box"><h5>What still works</h5><ul class="file-list"><li>Read the saved conversation.</li><li>Inspect the saved diff.</li><li class="quiet">Reconnect before sending or restoring.</li></ul><p class="quiet">A saved copy is not a completed handoff.</p></section>
-                </div>
+      <figure class="plate" id="leftovers">
+        <div class="plate-head"><span class="plate-num">G</span><h3>Finished work</h3><button class="zoom" type="button" aria-label="Full size: Finished work">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="leftovers" data-current="squad">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Squad sections</h4><span class="status"><i class="dot"></i>Finished</span></div><p class="quiet">Opus · 36 commits · 2h 14m</p></header>
+            <div class="lead-grid">
+              <div class="conversation">
+                <div class="thread"><div class="measure">
+                  <div class="folded">↑ Earlier in this thread</div>
+                  <div class="msg"><time>12:02</time><div><h6>Squad sections</h6><p>The squad page now groups players by section, and a coach can move a player between sections. All checks pass.</p></div></div>
+                  <div class="receipt"><b><span class="ok">✓</span> Landed in main</b><span class="quiet">Pull request 2368 merged · branch removed · 3 workers and 2 jobs closed</span></div>
+                  <div class="msg"><time>12:04</time><div><h6>Squad sections</h6><p>Two older branches in rondo have commits and no lead. I did not start them, so I left them. They need one decision from you.</p><div class="ncard" style="margin-top:10px"><span class="product-tag need">Decision · rondo</span><h6>2 branches have no lead</h6><p class="quiet"><code>feat/calendar-timetable-ios</code> · 4 commits · pull request closed<br><code>feat/calendar-timetable-web</code> · 3 commits · pull request closed</p><div class="acts"><span class="control compact primary">Have a lead land them</span><span class="control compact">Drop both</span></div></div></div></div>
+                </div></div>
+                <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Squad sections…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
               </div>
-              <div class="actionbar"><span class="quiet">Restore uses a new branch and leaves the source unchanged.</span><span class="control disabled">Restore unavailable</span></div>
-            </section>
-          </div>
-        </div>
-        <figcaption><p>Keep the last verified state separate from the current unknown state. Safe reads stay available. Recovery never creates a false completion.</p><span class="spec">1440 × 900</span></figcaption>
+              <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Finished</p><p class="quiet">Nothing is left open. This thread leaves the list when you close it.</p></div>
+                <div class="tabs"><span class="on">Todos 6/6</span><span>Team 0</span><span>Files 0</span></div></aside>
+            </div>
+          </section>
+        </div></div>
+        <figcaption><p>This replaces “Branches to review”. A lead ends with a receipt. Records of branches that no longer exist are removed by the service and never shown. A branch that has commits and no lead is one decision with two actions.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
+
+      <figure class="plate" id="capacity">
+        <div class="plate-head"><span class="plate-num">H</span><h3>Less room</h3><button class="zoom" type="button" aria-label="Full size: Less room">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="capacity" data-current="audit" data-cap="low">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Onboarding audit</h4><span class="status"><i class="dot"></i>Out of reach since 10:42</span></div><p class="quiet">Its work is kept. It returns when its machine answers.</p></header>
+            <div class="lead-grid">
+              <div class="conversation">
+                <div class="thread"><div class="measure">
+                  <div class="msg"><time>10:20</time><div class="owner-msg"><p>Audit the onboarding on a phone and list what breaks.</p></div></div>
+                  <div class="msg"><time>10:38</time><div><h6>Onboarding audit</h6><p>Four screens clip their primary button on a 360 px phone. I am fixing the pitch screen first.</p></div></div>
+                  <div class="msg"><time>10:52</time><div class="owner-msg"><p>Do the join screen first.</p><p class="meta quiet">Waiting · it is delivered when the lead is back</p></div></div>
+                </div></div>
+                <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Onboarding audit…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
+              </div>
+              <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Out of reach</p><p class="quiet">Last heard 10:42. Messages wait and are delivered in order.</p></div>
+                <div class="tabs"><span class="on">Todos 2/7</span><span>Team 2</span><span>Files 3</span></div></aside>
+            </div>
+          </section>
+          <div class="pop"><h6>Room for 2 more leads</h6><p class="quiet">One of three machines does not answer. New work uses the others.</p>
+            <div class="m" style="margin-top:8px"><span>This Mac</span><div class="meter"><i style="width:61%"></i></div><span class="quiet">61%</span></div>
+            <div class="m"><span>netcup</span><div class="meter"></div><span class="need">no answer</span></div>
+            <div class="m"><span>momokaya-2</span><div class="meter"><i style="width:38%"></i></div><span class="quiet">38%</span></div></div>
+        </div></div>
+        <figcaption><p>A machine that does not answer shows as less room, and as “out of reach” on the leads it holds. Their threads stay readable and messages wait. The capacity panel is the one place that names a machine.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="keys">
+        <div class="plate-head"><span class="plate-num">I</span><h3>Keyboard</h3><button class="zoom" type="button" aria-label="Full size: Keyboard">Full size ↗</button></div>
+        <div class="stage"><div class="screen" data-view="keys" data-current="tactic">
+          <section class="surface">
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="status good"><i class="dot"></i>Working · 4m 12s</span></div><p class="quiet">Opus · high effort</p></header>
+            <div class="thread"><div class="measure"><div class="msg"><time>10:21</time><div><h6>Tactic editor</h6><p>The outline now lists every moment of a tactic and reorders them by drag.</p></div></div></div></div>
+          </section>
+          <div class="scrim"></div>
+          <div class="palette" role="dialog" aria-label="Jump">
+            <div class="q">ron<i></i></div>
+            <div class="grp product-tag">Leads</div>
+            <div class="it on"><i class="st work"></i><div>Tactic editor <small>· rondo · working</small></div><span class="kbd">↵</span></div>
+            <div class="it"><i class="st unread"></i><div>Squad sections <small>· rondo · landed in main</small></div><span></span></div>
+            <div class="it"><i class="st quiet"></i><div>Onboarding audit <small>· rondo · quiet</small></div><span></span></div>
+            <div class="grp product-tag">Actions</div>
+            <div class="it"><span class="accent">+</span><div>New lead in rondo</div><span class="kbd">⌘N</span></div>
+            <div class="it"><i class="st need"></i><div>Answer: Which outline layout? <small>· Storyboard</small></div><span></span></div>
+            <div class="keys"><span><span class="kbd">⌥↓</span> <span class="kbd">⌥↑</span> next and previous lead</span><span><span class="kbd">⌘⇧U</span> next unread</span><span><span class="kbd">⌘1</span>–<span class="kbd">9</span> Needs you</span><span><span class="kbd">⌘.</span> team panel</span><span><span class="kbd">Esc</span> home</span></div>
+          </div>
+        </div></div>
+        <figcaption><p><code>⌘K</code> reaches every lead and action by name. Leads keep their position in the list, so <code>⌥↓</code> always goes to the same neighbour.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="unread">
+        <div class="plate-head"><span class="plate-num">J</span><h3>Unread, frame by frame</h3><span></span></div>
+        <div class="film">
+          <div><p class="film-label">0 ms <span>the click</span></p><div class="stage f0"></div></div>
+          <div><p class="film-label">100 ms <span>unread mark clears</span></p><div class="stage f100"></div></div>
+          <div><p class="film-label">1 s <span>nothing you read has moved</span></p><div class="stage f1000"></div></div>
+        </div>
+        <figcaption><p>The unread text is in the first frame, under a “New” line, because the app received it when the lead wrote it. Today the first frame shows the old text and the new text follows 0.8 to 1.8 s later.</p><span class="spec">3 × 1440 × 900</span></figcaption>
+      </figure>
+    </section>
+
+    <section class="chapter" id="away">
+      <div class="chapter-num">05 / What goes away</div>
+      <div>
+        <h2>Removed, with the reason.</h2>
+        <div class="table-wrap"><table class="away"><thead><tr><th>Today</th><th>End state</th><th>Principle</th></tr></thead><tbody>
+          <tr><td>“lead on local · pi”, machine chips on rows, three machine meters in the top bar</td><td>One capacity figure. Machine names only in its panel.</td><td>P5</td></tr>
+          <tr><td>“Repository unknown” group</td><td>No such group. A record with no lead and no checkout is removed by the service.</td><td>P4</td></tr>
+          <tr><td>“Branches to review”, 13 rows</td><td>A “Landed” receipt in the lead’s thread, or one decision for branches with no lead.</td><td>P6</td></tr>
+          <tr><td>Jobs as rows; “Job · owner unavailable”</td><td>Jobs in the Team tab of the lead that started them.</td><td>P4</td></tr>
+          <tr><td>A pane id (<code>w1D1:p1</code>) as a title; “Loading…”</td><td>The first words of the owner’s message, then the name.</td><td>P1</td></tr>
+          <tr><td>“This agent is no longer available” while a new lead starts</td><td>The thread with the message and the three start steps.</td><td>P1</td></tr>
+          <tr><td>“Live updates paused. Reconnecting.” as a banner in the thread</td><td>A small mark in the top bar after 2 s. The thread stays.</td><td>P3</td></tr>
+          <tr><td>Old history first, unread text seconds later</td><td>Unread text in the first frame.</td><td>P2</td></tr>
+          <tr><td>“Select an agent” empty screen</td><td>Home: the composer, Needs you, and what was said since.</td><td>P7</td></tr>
+          <tr><td>Row titles made of todo text; todo counts, model and machine on each row</td><td>A short name and the last thing the lead said.</td><td>P4</td></tr>
+        </tbody></table></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="considered">
+      <div class="chapter-num">Also considered</div>
+      <div>
+        <h2>Two shells that lost.</h2>
+        <div class="sketches">
+          <div class="sketch"><div class="draw" style="grid-template-columns:repeat(3,1fr)"><i></i><i></i><i></i><i></i><i></i><i></i></div><h3>A wall of machines</h3><p>One panel for each machine with its agents. It answers “what runs where”, which the owner does not ask. It breaks P5.</p></div>
+          <div class="sketch"><div class="draw" style="grid-template-columns:repeat(4,1fr)"><i style="grid-row:span 3"></i><i></i><i></i><i style="grid-row:span 2"></i><i></i><i></i></div><h3>A board of leads by state</h3><p>Columns for Needs you, Working, Quiet and Done. A lead changes column when its state changes, so no lead keeps a place. It breaks P7.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="chapter" id="decisions">
+      <div class="chapter-num">06 / Decisions</div>
+      <div>
+        <h2>Five decisions for the owner.</h2>
+        <ol class="decisions">
+          <li><h3>Home is the composer.</h3><p><span class="rec">Recommended: yes.</span> The other choice is an overview table of leads. It repeats the list.</p></li>
+          <li><h3>A row shows the lead’s name and its last words.</h3><p><span class="rec">Recommended: yes.</span> Todo counts, model and effort move into the thread. The other choice keeps them on the row.</p></li>
+          <li><h3>“Branches to review” becomes a receipt or one decision.</h3><p><span class="rec">Recommended: yes.</span> It needs the service to remove records of branches that no longer exist.</p></li>
+          <li><h3>Machine names appear only in the capacity panel.</h3><p><span class="rec">Recommended: yes.</span> The stricter choice shows no machine name anywhere and gives up the panel in screen H.</p></li>
+          <li><h3>The speed budgets in chapter 02.</h3><p><span class="rec">Recommended: accept them as the acceptance test of the speed work.</span> Each unit of <code>plans/portal-snappy.md</code> ends with the measurement of its row.</p></li>
+        </ol>
+      </div>
     </section>
   </div>
 </main>
-<footer class="colophon"><div class="wrap"><p><strong>Dogsled / North Star</strong><br>Design proposal. No runtime changes.</p><p>Companions: <code>plans/north-star.md</code> and <code>plans/north-star.squig.json</code></p></div></footer>
+<footer class="colophon"><div class="wrap"><p><strong>Dogsled / North Star</strong><br>Design proposal, revision 2. No runtime changes.</p><p>Companions: <code>plans/north-star.md</code> and <code>plans/portal-snappy.md</code></p></div></footer>
 
 <template id="console-chrome">
   <header class="appbar">
     <div class="appname"><svg aria-hidden="true" class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg> Dogsled</div>
-    <span class="top-work">Work</span><span class="control primary compact">+ New lead</span>
-    <span class="status good freshness"><i class="dot"></i><span>Live updates</span></span>
+    <span class="jump"><span>Jump to a lead or an action</span><span class="kbd">⌘K</span></span>
+    <span class="cap"><span class="bars"><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i></span><span class="cap-text">Room for 4 more</span></span>
+    <span class="control primary compact">New <span style="opacity:.7">⌘N</span></span>
   </header>
-  <aside class="app-sidebar" aria-label="Work and owner requests">
+  <aside class="app-sidebar" aria-label="Leads">
     <h5 class="needs">Needs you <span class="count">2</span></h5>
-    <div class="request" data-request="question"><small><span>Question</span><span>8 min</span></small><strong>Choose a rollout</strong><small>Portal delivery</small></div>
-    <div class="request" data-request="review"><small><span>Plan review</span><span>13 min</span></small><strong>Review recovery plan</strong><small>Recovery flow</small></div>
-    <div class="repo-label product-tag"><span>dogsled</span><span>02</span></div>
-    <div class="leadrow" data-lead="portal"><strong><i class="dot need"></i>Portal delivery</strong><small>Needs an answer · 3/5 todos</small></div>
-    <div class="leadrow" data-lead="recovery"><strong><i class="dot need"></i>Recovery flow</strong><small>Needs review · Plan v2</small></div>
-    <p class="repo-debt quiet">1 branch to land · Agent owned</p>
-    <div class="repo-label product-tag"><span>trailnotes</span><span>01</span></div>
-    <div class="leadrow" data-lead="index"><strong><i class="dot quiet"></i>Index test suite</strong><small>Waiting · 1 queued job</small></div>
-    <div class="sidefoot">2 repositories · 3 leads</div>
+    <div class="request" data-request="question"><small><span>Question</span><span>4m</span></small><strong>Which outline layout?</strong><small>Storyboard</small></div>
+    <div class="request" data-request="review"><small><span>Plan</span><span>9m</span></small><strong>Review the speed plan</strong><small>Portal speed</small></div>
+    <div class="repo-label product-tag"><span>dogsled</span></div>
+    <div class="trow" data-lead="drop"><i class="st work"></i><div><b>Image drop</b><span>Adding the drop target to the composer</span></div><time>1m</time></div>
+    <div class="trow" data-lead="speed"><i class="st need"></i><div><b>Portal speed</b><span>The plan is ready for your review.</span></div><time>9m</time></div>
+    <div class="repo-label product-tag"><span>rondo</span></div>
+    <div class="trow" data-lead="audit"><i class="st quiet"></i><div><b>Onboarding audit</b><span>Four screens clip their primary button…</span></div><time>22m</time></div>
+    <div class="trow unread" data-lead="squad"><i class="st unread"></i><div><b>Squad sections</b><span>Landed in main. Pull request 2368 is merged…</span></div><time>6m</time></div>
+    <div class="trow" data-lead="story"><i class="st need"></i><div><b>Storyboard</b><span>Which outline layout?</span></div><time>4m</time></div>
+    <div class="trow" data-lead="tactic"><i class="st work"></i><div><b>Tactic editor</b><span>Running the core tests</span></div><time>now</time></div>
+    <div class="repo-label product-tag"><span>zoomies</span></div>
+    <div class="trow unread" data-lead="reflex"><i class="st unread"></i><div><b>Reflex log</b><span>Android now keeps its reading position…</span></div><time>14m</time></div>
+    <div class="sidefoot"><span>7 leads · 3 repositories</span><span>2 unread</span></div>
   </aside>
+</template>
+<template id="film-source">
+  <div class="screen" data-view="unread" data-current="squad">
+    <section class="surface">
+      <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Squad sections</h4><span class="status"><i class="dot"></i>Finished</span></div><p class="quiet">Opus · 36 commits · 2h 14m</p></header>
+      <div class="lead-grid">
+        <div class="conversation">
+          <div class="thread"><div class="measure">
+            <div class="msg"><time>11:20</time><div class="owner-msg"><p>Group the squad by section and let a coach move a player between sections.</p></div></div>
+            <div class="msg"><time>11:48</time><div><h6>Squad sections</h6><p>The core groups players by section. Web and iOS show the groups. Android follows.</p></div></div>
+            <div class="newline">New</div>
+            <div class="msg"><time>12:02</time><div><h6>Squad sections</h6><p>The squad page now groups players by section, and a coach can move a player between sections. All checks pass.</p></div></div>
+            <div class="receipt"><b><span class="ok">✓</span> Landed in main</b><span class="quiet">Pull request 2368 merged · branch removed · 3 workers and 2 jobs closed</span></div>
+          </div></div>
+          <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Squad sections…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
+        </div>
+        <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Finished</p><p class="quiet">Nothing is left open.</p></div><div class="tabs"><span class="on">Todos 6/6</span><span>Team 0</span><span>Files 0</span></div></aside>
+      </div>
+    </section>
+  </div>
 </template>
 <dialog id="viewer" aria-label="Full-size screen">
   <form method="dialog"><button id="back" autofocus>← Back to book</button></form>
@@ -546,21 +760,41 @@
 <script>
 {
   const chromeTemplate = document.querySelector('#console-chrome');
+  const filmSource = document.querySelector('#film-source');
   const viewer = document.querySelector('#viewer');
   const viewport = viewer.querySelector('.viewer-scroll');
-  const activeLead = {lead:'portal', question:'portal', review:'recovery', job:'index', recovery:'recovery'};
   let opener = null;
 
+  for (const stage of document.querySelectorAll('.film .stage')) {
+    stage.append(filmSource.content.cloneNode(true));
+  }
   for (const screen of document.querySelectorAll('.stage > .screen')) {
-    const view = screen.dataset.view;
     screen.prepend(chromeTemplate.content.cloneNode(true));
-    screen.querySelector(`[data-request="${view}"]`)?.classList.add('current');
-    screen.querySelector(`[data-lead="${activeLead[view]}"]`)?.classList.add('current');
-    if (view === 'recovery') {
-      const freshness = screen.querySelector('.freshness');
-      freshness.classList.remove('good');
-      freshness.querySelector('span').textContent = 'Live updates paused';
-      screen.querySelector('.app-sidebar h5').append(' · Last known');
+    const {current, request, add, cap} = screen.dataset;
+    if (add === 'new') {
+      const row = document.createElement('div');
+      row.className = 'trow'; row.dataset.lead = 'new';
+      row.innerHTML = '<i class="st quiet"></i><div><b>Add a release gate for message…</b><span>Starting</span></div><time>now</time>';
+      screen.querySelector('[data-lead="drop"]').before(row);
+    }
+    if (request) screen.querySelector(`[data-request="${request}"]`)?.classList.add('current');
+    const row = current && screen.querySelector(`[data-lead="${current}"]`);
+    if (row) {
+      row.classList.add('current');
+      // An opened thread stops being unread after its first frame.
+      if (!screen.closest('.f0') && row.classList.contains('unread')) {
+        row.classList.remove('unread');
+        row.querySelector('.st').className = 'st quiet';
+      }
+    }
+    if (cap === 'low') {
+      const pill = screen.querySelector('.cap');
+      pill.classList.add('low');
+      pill.querySelectorAll('.bars i').forEach((bar, index) => bar.classList.toggle('on', index < 4));
+      pill.querySelector('.cap-text').textContent = 'Less room · 2 more';
+      const away = screen.querySelector('[data-lead="audit"]');
+      away.querySelector('.st').className = 'st away';
+      away.querySelector('span').textContent = 'Out of reach since 10:42';
     }
   }
 
@@ -570,9 +804,10 @@
       target.classList.add('ready');
     }
   });
+  for (const stage of document.querySelectorAll('.stage')) fit.observe(stage);
   for (const plate of document.querySelectorAll('.plate')) {
-    fit.observe(plate.querySelector('.stage'));
     const button = plate.querySelector('.zoom');
+    if (!button) continue;
     button.addEventListener('click', () => {
       opener = button;
       viewport.replaceChildren(plate.querySelector('.screen').cloneNode(true));
