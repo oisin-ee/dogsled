@@ -1,7 +1,7 @@
 
 # Dogsled: children, jobs, and messages
 
-Use dogsled to delegate, run jobs, and message other agents. Prefer the tools (`status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `end_turn`, `stop`, `cancel`, `place`); each matches a CLI command and returns the same JSON. In Pi they are `mcp__dogsled__<tool>`, except `end_turn`, which is native.
+Use dogsled to delegate, run jobs, and message other agents. Prefer the tools (`status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `end_turn`, `decide`, `stop`, `cancel`, `place`); each matches a CLI command and returns the same JSON. In Pi they are `mcp__dogsled__<tool>`, except `end_turn`, which is native.
 
 Never type into another agent's terminal (`herdr agent prompt`, `herdr pane send-text`, `send-keys`): it mixes your text into the user's draft. Use `send`.
 
@@ -85,6 +85,19 @@ dogsled close PANE [--host HOST]
 Close, prune, and the sweep use one loss rule: a clean checkout and every commit held by the default branch or freshly fetched remote refs. Ignored files do not count. A failed fetch disables remote-ref evidence for that repository.
 Close runs `teardown`, closes the panes and workspace, removes the checkout, and ends the item. The same loss rule governs branch deletion. A child in an unlocked checkout loses only its pane.
 It refuses, before it changes anything, a busy agent, a dirty or detached worktree, a foreign lock, your own pane, and a worktree you work in. Report a refusal; do not remove a worktree by hand.
+
+## Record a decision
+
+Use `decide({ title, decision, why, question?, alternatives? })` to record an open question you settled without your owner.
+Give the choice and the facts that support it. The title is one line of at most 200 bytes. Other fields have a 2000-byte limit.
+
+```sh
+dogsled decide --title TITLE --decision CHOICE --why REASON [--question QUESTION] [--alternatives OPTIONS]
+dogsled decisions [--pane PANE] [--json]
+```
+
+`dogsled decide` prints the decision ID. With `--json`, it prints the full record.
+`dogsled decisions` lists up to 100 decisions from this host, newest first.
 
 ## Run a job
 

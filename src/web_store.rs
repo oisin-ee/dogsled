@@ -15,6 +15,45 @@ fn index(row: &rusqlite::Row<'_>, column: &str) -> crate::error::Result<usize> {
         .map_err(|_| crate::error::Error::Invalid(format!("{column} exceeds an index")))
 }
 
+macro_rules! question_table {
+    ($table:literal) => {
+        concat!(
+            "CREATE TABLE ",
+            $table,
+            " (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    pane TEXT NOT NULL, session TEXT NOT NULL, cwd TEXT NOT NULL,
+    created_ms INTEGER NOT NULL CHECK(created_ms >= 0),
+    state TEXT NOT NULL CHECK(state IN ('pending','answered','rejected','released')),
+    answered_ms INTEGER CHECK(answered_ms >= 0), rejection_reason TEXT, form_message BLOB NOT NULL,
+    CHECK((state = 'pending') = (answered_ms IS NULL)),
+    CHECK((state = 'rejected') = (rejection_reason IS NOT NULL))
+) STRICT;
+"
+        )
+    };
+}
+
+macro_rules! question_index {
+    () => {
+        "CREATE INDEX web_questions_pending ON web_questions(state, created_ms, id);"
+    };
+}
+
+/// Rebuild this table with a wider state constraint. The caller disables foreign keys
+/// for the migration transaction so the unchanged answer tables keep their rows.
+pub(crate) fn upgrade_questions(tx: &rusqlite::Transaction<'_>) -> crate::error::Result<()> {
+    tx.execute_batch(concat!(
+        question_table!("web_questions_v9"),
+        "INSERT INTO web_questions_v9 (id, pane, session, cwd, created_ms, state, answered_ms, rejection_reason, form_message)
+         SELECT id, pane, session, cwd, created_ms, state, answered_ms, rejection_reason, form_message FROM web_questions;
+         DROP TABLE web_questions;
+         ALTER TABLE web_questions_v9 RENAME TO web_questions;",
+        question_index!(),
+    ))?;
+    Ok(())
+}
+
 pub(crate) const SCHEMA: &str = concat!(
     "
 CREATE TABLE inbox_terminals (id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 64)) STRICT;
@@ -88,16 +127,9 @@ CREATE TABLE todo_children (
     text TEXT NOT NULL, description TEXT, unit TEXT, PRIMARY KEY(item, position)
 ) STRICT;
 ",
-    "CREATE TABLE web_questions (
-    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
-    pane TEXT NOT NULL, session TEXT NOT NULL, cwd TEXT NOT NULL,
-    created_ms INTEGER NOT NULL CHECK(created_ms >= 0),
-    state TEXT NOT NULL CHECK(state IN ('pending','answered','rejected')),
-    answered_ms INTEGER CHECK(answered_ms >= 0), rejection_reason TEXT, form_message BLOB NOT NULL,
-    CHECK((state = 'pending') = (answered_ms IS NULL)),
-    CHECK((state = 'rejected') = (rejection_reason IS NOT NULL))
-) STRICT;
-CREATE INDEX web_questions_pending ON web_questions(state, created_ms, id);
+    question_table!("web_questions"),
+    question_index!(),
+    "
 CREATE TABLE web_answers (
     id TEXT PRIMARY KEY NOT NULL, question TEXT NOT NULL REFERENCES web_questions(id) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK(position >= 0), response_id TEXT NOT NULL, value_message BLOB NOT NULL,
