@@ -372,7 +372,7 @@ impl<'a> Node<'a> {
         timings: &mut Phases,
     ) -> Result<Snapshot> {
         let probe =
-            probe::local_capacity(self.shell, self.home, terminals, timings, || Ok(cpu.busy()))?;
+            probe::local_capacity(self.shell, self.home, terminals, timings, || cpu.busy())?;
         let mut probe = observe_probe(self.ledger, self.shell, probe, timings)?;
         let lock_started = std::time::Instant::now();
         self.ledger.with_lock("host", || {

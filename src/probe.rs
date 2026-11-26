@@ -399,7 +399,8 @@ pub(crate) fn terminals(shell: &dyn Shell) -> Result<Terminals> {
             .clone(),
     )?;
     Ok(classify_shells(agents, panes, |pane| {
-        matches!(foreground(shell, pane), Ok(None))
+        // A pane that closed after the list is gone, not idle: only read evidence proves idle.
+        matches!(process_info(shell, pane), Ok(Some(info)) if foreground_command(&info).is_none())
     }))
 }
 
@@ -631,17 +632,19 @@ impl Default for CpuSampler {
 }
 
 impl CpuSampler {
-    pub(crate) fn busy(&mut self) -> Option<f64> {
+    /// A sampler that cannot start is an error of the sample, not a silent missing value.
+    pub(crate) fn busy(&mut self) -> Result<Option<f64>> {
         match self {
             #[cfg(not(target_os = "macos"))]
-            Self::ProcStat => None,
+            Self::ProcStat => Ok(None),
             #[cfg(target_os = "macos")]
             Self::Darwin(state) => {
                 let Some((system, sampled, busy)) = state else {
-                    let mut system = sysinfo::System::new();
+                    let mut system = sysinfo::System::new()
+                        .map_err(|error| Error::Invalid(format!("CPU sampler: {error}")))?;
                     system.refresh_cpu_usage();
                     *state = Some((system, std::time::Instant::now(), None));
-                    return None;
+                    return Ok(None);
                 };
                 if sampled.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
                     system.refresh_cpu_usage();
@@ -650,7 +653,7 @@ impl CpuSampler {
                         *busy = Some(f64::from(system.global_cpu_usage()) / 100.0);
                     }
                 }
-                *busy
+                Ok(*busy)
             }
         }
     }
@@ -859,6 +862,91 @@ mod tests {
         );
         assert_eq!(foreground(&shell, "w1:p1").unwrap(), None);
         assert!(foreground(&shell, "w1:p2").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_darwin_sampler_reports_a_fraction_from_its_second_sample() {
+        let mut sampler = CpuSampler::default();
+        assert_eq!(sampler.busy().unwrap(), None);
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        let busy = sampler
+            .busy()
+            .unwrap()
+            .expect("the second sample has a value");
+        assert!((0.0..=1.0).contains(&busy), "{busy}");
+    }
+
+    #[test]
+    fn socket_and_command_reads_give_equal_terminals() {
+        use serde_json::json;
+        let agents = json!([{"pane_id":"worker","agent":"pi"}]);
+        let panes = json!([
+            {"pane_id":"worker","agent":"pi"}, {"pane_id":"idle"}, {"pane_id":"busy"}, {"pane_id":"gone"}
+        ]);
+        let idle =
+            json!({"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]});
+        let busy = json!({"shell_pid":10,"foreground_processes":[{"pid":11,"name":"cargo","argv":["cargo","test"]}]});
+        let gone = json!({"error":{"code":"pane_not_found","message":"pane not found"}});
+
+        let shell = Fake::new();
+        shell
+            .on(
+                "herdr agent list",
+                &json!({"result":{"agents":agents}}).to_string(),
+            )
+            .on(
+                "herdr pane list",
+                &json!({"result":{"panes":panes}}).to_string(),
+            )
+            .on(
+                "herdr pane process-info --pane idle",
+                &json!({"result":{"process_info":idle}}).to_string(),
+            )
+            .on(
+                "herdr pane process-info --pane busy",
+                &json!({"result":{"process_info":busy}}).to_string(),
+            );
+        shell.on_output(
+            "herdr pane process-info --pane gone",
+            crate::shell::Output {
+                status: 1,
+                stdout: String::new(),
+                stderr: gone.to_string(),
+            },
+        );
+        let server = crate::herdr_socket::fake::Server::start(move |method, params| match method {
+            "agent.list" => json!({"result":{"agents":agents}}),
+            "pane.list" => json!({"result":{"panes":panes}}),
+            "pane.process_info" => match params["pane_id"].as_str() {
+                Some("idle") => json!({"result":{"process_info":idle}}),
+                Some("busy") => json!({"result":{"process_info":busy}}),
+                Some("gone") => gone.clone(),
+                pane => panic!("unexpected process_info for {pane:?}"),
+            },
+            method => panic!("unexpected method {method}"),
+        });
+
+        let from_command = terminals(&shell).unwrap();
+        let from_socket = socket_terminals(&server.client(), &mut Vec::new()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&from_command).unwrap(),
+            serde_json::to_value(&from_socket).unwrap()
+        );
+        let idle_shells: Vec<_> = from_socket
+            .panes
+            .iter()
+            .map(|pane| (pane.pane_id.as_str(), pane.idle_shell))
+            .collect();
+        assert_eq!(
+            idle_shells,
+            [
+                ("worker", false),
+                ("idle", true),
+                ("busy", false),
+                ("gone", false)
+            ]
+        );
     }
 
     /// The process information of one pane, as Herdr reports it.
