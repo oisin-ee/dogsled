@@ -340,6 +340,7 @@ fn input(socket: &Client, ledger: &Ledger) -> Publication {
         agents: Some(agents),
         inbox: Some(inbox),
         repos: None,
+        autonomy: None,
         gaps: vec![],
     };
     Publication {

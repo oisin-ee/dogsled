@@ -2,6 +2,7 @@
 //! them. This crate holds data only, so it compiles to wasm32 as well.
 
 pub mod agents;
+pub mod autonomy;
 pub mod files;
 pub mod inbox;
 pub mod metrics;
@@ -55,6 +56,9 @@ pub struct PortalSnapshot {
     pub agents: Option<Vec<agents::AgentView>>,
     pub inbox: Option<inbox::InboxView>,
     pub repos: Option<agents::RepoList>,
+    /// The fleet switch. Absent when autonomy could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<autonomy::AutonomyView>,
     pub gaps: Vec<ObservationGap>,
 }
 

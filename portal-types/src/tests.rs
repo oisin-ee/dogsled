@@ -15,6 +15,10 @@ fn snapshot() -> PortalSnapshot {
         agents: Some(vec![]),
         inbox: Some(inbox::InboxView::default()),
         repos: Some(agents::RepoList::default()),
+        autonomy: Some(autonomy::AutonomyView {
+            fleet: vec!["netcup".to_owned()],
+            unsupported: vec![],
+        }),
         gaps: vec![],
     }
 }

@@ -295,6 +295,8 @@ mod tests {
             blocked: None,
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         }
     }
 
@@ -669,6 +671,8 @@ mod tests {
             }),
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         };
         let view = view(&board()?, &[review.clone()], &pending, &[blocked_agent], 20);
         assert_eq!(view.count, 4);

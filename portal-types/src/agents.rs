@@ -72,6 +72,12 @@ pub struct AgentView {
     /// has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<String>,
+    /// Why the agent decides without its owner. Absent while it asks its owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomous: Option<crate::autonomy::AutonomyCause>,
+    /// The recorded decisions of the agent and of the agents it owns. Absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<crate::autonomy::DecisionMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

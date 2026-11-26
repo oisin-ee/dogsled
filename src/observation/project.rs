@@ -606,6 +606,8 @@ fn fleet_agents(local: &LocalInputs, reports: &[HostReport], now: u64) -> Option
                 blocked: None,
                 reply: report.fresh(now).then(|| reply_stamp(agent)).flatten(),
                 launch: agent.launch_progress.clone(),
+                autonomous: None,
+                decisions: None,
             }));
         }
     }
@@ -723,6 +725,7 @@ fn portal(
         agents,
         inbox,
         repos: local.repos.clone(),
+        autonomy: None,
         gaps: gaps.to_vec(),
     }
 }
