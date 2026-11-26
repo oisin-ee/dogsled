@@ -1,6 +1,6 @@
 # Portal speed: causes and fixes
 
-Status: proposal, 2026-11-27. Not approved. No code changed.
+Status: proposal, revision 2, 2026-11-27. Not approved. No code changed. The owner decided the targets and the branch list on 2026-11-27 (see Decisions).
 Owner request: every portal interaction must feel as fast as Herdr.
 Related: the north-star design book (`docs/design/north-star/`, branch `design/north-star`) sets the end state and the speed budgets. This plan removes the measured causes of the delays.
 
@@ -8,7 +8,7 @@ Related: the north-star design book (`docs/design/north-star/`, branch `design/n
 
 Measured on the live Mac portal at 0.43.2 on 2026-11-26, with `curl`, a headless Chromium tab, the service log, and a process sample of `dogsled serve`.
 
-| Interaction | Measured | Proposed target |
+| Interaction | Measured | Target |
 | --- | --- | --- |
 | A second portal tab is open | Every request in both tabs stalls for more than 4 s, with no upper limit | No effect |
 | Sidebar, agent state, Needs you | A new publication every 3.2 to 7.2 s; the log shows single passes of 20 s and 64 s | 300 ms after the event |
@@ -61,6 +61,7 @@ From the live board: 13 `to_land` rows, 5 jobs, and 3 rows with no repository.
 - The rows under "Repository unknown" are two closed items of six days ago and one item in an unknown state. `item_repository` reads the repository from a live agent or a job's checkout (`src/board.rs:781`); these items have neither.
 - Of 15 branch names in these rows, 8 have no branch on GitHub, 5 have a closed, unmerged pull request, 1 has an open pull request with a commit 6 minutes old, and 1 is in active work with no pull request. The list mixes live work, stopped work and records of branches that are gone.
 - 11 rows have `ownership_stale`. A job with no known owner shows "Job · owner unavailable" (`web/src/board.rs:272`) and has no action.
+- `dogsled status` shows 73 resource holds across the fleet. A lead that started two workers and one job kept 8 of them after all three closed: 6 validity records and 2 launch references. `dogsled unit settlements` and `dogsled unit retry-reference-releases` returned nothing for that lead. Dogsled counts each hold as "needs you" and the owner has no action for it. `docs/lifecycle.md` lists expiry of finished records as not yet implemented.
 
 ## Units
 
@@ -73,18 +74,25 @@ Each unit ends with the same measurement that found its cause.
 | S3 Transcript push | The per-pane reader watches the transcript file and reads on a change. It keeps the incremental parser it has. The live socket sends only the new turns; the browser appends them. The browser shows what it holds at once and never waits for `pending` to draw known history. | C3 | `src/observation/details.rs`, `src/activity.rs`, the conversation part of `src/web/live.rs`, `web/src/conversations.rs` |
 | S4 Publication pass | Add timings below phase level. Read Herdr through the socket client. Move the CPU sample to its own sampler so no pass sleeps. Make a ledger wake collect only the domains that the store change touches. Target: a pass of less than 300 ms with no terminal sample. | C2 | `src/service.rs`, `src/observation/collect.rs`, `src/probe.rs`, `src/node.rs`, `src/observation/timing.rs` |
 | S5 Other machines | The service already follows each machine with one long stream. Carry inbox items and the open thread's content on streams that stay open, so no read starts an SSH command. | C4 | `src/observation/peers*.rs`, `src/web/peer_stream.rs`, `src/web/inbox.rs`, `peer_call` callers |
-| S6 Sidebar | Every row belongs to a lead. See decisions 2 and 3. | C6 | `web/src/board.rs`, `web/src/app.rs`, `src/board.rs`, `src/web/board.rs` |
+| S6 Sidebar | Every row belongs to a lead. A lead's page has a PRs tab for its pull requests and those of its workers. The thread header names the machine on the control that opens the raw session in Herdr. A hold of a closed worker or job is released or expires and never counts as "needs you". See decisions 2 and 3. | C6 | `web/src/board.rs`, `web/src/app.rs`, `src/board.rs`, `src/web/board.rs` |
 
 Order: S1 and S4 start together; they share no file. S3's reader change starts with them; its delivery follows S1. S2 follows S1 because both change `src/web/agents.rs` and `web/src/agent_view.rs`. S5 follows S1 and S3. S6 follows the owner's decisions.
 
 The image-drop unit (`feat/composer-image-drop`) changes the composer in `web/src/agent_view.rs` and lands before S1.
 
-## Decisions for the owner
+## Decisions
+
+Open, for the owner:
 
 1. **Transport.** Recommended: one WebSocket per tab (S1). It adds one dependency, `tokio-tungstenite`, through axum. Alternative: one combined `EventSource` per tab. It removes the stall for two tabs, still stalls at six, and keeps the inbox poll.
-2. **Branches.** Recommended: remove "Branches to review" from the sidebar. A branch shows on its lead's page while that lead exists. The service deletes a record whose branch is gone from GitHub and from the machine. A branch that still has commits and has no lead becomes one Needs you item per repository with two actions: start a lead to land them, or drop them.
-3. **Jobs and "Repository unknown".** Recommended: a job shows only under the lead that started it. A job or closed item with no lead and no checkout is a dead record; the service removes it. No row has a "Repository unknown" group.
-4. **Targets.** The targets in the table above are proposals. The north-star book carries the same numbers for approval.
+2. **Jobs and "Repository unknown".** Recommended: a job shows only under the lead that started it. A job or closed item with no lead and no checkout is a dead record; the service removes it. No row has a "Repository unknown" group.
+3. **Holds.** Recommended: add to S6 that a hold of a closed worker or job is released or expires, and is never counted as "needs you".
+
+Decided by the owner on 2026-11-27, with the north-star book:
+
+- **Branches.** "Branches to review" leaves the sidebar. A lead's thread ends with a "Landed" receipt. A PRs tab on the lead's page lists its pull requests and those of its workers. The service deletes a record whose branch is gone from GitHub and from the machine. A branch that still has commits and has no lead becomes one Needs you item per repository with two actions: start a lead to land them, or drop them.
+- **Targets.** The targets in the table above are the acceptance test. Each unit ends with the measurement of its row.
+- **Machine names.** A machine name appears in the capacity panel and on the Herdr control of a thread header, and nowhere else.
 
 ## Limits
 
