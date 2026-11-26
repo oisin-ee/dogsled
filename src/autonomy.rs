@@ -124,6 +124,8 @@ pub(crate) type Pane<'a> = (&'a str, &'a str);
 
 /// A worker inherits autonomy from a resolved owner. Walk outwards from switched-on
 /// panes; an unseeded ownership cycle never resolves, and each pane is visited once.
+/// Only a host that publishes the extension enforces autonomy, so only its panes get a
+/// cause: a pane on an older host still asks its owner, whatever the switches say.
 pub(crate) fn resolve<'a>(
     panes: impl IntoIterator<Item = Pane<'a>>,
     extensions: impl IntoIterator<Item = (&'a str, &'a Extension)>,
@@ -135,7 +137,9 @@ pub(crate) fn resolve<'a>(
 
     let mut causes = BTreeMap::new();
     let mut fleet = false;
+    let mut enforcing = std::collections::BTreeSet::new();
     for (host, extension) in extensions {
+        enforcing.insert(host);
         fleet |= extension.fleet;
         causes.extend(
             extension
@@ -151,6 +155,7 @@ pub(crate) fn resolve<'a>(
             .chain(executions.into_iter().filter_map(|(host, execution)| {
                 (execution.kind == Kind::Agent).then_some((host, execution.pane.as_str()))
             }))
+            .filter(|(host, _)| enforcing.contains(host))
             .map(|pane| (pane, AutonomyCause::Fleet))
             .collect();
     }
@@ -174,6 +179,7 @@ pub(crate) fn resolve<'a>(
             }
         }
     }
+    causes.retain(|(host, _), _| enforcing.contains(host));
     causes
 }
 
@@ -338,7 +344,7 @@ mod tests {
     #[test]
     fn autonomy_resolve_fleet_agent_owner_and_cycles() {
         use crate::observation::owned_work::{Execution, Kind};
-        let a = Extension {
+        let mut a = Extension {
             fleet: false,
             agents: vec!["lead".into()],
             decisions: vec![],
@@ -385,6 +391,11 @@ mod tests {
                 (("B", "nested"), AutonomyCause::Owner),
             ])
         );
+        // Host B runs an older release: it publishes no extension and enforces nothing.
+        assert_eq!(
+            resolve(panes, [("A", &a)], executions, &labels),
+            BTreeMap::from([(("A", "lead"), AutonomyCause::Agent)])
+        );
         b.fleet = true;
         assert_eq!(
             resolve(panes, [("A", &a), ("B", &b)], executions, &labels),
@@ -392,6 +403,14 @@ mod tests {
                 .into_iter()
                 .map(|pane| (pane, AutonomyCause::Fleet))
                 .collect()
+        );
+        a.fleet = true;
+        assert_eq!(
+            resolve(panes, [("A", &a)], executions, &labels),
+            BTreeMap::from([
+                (("A", "lead"), AutonomyCause::Fleet),
+                (("A", "cycle-a"), AutonomyCause::Fleet),
+            ])
         );
     }
 
