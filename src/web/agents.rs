@@ -9,13 +9,11 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::sse::KeepAlive;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use portal_types::agents::{AgentEvent, AgentView, KeysBody, PromptBody};
 use serde_json::{Value, json};
-use tokio_stream::StreamExt;
 
 use crate::herdr_socket::Client;
 use crate::observation::{
@@ -223,7 +221,7 @@ fn event_reply(publication: &DetailFrame, pane: &str) -> crate::error::Result<Pe
     Ok(if publication.found {
         PeerReply {
             status: 200,
-            body: serde_json::from_str(&agent_event(publication, pane)?)?,
+            body: serde_json::to_value(agent_event(publication, pane)?)?,
         }
     } else {
         PeerReply {
@@ -536,95 +534,6 @@ async fn machine_action(state: AppState, host: String, action: MachineAction) ->
     }
 }
 
-/// Share a held peer stream without observing unrelated portal publications.
-pub(super) async fn peer_events(
-    state: AppState,
-    host: String,
-    pane: String,
-    operation: PeerOperation,
-    event: &'static str,
-) -> Response {
-    let mut lines = match state
-        .followers
-        .subscribe(&state, host.clone(), pane, &operation)
-    {
-        Ok(lines) => lines,
-        Err(error) => return peer_error(&host, &error),
-    };
-    let first = tokio::select! {
-        () = state.stop.cancelled() => Err(format!("host {host}: agent stream unavailable")),
-        result = tokio::time::timeout(crate::budget::CALL_LIMIT, first_peer_line(&mut lines)) => {
-            result.unwrap_or_else(|_| Err(format!("host {host}: agent stream unavailable")))
-        }
-    };
-    let initial = match first {
-        Ok(reply) if reply.status < 400 && StatusCode::from_u16(reply.status).is_ok() => reply,
-        Ok(reply) => return peer_reply_response(&host, reply),
-        Err(error) => {
-            return (StatusCode::BAD_GATEWAY, Json(json!({"error":error}))).into_response();
-        }
-    };
-    let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    let stop = state.stop.clone();
-    tokio::spawn(async move {
-        let mut line = Ok(initial);
-        loop {
-            let (name, body, failed) = match line {
-                Ok(mut reply) => {
-                    reply.status = StatusCode::from_u16(reply.status)
-                        .unwrap_or(StatusCode::BAD_GATEWAY)
-                        .as_u16();
-                    if reply.status >= 500 {
-                        reply.body =
-                            json!({"error":format!("host {host}: agent detail unavailable")});
-                    }
-                    (
-                        if reply.status >= 400 { "error" } else { event },
-                        reply.body,
-                        reply.status >= 400,
-                    )
-                }
-                Err(error) => ("error", json!({"error":error}), true),
-            };
-            if sender.send((name, body.to_string())).await.is_err() || failed {
-                break;
-            }
-            tokio::select! {
-                () = stop.cancelled() => break,
-                () = sender.closed() => break,
-                changed = lines.changed() => if changed.is_err() { break; },
-            }
-            let Some(next) = lines.borrow_and_update().clone() else {
-                break;
-            };
-            line = next;
-        }
-    });
-    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).map(|(event, data)| {
-        Ok::<_, std::convert::Infallible>(
-            axum::response::sse::Event::default()
-                .event(event)
-                .data(data),
-        )
-    });
-    axum::response::sse::Sse::new(state.until_shutdown(stream))
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response()
-}
-
-async fn first_peer_line(
-    lines: &mut tokio::sync::watch::Receiver<Option<super::peer_stream::Line>>,
-) -> super::peer_stream::Line {
-    loop {
-        if let Some(line) = lines.borrow_and_update().clone() {
-            return line;
-        }
-        if lines.changed().await.is_err() {
-            return Err("agent stream unavailable".into());
-        }
-    }
-}
-
 /// The routes of the agent API.
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -636,7 +545,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/agents/{host}/{pane}/keys", post(keys))
         .route("/api/agents/{host}/{pane}/focus", post(focus))
         .route("/api/agents/{host}/{pane}/close", post(close))
-        .route("/api/agents/{host}/{pane}/events", get(events))
         .route("/api/leads", post(create_lead))
         .route("/api/repos", get(repos))
         .route("/api/models", get(models))
@@ -1053,67 +961,12 @@ async fn close(
     }
 }
 
-/// Forward serve-owned detail changes. The observation connection owns the interest.
-async fn events(
-    State(state): State<AppState>,
-    Path((host, pane)): Path<(String, String)>,
-) -> Response {
-    if host != crate::hosts::LOCAL {
-        return peer_events(state, host, pane, PeerOperation::Event, "agent").await;
-    }
-    let client = ipc::Client::at(&state.web.dir);
-    let selected = pane.clone();
-    let mut subscription = match tokio::task::spawn_blocking(move || client.detail(&selected)).await
-    {
-        Ok(Ok(subscription)) => subscription,
-        Ok(Err(error)) => return crate::web::observation_error(&error.to_string()),
-        Err(error) => return crate::web::observation_error(&error.to_string()),
-    };
-    let (sender, receiver) = tokio::sync::watch::channel(None::<String>);
-    let stop = state.stop.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut previous = None;
-        loop {
-            if stop.is_cancelled() || sender.is_closed() {
-                break;
-            }
-            let connection = subscription.current();
-            if let ipc::Status::Disconnected(error) = connection.status {
-                sender.send_replace(Some(json!({"error": error}).to_string()));
-                break;
-            }
-            match agent_event(&connection.publication, &pane) {
-                Ok(payload) => {
-                    if previous.as_ref() != Some(&payload) {
-                        sender.send_replace(Some(payload.clone()));
-                        previous = Some(payload);
-                    }
-                }
-                Err(error) => {
-                    sender.send_replace(Some(json!({"error": error.to_string()}).to_string()));
-                    break;
-                }
-            }
-            subscription.changed(Duration::from_millis(100));
-        }
-    });
-    let stream = tokio_stream::wrappers::WatchStream::new(receiver).filter_map(|payload| {
-        payload.map(|payload| {
-            Ok::<_, std::convert::Infallible>(
-                axum::response::sse::Event::default()
-                    .event("agent")
-                    .data(payload),
-            )
-        })
-    });
-    axum::response::sse::Sse::new(state.until_shutdown(stream))
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response()
-}
-
-fn agent_event(publication: &DetailFrame, pane: &str) -> crate::error::Result<String> {
+pub(super) fn agent_event(
+    publication: &DetailFrame,
+    pane: &str,
+) -> crate::error::Result<AgentEvent> {
     let agent = publication.agent.as_ref();
-    Ok(serde_json::to_string(&AgentEvent {
+    Ok(AgentEvent {
         revisions: publication.parts.clone(),
         pending: Some(portal_types::agents::PendingParts {
             conversation: matches!(publication.detail.conversation, Content::Pending),
@@ -1135,7 +988,7 @@ fn agent_event(publication: &DetailFrame, pane: &str) -> crate::error::Result<St
         } else {
             portal_types::agents::DetailSession::Unavailable
         },
-    })?)
+    })
 }
 
 #[derive(Debug, Default)]
@@ -1254,10 +1107,13 @@ pub(crate) async fn test_request(
 
 #[cfg(test)]
 mod tests {
+    use super::super::live::tests as live;
     use super::*;
     use crate::herdr_socket::fake;
     use axum::body::Body;
     use axum::http::{Method, Request};
+    use portal_types::agents::AgentAddress;
+    use portal_types::live::ServerFrame;
     use std::sync::Arc;
     use tokio::sync::watch;
     use tower::ServiceExt;
@@ -1959,7 +1815,12 @@ mod tests {
         let mut fixture = PeerFixture::new();
         fixture.state.followers = super::super::peer_stream::Followers::with_launcher("sh", vec![
             "-c".into(),
-            "printf '%s\\n' '{\"status\":200,\"body\":{\"session\":\"peer-session\"}}'; cat >/dev/null".into(),
+            r#"case "$*" in
+                *activity*) printf '%s
+' '{"status":200,"body":{"version":1,"pane":"w1:p1","epoch":"peer-serve","revision":2,"session":"peer-session","coarse_state":"working","producer":{"generation":1,"id":"producer"},"detail":{"availability":"unavailable","reason":"expired"}}}' ;;
+                *) printf '%s
+' '{"status":200,"body":{"kind":"pane.agent_status_changed","pane":"w1:p1","session":{"availability":"available","key":"peer-session"}}}' ;;
+            esac; cat >/dev/null"#.into(),
         ]);
         let activity = json!({"version":1,"pane":"w1:p1","epoch":"peer-serve","revision":2,
             "session":"peer-session","coarse_state":"working","producer":{"generation":1,"id":"producer"},
@@ -1999,36 +1860,52 @@ mod tests {
         assert_eq!(payload["session"], "peer-session");
         assert!(payload["detail"]["valid_for_ms"].as_u64().unwrap() <= 5000);
         fixture.shell.calls.lock().unwrap().clear();
+        assert_peer_updates_on_live_socket(&mut fixture).await;
+    }
+
+    async fn assert_peer_updates_on_live_socket(fixture: &mut PeerFixture) {
         let (publications, portal) = watch::channel(fixture.state.portal.borrow().clone());
         fixture.state.portal = portal;
-        for (route, event) in [("events", "agent"), ("activity/events", "activity")] {
-            let response = call(
-                fixture.state.clone(),
-                request(
-                    Method::GET,
-                    &format!("/api/agents/netcup/w1:p1/{route}"),
-                    None,
-                ),
-            )
+        let server = live::Server::start(&fixture.state).await;
+        let mut stream = server.connect().await;
+        live::select(
+            &mut stream,
+            1,
+            Some(AgentAddress {
+                host: "netcup".into(),
+                pane: "w1:p1".into(),
+            }),
+        )
+        .await;
+        let mut agent = false;
+        let mut activity = false;
+        while !(agent && activity) {
+            let frame = live::next(&mut stream, |frame| match frame {
+                frame @ (ServerFrame::Agent { .. } | ServerFrame::Activity { .. }) => Some(frame),
+                _ => None,
+            })
             .await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let mut stream = response.into_body().into_data_stream();
-            let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame = String::from_utf8(bytes.to_vec()).unwrap();
-            assert!(frame.contains(&format!("event: {event}")), "{frame}");
-            assert!(frame.contains("peer-session"), "{frame}");
-            publications.send_replace(super::super::PortalState::default());
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), stream.next())
-                    .await
-                    .is_err(),
-                "unrelated portal publication must not emit an event"
-            );
+            match frame {
+                ServerFrame::Agent { id: 1, event } => {
+                    assert_eq!(
+                        event.session,
+                        portal_types::agents::DetailSession::Available("peer-session".into())
+                    );
+                    agent = true;
+                }
+                ServerFrame::Activity { id: 1, view } => {
+                    assert_eq!(view.session.as_deref(), Some("peer-session"));
+                    activity = true;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
         }
+        publications.send_replace(super::super::PortalState::default());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), live::agent(&mut stream))
+                .await
+                .is_err()
+        );
         assert!(
             fixture
                 .shell
@@ -2040,101 +1917,61 @@ mod tests {
         );
         let calls = fixture.state.followers.calls();
         assert_eq!(calls.len(), 2);
-        for (argv, operation) in calls
-            .iter()
-            .zip([PeerOperation::Event, PeerOperation::Activity])
-        {
+        for operation in [PeerOperation::Event, PeerOperation::Activity] {
             let expected =
                 fixture
                     .command("w1:p1", &operation)
                     .replacen(" --input", " --follow --input", 1);
-            assert_eq!(format!("ssh {}", argv.join(" ")), expected);
+            assert!(
+                calls
+                    .iter()
+                    .any(|argv| format!("ssh {}", argv.join(" ")) == expected)
+            );
         }
     }
 
     #[tokio::test]
-    async fn remote_stream_errors_preserve_initial_status_and_close_later_events() {
-        for (script, status, error) in [
-            (
-                "exit 0".to_owned(),
-                StatusCode::BAD_GATEWAY,
-                "host netcup: agent stream unavailable",
-            ),
-            (
-                "printf '%s\\n' '{\"status\":404,\"body\":{\"error\":\"no agent\"}}'".into(),
-                StatusCode::NOT_FOUND,
-                "no agent",
-            ),
-            (
-                "printf '%s\\n' '{\"status\":503,\"body\":{\"error\":\"secret peer detail\"}}'"
-                    .into(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "host netcup: agent detail unavailable",
-            ),
-        ] {
-            let mut fixture = PeerFixture::new();
-            fixture.state.followers = super::super::peer_stream::Followers::with_launcher(
-                "sh",
-                vec!["-c".into(), script],
-            );
-            let response = call(
-                fixture.state.clone(),
-                request(Method::GET, "/api/agents/netcup/w1:p1/events", None),
-            )
-            .await;
-            assert_eq!(response.status(), status);
-            assert_eq!(body_json(response).await["error"], error);
-            assert!(
-                fixture
-                    .shell
-                    .calls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .all(|call| !call.contains("agent-detail"))
-            );
-        }
-        let release = std::env::temp_dir().join(crate::ledger::new_id());
+    async fn live_peer_failure_does_not_close_the_portal() {
         let mut fixture = PeerFixture::new();
         fixture.state.followers = super::super::peer_stream::Followers::with_launcher(
             "sh",
             vec![
                 "-c".into(),
-                format!(
-                    "printf '%s\\n' '{{\"status\":200,\"body\":{{\"session\":\"peer-session\"}}}}'; while [ ! -f {} ]; do sleep 0.01; done; printf '%s\\n' '{{\"status\":409,\"body\":{{\"error\":\"session changed\"}}}}'; cat >/dev/null",
-                    crate::shell::quote(&release.to_string_lossy())
-                ),
+                r#"printf '%s
+' '{"status":503,"body":{"error":"secret peer detail"}}'"#
+                    .into(),
             ],
         );
-        let response = call(
-            fixture.state.clone(),
-            request(Method::GET, "/api/agents/netcup/w1:p1/events", None),
+        let (publications, portal) = watch::channel(fixture.state.portal.borrow().clone());
+        fixture.state.portal = portal;
+        let server = live::Server::start(&fixture.state).await;
+        let mut stream = server.connect().await;
+        live::select(
+            &mut stream,
+            1,
+            Some(AgentAddress {
+                host: "netcup".into(),
+                pane: "w1:p1".into(),
+            }),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(String::from_utf8_lossy(&first).contains("event: agent"));
-        std::fs::write(&release, "release").unwrap();
-        let last = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let last = String::from_utf8_lossy(&last);
-        assert!(last.contains("event: error"), "{last}");
-        assert!(last.contains("session changed"), "{last}");
-        assert!(
-            tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        std::fs::remove_file(release).unwrap();
+        let error = live::next(&mut stream, |frame| match frame {
+            ServerFrame::AgentUnavailable { id: 1, error } => Some(error),
+            _ => None,
+        })
+        .await;
+        assert_eq!(error, "host netcup: agent stream unavailable");
+        publications.send_replace(super::super::PortalState {
+            snapshot: None,
+            error: Some("new portal status".into()),
+        });
+        live::next(&mut stream, |frame| match frame {
+            ServerFrame::Portal {
+                event: portal_types::PortalEvent::Status(status),
+            } if status.error == "new portal status" => Some(()),
+            _ => None,
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -2281,33 +2118,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_closes_an_idle_agent_subscription() {
+    async fn deselection_closes_an_idle_agent_subscription() {
         let server = agent_server();
         let state = with_socket(&server);
         let fixture =
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
-        let response = call(
-            state.clone(),
-            request(Method::GET, "/api/agents/local/w1:p1/events", None),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let live_server = live::Server::start(&state).await;
+        let mut stream = live_server.connect().await;
+        live::select(&mut stream, 1, Some(AgentAddress::local("w1:p1"))).await;
         let registered = fixture.wait(|frame| {
             frame.views["agent_details"]["data"]
                 .as_object()
                 .is_some_and(|details| details.contains_key("w1:p1"))
         });
-        state.stop.cancel();
-        tokio::time::timeout(
-            crate::test_support::WAIT_DEADLINE,
-            axum::body::to_bytes(response.into_body(), 1024),
-        )
-        .await
-        .expect("agent SSE stops")
-        .expect("the body");
-        // The body ends at once; the forwarding thread drops its subscription on its next
-        // poll, and only then does serve release the lease. A frame with no details can
-        // predate the first capture, so it proves nothing about the release.
+        // Clearing the selection releases its lease without closing the tab socket.
+        live::select(&mut stream, 2, None).await;
         let deadline = std::time::Instant::now() + crate::test_support::WAIT_DEADLINE;
         while !fixture.no_viewers() {
             assert!(
@@ -2511,26 +2336,13 @@ mod tests {
         fixture.wait(|frame| {
             frame.views["agent_details"]["data"]["w1:p1"]["files"]["availability"] == "empty"
         });
-        let response = call(
-            state.clone(),
-            request(Method::GET, "/api/agents/local/w1:p1/events", None),
-        )
-        .await;
-        let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let first = agent_sse_payload(&first).revisions.unwrap();
+        let live_server = live::Server::start(&state).await;
+        let mut stream = live_server.connect().await;
+        live::select(&mut stream, 1, Some(AgentAddress::local("w1:p1"))).await;
+        let first = live::agent(&mut stream).await.revisions.unwrap();
         std::fs::write(repo.0.join("file"), "edited\n").unwrap();
         assert!(fixture.files_tick("w1:p1"));
-        let second = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let second = agent_sse_payload(&second).revisions.unwrap();
+        let second = live::agent(&mut stream).await.revisions.unwrap();
         assert!(second.files > first.files);
         assert_eq!(second.conversation, first.conversation);
         assert_eq!(second.screen, first.screen);
@@ -2912,7 +2724,7 @@ mod tests {
                 publication.detail.files = FilesState::NotRepository;
             }
             let wire: Value =
-                serde_json::from_str(&agent_event(&publication, "pane").unwrap()).unwrap();
+                serde_json::to_value(agent_event(&publication, "pane").unwrap()).unwrap();
             assert_eq!(
                 wire["pending"],
                 json!({
@@ -2945,19 +2757,10 @@ mod tests {
             crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
         let _viewer = fixture.client.detail("w1:p1").unwrap();
         fixture.wait(|frame| frame.views["agent_details"]["data"]["w1:p1"]["screen_revision"] == 7);
-        let response = call(
-            state.clone(),
-            request(Method::GET, "/api/agents/local/w1:p1/events", None),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut stream = response.into_body().into_data_stream();
-        let first = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let first = agent_sse_payload(&first);
+        let live_server = live::Server::start(&state).await;
+        let mut stream = live_server.connect().await;
+        live::select(&mut stream, 1, Some(AgentAddress::local("w1:p1"))).await;
+        let first = live::agent(&mut stream).await;
         for name in ["renamed", "renamed again"] {
             let previous = fixture
                 .client
@@ -2968,7 +2771,7 @@ mod tests {
             fixture.wake();
             fixture.wait(|frame| frame.revision > previous);
             assert!(
-                tokio::time::timeout(Duration::from_millis(250), stream.next())
+                tokio::time::timeout(Duration::from_millis(250), live::agent(&mut stream))
                     .await
                     .is_err(),
                 "unchanged event content must not emit another agent event"
@@ -2976,12 +2779,7 @@ mod tests {
         }
         *screen.lock().unwrap() = json!({"text":"second screen", "revision":8});
         assert!(fixture.tick("w1:p1"));
-        let second = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let second = agent_sse_payload(&second);
+        let second = live::agent(&mut stream).await;
         let first = first.revisions.unwrap();
         let second = second.revisions.unwrap();
         assert_eq!(second.conversation, first.conversation);
@@ -3085,48 +2883,18 @@ mod tests {
         thread.join().unwrap();
     }
 
-    fn agent_sse_payload(bytes: &[u8]) -> AgentEvent {
-        let frame = std::str::from_utf8(bytes).unwrap();
-        assert!(frame.contains("event: agent"), "the event name: {frame}");
-        let data = frame
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .unwrap();
-        serde_json::from_str(data).unwrap()
-    }
-
     #[tokio::test]
     async fn the_agent_events_are_pushed_as_they_arrive() {
-        let server = agent_server();
-        let state = with_socket(&server);
+        let native = agent_server();
+        let state = with_socket(&native);
         let _fixture =
-            crate::observation::details::fixture::Fixture::at(server.client(), state.web.clone());
-        let response = call(
-            state.clone(),
-            request(Method::GET, "/api/agents/local/w2:p1/events", None),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/event-stream")
-        );
-        let mut stream = response.into_body().into_data_stream();
-        let mut text = String::new();
-        while !text.contains("\"state\":\"blocked\"") {
-            let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-                .await
-                .expect("published agent event")
-                .expect("stream open")
-                .expect("body data");
-            text.push_str(&String::from_utf8_lossy(&bytes));
-        }
-        assert!(text.contains("event: agent"), "the event name: {text}");
-        assert!(text.contains("\"kind\":\"pane.agent_status_changed\""));
-        assert!(text.contains("\"state\":\"blocked\""));
+            crate::observation::details::fixture::Fixture::at(native.client(), state.web.clone());
+        let live_server = live::Server::start(&state).await;
+        let mut stream = live_server.connect().await;
+        live::select(&mut stream, 1, Some(AgentAddress::local("w2:p1"))).await;
+        let event = live::agent(&mut stream).await;
+        assert_eq!(event.kind, "pane.agent_status_changed");
+        assert_eq!(event.state.as_deref(), Some("blocked"));
         state.stop.cancel();
     }
 

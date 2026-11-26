@@ -1,7 +1,7 @@
 //! Unified actionable inbox, derived from the existing stores and board snapshot.
 
 use axum::extract::State;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::{Router, routing::get};
 use portal_types::agents::AgentView;
 use portal_types::inbox::{InboxItem, InboxKind, InboxView};
@@ -16,31 +16,78 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn list(State(state): State<AppState>) -> Response {
-    let (mut inbox, hosts, headers) = {
-        let current = state.portal.borrow();
-        if let Some(error) = &current.error {
-            return super::observation_error(error);
-        }
-        let Some(snapshot) = &current.snapshot else {
-            return super::observation_error("inbox unavailable");
-        };
-        let (Some(inbox), Some(board)) = (&snapshot.inbox, &snapshot.board) else {
-            return super::observation_error("inbox unavailable");
-        };
-        // The local publication's revision, as every other projection route reports it.
-        let headers = [
-            ("x-observation-version", snapshot.version.to_string()),
-            ("x-observation-epoch", snapshot.epoch.clone()),
-            ("x-observation-revision", snapshot.revision.to_string()),
-            ("cache-control", "no-store".to_owned()),
-        ];
-        (inbox.clone(), board.hosts.clone(), headers)
+    let current = state.portal.borrow().clone();
+    let inbox = match projected(&state, &current).await {
+        Ok(inbox) => inbox,
+        Err(error) => return super::observation_error(&error),
     };
+    AppState::project(&current, |_| Some(inbox))
+}
+
+type Projection = Result<InboxView, String>;
+type Sender = tokio::sync::watch::Sender<Option<Projection>>;
+
+/// One inbox projection per web server, not one fan-out to peers per open tab.
+#[derive(Debug, Clone, Default)]
+pub(super) struct LiveInbox(std::sync::Arc<std::sync::Mutex<Option<Sender>>>);
+
+impl LiveInbox {
+    pub(super) fn subscribe(
+        &self,
+        state: &AppState,
+    ) -> tokio::sync::watch::Receiver<Option<Projection>> {
+        let mut cached = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(sender) = cached.as_ref().filter(|sender| sender.receiver_count() > 0) {
+            return sender.subscribe();
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *cached = Some(sender.clone());
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut portal = state.portal.clone();
+            loop {
+                let current = portal.borrow_and_update().clone();
+                let result = tokio::select! {
+                    () = state.stop.cancelled() => break,
+                    () = sender.closed() => break,
+                    result = projected(&state, &current) => result,
+                };
+                sender.send_if_modified(|previous| {
+                    if previous.as_ref() == Some(&result) {
+                        return false;
+                    }
+                    *previous = Some(result);
+                    true
+                });
+                tokio::select! {
+                    () = state.stop.cancelled() => break,
+                    () = sender.closed() => break,
+                    changed = portal.changed() => if changed.is_err() { break; },
+                }
+            }
+        });
+        receiver
+    }
+}
+
+async fn projected(state: &AppState, current: &super::PortalState) -> Projection {
+    if let Some(error) = &current.error {
+        return Err(error.clone());
+    }
+    let (mut inbox, hosts) = current
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| Some((snapshot.inbox.clone()?, &snapshot.board.as_ref()?.hosts)))
+        .ok_or_else(|| "inbox unavailable".to_owned())?;
     inbox.items.retain(|item| item.host == crate::hosts::LOCAL);
     let mut peers = tokio::task::JoinSet::new();
     for host in hosts
-        .into_iter()
+        .iter()
         .filter(|host| host.label != crate::hosts::LOCAL)
+        .cloned()
     {
         if !host.reachable {
             inbox.gaps.push(portal_types::inbox::HostGap {
@@ -84,11 +131,11 @@ async fn list(State(state): State<AppState>) -> Response {
                 host,
                 error: error.to_string(),
             }),
-            Err(error) => return super::observation_error(&error.to_string()),
+            Err(error) => return Err(error.to_string()),
         }
     }
     inbox.count = inbox.items.len();
-    (headers, axum::Json(inbox)).into_response()
+    Ok(inbox)
 }
 
 /// Select the owning serve's publication, including an explicit unavailable result.
@@ -415,8 +462,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_publishes_inbox_changes_and_stops_on_shutdown() -> Result<()> {
-        use futures_util::StreamExt as _;
+    async fn live_socket_publishes_inbox_changes_and_stops_on_shutdown() -> Result<()> {
+        use super::super::live::tests as live;
         let ledger = crate::ledger::Ledger::temporary();
         let mut board = board()?;
         board.repos.clear();
@@ -434,33 +481,10 @@ mod tests {
             super::super::guard::Token::new("token".into()),
             ledger.clone(),
         );
-        let response = super::super::router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/api/stream")
-                    .header(header::HOST, "localhost:7465")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let mut stream = response.into_body().into_data_stream();
-        let next_inbox = |mut stream: axum::body::BodyDataStream| async move {
-            loop {
-                let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-                    .await
-                    .expect("SSE event deadline")
-                    .expect("SSE stays open")
-                    .expect("SSE bytes");
-                let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 event");
-                if text.contains("event: portal\n") {
-                    return (text, stream);
-                }
-            }
-        };
-        let (initial, remaining) = next_inbox(stream).await;
-        assert!(initial.contains("\"count\":0"));
-        stream = remaining;
+        let server = live::Server::start(&state).await;
+        let mut stream = server.connect().await;
+        let initial = next_inbox(&mut stream).await;
+        assert_eq!(initial.count, 0);
         let id = state.questions.create(serde_json::from_value(json!({
             "pane": "worker-pane", "session": "session", "cwd": "/repo",
             "questions": {"title": "Choose", "questions": [{"id": "q", "type": "text", "question": "Which?"}]}
@@ -471,10 +495,9 @@ mod tests {
             board.clone(),
             vec![agent("local", "worker-pane", "idle")],
         )?);
-        let (changed, remaining) = next_inbox(stream).await;
-        assert!(changed.contains("\"count\":1"));
-        assert!(changed.contains(&id));
-        stream = remaining;
+        let changed = next_inbox(&mut stream).await;
+        assert_eq!(changed.count, 1);
+        assert_eq!(changed.items[0].id, id);
         state.questions.answer(&id, vec![]).await?;
         sender.send_replace(super::super::test_support::publish(
             &mut publisher,
@@ -482,42 +505,38 @@ mod tests {
             board,
             vec![agent("local", "worker-pane", "idle")],
         )?);
-        let (answered, mut stream) = next_inbox(stream).await;
-        assert!(answered.contains("\"count\":0"));
+        let answered = next_inbox(&mut stream).await;
+        assert_eq!(answered.count, 0);
         state.stop.cancel();
-        assert!(
-            tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-                .await
-                .expect("shutdown deadline")
-                .is_none()
-        );
+        tokio::time::timeout(crate::test_support::WAIT_DEADLINE, async {
+            while live::read(&mut stream).await.is_some() {}
+        })
+        .await
+        .expect("socket closes on shutdown");
         std::fs::remove_dir_all(ledger.dir)?;
         Ok(())
     }
 
-    async fn next_snapshot(
-        stream: &mut axum::body::BodyDataStream,
-    ) -> Result<portal_types::PortalSnapshot> {
-        use futures_util::StreamExt as _;
-        loop {
-            let bytes = tokio::time::timeout(crate::test_support::WAIT_DEADLINE, stream.next())
-                .await
-                .expect("SSE event deadline")
-                .expect("SSE stays open")
-                .expect("SSE bytes");
-            let text = String::from_utf8(bytes.to_vec()).expect("UTF-8 event");
-            if text.contains("event: portal\n") {
-                let data = text
-                    .lines()
-                    .find_map(|line| line.strip_prefix("data: "))
-                    .expect("portal event data");
-                let portal_types::PortalEvent::Snapshot(snapshot) = serde_json::from_str(data)?
-                else {
-                    panic!("expected a complete portal snapshot");
-                };
-                return Ok(*snapshot);
+    async fn next_inbox(socket: &mut super::super::live::tests::Socket) -> InboxView {
+        super::super::live::tests::next(socket, |frame| match frame {
+            portal_types::live::ServerFrame::Inbox { result } => {
+                Some(result.expect("available inbox"))
             }
-        }
+            _ => None,
+        })
+        .await
+    }
+
+    async fn next_snapshot(
+        socket: &mut super::super::live::tests::Socket,
+    ) -> portal_types::PortalSnapshot {
+        super::super::live::tests::next(socket, |frame| match frame {
+            portal_types::live::ServerFrame::Portal {
+                event: portal_types::PortalEvent::Snapshot(snapshot),
+            } => Some(*snapshot),
+            _ => None,
+        })
+        .await
     }
 
     #[tokio::test]
@@ -559,19 +578,9 @@ mod tests {
         assert_eq!(initial.count, 2);
         assert_eq!(initial.items[0].id, review.id);
         assert_eq!(initial.items[1].id, id);
-        let response = super::super::router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/api/stream")
-                    .header(header::HOST, "localhost:7465")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut stream = response.into_body().into_data_stream();
-        let first = next_snapshot(&mut stream).await?;
+        let live_server = super::super::live::tests::Server::start(&state).await;
+        let mut stream = live_server.connect().await;
+        let first = next_snapshot(&mut stream).await;
         assert_eq!(first.inbox, Some(initial));
 
         // Keep the historical board row and a same-pane peer, but remove the local owner.
@@ -582,7 +591,7 @@ mod tests {
             board,
             vec![agent("peer", "worker-pane", "idle")],
         )?);
-        let changed = next_snapshot(&mut stream).await?;
+        let changed = next_snapshot(&mut stream).await;
         assert_eq!(changed.epoch, first.epoch);
         assert!(changed.revision > first.revision);
         let served = served_inbox(&state).await?;

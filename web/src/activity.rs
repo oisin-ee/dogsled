@@ -223,46 +223,39 @@ pub fn use_live_activity(
             }
         }
     });
-    use_resource(use_reactive(&address, move |address| {
+    let socket = use_context::<crate::app::LivePortal>();
+    let pane = address.pane.clone();
+    let activity = use_memo(move || socket.activity(&address));
+    let mut reducer = use_signal(|| (None, ActivityState::default()));
+    use_effect(move || {
         let selected = session();
-        live.set(Live::Pending);
-        expiry.set(None);
-        async move {
-            if selected.is_none() {
-                return;
-            }
-            loop {
-                let mut state = ActivityState::default();
-                let mut apply = |view: ActivityView| -> Result<(), Gap> {
-                    // Recheck the current selection before every async callback.
-                    if *session.peek() != selected {
-                        live.set(Live::Unavailable(Gap::SessionMismatch));
-                        expiry.set(None);
-                        return Err(Gap::SessionMismatch);
-                    }
-                    if let Some((next, ttl)) = state.frame(view, &address.pane, &selected)? {
-                        expiry.set(ttl.map(|ttl| (state.revision, ttl)));
-                        live.set(next);
-                    }
-                    Ok(())
-                };
-                // GET establishes the current serve epoch before opening this stream.
-                let result = match crate::api::fetch_activity(&address).await {
-                    Ok(view) => match apply(view) {
-                        Ok(()) => crate::api::watch_activity(&address, apply).await,
-                        Err(gap) => Err(gap),
-                    },
-                    Err(gap) => Err(gap),
-                };
-                expiry.set(None);
-                live.set(state.clear(result.err().unwrap_or(Gap::Disconnected)));
-                if *session.peek() != selected {
-                    return;
-                }
-                sleep(Duration::from_secs(1)).await;
-            }
+        let frame = activity();
+        let mut current = reducer.write();
+        if current.0 != selected {
+            *current = (selected.clone(), ActivityState::default());
+            live.set(Live::Pending);
+            expiry.set(None);
         }
-    }));
+        match frame {
+            Some(Ok(view)) => match current.1.frame(view, &pane, &selected) {
+                Ok(Some((next, ttl))) => {
+                    expiry.set(ttl.map(|ttl| (current.1.revision, ttl)));
+                    live.set(next);
+                }
+                Ok(None) => {}
+                Err(gap) => {
+                    expiry.set(None);
+                    live.set(Live::Unavailable(gap));
+                }
+            },
+            Some(Err(gap)) => {
+                current.1 = ActivityState::default();
+                expiry.set(None);
+                live.set(Live::Unavailable(gap));
+            }
+            None => {}
+        }
+    });
     live
 }
 

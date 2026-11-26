@@ -1,10 +1,11 @@
 //! The portal stream, independent agent detail reads, and actions.
 
-use futures_util::StreamExt;
-use gloo_net::eventsource::futures::EventSource;
+use futures_util::{SinkExt, StreamExt};
 use gloo_net::http::Request;
+use gloo_net::websocket::{Message, futures::WebSocket};
 use portal_types::PortalEvent;
-use portal_types::agents::{ActivityView, AgentEvent, Conversation, KeysBody, PromptBody, Screen};
+use portal_types::agents::{Conversation, KeysBody, PromptBody, Screen};
+use portal_types::live::{ClientFrame, ServerFrame};
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -118,54 +119,6 @@ pub async fn change_settings(
         .json(change)
         .map_err(|error| error.to_string())?;
     read_json(request.send().await.map_err(|error| error.to_string())?).await
-}
-
-/// Read a complete activity snapshot, separately from transcript and lifecycle reads.
-pub async fn fetch_activity(
-    address: &portal_types::agents::AgentAddress,
-) -> Result<ActivityView, crate::activity::Gap> {
-    use crate::activity::Gap;
-    let response = Request::get(&agent_url(address, "activity"))
-        .header("Cache-Control", "no-cache")
-        .send()
-        .await
-        .map_err(|_| Gap::Disconnected)?;
-    if !response.ok() {
-        return Err(Gap::Disconnected);
-    }
-    response.json().await.map_err(|_| Gap::Invalid)
-}
-
-/// Follow only activity. Subscribe to error events explicitly: EventSource reconnecting
-/// errors must clear detail too, even while the browser intends to reconnect.
-pub async fn watch_activity(
-    address: &portal_types::agents::AgentAddress,
-    mut on_frame: impl FnMut(ActivityView) -> Result<(), crate::activity::Gap>,
-) -> Result<(), crate::activity::Gap> {
-    use crate::activity::Gap;
-    let mut source =
-        EventSource::new(&agent_url(address, "activity/events")).map_err(|_| Gap::Disconnected)?;
-    let activity = source
-        .subscribe("activity")
-        .map_err(|_| Gap::Disconnected)?;
-    let errors = source.subscribe("error").map_err(|_| Gap::Disconnected)?;
-    let mut stream = futures_util::stream::select(
-        activity.map(|item| (false, item)),
-        errors.map(|item| (true, item)),
-    );
-    while let Some((error, item)) = stream.next().await {
-        if error {
-            return Err(Gap::Disconnected);
-        }
-        let (_, message) = item.map_err(|_| Gap::Disconnected)?;
-        let text = message.data().as_string().ok_or(Gap::Invalid)?;
-        if text.len() > 128 * 1024 {
-            return Err(Gap::Invalid);
-        }
-        let view = serde_json::from_str::<ActivityView>(&text).map_err(|_| Gap::Invalid)?;
-        on_frame(view)?;
-    }
-    Err(Gap::Disconnected)
 }
 
 /// Read the terminal of the agent in `pane`.
@@ -364,78 +317,65 @@ pub(crate) fn attachment_url(host: &str, path: &str) -> String {
     host_url(host, &format!("attachments/{}", encode(name)))
 }
 
-pub async fn inbox() -> Result<portal_types::inbox::InboxView, String> {
-    read_json(
-        Request::get(&format!("{BASE}/api/inbox"))
-            .send()
-            .await
-            .map_err(|error| error.to_string())?,
-    )
-    .await
-}
-
-/// Call `on_event` for each change the agent in `pane` pushes, until the stream fails.
-pub async fn watch_agent(
-    address: &portal_types::agents::AgentAddress,
-    mut on_event: impl FnMut(AgentEvent),
-) -> Result<(), String> {
-    let mut source =
-        EventSource::new(&agent_url(address, "events")).map_err(|error| error.to_string())?;
-    let agents = source
-        .subscribe("agent")
-        .map_err(|error| error.to_string())?;
-    let errors = source
-        .subscribe("error")
-        .map_err(|error| error.to_string())?;
-    let mut stream = futures_util::stream::select(
-        agents.map(|item| (false, item)),
-        errors.map(|item| (true, item)),
-    );
-    while let Some((failed, item)) = stream.next().await {
-        if failed {
-            return Err(format!("host {}: agent stream disconnected", address.host));
-        }
-        let (_, message) = item.map_err(|error| error.to_string())?;
-        if let Some(text) = message.data().as_string() {
-            let event = serde_json::from_str::<AgentEvent>(&text)
-                .map_err(|error| format!("the agent stream sent an invalid event: {error}"))?;
-            on_event(event);
-        }
-    }
-    Err("the agent stream ended".to_owned())
-}
-
-/// Deliver snapshots and connection statuses in their original wire order.
+/// Follow the portal and the current selection without reopening the socket on navigation.
 pub async fn watch(
-    mut on_publication: impl FnMut(Result<PortalEvent, String>),
+    changes: &mut (impl futures_util::Stream<Item = ()> + Unpin),
+    mut selection: impl FnMut() -> ClientFrame,
+    mut on_frame: impl FnMut(ServerFrame),
 ) -> Result<(), String> {
-    let mut source =
-        EventSource::new(&format!("{BASE}/api/stream")).map_err(|error| error.to_string())?;
-    let mut stream = source
-        .subscribe("portal")
-        .map_err(|error| error.to_string())?;
-    let mut stamp: Option<(String, u64)> = None;
-    while let Some(item) = stream.next().await {
-        let (_, message) = match item {
-            Ok(item) => item,
-            Err(error) => {
-                on_publication(Err(error.to_string()));
-                continue;
+    let socket = WebSocket::open(&format!("{BASE}/api/live")).map_err(|error| error.to_string())?;
+    use futures_util::future::{Either, select};
+
+    let (mut send, mut receive) = socket.split();
+    let mut stamp = None;
+    // Wait for the server's first publication before sending. A failed upgrade
+    // reaches the stream, not the sink waiting for the socket to open.
+    let mut incoming = Some(
+        receive
+            .next()
+            .await
+            .ok_or("the portal live socket closed")?,
+    );
+    let mut last_sent = None;
+    loop {
+        if let Some(item) = incoming.take() {
+            match item {
+                Ok(Message::Text(text)) => on_frame(decode_live(&text, &mut stamp)?),
+                Ok(Message::Bytes(_)) => return Err("invalid portal live frame".into()),
+                Err(error) => return Err(error.to_string()),
             }
-        };
-        if let Some(text) = message.data().as_string() {
-            let event = decode_portal(&text, &mut stamp)?;
-            on_publication(Ok(event));
+        }
+        let command @ ClientFrame::Open { id, .. } = selection();
+        if last_sent != Some(id) {
+            let text = serde_json::to_string(&command).map_err(|error| error.to_string())?;
+            send.send(Message::Text(text))
+                .await
+                .map_err(|error| error.to_string())?;
+            last_sent = Some(id);
+        }
+        match select(receive.next(), changes.next()).await {
+            Either::Left((Some(item), _)) => incoming = Some(item),
+            Either::Right((Some(()), _)) => {}
+            _ => return Err("the portal live socket closed".into()),
         }
     }
-    Err("the portal stream ended".to_owned())
+}
+
+pub(crate) fn decode_live(
+    text: &str,
+    stamp: &mut Option<(String, u64)>,
+) -> Result<ServerFrame, String> {
+    let frame: ServerFrame = serde_json::from_str(text)
+        .map_err(|error| format!("the portal live socket sent invalid data: {error}"))?;
+    if let ServerFrame::Portal { event } = &frame {
+        validate_portal(event, stamp)?;
+    }
+    Ok(frame)
 }
 
 /// Validate the portal payload independently of the observation IPC version.
-fn decode_portal(text: &str, stamp: &mut Option<(String, u64)>) -> Result<PortalEvent, String> {
-    let event = serde_json::from_str::<PortalEvent>(text)
-        .map_err(|error| format!("the portal stream sent invalid data: {error}"))?;
-    if let PortalEvent::Snapshot(snapshot) = &event {
+fn validate_portal(event: &PortalEvent, stamp: &mut Option<(String, u64)>) -> Result<(), String> {
+    if let PortalEvent::Snapshot(snapshot) = event {
         if snapshot.version != portal_types::PORTAL_VERSION {
             return Err(format!(
                 "unsupported portal snapshot version: {}",
@@ -452,12 +392,22 @@ fn decode_portal(text: &str, stamp: &mut Option<(String, u64)>) -> Result<Portal
         }
         *stamp = Some((snapshot.epoch.clone(), snapshot.revision));
     }
-    Ok(event)
+    Ok(())
 }
 
 #[cfg(test)]
 mod catalogue_tests {
-    use super::{decode_portal, settings_failure};
+    use super::{decode_live, settings_failure};
+
+    fn decode_portal(
+        text: &str,
+        stamp: &mut Option<(String, u64)>,
+    ) -> Result<portal_types::PortalEvent, String> {
+        match decode_live(&format!(r#"{{"type":"portal","event":{text}}}"#), stamp)? {
+            portal_types::live::ServerFrame::Portal { event } => Ok(event),
+            _ => unreachable!("decoded portal frame"),
+        }
+    }
     use serde_json::json;
 
     #[test]

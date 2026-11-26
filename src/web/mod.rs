@@ -7,6 +7,7 @@ pub mod assets;
 pub mod board;
 pub mod guard;
 pub mod inbox;
+mod live;
 mod metrics;
 pub mod oneshot;
 mod peer_stream;
@@ -19,7 +20,6 @@ pub mod store;
 mod test_support;
 pub mod token;
 
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,13 +27,10 @@ use axum::Router;
 use axum::extract::{FromRequest, Request, State};
 use axum::http::header;
 use axum::middleware::Next;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use portal_types::{PortalAvailability, PortalEvent, PortalSnapshot, PortalStatus};
+use portal_types::PortalSnapshot;
 use tokio::sync::watch;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::WatchStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Policy;
@@ -44,7 +41,6 @@ use crate::ledger::Ledger;
 const RETRY: Duration = Duration::from_secs(2);
 /// Bound cancellation checks while waiting for a replacement.
 const TICK: Duration = Duration::from_millis(100);
-const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 /// A failed connection retains its last publication, but never marks it current.
 #[derive(Debug, Clone)]
@@ -87,6 +83,7 @@ pub struct AppState {
     stop: CancellationToken,
     leads: Option<Arc<LeadLaunch>>,
     followers: peer_stream::Followers,
+    inbox_live: inbox::LiveInbox,
 }
 
 impl AppState {
@@ -113,6 +110,7 @@ impl AppState {
             stop: CancellationToken::new(),
             leads: None,
             followers: peer_stream::Followers::default(),
+            inbox_live: inbox::LiveInbox::default(),
         }
     }
 
@@ -129,6 +127,13 @@ impl AppState {
         select: impl FnOnce(&PortalSnapshot) -> Option<T>,
     ) -> Response {
         let current = self.portal.borrow();
+        Self::project(&current, select)
+    }
+
+    fn project<T: serde::Serialize>(
+        current: &PortalState,
+        select: impl FnOnce(&PortalSnapshot) -> Option<T>,
+    ) -> Response {
         if let Some(error) = &current.error {
             return observation_error(error);
         }
@@ -263,7 +268,7 @@ async fn listen(
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/board", get(board))
-        .route("/api/stream", get(stream))
+        .route("/api/live", get(live::upgrade))
         .merge(agents::router())
         .merge(activity::router())
         .merge(settings::router())
@@ -284,43 +289,6 @@ fn router(state: AppState) -> Router {
 
 async fn board(State(state): State<AppState>) -> Response {
     state.projection(|snapshot| snapshot.board.clone())
-}
-
-/// One event carries all portal projections from the same publication.
-async fn stream(
-    State(state): State<AppState>,
-) -> Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>> {
-    let stream = WatchStream::new(state.portal.clone()).map(|current| {
-        let availability = if current.snapshot.is_some() {
-            PortalAvailability::Disconnected
-        } else {
-            PortalAvailability::Unavailable
-        };
-        let frame = match (current.snapshot, current.error) {
-            (_, Some(error)) => PortalEvent::Status(PortalStatus {
-                observation: availability,
-                error,
-            }),
-            (Some(snapshot), None) => PortalEvent::Snapshot(Box::new(snapshot)),
-            (None, None) => PortalEvent::Status(PortalStatus {
-                observation: PortalAvailability::Unavailable,
-                error: "observation unavailable".to_owned(),
-            }),
-        };
-        let event = Event::default()
-            .event("portal")
-            .json_data(frame)
-            .unwrap_or_else(|error| {
-                Event::default().event("portal").data(
-                    serde_json::json!({
-                        "observation": "disconnected", "error": error.to_string(),
-                    })
-                    .to_string(),
-                )
-            });
-        Ok(event)
-    });
-    Sse::new(state.until_shutdown(stream)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
 async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
@@ -729,78 +697,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_stream_is_served_for_the_loopback_host() {
-        let app = router(state(&board_json()));
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/stream")
-                    .header(header::HOST, format!("localhost:{PORT}"))
-                    .body(Body::empty())
-                    .expect("the request"),
-            )
-            .await
-            .expect("the router answers");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/event-stream")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_finishes_with_an_open_board_stream() {
-        use std::io::{Read as _, Write as _};
+    async fn shutdown_finishes_with_an_open_live_socket() {
+        use super::live::tests as live;
+        use portal_types::live::ServerFrame;
 
         let ledger = Ledger::temporary();
         let (_sender, receiver) = watch::channel(board_json());
         let (listener, state) = listen(&ledger, 0, receiver).await.expect("bind the portal");
         let port = state.port;
         let (stop, stopping) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(async move {
-            serve_until(listener, state, async {
-                let _ = stopping.await;
-            })
+        let server = tokio::spawn(serve_until(listener, state, async {
+            let _ = stopping.await;
+        }));
+        let mut socket = live::connect(port, &format!("http://localhost:{port}"))
             .await
-        });
-        let (opened, ready) = tokio::sync::oneshot::channel();
-        let client = tokio::task::spawn_blocking(move || {
-            let mut client =
-                std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the portal");
-            client
-                .set_read_timeout(Some(crate::test_support::WAIT_DEADLINE))
-                .expect("read timeout");
-            write!(
-                client,
-                "GET /api/stream HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-            )
-            .expect("request the stream");
-            let mut bytes = Vec::new();
-            let mut buffer = [0; 4096];
-            loop {
-                let size = client.read(&mut buffer).expect("read the stream");
-                assert!(size > 0, "the stream stays open before shutdown");
-                bytes.extend_from_slice(&buffer[..size]);
-                if String::from_utf8_lossy(&bytes).contains("event: portal") {
-                    break;
-                }
-            }
-            opened.send(()).expect("report the open stream");
-            let mut rest = Vec::new();
-            client.read_to_end(&mut rest)
-        });
-        ready.await.expect("the client opened SSE");
+            .unwrap();
+        live::next(&mut socket, |frame| {
+            matches!(frame, ServerFrame::Portal { .. }).then_some(())
+        })
+        .await;
         stop.send(()).expect("trigger shutdown");
-        let result = tokio::time::timeout(Duration::from_secs(2), server).await;
-        assert!(result.is_ok(), "shutdown must not wait for the SSE client");
-        result
-            .expect("server stopped")
-            .expect("server task")
-            .expect("serve result");
-        client.await.expect("client task").expect("SSE reaches EOF");
+        tokio::time::timeout(crate::test_support::WAIT_DEADLINE, server)
+            .await
+            .expect("shutdown must not wait for the socket")
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(crate::test_support::WAIT_DEADLINE, async {
+            while live::read(&mut socket).await.is_some() {}
+        })
+        .await
+        .expect("socket closes on shutdown");
         std::fs::remove_dir_all(&ledger.dir).expect("remove portal state");
     }
 
@@ -872,12 +798,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_stream_is_refused_for_another_host() {
+    async fn live_is_refused_for_another_host() {
         let app = router(state(&board_json()));
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/stream")
+                    .uri("/api/live")
                     .header(header::HOST, "evil.example")
                     .body(Body::empty())
                     .expect("the request"),
