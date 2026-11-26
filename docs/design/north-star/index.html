@@ -313,6 +313,11 @@
   .pop { position:absolute; right:14px; top:44px; width:330px; background:var(--raised); border:1px solid var(--lightline); border-radius:8px; padding:14px; z-index:2; font-size:13px; }
   .pop h6 { margin-bottom:8px; } .pop .m { display:grid; grid-template-columns:110px 1fr auto; gap:10px; align-items:center; padding:7px 0; border-top:1px solid var(--line); }
   .pop .meter { height:5px; border-radius:3px; background:var(--selected); } .pop .meter i { display:block; height:100%; border-radius:3px; background:var(--green); }
+  .headright { display:flex; align-items:center; gap:14px; }
+  .herdr { font:500 11px/1 "JetBrains Mono",var(--mono); color:var(--quiet); border:1px solid var(--line); border-radius:5px; padding:5px 7px; white-space:nowrap; }
+  .prrow { display:grid; grid-template-columns:auto minmax(0,1fr); column-gap:8px; padding:11px 0; border-bottom:1px solid var(--line); font-size:13.5px; }
+  .prrow code { color:var(--quiet); } .prrow small { grid-column:2; color:var(--quiet); font-size:12px; } .prrow .ok { color:var(--green); }
+  .decided { font:600 11px/1 var(--mono); letter-spacing:.08em; text-transform:uppercase; color:#1f6b45; border:1px solid #1f6b45; border-radius:3px; padding:2px 5px; margin-right:8px; vertical-align:2px; }
   .scrim { position:absolute; inset:0; background:rgb(8 12 22 / 62%); z-index:3; }
   .palette { position:absolute; z-index:4; left:50%; top:110px; width:640px; margin-left:-320px; background:var(--raised); border:1px solid var(--lightline); border-radius:10px; overflow:hidden; }
   .palette .q { padding:15px 16px; font-size:17px; border-bottom:1px solid var(--line); } .palette .q i { display:inline-block; width:1px; height:18px; background:var(--signal); vertical-align:-3px; margin-left:1px; }
@@ -343,10 +348,10 @@
       <g fill="#dec9ff" font-family="monospace" font-size="11" letter-spacing="1"><text x="229" y="375">01 / ASK</text><text x="427" y="209">02 / STEER</text><text x="550" y="44">03 / LANDED</text></g>
     </svg>
     <div class="wrap cover-inner">
-      <p class="overline">Dogsled · Product direction · Proposal</p>
+      <p class="overline">Dogsled · Product direction · Decided 27 November 2026</p>
       <h1>North <em>Star.</em></h1>
       <p class="thesis">As fast as Herdr. You talk to leads. The leads use every machine as one.</p>
-      <span class="folio">Design book / revision 2</span>
+      <span class="folio">Design book / revision 3</span>
     </div>
   </div>
   <nav class="index" aria-label="Reading order"><div class="wrap">
@@ -378,9 +383,9 @@
           <div class="principle"><span class="overline">P1</span><h3>The click is the result.</h3><p>The app answers from what it already holds. The network confirms later.</p><p class="forces">Rule: every navigation paints its full result in the same frame. No request sits between a click and its content.</p></div>
           <div class="principle"><span class="overline">P2</span><h3>It arrives before you ask.</h3><p>An unread thread already has its unread text when you open it.</p><p class="forces">Rule: the app receives the newest part of every thread as it is written, not only of the open one.</p></div>
           <div class="principle"><span class="overline">P3</span><h3>Nothing you saw is taken away.</h3><p>Content never gives way to a spinner, a banner or an error.</p><p class="forces">Rule: a lost connection is a small mark after 2 s. The last content stays and stays readable.</p></div>
-          <div class="principle"><span class="overline">P4</span><h3>A lead is the only address.</h3><p>The list holds leads. Workers, jobs, branches and files live inside their lead.</p><p class="forces">Rule: no row without a lead. A record with no lead is removed by the service or becomes one decision.</p></div>
-          <div class="principle"><span class="overline">P5</span><h3>One machine.</h3><p>Capacity is one figure: is there room for more work?</p><p class="forces">Rule: no machine name, pane id or machine chip in any primary view. Names appear in one capacity panel only.</p></div>
-          <div class="principle"><span class="overline">P6</span><h3>Leads finish their own work.</h3><p>Landing, review and cleanup belong to agents.</p><p class="forces">Rule: the owner sees a receipt (“Landed in main”), or one decision when work is stuck. Never a to-do list of branches.</p></div>
+          <div class="principle"><span class="overline">P4</span><h3>A lead is the only address.</h3><p>The list holds leads. Workers, jobs, pull requests and files live inside their lead.</p><p class="forces">Rule: no row without a lead. A record with no lead is removed by the service or becomes one decision.</p></div>
+          <div class="principle"><span class="overline">P5</span><h3>One machine.</h3><p>Capacity is one figure: is there room for more work?</p><p class="forces">Rule: no machine name on a row, a card or a message, and no pane id anywhere. A machine is named in two places: the capacity panel, and the Herdr control of a thread’s header, which opens the raw session.</p></div>
+          <div class="principle"><span class="overline">P6</span><h3>Leads finish their own work.</h3><p>Landing, review and cleanup belong to agents.</p><p class="forces">Rule: the owner sees a receipt (“Landed in main”), the pull requests of a lead in its PRs tab, or one decision when work is stuck. Never a to-do list of branches.</p></div>
           <div class="principle"><span class="overline">P7</span><h3>Hands stay on the keys.</h3><p>Rows keep their place, so the hand learns them.</p><p class="forces">Rule: every lead and action is in <code>⌘K</code>. Threads switch with keys. Rows never reorder by state.</p></div>
         </div>
       </div>
@@ -390,7 +395,7 @@
       <div class="chapter-num">02 / Speed</div>
       <div>
         <h2>As fast as Herdr.</h2>
-        <p class="lede">A budget is what the owner sees at each moment after an input. Every budget is proposed. “Today” was measured on the live portal, version 0.43.2, on 26 November 2026.</p>
+        <p class="lede">A budget is what the owner sees at each moment after an input. The owner accepted these budgets on 27 November 2026 as the acceptance test of the speed work. “Today” was measured on the live portal, version 0.43.2, on 26 November 2026.</p>
         <div class="table-wrap" tabindex="0" role="region" aria-label="Speed budget table">
           <table class="budget"><thead><tr><th scope="col">Interaction</th><th scope="col">Same frame (0 ms)</th><th scope="col">By 100 ms</th><th scope="col">By 1 s</th><th scope="col">Budget</th><th scope="col">Today</th></tr></thead><tbody>
             <tr><td>Open a thread</td><td>The whole known thread, with the unread part under a “New” line</td><td>Unread mark clears</td><td>No change to what you read</td><td class="num">0 requests<br>1 frame</td><td class="num today">830 ms<small>1.1–1.8 s when the lead is on another machine. Old text first.</small></td></tr>
@@ -472,7 +477,7 @@
         <div class="plate-head"><span class="plate-num">B</span><h3>Lead at work</h3><button class="zoom" type="button" aria-label="Full size: Lead at work">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="thread" data-current="tactic">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="status good"><i class="dot"></i>Working · 4m 12s</span></div><p class="quiet">Opus · high effort</p></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="headright"><span class="herdr">Herdr · this Mac ↗</span><span class="status good"><i class="dot"></i>Working · 4m 12s</span></span></div><p class="quiet">Opus · high effort</p></header>
             <div class="lead-grid">
               <div class="conversation">
                 <div class="thread"><div class="measure">
@@ -485,14 +490,14 @@
               </div>
               <aside class="inspector" aria-label="Lead progress">
                 <div class="box"><h5>Now</h5><p class="status good"><i class="dot"></i>Running the core tests</p><p class="meta quiet">Turn started 10:22</p></div>
-                <div class="tabs"><span class="on">Todos 3/5</span><span>Team 3</span><span>Files 6</span></div>
+                <div class="tabs"><span class="on">Todos 3/5</span><span>Team 3</span><span>PRs 1</span><span>Files 6</span></div>
                 <div class="progress" aria-label="60 percent complete"><span></span></div>
                 <ul class="step-list"><li><span class="check">✓</span>Outline lists the moments</li><li><span class="check">✓</span>Reorder by drag</li><li><span class="check">✓</span>Core owns the order</li><li><span class="good">●</span> New tactic opens on its first moment</li><li><span class="quiet">○</span> Land</li></ul>
               </aside>
             </div>
           </section>
         </div></div>
-        <figcaption><p>The thread says what the lead did, in sentences. Live work is one block that names the current step. Tool calls fold into a line. No machine, no pane id, no “lead on local”.</p><span class="spec">1440 × 900</span></figcaption>
+        <figcaption><p>The thread says what the lead did, in sentences. Live work is one block that names the current step. Tool calls fold into a line. No pane id. The machine shows once, on the Herdr control that opens the raw session in the terminal.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
       <figure class="plate" id="sent">
@@ -519,7 +524,7 @@
         <div class="plate-head"><span class="plate-num">D</span><h3>Question</h3><button class="zoom" type="button" aria-label="Full size: Question">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="question" data-current="story" data-request="question">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Storyboard</h4><span class="status need"><i class="dot"></i>Needs your answer</span></div><div class="tabs"><span>Conversation</span><span class="on">Question</span></div></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Storyboard</h4><span class="headright"><span class="herdr">Herdr · netcup ↗</span><span class="status need"><i class="dot"></i>Needs your answer</span></span></div><div class="tabs"><span>Conversation</span><span class="on">Question</span></div></header>
             <div class="lead-grid">
               <div class="conversation">
                 <div class="prompt"><div class="measure">
@@ -531,7 +536,7 @@
                 <div class="actionbar"><span class="quiet"><span class="kbd">1</span> <span class="kbd">2</span> choose · <span class="kbd">⌘↵</span> send</span><span class="control">Decline</span><span class="control primary">Send answer</span></div>
               </div>
               <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status need"><i class="dot"></i>Waiting for this answer</p><p class="quiet">One worker continues on work that does not depend on it.</p></div>
-                <div class="tabs"><span class="on">Todos 2/4</span><span>Team 1</span><span>Files 3</span></div></aside>
+                <div class="tabs"><span class="on">Todos 2/4</span><span>Team 1</span><span>PRs 1</span><span>Files 3</span></div></aside>
             </div>
           </section>
         </div></div>
@@ -561,7 +566,7 @@
         <div class="plate-head"><span class="plate-num">F</span><h3>A lead’s team</h3><button class="zoom" type="button" aria-label="Full size: A lead’s team">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="team" data-current="tactic">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="status good"><i class="dot"></i>Working · 4m 12s</span></div><div class="tabs"><span>Conversation</span><span class="on">Team 5</span><span>Files 6</span></div></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="headright"><span class="herdr">Herdr · this Mac ↗</span><span class="status good"><i class="dot"></i>Working · 4m 12s</span></span></div><div class="tabs"><span>Conversation</span><span class="on">Team 5</span><span>PRs 1</span><span>Files 6</span></div></header>
             <div class="pagebody twocol equal">
               <section class="box"><h5>Workers</h5>
                 <div class="teamrow"><i class="st work"></i><div>Outline in the core<small>Writing the reorder test</small></div><span class="quiet">2m 10s</span><span class="control compact">Open</span></div>
@@ -583,7 +588,7 @@
         <div class="plate-head"><span class="plate-num">G</span><h3>Finished work</h3><button class="zoom" type="button" aria-label="Full size: Finished work">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="leftovers" data-current="squad">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Squad sections</h4><span class="status"><i class="dot"></i>Finished</span></div><p class="quiet">Opus · 36 commits · 2h 14m</p></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Squad sections</h4><span class="headright"><span class="herdr">Herdr · momokaya-2 ↗</span><span class="status"><i class="dot"></i>Finished</span></span></div><p class="quiet">Opus · 36 commits · 2h 14m</p></header>
             <div class="lead-grid">
               <div class="conversation">
                 <div class="thread"><div class="measure">
@@ -595,18 +600,21 @@
                 <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Squad sections…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
               </div>
               <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Finished</p><p class="quiet">Nothing is left open. This thread leaves the list when you close it.</p></div>
-                <div class="tabs"><span class="on">Todos 6/6</span><span>Team 0</span><span>Files 0</span></div></aside>
+                <div class="tabs"><span>Todos 6/6</span><span>Team 0</span><span class="on">PRs 3</span><span>Files 0</span></div>
+                <div class="prrow"><code>2368</code><span>Group the squad by section</span><small><span class="ok">Merged</span> 12:01 · the lead</small></div>
+                <div class="prrow"><code>2364</code><span>iOS: section headers in the squad</span><small><span class="ok">Merged</span> 11:52 · worker “iOS squad”</small></div>
+                <div class="prrow"><code>2361</code><span>Core: sections in the squad model</span><small><span class="ok">Merged</span> 11:40 · worker “Core sections”</small></div></aside>
             </div>
           </section>
         </div></div>
-        <figcaption><p>This replaces “Branches to review”. A lead ends with a receipt. Records of branches that no longer exist are removed by the service and never shown. A branch that has commits and no lead is one decision with two actions.</p><span class="spec">1440 × 900</span></figcaption>
+        <figcaption><p>This replaces “Branches to review”. A lead ends with a receipt. Records of branches that no longer exist are removed by the service and never shown. A branch that has commits and no lead is one decision with two actions. The PRs tab lists every pull request of the lead and its workers.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
       <figure class="plate" id="capacity">
         <div class="plate-head"><span class="plate-num">H</span><h3>Less room</h3><button class="zoom" type="button" aria-label="Full size: Less room">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="capacity" data-current="audit" data-cap="low">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Onboarding audit</h4></div><p class="quiet">Out of reach since 10:42. Its work is kept. It returns when its machine answers.</p></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Onboarding audit</h4><span class="headright"><span class="herdr">Herdr · netcup ↗</span></span></div><p class="quiet">Out of reach since 10:42. Its work is kept. It returns when its machine answers.</p></header>
             <div class="lead-grid">
               <div class="conversation">
                 <div class="thread"><div class="measure">
@@ -617,7 +625,7 @@
                 <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Onboarding audit…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
               </div>
               <aside class="inspector" aria-label="Lead progress" style="padding-top:128px">
-                <div class="tabs"><span class="on">Todos 2/7</span><span>Team 2</span><span>Files 3</span></div></aside>
+                <div class="tabs"><span class="on">Todos 2/7</span><span>Team 2</span><span>PRs 1</span><span>Files 3</span></div></aside>
             </div>
           </section>
           <div class="pop"><h6>Room for 2 more leads</h6><p class="quiet">One of three machines does not answer. New work uses the others.</p>
@@ -625,14 +633,14 @@
             <div class="m"><span>netcup</span><div class="meter"></div><span class="need">no answer</span></div>
             <div class="m"><span>momokaya-2</span><div class="meter"><i style="width:38%"></i></div><span class="quiet">38%</span></div></div>
         </div></div>
-        <figcaption><p>A machine that does not answer shows as less room, and as “out of reach” on the leads it holds. Their threads stay readable and messages wait. The capacity panel is the one place that names a machine.</p><span class="spec">1440 × 900</span></figcaption>
+        <figcaption><p>A machine that does not answer shows as less room, and as “out of reach” on the leads it holds. Their threads stay readable and messages wait. Machines are named here, in the capacity panel, and on the Herdr control of a thread.</p><span class="spec">1440 × 900</span></figcaption>
       </figure>
 
       <figure class="plate" id="keys">
         <div class="plate-head"><span class="plate-num">I</span><h3>Keyboard</h3><button class="zoom" type="button" aria-label="Full size: Keyboard">Full size ↗</button></div>
         <div class="stage"><div class="screen" data-view="keys" data-current="tactic">
           <section class="surface">
-            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="status good"><i class="dot"></i>Working · 4m 12s</span></div><p class="quiet">Opus · high effort</p></header>
+            <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Tactic editor</h4><span class="headright"><span class="herdr">Herdr · this Mac ↗</span><span class="status good"><i class="dot"></i>Working · 4m 12s</span></span></div><p class="quiet">Opus · high effort</p></header>
             <div class="thread"><div class="measure"><div class="msg"><time>10:21</time><div><h6>Tactic editor</h6><p>The outline now lists every moment of a tactic and reorders them by drag.</p></div></div></div></div>
           </section>
           <div class="scrim"></div>
@@ -667,9 +675,9 @@
       <div>
         <h2>Removed, with the reason.</h2>
         <div class="table-wrap"><table class="away"><thead><tr><th>Today</th><th>End state</th><th>Principle</th></tr></thead><tbody>
-          <tr><td>“lead on local · pi”, machine chips on rows, three machine meters in the top bar</td><td>One capacity figure. Machine names only in its panel.</td><td>P5</td></tr>
+          <tr><td>“lead on local · pi”, machine chips on rows, three machine meters in the top bar</td><td>One capacity figure. A machine name only in its panel and on the Herdr control of a thread.</td><td>P5</td></tr>
           <tr><td>“Repository unknown” group</td><td>No such group. A record with no lead and no checkout is removed by the service.</td><td>P4</td></tr>
-          <tr><td>“Branches to review”, 13 rows</td><td>A “Landed” receipt in the lead’s thread, or one decision for branches with no lead.</td><td>P6</td></tr>
+          <tr><td>“Branches to review”, 13 rows</td><td>A “Landed” receipt in the lead’s thread, a PRs tab for the lead and its workers, and one decision for branches with no lead.</td><td>P6</td></tr>
           <tr><td>Jobs as rows; “Job · owner unavailable”</td><td>Jobs in the Team tab of the lead that started them.</td><td>P4</td></tr>
           <tr><td>A pane id (<code>w1D1:p1</code>) as a title; “Loading…”</td><td>The first words of the owner’s message, then the name.</td><td>P1</td></tr>
           <tr><td>“This agent is no longer available” while a new lead starts</td><td>The thread with the message and the three start steps.</td><td>P1</td></tr>
@@ -695,19 +703,21 @@
     <section class="chapter" id="decisions">
       <div class="chapter-num">06 / Decisions</div>
       <div>
-        <h2>Five decisions for the owner.</h2>
+        <h2>Five decisions, made.</h2>
+        <p class="lede">The owner decided these on 27 November 2026. Two came with a change, which the screens above now show.</p>
         <ol class="decisions">
-          <li><h3>Home is the composer.</h3><p><span class="rec">Recommended: yes.</span> The other choice is an overview table of leads. It repeats the list.</p></li>
-          <li><h3>A row shows the lead’s name and its last words.</h3><p><span class="rec">Recommended: yes.</span> Todo counts, model and effort move into the thread. The other choice keeps them on the row.</p></li>
-          <li><h3>“Branches to review” becomes a receipt or one decision.</h3><p><span class="rec">Recommended: yes.</span> It needs the service to remove records of branches that no longer exist.</p></li>
-          <li><h3>Machine names appear only in the capacity panel.</h3><p><span class="rec">Recommended: yes.</span> The stricter choice shows no machine name anywhere and gives up the panel in screen H.</p></li>
-          <li><h3>The speed budgets in chapter 02.</h3><p><span class="rec">Recommended: accept them as the acceptance test of the speed work.</span> Each unit of <code>plans/portal-snappy.md</code> ends with the measurement of its row.</p></li>
+          <li><h3>Home is the composer.</h3><p><span class="decided">Decided</span>Yes: the composer, Needs you, and what leads said since the last visit.</p></li>
+          <li><h3>A row shows the lead’s name and its last words.</h3><p><span class="decided">Decided</span>Yes. Todo counts, model and effort move into the thread.</p></li>
+          <li><h3>“Branches to review” becomes a receipt or one decision.</h3><p><span class="decided">Decided</span>Yes, with a change: the right panel gets a PRs tab that lists every pull request of the lead and its workers (screen G).</p></li>
+          <li><h3>Machine names appear only in the capacity panel.</h3><p><span class="decided">Decided</span>Yes, with a change: each thread header also names its machine, on the control that opens the raw session in Herdr (screens B, D, F, G, H).</p></li>
+          <li><h3>The speed budgets in chapter 02.</h3><p><span class="decided">Decided</span>Yes. Each unit of <code>plans/portal-snappy.md</code> ends with the measurement of its row.</p></li>
         </ol>
+        <p class="method"><strong>Still open.</strong> The speed plan has its own decisions, which the owner reviews with that plan: the transport (one socket for each window), and what happens to jobs and records that have no lead.</p>
       </div>
     </section>
   </div>
 </main>
-<footer class="colophon"><div class="wrap"><p><strong>Dogsled / North Star</strong><br>Design proposal, revision 2. No runtime changes.</p><p>Companions: <code>plans/north-star.md</code> and <code>plans/portal-snappy.md</code></p></div></footer>
+<footer class="colophon"><div class="wrap"><p><strong>Dogsled / North Star</strong><br>Revision 3. Direction decided by the owner on 27 November 2026. No runtime changes.</p><p>Companions: <code>plans/north-star.md</code> and <code>plans/portal-snappy.md</code></p></div></footer>
 
 <template id="console-chrome">
   <header class="appbar">
@@ -736,7 +746,7 @@
 <template id="film-source">
   <div class="screen" data-view="unread" data-current="squad">
     <section class="surface">
-      <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Squad sections</h4><span class="status"><i class="dot"></i>Finished</span></div><p class="quiet">Opus · 36 commits · 2h 14m</p></header>
+      <header class="pagehead"><p class="product-tag">rondo</p><div class="head-line"><h4>Squad sections</h4><span class="headright"><span class="herdr">Herdr · momokaya-2 ↗</span><span class="status"><i class="dot"></i>Finished</span></span></div><p class="quiet">Opus · 36 commits · 2h 14m</p></header>
       <div class="lead-grid">
         <div class="conversation">
           <div class="thread"><div class="measure">
@@ -748,7 +758,7 @@
           </div></div>
           <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text quiet">Message Squad sections…</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control primary compact">↑</span></div></div></div></div>
         </div>
-        <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Finished</p><p class="quiet">Nothing is left open.</p></div><div class="tabs"><span class="on">Todos 6/6</span><span>Team 0</span><span>Files 0</span></div></aside>
+        <aside class="inspector" aria-label="Lead progress"><div class="box"><h5>Now</h5><p class="status"><i class="dot"></i>Finished</p><p class="quiet">Nothing is left open.</p></div><div class="tabs"><span class="on">Todos 6/6</span><span>Team 0</span><span>PRs 3</span><span>Files 0</span></div></aside>
       </div>
     </section>
   </div>

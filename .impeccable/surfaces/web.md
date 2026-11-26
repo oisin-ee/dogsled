@@ -25,6 +25,7 @@ Mode: Operate. Surface: the `dogsled web` main screen from 800px wide (designed 
 - Branches to land are not inbox items; agents land them (owner, 2026-11-02). The agents list shows a muted per-repository count.
 - Smaller screens use tabs (owner, 2026-11-02). The sidebar, with its Needs you section, never folds.
 - Quiet console (owner, 2026-11-20, supersedes the colours, fonts and right column below): the owner chose variant B2 from `.impeccable/mocks/refresh-b/`. The live Now panel goes at the top of the right column, not above the composer. The right column keeps its Todos, Workers and Files tabs under Now. Only data that the portal has is shown; activity sparklines, CI stages, slots and the base commit wait for data.
+- North star (owner, 2026-11-27, supersedes the items above where they differ): the direction is `docs/design/north-star/index.html`. Home is the composer with Needs you and what leads said since the last visit. A list row shows a lead's short name and its last words. "Branches to review" becomes a "Landed" receipt in the lead's thread, a PRs tab for the lead and its workers, and one decision per repository for branches with no lead. A machine name appears only in the capacity panel and on the Herdr control of a thread header. The speed budgets of the book's chapter 02 are the acceptance test of `plans/portal-snappy.md`. No layout is built from this before Squig wireframes and a layout plan exist.
 
 ## Direction contract
 
