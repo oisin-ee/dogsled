@@ -1,7 +1,8 @@
 # Autonomous toggle and decision log
 
-Status: plan for review. Production work has not started.
+Status: approved on 2026-11-27 (portal review `a5974878`, revision 1, no notes). Implementation is in progress.
 The owner answered the product questions on 2026-11-27. Their answers are in "Owner decisions".
+Revision 2 records what the code settled after approval: see "Settled after approval". No owner decision changed.
 
 ## Outcome
 
@@ -103,16 +104,17 @@ Each host's `state.db` owns the switches and the decisions of its own agents. Sc
 
 - `autonomy_fleet`: at most one row. It exists while this host holds the fleet switch on.
 - `autonomy_agents`: one row per switched-on agent, keyed by pane and harness session, as todo snapshots are.
-- `autonomy_decisions`: one row per decision, with the fields above. Each host keeps its newest 500 and drops older rows.
+- `autonomy_decisions`: one row per decision, with the fields above. Each host keeps its newest 200 and drops older rows.
 - `web_questions.state` gains `released`.
 
 A new module `src/autonomy.rs` owns reads, writes, and the rule in "Which agents are autonomous".
 
 ### Publication
 
-`autonomy` and `decisions` become host-owned domains, exported to peers beside `host`, `headroom`, `todos`, and `branches` (`peers::exportable`).
-The projection (`src/observation/project.rs`) resolves each local pane to `none`, `fleet`, `agent`, or `owner`.
-It reads the local tables, the peers' `autonomy` domains, and the owner pane and owner host of each local launch.
+Each host adds a versioned `autonomy` extension to its `host` domain, as `owned_work` does (`src/observation/owned_work.rs:130`).
+The extension holds the fleet switch, the switched-on panes whose session is still live, and the host's decisions.
+The projection (`src/observation/project.rs`) resolves each pane to `none`, `fleet`, `agent`, or `owner`.
+It reads the local tables, the peers' extensions, and the ownership evidence that hosts already exchange (`owned_work::Execution`).
 The fleet switch is stored on the host whose portal took the click. Every host treats it as on when any host publishes it on.
 Switching it off clears it on each host that publishes it on.
 
@@ -140,7 +142,11 @@ The word "decision" already names a review's approval there. New code and routes
 
 ### Portal API and wire types
 
-- `portal-types`: `AgentView.autonomous` (the resolved cause), the fleet switch state, and a `DecisionView` list in the snapshot.
+- `portal-types/src/autonomy.rs` holds the types. The snapshot gains `autonomy` (the fleet switch and the hosts without support).
+  `AgentView` gains `autonomous` (the resolved cause) and `decisions` (a count and the newest time).
+- `GET /api/agents/{host}/{pane}/decisions` returns a `DecisionList`: the agent's own decisions and those of the agents it owns.
+  The portal server answers from its own publication. It starts no SSH command and no stream.
+  The portal reads the list again when the agent's `decisions` mark changes.
 - `POST /api/autonomy/fleet` and `POST /api/agents/{host}/{pane}/autonomy`, each with `{ "on": bool }`, behind the Origin guard.
 - A remote agent's switch goes through a new `PeerOperation`, as model settings do (`src/web/settings.rs`).
 - An older peer answers "unknown variant". The portal reports "host X: autonomous unsupported", as it does for files.
@@ -174,16 +180,18 @@ At 400px the row fits, and the "N working" text beside the tabs still fits.
 | Who enforces the rule | The host's service refuses or releases the request | A prompt rule alone: an agent that asks anyway would still block. |
 | How a worker learns its lead's state | Each host resolves it from published domains | Push at switch time and at spawn: two more paths that can miss a worker. |
 | Where the fleet switch lives | One host stores it; every host reads it | Write to every host: a partial write leaves hosts that disagree. |
-| How the portal reads decisions | In the publication, as todos are | One request per worker and host for each page. |
+| How the portal reads decisions | Hosts exchange them; the browser reads one lead's list on demand | In every snapshot frame: each frame would carry every decision of the fleet. One request per worker host: an SSH command for each read. |
 | Where a decision is attributed | Owner pane and host stored with the decision | Resolve from the board: a closed worker's row leaves the board. |
 
 ## Units
 
-Unit 1 fixes the interface. Units 2 and 3 can then run at the same time, because they own different files.
+Unit 1 fixes the interface. Units 2 and 4 can then run at the same time, because they own different files.
+Unit 2 of the reviewed plan is now units 2 and 3, so that each fits one session. Unit 3 needs unit 2 merged.
 
-1. **Wire types.** `portal-types`: the autonomy and decision types, with round-trip tests. Owner: lead.
-2. **Service and tools.** `src/` and `pi/`: store and schema 9, `src/autonomy.rs`, publication and peer export, the enforcement points, `decide` and `decisions`, the portal routes, the Pi `interview` result, command docs. Owner: writer.
-3. **Portal.** `web/` and `DESIGN.md`: Switch, the two switches, the `Auto` badge, the Decisions tab and panel, the event card, the 400px column, the full-width thread. Owner: writer.
+1. **Wire types.** `portal-types`: the autonomy and decision types, with tests. Owner: lead.
+2. **State.** `src/`: store and schema 9, `src/autonomy.rs`, the `host` extension and projection, the switch and decisions routes, the prompt context block, `decide` and `decisions`, command docs. Owner: writer.
+3. **Enforcement.** `src/` and `pi/`: refused and released questions, approved plans with their decision, the Pi `interview` result, the switch-change messages. Owner: writer.
+4. **Portal.** `web/` and `DESIGN.md`: Switch, the two switches, the `Auto` badge, the Decisions tab and panel, the event card, the 400px column, the full-width thread. Owner: writer.
 
 ## Checks
 
@@ -215,8 +223,16 @@ Read in `origin/main` at `78346fd`:
 - The right column holds Todos, Workers, and Files (`web/src/agent_view.rs:1169`). The top bar holds New and Metrics (`web/src/app.rs:663`).
 - The official catalogue has `switch` ([DioxusLabs/components](https://github.com/DioxusLabs/components/tree/main/preview/src/components)).
 
-Not yet verified. Unit 2 starts with these:
+## Settled after approval
 
-- How the projection reads a peer's exported domain, and whether a stale peer keeps its last domains across a service restart.
-- Whether every local launch record of a live worker has `owner_host`. Records from before that field have none.
-- How the portal snapshot versions an added optional field.
+Read in `origin/main` at `0951ae6`:
+
+- A new exported domain would break older hosts. `Export::validate` rejects an export whose `local` holds a domain it does not know (`src/observation/peers.rs:192`).
+  So the data travels inside the `host` domain, in a versioned extension that older hosts ignore, as `owned_work` does.
+- A host keeps a peer's last usable evidence while the peer is stale (`Ownership::replace`, `src/observation/peers.rs:446`). The copy is in memory.
+  After a service restart, the host has none until the peer answers. This is the limit that "Limits of the first iteration" already names.
+- A launch from before `owner_host` has no resolvable owner (`owned_work::agent_executions` skips it). Such a worker follows only the fleet switch and its own state.
+- The snapshot type refuses unknown fields, and the browser bundle ships inside the same binary (`src/web/assets.rs`).
+  The new fields are optional and absent when empty, as `dogsled` is. `PORTAL_VERSION` stays 2.
+- The owner approved a portal speed plan on the same day (`plans/portal-snappy.md`). It removes polls, extra streams, and SSH reads.
+  This feature adds none of them: switches and decisions arrive in the existing publication and one on-demand read.
