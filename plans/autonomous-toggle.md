@@ -238,3 +238,16 @@ Read in `origin/main` at `0951ae6`:
   The new fields are optional and absent when empty, as `dogsled` is. `PORTAL_VERSION` stays 2.
 - The owner approved a portal speed plan on the same day (`plans/portal-snappy.md`). It removes polls, extra streams, and SSH reads.
   This feature adds none of them: switches and decisions arrive in the existing publication and one on-demand read.
+
+Settled in review of the units (merged in #451, #452, and #454):
+
+- Only a host that publishes the extension enforces autonomy. A pane on an older host gets no cause, whatever the switches say.
+  The portal names those hosts beside the fleet switch. A switch request for a pane there answers "host X: autonomous unsupported".
+- When a host does not answer, the Decisions tab shows the decisions that the other hosts returned, with a notice that names the host.
+  The wireframe's "Unavailable" state applies only when no decision could be read.
+- A `plan` decision opens its approved plan in a new browser tab, in a read-only view of the stored review.
+- The host meters in the top bar scroll inside the bar at any width where they do not fit. The rule applied only below 1150px before.
+- A store write already wakes the service (`src/store.rs`), so the switch routes send no wake of their own.
+- The writer profile cannot run a build. The lead builds the portal bundle in each service worktree before the writer runs `cargo test`.
+- A binary from these branches must not open a live `state.db`: it upgrades the file to schema 9, and a 0.43.3 service then refuses it.
+  Every review run used a temporary state directory.

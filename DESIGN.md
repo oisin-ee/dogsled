@@ -242,6 +242,7 @@ The console uses the official Dioxus components for every control and changes th
 
 ### Autonomous switch
 The official Switch shows the current setting. Fleet mode locks the lead switch on. A worker switch is read-only.
+Beside the fleet switch, a yellow note names each host whose release ignores the switches ("not on momokaya-2").
 
 ### Chips
 - **Count badge:** an 18px pill (12px/600). Yellow fill with dark text when something waits.
