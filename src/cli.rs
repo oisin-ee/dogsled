@@ -337,6 +337,30 @@ pub enum Command {
     Blocked {
         reason: String,
     },
+    /// Record a decision you made without your owner.
+    Decide {
+        /// A one-line title.
+        #[arg(long)]
+        title: String,
+        /// What you chose.
+        #[arg(long)]
+        decision: String,
+        /// The reason and the facts you used.
+        #[arg(long)]
+        why: String,
+        /// The open question you settled.
+        #[arg(long)]
+        question: Option<String>,
+        /// The options you did not choose.
+        #[arg(long)]
+        alternatives: Option<String>,
+    },
+    /// List the decisions recorded on this host, newest first.
+    Decisions {
+        /// Show only decisions from this pane.
+        #[arg(long)]
+        pane: Option<String>,
+    },
     /// Show a child's or job's newest output and its captured final reply.
     Read {
         /// A child's name or pane, a job id, or any agent's name or pane.
