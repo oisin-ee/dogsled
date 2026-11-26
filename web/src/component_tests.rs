@@ -1634,6 +1634,92 @@ fn composer_has_only_accessible_icon_actions_and_an_unprompted_field() {
     assert!(text.trim().is_empty(), "unexpected composer text: {text}");
 }
 
+// Native VirtualDom tests supply Dioxus input data without constructing a JS DragEvent.
+struct TextDrag;
+
+impl dioxus::html::InteractionLocation for TextDrag {
+    fn client_coordinates(&self) -> dioxus::html::geometry::ClientPoint {
+        Default::default()
+    }
+    fn screen_coordinates(&self) -> dioxus::html::geometry::ScreenPoint {
+        Default::default()
+    }
+    fn page_coordinates(&self) -> dioxus::html::geometry::PagePoint {
+        Default::default()
+    }
+}
+
+impl dioxus::html::InteractionElementOffset for TextDrag {
+    fn element_coordinates(&self) -> dioxus::html::geometry::ElementPoint {
+        Default::default()
+    }
+}
+
+impl dioxus::html::ModifiersInteraction for TextDrag {
+    fn modifiers(&self) -> Modifiers {
+        Modifiers::empty()
+    }
+}
+
+impl dioxus::html::PointerInteraction for TextDrag {
+    fn trigger_button(&self) -> Option<dioxus::html::input_data::MouseButton> {
+        None
+    }
+    fn held_buttons(&self) -> dioxus::html::input_data::MouseButtonSet {
+        Default::default()
+    }
+}
+
+impl dioxus::html::HasMouseData for TextDrag {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl dioxus::html::HasDragData for TextDrag {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl dioxus::html::HasFileData for TextDrag {
+    fn files(&self) -> Vec<dioxus::html::FileData> {
+        vec![]
+    }
+}
+
+impl dioxus::html::HasDataTransferData for TextDrag {
+    fn data_transfer(&self) -> dioxus::html::DataTransfer {
+        unreachable!("native fixture supplies no browser transfer")
+    }
+}
+
+#[test]
+fn composer_drop_preserves_native_text_drop() {
+    let dom = VirtualDom::prebuilt(composer_root);
+    let scope = catalogue_scopes(&dom)
+        .into_iter()
+        .find_map(|(name, scope)| name.contains("::Composer:").then_some(scope))
+        .expect("composer scope");
+    let drop = dom
+        .get_scope(scope)
+        .unwrap()
+        .root_node()
+        .dynamic_attrs
+        .iter()
+        .flatten()
+        .find_map(|attribute| match &attribute.value {
+            dioxus::core::AttributeValue::Listener(listener) if attribute.name == "ondrop" => {
+                Some(listener.clone())
+            }
+            _ => None,
+        })
+        .expect("composer drop listener");
+    let event = catalogue_event(|| dioxus::html::DragData::new(TextDrag));
+    dom.in_runtime(|| drop.call(event.clone()));
+    assert!(event.default_action_enabled());
+}
+
 #[test]
 fn attached_composer_shows_preview_removal_and_disabled_controls() {
     let html = dioxus_ssr::render(&VirtualDom::prebuilt(attached_composer_root));

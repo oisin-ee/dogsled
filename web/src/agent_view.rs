@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use dioxus::html::geometry::PixelsVector2D;
+use dioxus::html::{FileData, HasFileData, geometry::PixelsVector2D};
 use dioxus::prelude::*;
 use dioxus::web::WebEventExt;
 use dioxus_icons::lucide::{ArrowUp, ExternalLink, Paperclip, Square, X};
@@ -2090,6 +2090,37 @@ pub(crate) fn message_with_images(text: &str, images: &[String]) -> String {
     )
 }
 
+/// The browser files carried by a file input or drop.
+pub(crate) fn attachment_files(files: Vec<FileData>) -> Vec<web_sys::File> {
+    files
+        .iter()
+        .filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned())
+        .collect()
+}
+
+pub(crate) fn pasted_files(event: &ClipboardEvent) -> Vec<web_sys::File> {
+    let list = event
+        .data()
+        .try_as_web_event()
+        .and_then(|event| event.dyn_into::<web_sys::ClipboardEvent>().ok())
+        .and_then(|event| event.clipboard_data())
+        .and_then(|data| data.files());
+    list.map_or_else(Vec::new, |list| {
+        (0..list.length())
+            .filter_map(|index| list.item(index))
+            .collect()
+    })
+}
+
+fn file_drag(event: &DragEvent) -> Option<web_sys::DataTransfer> {
+    // The file list is protected until drop; only the types are visible during dragover.
+    event
+        .data()
+        .try_as_web_event()
+        .and_then(|event| event.data_transfer())
+        .filter(|data| data.types().includes(&"Files".into(), 0))
+}
+
 #[component]
 pub(crate) fn Composer(
     draft: Signal<String>,
@@ -2114,6 +2145,8 @@ pub(crate) fn Composer(
     let mut round = use_signal(|| 0_u32);
     // The history entry the composer shows, until the owner edits it.
     let mut recalled = use_signal(|| None::<usize>);
+    let mut file_over = use_signal(|| false);
+    let accepts_files = !disabled && !busy && !uploading();
     use_drop(move || uploading.set(false));
     let upload = use_callback(move |files: Vec<web_sys::File>| {
         if disabled || busy || uploading() || files.is_empty() {
@@ -2136,6 +2169,31 @@ pub(crate) fn Composer(
     });
     rsx! {
         form { class: "console-composer message-composer", aria_label: "Message composer", aria_busy: uploading() || busy,
+            "data-drop-target": accepts_files && file_over(),
+            ondragover: move |event: DragEvent| {
+                if let Some(data) = file_drag(&event) {
+                    // Cancel even when disabled, so dropping a file cannot navigate away.
+                    event.prevent_default();
+                    data.set_drop_effect(if accepts_files { "copy" } else { "none" });
+                    if *file_over.peek() != accepts_files { file_over.set(accepts_files); }
+                }
+            },
+            ondragleave: move |event: DragEvent| {
+                // Drag events bubble from the controls; crossing between them is not a leave.
+                let still_inside = event.data().try_as_web_event()
+                    .and_then(|event| event.related_target())
+                    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+                    .is_some_and(|target| target.closest(".message-composer").ok().flatten().is_some());
+                if !still_inside { file_over.set(false); }
+            },
+            ondrop: move |event: DragEvent| {
+                file_over.set(false);
+                let files = event.files();
+                if !files.is_empty() || file_drag(&event).is_some() {
+                    event.prevent_default();
+                    upload.call(attachment_files(files));
+                }
+            },
             // Enter in the repository or model search submits the form too. Only the message's
             // Enter and the send button send, so choosing a control never sends the message.
             onsubmit: move |event| event.prevent_default(),
@@ -2169,10 +2227,7 @@ pub(crate) fn Composer(
                         draft.set(event.value());
                     },
                     onpaste: move |event: ClipboardEvent| {
-                        let files = event.data().try_as_web_event()
-                            .and_then(|event| event.dyn_into::<web_sys::ClipboardEvent>().ok())
-                            .and_then(|event| event.clipboard_data()).and_then(|data| data.files());
-                        let files: Vec<_> = files.map_or_else(Vec::new, |files| (0..files.length()).filter_map(|index| files.item(index)).collect());
+                        let files = pasted_files(&event);
                         if !files.is_empty() { event.prevent_default(); upload.call(files); }
                     },
                     onkeydown: move |event: KeyboardEvent| {
@@ -2211,8 +2266,11 @@ pub(crate) fn Composer(
                 }
                 Input { key: "{round}", id: "composer-images", name: "images", r#type: "file", hidden: true,
                     accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: disabled || busy || uploading(),
-                    onchange: move |event: FormEvent| upload.call(event.files().iter().filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned()).collect()),
+                    onchange: move |event: FormEvent| upload.call(attachment_files(event.files())),
                 }
+            }
+            if accepts_files && file_over() {
+                div { class: "composer-drop-label", "Drop images here" }
             }
         }
     }

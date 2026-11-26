@@ -3,9 +3,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use dioxus::html::FileData;
 use dioxus::prelude::*;
-use dioxus::web::WebEventExt;
 use dioxus_primitives::dioxus_attributes::attributes;
 use futures_util::StreamExt;
 use gloo_net::http::{Request, RequestBuilder, Response};
@@ -18,7 +16,7 @@ use serde::de::DeserializeOwned;
 
 use dioxus_icons::lucide::{Pencil, Trash, X};
 
-use crate::agent_view::Draft;
+use crate::agent_view::{Draft, attachment_files, pasted_files};
 use crate::api;
 use crate::components::{
     button::{Button, ButtonVariant},
@@ -925,29 +923,6 @@ fn Images(paths: Vec<String>) -> Element {
     }
 }
 
-/// The files that an input or a drop carries.
-fn dropped_files(files: Vec<FileData>) -> Vec<web_sys::File> {
-    files
-        .iter()
-        .filter_map(|file| file.inner().downcast_ref::<web_sys::File>().cloned())
-        .collect()
-}
-
-/// The files that a paste carries.
-fn pasted_files(event: &ClipboardEvent) -> Vec<web_sys::File> {
-    let list = event
-        .data()
-        .try_as_web_event()
-        .and_then(|event| event.dyn_into::<web_sys::ClipboardEvent>().ok())
-        .and_then(|event| event.clipboard_data())
-        .and_then(|data| data.files());
-    list.map_or_else(Vec::new, |list| {
-        (0..list.length())
-            .filter_map(|index| list.item(index))
-            .collect()
-    })
-}
-
 #[component]
 fn AnnotationEditor(
     annotation: Annotation,
@@ -999,7 +974,7 @@ fn AnnotationEditor(
         ondragover: move |event: DragEvent| event.prevent_default(),
         ondrop: move |event: DragEvent| {
             event.prevent_default();
-            upload.call(dropped_files(event.data_transfer().files()));
+            upload.call(attachment_files(event.data_transfer().files()));
         },
     });
     let quote = annotation.quote.clone();
@@ -1023,7 +998,7 @@ fn AnnotationEditor(
             Label { html_for: "annotation-images", "Add images (PNG, JPEG, WebP; up to 10 MiB each)" }
             for round in [uploads()] {
                 Input { key: "{round}", id: "annotation-images", name: "images", r#type: "file", accept: "image/png,image/jpeg,image/webp", multiple: true, disabled: busy || uploading(),
-                    onchange: move |event: FormEvent| upload.call(dropped_files(event.files())),
+                    onchange: move |event: FormEvent| upload.call(attachment_files(event.files())),
                 }
             }
             DialogDescription { "Paste, drop or add images." }
