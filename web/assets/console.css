@@ -171,6 +171,8 @@ textarea {
   align-items: center;
   min-width: 0;
   margin-left: auto;
+  /* The meters scroll inside the bar at any width where they do not fit. */
+  overflow-x: auto;
   color: var(--console-muted);
   font-size: 12px;
 }
@@ -1817,9 +1819,6 @@ dogsled-read-edge { display: block; height: 1px; }
   }
   .console-provider .console-shell .lead-header > :is(.lead-heading, .worker-heading) {
     flex-basis: 100%;
-  }
-  .console-provider .console-shell .console-hosts {
-    overflow-x: auto;
   }
 }
 .console-provider .console-shell .new-lead-repo {
