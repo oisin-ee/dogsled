@@ -15,7 +15,7 @@ Status: design proposal, revision 2, 2026-11-27. Not approved. It changes no run
 
 The owner talks to leads. The list holds only leads. Each row shows a short name and the last thing the lead said. Workers, jobs, branches and files live inside their lead. Home is the composer, with what needs the owner and what leads said since the last visit. A machine name appears only in one capacity panel.
 
-The book has six chapters: direction and seven principles, speed budgets with today's measurements, identity, eleven screens at 1440 × 900, what goes away, and the decisions.
+The book has six chapters: direction and seven principles, speed budgets with today's measurements, identity, ten screens at 1440 × 900, what goes away, and the decisions.
 
 ## Decisions for the owner
 
@@ -36,4 +36,4 @@ The book has six chapters: direction and seven principles, speed budgets with to
 ## History
 
 - Revision 1 (commit `28d02d9`): a writer's book that kept the current layout, with seven screens and budgets without a baseline.
-- Revision 2: rewritten from the owner's thesis, with measured baselines, eleven screens, the removals and the decisions.
+- Revision 2: rewritten from the owner's thesis, with measured baselines, ten screens, the removals and the decisions.
