@@ -633,6 +633,13 @@ impl Default for CpuSampler {
 
 impl CpuSampler {
     /// A sampler that cannot start is an error of the sample, not a silent missing value.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "only the macOS sampler can fail; its callers are not platform-specific"
+        )
+    )]
     pub(crate) fn busy(&mut self) -> Result<Option<f64>> {
         match self {
             #[cfg(not(target_os = "macos"))]
