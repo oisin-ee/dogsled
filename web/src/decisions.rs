@@ -47,12 +47,12 @@ pub(crate) fn Decisions(
                 Some(Err(error)) => rsx! { Alert { "Decisions are unavailable. {error}" } },
                 Some(Ok(list)) => rsx! {
                     if !list.gaps.is_empty() {
+                        // The hosts that answered are current; only the named hosts are missing.
                         Alert {
-                            p { "Decisions are unavailable." }
+                            p { if list.decisions.is_empty() { "Decisions are unavailable." } else { "Some decisions are unavailable." } }
                             for gap in &list.gaps {
                                 p { key: "{gap.host}", "Host {gap.host} did not answer." }
                             }
-                            p { "The last known list is not shown as current." }
                         }
                     } else if list.decisions.is_empty() {
                         Status { "data-part": "column-empty",
@@ -66,7 +66,7 @@ pub(crate) fn Decisions(
                             }
                         }
                     }
-                    if list.gaps.is_empty() && !list.decisions.is_empty() {
+                    if !list.decisions.is_empty() {
                         Accordion { "data-part": "decision-rows", allow_multiple_open: true, horizontal: false,
                             for (index, record) in list.decisions.into_iter().enumerate() {
                                 DecisionRow { key: "{record.host}:{record.id}", index,

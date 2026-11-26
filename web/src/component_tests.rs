@@ -916,6 +916,20 @@ fn decisions_show_newest_first_with_host_qualified_authors() {
         decisions: vec![worker, lead],
         gaps: vec![],
     };
+    // A host that did not answer hides nothing that the other hosts returned.
+    let partial = DecisionList {
+        gaps: vec![portal_types::inbox::HostGap {
+            host: "momokaya-2".into(),
+            error: "timeout".into(),
+        }],
+        ..list.clone()
+    };
+    let mut dom = VirtualDom::new_with_props(decisions_root, (true, partial));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Some decisions are unavailable."), "{html}");
+    assert!(html.contains("Host momokaya-2 did not answer."), "{html}");
+    assert!(html.contains("Keep the CSV column order"), "{html}");
     let mut dom = VirtualDom::new_with_props(decisions_root, (true, list));
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
@@ -963,7 +977,7 @@ fn decisions_distinguish_empty_switch_states_and_gaps() {
             [
                 "Decisions are unavailable.",
                 "Host netcup did not answer.",
-                "The last known list is not shown as current.",
+                "Recorded decisions",
             ],
         ),
     ] {
