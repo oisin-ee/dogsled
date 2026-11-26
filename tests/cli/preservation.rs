@@ -503,17 +503,57 @@ fn p3_completed_teardown_stages_resume_without_repeating_effects() {
 }
 
 #[test]
-fn p3_interrupted_normalization_still_refuses_retry() {
-    let (rig, tree) = p3_rig("p3-normalizing");
-    fs::write(tree.join("draft"), b"live work\n").unwrap();
-    interrupt_p3(&rig, "NORMALIZING");
-    assert_eq!(operations(&rig)[0]["stage"], "normalizing");
-    let output = rig.run(&["close", "w2:p1"]);
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("normalization was interrupted"), "{error}");
-    assert_p3_kept(&rig, &tree);
-    assert_eq!(rig.log("hook.log").lines().count(), 1);
+fn p3_interrupted_normalization_resumes_from_its_snapshot() {
+    for progress in ["none", "cleared", "rebuilt", "changed"] {
+        let (rig, tree) = p3_rig(&format!("p3-normalizing-{progress}"));
+        let repo = rig.dir.join("home/repo");
+        fs::write(tree.join("tracked"), b"head\n").unwrap();
+        super::close::git(&tree, &["add", "tracked"]);
+        super::close::git(&tree, &["commit", "-qm", "tracked"]);
+        super::close::git(&repo, &["merge", "--ff-only", "feat/x"]);
+        fs::write(tree.join("tracked"), b"live\n").unwrap();
+        fs::write(tree.join("draft"), b"live work\n").unwrap();
+        interrupt_p3(&rig, "NORMALIZING");
+        let operation = operations(&rig).remove(0);
+        assert_eq!(operation["stage"], "normalizing");
+        // Each state is one that the interrupted normalization can leave, except `changed`.
+        match progress {
+            "cleared" => {
+                fs::remove_file(tree.join("draft")).unwrap();
+                fs::remove_file(tree.join("tracked")).unwrap();
+            }
+            "rebuilt" => {
+                fs::remove_file(tree.join("draft")).unwrap();
+                fs::write(tree.join("tracked"), b"head\n").unwrap();
+                super::close::git(&tree, &["read-tree", "HEAD"]);
+            }
+            "changed" => fs::write(tree.join("draft"), b"other work\n").unwrap(),
+            _ => (),
+        }
+        let out = rig.run(&["close", "w2:p1"]);
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(rig.log("hook.log").lines().count(), 1, "{progress}");
+        if progress == "changed" {
+            assert!(!out.status.success(), "{progress}");
+            assert!(
+                error.contains("normalization was interrupted and cannot resume"),
+                "{error}"
+            );
+            assert_eq!(fs::read(tree.join("draft")).unwrap(), b"other work\n");
+            assert!(rig.items()[0]["closed_ms"].is_null());
+            continue;
+        }
+        assert!(out.status.success(), "{progress}: {error}");
+        assert!(!tree.exists(), "{progress}");
+        let finished = operations(&rig).remove(0);
+        assert_eq!(finished["stage"], "finished");
+        assert_eq!(finished["id"], operation["id"]);
+        let to = rig.dir.join("normalizing-restored");
+        let (code, restored) = restore(&rig, &repo, &finished["latest"], &to, &[]);
+        assert_eq!(code, 0, "{restored}");
+        assert_eq!(fs::read(to.join("draft")).unwrap(), b"live work\n");
+        assert_eq!(fs::read(to.join("tracked")).unwrap(), b"live\n");
+    }
 }
 
 #[test]

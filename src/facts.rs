@@ -392,7 +392,9 @@ mod tests {
                 &format!("{head}\n{base}\n"),
             )
             .on(
-                &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
+                &format!(
+                    "git -C {cwd} --no-optional-locks status --porcelain --untracked-files=all -z"
+                ),
                 "",
             )
             .on(
@@ -540,7 +542,9 @@ mod tests {
         assert_eq!((first.ahead, first.landed, first.dirty), (2, true, false));
         let calls = shell.calls.lock().unwrap().len();
         shell.on(
-            &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
+            &format!(
+                "git -C {cwd} --no-optional-locks status --porcelain --untracked-files=all -z"
+            ),
             " M a\0",
         );
         let second = worktree(&shell, &cwd, Some(&first)).unwrap();
@@ -554,7 +558,9 @@ mod tests {
             "unchanged tips reuse the count and the landed check"
         );
         shell.on(
-            &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
+            &format!(
+                "git -C {cwd} --no-optional-locks status --porcelain --untracked-files=all -z"
+            ),
             " D a\0D  b\0",
         );
         assert!(!worktree(&shell, &cwd, Some(&first)).unwrap().dirty);
@@ -564,7 +570,9 @@ mod tests {
         };
         assert!(worktree(&shell, &cwd, Some(&unheld)).unwrap().dirty);
         shell.on(
-            &format!("git -C {cwd} status --porcelain --untracked-files=all -z"),
+            &format!(
+                "git -C {cwd} --no-optional-locks status --porcelain --untracked-files=all -z"
+            ),
             " D a\0 M b\0?? c\0",
         );
         assert!(worktree(&shell, &cwd, Some(&first)).unwrap().dirty);

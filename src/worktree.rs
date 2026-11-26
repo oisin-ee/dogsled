@@ -1160,6 +1160,7 @@ fn run_teardown(
             operation.stage,
             Stage::TeardownComplete
                 | Stage::FinalCaptured
+                | Stage::Normalizing
                 | Stage::Normalized
                 | Stage::Removed
                 | Stage::Finished
@@ -1217,7 +1218,17 @@ fn normalize_preserved(
         .ok_or_else(|| operation.refusal("missing final capture"))?;
     let now =
         snapshot(shell, &tree.path)?.ok_or_else(|| operation.refusal("checkout disappeared"))?;
-    let proof = crate::preservation::VerifiedRemoval::capture(shell, &now, saved)?;
+    // An interrupted normalization resumes from the snapshot that it pinned.
+    let resumed = operation.stage == Stage::Normalizing;
+    let proof = if resumed {
+        crate::preservation::VerifiedRemoval::resume(shell, &now, saved).map_err(|e| {
+            operation.refusal(format!(
+                "normalization was interrupted and cannot resume: {e}"
+            ))
+        })?
+    } else {
+        crate::preservation::VerifiedRemoval::capture(shell, &now, saved)?
+    };
     let recovery = operation.recovery()?;
     if let Some(result) = &mut operation.result {
         result.recovery = Some(recovery);
@@ -1236,8 +1247,10 @@ fn normalize_preserved(
     crate::work::launch_test_barrier("PRESERVATION_BEFORE_NORMALIZE")?;
     crate::close::validate_preservation(shell, ledger, operation, &now)?;
     pin.validate(tree)?;
-    operation.advance(ledger, Stage::Normalizing)?;
-    crate::work::launch_test_barrier("PRESERVATION_NORMALIZING")?;
+    if !resumed {
+        operation.advance(ledger, Stage::Normalizing)?;
+        crate::work::launch_test_barrier("PRESERVATION_NORMALIZING")?;
+    }
     proof
         .normalize(shell, &now)
         .map_err(|e| operation.refusal(e))?;

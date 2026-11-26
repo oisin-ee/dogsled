@@ -334,7 +334,9 @@ fn capture_expected(
                     planned.head.clone_from(&live.head);
                 }
             }
-            crate::preservation::Stage::FinalCaptured | crate::preservation::Stage::Normalized => {
+            crate::preservation::Stage::FinalCaptured
+            | crate::preservation::Stage::Normalizing
+            | crate::preservation::Stage::Normalized => {
                 planned.head = operation
                     .latest
                     .as_ref()
@@ -1181,6 +1183,7 @@ fn begin_preservation(
                 existing.stage,
                 crate::preservation::Stage::TeardownComplete
                     | crate::preservation::Stage::FinalCaptured
+                    | crate::preservation::Stage::Normalizing
                     | crate::preservation::Stage::Normalized
             )
         {
