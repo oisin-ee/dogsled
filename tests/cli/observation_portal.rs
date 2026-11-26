@@ -188,87 +188,52 @@ impl Http {
 
 /// Native Herdr remains a test transport; serve, the Close adapter and web are real.
 struct CloseHerdr {
-    path: PathBuf,
-    stopped: Arc<std::sync::atomic::AtomicBool>,
-    sockets: Arc<Mutex<Vec<std::os::unix::net::UnixStream>>>,
     events: Arc<Mutex<Vec<std::os::unix::net::UnixStream>>>,
     subscriptions: mpsc::Receiver<Value>,
     closes: mpsc::Receiver<Value>,
-    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CloseHerdr {
     fn start(rig: &Rig, refuse: bool) -> Self {
-        use std::os::unix::net::UnixListener;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let path = rig.dir.join("herdr.sock");
-        let listener = UnixListener::bind(&path).unwrap();
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stop = Arc::clone(&stopped);
-        let sockets = Arc::new(Mutex::new(Vec::new()));
-        let connections = Arc::clone(&sockets);
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscribers = Arc::clone(&events);
         let (subscribed, subscriptions) = mpsc::channel();
-        let (actions, closes) = mpsc::channel();
-        let dir = rig.dir.clone();
-        let thread = std::thread::spawn(move || {
-            while let Ok((mut stream, _)) = listener.accept() {
-                if stop.load(Ordering::Acquire) {
-                    break;
-                }
-                stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
-                stream.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
-                connections
-                    .lock()
-                    .unwrap()
-                    .push(stream.try_clone().unwrap());
-                if stop.load(Ordering::Acquire) {
-                    break;
-                }
-                let mut line = String::new();
-                if !matches!(BufReader::new(&stream).read_line(&mut line), Ok(n) if n > 0) {
-                    continue;
-                }
-                let request: Value = serde_json::from_str(&line).unwrap();
-                let method = request["method"].as_str().unwrap();
-                let mut reply = match method {
-                    "agent.list" => {
-                        serde_json::from_slice::<Value>(&fs::read(dir.join("agents.json")).unwrap())
-                            .unwrap()
-                    }
-                    "events.subscribe" => json!({"result":{"type":"subscription_started"}}),
-                    "pane.read" => {
-                        json!({"result":{"type":"pane_read","read":{"text":"","revision":1}}})
-                    }
-                    "pane.close" => {
-                        actions.send(request["params"].clone()).unwrap();
-                        if refuse {
-                            json!({"error":{"code":"confirmation_required","message":"confirm worktree group"}})
-                        } else {
-                            let pane = request["params"]["pane_id"].as_str().unwrap();
-                            remove_native_pane(&dir, pane);
-                            Self::notify(&subscribers, "pane.closed", pane);
-                            json!({"result":{}})
-                        }
-                    }
-                    other => panic!("unexpected Close transport method: {other}"),
-                };
-                reply["id"] = request["id"].clone();
-                if writeln!(stream, "{reply}").is_ok() && method == "events.subscribe" {
-                    subscribers.lock().unwrap().push(stream);
-                    let _ = subscribed.send(request["params"]["subscriptions"].clone());
-                }
+        rig.on_herdr("events.subscribe", move |mut stream, request| {
+            if herdr_fixture::Server::reply(
+                &mut stream,
+                &request,
+                json!({"result":{"type":"subscription_started"}}),
+            ) {
+                subscribers.lock().unwrap().push(stream);
+                let _ = subscribed.send(request["params"]["subscriptions"].clone());
             }
         });
+        rig.on_herdr("pane.read", |mut stream, request| {
+            herdr_fixture::Server::reply(
+                &mut stream,
+                &request,
+                json!({"result":{"type":"pane_read","read":{"text":"","revision":1}}}),
+            );
+        });
+        let (actions, closes) = mpsc::channel();
+        let dir = rig.dir.clone();
+        let subscribers = Arc::clone(&events);
+        rig.on_herdr("pane.close", move |mut stream, request| {
+            let _ = actions.send(request["params"].clone());
+            let reply = if refuse {
+                json!({"error":{"code":"confirmation_required","message":"confirm worktree group"}})
+            } else {
+                let pane = request["params"]["pane_id"].as_str().unwrap();
+                remove_native_pane(&dir, pane);
+                Self::notify(&subscribers, "pane.closed", pane);
+                json!({"result":{}})
+            };
+            herdr_fixture::Server::reply(&mut stream, &request, reply);
+        });
         Self {
-            path,
-            stopped,
-            sockets,
             events,
             subscriptions,
             closes,
-            thread: Some(thread),
         }
     }
 
@@ -300,27 +265,8 @@ impl CloseHerdr {
     }
 }
 
-impl Drop for CloseHerdr {
-    fn drop(&mut self) {
-        use std::net::Shutdown;
-        use std::sync::atomic::Ordering;
-        self.stopped.store(true, Ordering::Release);
-        for socket in self.sockets.lock().unwrap().iter() {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
-        let _ = std::os::unix::net::UnixStream::connect(&self.path);
-        if let Some(thread) = self.thread.take() {
-            let result = thread.join();
-            if !std::thread::panicking() {
-                result.unwrap();
-            }
-        }
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 fn remove_native_pane(dir: &Path, pane: &str) {
-    // The CLI collector and the socket adapter read the same native evidence.
+    // The collector and the Close adapter read the same native evidence.
     for (file, key) in [("agents.json", "agents"), ("panes.json", "panes")] {
         let path = dir.join(file);
         let mut evidence: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -851,9 +797,7 @@ fn portal_readers_share_one_revision_and_one_subscription_without_observation() 
 
 /// Capture detail through the actual serve interest path before trapping every reader tool.
 fn capture_agent_detail(rig: &Rig) -> (Value, Value) {
-    use std::os::unix::net::{UnixListener, UnixStream};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::os::unix::net::UnixStream;
     let transcript = rig.dir.join("conversation.jsonl");
     fs::write(&transcript, "{\"type\":\"session\",\"id\":\"detail-session\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Fixture title\\npublished conversation\"}]}}\n").unwrap();
     rig.put(
@@ -863,39 +807,14 @@ fn capture_agent_detail(rig: &Rig) -> (Value, Value) {
             "terminal_id":"detail-terminal", "agent_session":{"kind":"path","value":transcript}
         }]}}),
     );
-    let path = rig.dir.join("detail-herdr.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    let stopped = Arc::new(AtomicBool::new(false));
-    let stop = Arc::clone(&stopped);
-    let agents = rig.dir.join("agents.json");
-    let thread = std::thread::spawn(move || {
-        while let Ok((mut stream, _)) = listener.accept() {
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
-            let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            let mut reply = match request["method"].as_str().unwrap() {
-                "agent.list" => {
-                    serde_json::from_slice::<Value>(&fs::read(&agents).unwrap()).unwrap()
-                }
-                "pane.read" => {
-                    json!({"result":{"type":"pane_read","read":{"text":"published screen","revision":11}}})
-                }
-                "events.subscribe" => {
-                    json!({"error":{"code":"unsupported","message":"fixture uses the fallback"}})
-                }
-                other => panic!("unexpected detail observation: {other}"),
-            };
-            reply["id"] = request["id"].clone();
-            writeln!(stream, "{reply}").unwrap();
-        }
+    rig.on_herdr("pane.read", |mut stream, request| {
+        herdr_fixture::Server::reply(
+            &mut stream,
+            &request,
+            json!({"result":{"type":"pane_read","read":{"text":"published screen","revision":11}}}),
+        );
     });
-    let mut command = rig.cmd(&["serve", "--interval", "60"]);
-    command.env("HERDR_SOCKET_PATH", &path);
-    let observer = Rig::background(command);
+    let observer = Rig::background(rig.cmd(&["serve", "--interval", "60"]));
     wait_publication(rig, |frame| {
         frame["views"]["portal"]["data"]["agents"][0]["pane"] == "w1:p1"
     });
@@ -935,9 +854,6 @@ fn capture_agent_detail(rig: &Rig) -> (Value, Value) {
     assert!(!frame.to_string().contains("published screen"));
     drop(observer);
     drop(reader);
-    stopped.store(true, Ordering::Release);
-    let _ = UnixStream::connect(&path);
-    thread.join().unwrap();
     fs::remove_file(transcript).unwrap();
     (frame, content)
 }

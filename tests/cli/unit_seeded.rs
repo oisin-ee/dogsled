@@ -469,6 +469,7 @@ fn over_budget_prepared_unit_releases_only_its_claim_and_settles_idempotently() 
         std::os::unix::fs::symlink(&original.dir, &alias).unwrap();
         let rig = Rig {
             dir: alias,
+            herdr: None,
             service: std::sync::Mutex::new(None),
             origin_ms: original.origin_ms,
         };
@@ -616,6 +617,7 @@ fn refusal_release_recovers_each_boundary_through_symlinked_home() {
         std::os::unix::fs::symlink(&original.dir, &root).unwrap();
         let rig = Rig {
             dir: root,
+            herdr: None,
             service: std::sync::Mutex::new(None),
             origin_ms: original.origin_ms,
         };

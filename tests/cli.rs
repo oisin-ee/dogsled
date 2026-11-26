@@ -13,6 +13,8 @@ mod done;
 mod drop;
 #[path = "cli/git_env.rs"]
 mod git_env;
+#[path = "cli/herdr_fixture.rs"]
+mod herdr_fixture;
 #[path = "cli/host_store.rs"]
 mod host_store;
 #[path = "cli/inbox.rs"]
@@ -681,6 +683,7 @@ impl Drop for ServiceLock {
 
 struct Rig {
     dir: PathBuf,
+    herdr: Option<herdr_fixture::Server>,
     service: std::sync::Mutex<Option<ServiceLock>>,
     /// The time this rig's records were created at. It never moves, so a record and its
     /// receipt always name the same request time.
@@ -688,21 +691,22 @@ struct Rig {
 }
 impl Rig {
     /// Bound launch fixtures keep state paths below the macOS terminal-line budget.
-    fn short(name: &str) -> Self {
-        Self::new(name).shortened()
+    fn short(_name: &str) -> Self {
+        Self::new("")
     }
 
     fn shortened(mut self) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let short = PathBuf::from("/tmp").join(format!(
-            "ds3-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        assert!(!short.exists(), "{}", short.display());
+        // Bound the socket and file paths without changing the fixture's saved facts.
+        let short = Self::directory("");
+        drop(self.herdr.take());
+        fs::remove_dir_all(&short).unwrap();
         fs::rename(&self.dir, &short).unwrap();
-        self.dir = short.canonicalize().unwrap();
+        self.dir = short;
+        self.herdr = Some(herdr_fixture::Server::start(
+            &self.dir,
+            "herdr.sock",
+            self.dir.join("agents.json"),
+        ));
         self
     }
 
@@ -712,11 +716,16 @@ impl Rig {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name: String = name.chars().take(16).collect();
-        let dir = PathBuf::from("/tmp").join(format!(
-            "dc-{}-{}-{name}",
+        let mut basename = format!(
+            "dc-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        );
+        if !name.is_empty() {
+            basename.push('-');
+            basename.push_str(&name);
+        }
+        let dir = PathBuf::from("/tmp").join(basename);
         let _ = fs::remove_dir_all(&dir);
         for child in ["bin", "state", "home"] {
             fs::create_dir_all(dir.join(child)).unwrap();
@@ -726,8 +735,10 @@ impl Rig {
 
     fn new(name: &str) -> Self {
         let dir = Self::directory(name);
+        let herdr = herdr_fixture::Server::start(&dir, "herdr.sock", dir.join("agents.json"));
         let rig = Self {
             dir,
+            herdr: Some(herdr),
             service: std::sync::Mutex::new(None),
             origin_ms: now(),
         };
@@ -991,9 +1002,15 @@ esac
         cmd
     }
 
-    /// The environment every process in this rig runs with. A process the rig starts, and
-    /// a process the test spawns from what the rig recorded, run with the same
-    /// environment, so both see the same fake Herdr, the same state, and the same rig.
+    fn on_herdr(
+        &self,
+        method: &'static str,
+        handler: impl FnMut(std::os::unix::net::UnixStream, Value) + Send + 'static,
+    ) {
+        self.herdr.as_ref().unwrap().on(method, handler);
+    }
+
+    /// Run commands and recorded wrappers with the same rig state and Herdr fixture.
     fn rig_env(&self, cmd: &mut Command) {
         cmd.env(
             "PATH",
@@ -1007,7 +1024,10 @@ esac
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_WORKSPACE_ID", "w1")
         // Fake Herdr owns this rig; never discover or subscribe to the developer's daemon.
-        .env("HERDR_SOCKET_PATH", self.dir.join("herdr.sock"))
+        .env(
+            "HERDR_SOCKET_PATH",
+            self.dir.canonicalize().unwrap().join("herdr.sock"),
+        )
         .env("RIG", &self.dir)
         .env("RIG_DOGSLED", env!("CARGO_BIN_EXE_dogsled"))
         .env("HOME", self.dir.join("home"))
@@ -1137,12 +1157,20 @@ esac
     /// Explicit observer peer ingestion without replacing the local fixture sample.
     /// The failed local probe publishes a gap and exits 2, after peer ingestion.
     fn ingest_peers(&self) {
+        self.ingest_peers_with(|_| {});
+    }
+
+    fn ingest_peers_with(&self, configure: impl FnOnce(&herdr_fixture::Server)) {
         let running = self.service.lock().unwrap().is_some();
         let unavailable = self.dir.join("unavailable-origin-agents.json");
         fs::write(&unavailable, "unavailable local probe").unwrap();
+        let socket =
+            herdr_fixture::Server::start(&self.dir, "bad-agents.sock", unavailable.clone());
+        configure(&socket);
         let output = self
             .cmd(&["serve", "--once", "--interval", "1"])
             .env("RIG_AGENTS", unavailable)
+            .env("HERDR_SOCKET_PATH", &socket.path)
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{output:?}");
@@ -1746,6 +1774,7 @@ esac
 }
 impl Drop for Rig {
     fn drop(&mut self) {
+        drop(self.herdr.take());
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -1807,8 +1836,8 @@ fn serve_once_publishes_local_facts_and_discovers_peers_once_without_ssh() {
             .count(),
         1
     );
-    // The event subscription asks Herdr for its socket; the fixture has none, so serve
-    // keeps its fallback timer. That lookup is not a collection tick.
+    // The fixture rejects event subscriptions, so serve keeps its fallback timer.
+    // An event subscription attempt is not a collection tick.
     let herdr = herdr
         .lines()
         .filter(|line| !["machine list --json", "status server --json"].contains(line))
