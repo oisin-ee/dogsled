@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod agents;
 pub mod assets;
+mod autonomy;
 pub mod board;
 pub mod guard;
 pub mod inbox;
@@ -272,6 +273,7 @@ fn router(state: AppState) -> Router {
         .merge(agents::router())
         .merge(activity::router())
         .merge(settings::router())
+        .merge(autonomy::router())
         .merge(metrics::router())
         .merge(producer::router().with_state(producer::Producer::portal(
             &state.web.dir,

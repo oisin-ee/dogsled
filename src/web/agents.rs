@@ -75,6 +75,8 @@ pub(crate) enum PeerOperation {
     Activity,
     Settings,
     ChangeSettings(portal_types::models::SettingsChange),
+    SetFleetAutonomy(portal_types::autonomy::SwitchBody),
+    SetAgentAutonomy(portal_types::autonomy::SwitchBody),
     Interactive(super::producer::Interactive),
     Inbox,
     Register(portal_types::agents::RegisterProducer),
@@ -298,6 +300,12 @@ pub(super) async fn peer_read(
             )
             .await
         }
+        PeerOperation::SetFleetAutonomy(body) => {
+            super::autonomy::local_fleet(state.web, body).await
+        }
+        PeerOperation::SetAgentAutonomy(body) => {
+            super::autonomy::local_agent(state.web, pane, body).await
+        }
         PeerOperation::Register(body) => activity_command(
             &client,
             &pane,
@@ -414,27 +422,32 @@ pub(super) async fn peer_response(
     pane: String,
     operation: PeerOperation,
 ) -> Response {
+    use crate::error::Refusal;
     let label = host.clone();
-    let files = matches!(operation, PeerOperation::Files);
+    let unsupported = match &operation {
+        PeerOperation::Files => Some(Refusal::AgentFilesUnsupported),
+        PeerOperation::SetFleetAutonomy(_) | PeerOperation::SetAgentAutonomy(_) => {
+            Some(Refusal::AutonomyUnsupported)
+        }
+        _ => None,
+    };
     match tokio::task::spawn_blocking(move || peer_call(&state, &host, &pane, &operation)).await {
         Ok(Ok(reply)) => peer_reply_response(&label, reply),
-        Ok(Err(error))
-            if files
-                && matches!(
-                    error.root(),
-                    crate::error::Error::Ssh {
-                        refusal: Some(crate::error::Refusal::AgentFilesUnsupported),
-                        ..
-                    }
-                ) =>
-        {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("host {label}: files unsupported")})),
-            )
-                .into_response()
+        Ok(Err(error)) => {
+            if let crate::error::Error::Ssh {
+                refusal: Some(refusal),
+                ..
+            } = error.root()
+                && Some(*refusal) == unsupported
+            {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": format!("host {label}: {}", refusal.message())})),
+                )
+                    .into_response();
+            }
+            peer_error(&label, &error)
         }
-        Ok(Err(error)) => peer_error(&label, &error),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({"error": format!("host {label}: peer transport unavailable")})),

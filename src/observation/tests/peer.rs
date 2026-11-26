@@ -92,6 +92,27 @@ fn input(value: u64) -> Publication {
 }
 
 #[test]
+fn autonomy_peer_retains_stale_extension_and_detects_unsupported() {
+    let mut publication = input(100);
+    let mut source = peers::Ownership::default();
+    let host = publication.local.get_mut("host").unwrap();
+    source.replace(Some(host), true);
+    assert_eq!(source.autonomy_state, Some(Availability::Unsupported));
+    assert!(source.autonomy.is_none());
+
+    host["autonomy"] = json!({"version":1,"fleet":true,"agents":[],"decisions":[]});
+    source.replace(Some(host), true);
+    assert!(source.autonomy.as_ref().unwrap().fleet);
+    host["autonomy"]["fleet"] = false.into();
+    source.replace(Some(host), false);
+    assert!(source.autonomy.as_ref().unwrap().fleet);
+    source.replace(None, false);
+    assert!(source.autonomy.as_ref().unwrap().fleet);
+    source.replace(Some(host), true);
+    assert!(!source.autonomy.as_ref().unwrap().fleet);
+}
+
+#[test]
 fn owned_work_wire_preserves_base_report_at_reply_limit() {
     let mut publication = input(100);
     let mut publisher = Publisher::new().unwrap();

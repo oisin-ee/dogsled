@@ -443,6 +443,8 @@ pub(crate) fn import(ledger: &Ledger, host: &str, results: &[BranchObservation])
 pub(crate) struct Ownership {
     pub(crate) evidence: Option<Arc<super::owned_work::Evidence>>,
     pub(crate) current: bool,
+    pub(crate) autonomy: Option<Arc<crate::autonomy::Extension>>,
+    pub(crate) autonomy_state: Option<Availability>,
 }
 
 impl Ownership {
@@ -454,6 +456,26 @@ impl Ownership {
         {
             self.evidence = Some(Arc::new(decoded));
         }
+        if let Some(host) = host
+            && (fresh || self.autonomy_state.is_none())
+        {
+            self.replace_autonomy(crate::autonomy::HostExtension::decode(host));
+        }
+    }
+
+    fn replace_autonomy(&mut self, extension: crate::autonomy::HostExtension) {
+        use crate::autonomy::HostExtension;
+        self.autonomy_state = Some(match extension {
+            HostExtension::Ready(extension) => {
+                self.autonomy = Some(Arc::new(extension));
+                Availability::Available
+            }
+            HostExtension::Unavailable => Availability::Unavailable,
+            HostExtension::Unsupported => {
+                self.autonomy = None;
+                Availability::Unsupported
+            }
+        });
     }
 }
 
@@ -583,6 +605,10 @@ impl Ingestion {
             fleet.remote::<Option<crate::node::SnapshotReport>>(host, &["snapshot".into()])?;
         let snapshot = report.as_ref().and_then(|report| report.snapshot.as_ref());
         self.ownership.current = false;
+        if snapshot.is_some_and(|snapshot| snapshot.fresh(now)) {
+            self.ownership
+                .replace_autonomy(crate::autonomy::HostExtension::Unsupported);
+        }
         self.source = Some(PeerSource {
             epoch: "legacy".into(),
             local_revision: snapshot.map_or(0, |snapshot| snapshot.sampled_ms),

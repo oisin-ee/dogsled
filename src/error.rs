@@ -121,6 +121,8 @@ pub enum Refusal {
     JobValidityUnsupported,
     /// The peer explicitly rejects the Files detail operation.
     AgentFilesUnsupported,
+    /// The peer does not understand the autonomy switch operation.
+    AutonomyUnsupported,
     /// Close found no such pane on the host.
     ClosePaneMissing,
     /// Close refused a working or blocked child.
@@ -151,6 +153,7 @@ impl Refusal {
             Self::JobClockUnavailable => "JOB_CLOCK_UNAVAILABLE",
             Self::JobValidityUnsupported => "JOB_VALIDITY_UNSUPPORTED",
             Self::AgentFilesUnsupported => "AGENT_FILES_UNSUPPORTED",
+            Self::AutonomyUnsupported => "AUTONOMY_UNSUPPORTED",
             Self::ClosePaneMissing => "CLOSE_PANE_MISSING",
             Self::CloseBusy => "CLOSE_BUSY",
             Self::CloseNotDone => "CLOSE_NOT_DONE",
@@ -175,6 +178,7 @@ impl Refusal {
             Self::JobClockUnavailable,
             Self::JobValidityUnsupported,
             Self::AgentFilesUnsupported,
+            Self::AutonomyUnsupported,
             Self::ClosePaneMissing,
             Self::CloseBusy,
             Self::CloseNotDone,
@@ -207,6 +211,7 @@ impl Refusal {
             }
             Self::JobClockUnavailable => "job validity clock is unavailable; new execution refused",
             Self::AgentFilesUnsupported => "files unsupported",
+            Self::AutonomyUnsupported => "autonomous unsupported",
             Self::JobValidityUnsupported => {
                 "this host does not support job request validity: host too old for job startup ownership; upgrade it; new execution refused"
             }
