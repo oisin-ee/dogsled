@@ -9,7 +9,8 @@ use futures_util::StreamExt;
 use gloo_net::http::{Request, RequestBuilder, Response};
 use js_sys::wasm_bindgen::JsCast;
 use portal_types::reviews::{
-    Annotation, AnnotationsBody, ApproveBody, ChangeKind, DiffView, GeneralBody, Review, plan_title,
+    Annotation, AnnotationsBody, ApproveBody, ChangeKind, Decision, DiffView, GeneralBody, Review,
+    plan_title,
 };
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use serde::de::DeserializeOwned;
@@ -96,6 +97,7 @@ pub fn ReviewView(
     review_id: String,
     revision: u64,
     #[props(default)] embedded: bool,
+    #[props(default)] recorded: bool,
     #[props(default)] lead: String,
     #[props(default)] role: String,
     #[props(default)] repository: String,
@@ -104,7 +106,7 @@ pub fn ReviewView(
     // Another review mounts a fresh loader, without the previous review or its error.
     crate::keyed(rsx! {
         ReviewLoader {
-            key: "{host}:{review_id}", host, id: review_id, revision, embedded, lead, role, repository, on_close,
+            key: "{host}:{review_id}", host, id: review_id, revision, embedded, recorded, lead, role, repository, on_close,
         }
     })
 }
@@ -115,6 +117,7 @@ fn ReviewLoader(
     id: String,
     revision: u64,
     embedded: bool,
+    recorded: bool,
     lead: String,
     role: String,
     repository: String,
@@ -138,12 +141,46 @@ fn ReviewLoader(
     rsx! {
         if let Some(message) = error() { Alert { "{message}" } }
         if let Some(value) = review() {
-            if value.decision.is_some() {
+            if recorded {
+                RecordedReview { review: value, host: host.clone() }
+            } else if value.decision.is_some() {
                 Status { "This review is closed." }
             } else {
                 ReviewEditor { key: "{value.id}-{value.revisions.last().map_or(0, |r| r.n)}", initial: value, host: host.clone(), embedded, lead, role, repository, on_close }
             }
         } else { Status { "Loading plan…" } }
+    }
+}
+
+/// A completed review remains readable without exposing the editor or approval actions.
+#[component]
+fn RecordedReview(review: Review, host: String) -> Element {
+    let revision = review.revisions.last();
+    let (outcome, note) = match review.decision.as_ref() {
+        Some(Decision::Approved { notes }) => ("Approved", notes.as_deref()),
+        Some(Decision::ChangesRequested { message }) => {
+            ("Changes requested", Some(message.as_str()))
+        }
+        None => ("No review outcome recorded", None),
+    };
+    rsx! {
+        section { class: "review-editor recorded-review", aria_label: "Recorded plan review",
+            header { class: "review-header",
+                div { class: "review-heading",
+                    h1 { "{review.path}" }
+                    p { "{outcome} · {host}" if let Some(revision) = revision { " · Revision {revision.n}" } }
+                }
+            }
+            div { class: "review-body recorded-review-body",
+                if let Some(revision) = revision {
+                    div { class: "review-document console-scroll", tabindex: "0", aria_label: "Plan text",
+                        div { class: "review-prose markdown-body",
+                            dangerous_inner_html: render_markdown(&revision.content) }
+                    }
+                } else { Status { "No plan text was recorded." } }
+            }
+            if let Some(note) = note { Status { "{note}" } }
+        }
     }
 }
 

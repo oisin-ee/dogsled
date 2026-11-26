@@ -5,6 +5,7 @@ use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
 use portal_types::PortalEvent;
 use portal_types::agents::{ActivityView, AgentEvent, Conversation, KeysBody, PromptBody, Screen};
+use portal_types::autonomy::{DecisionList, SwitchBody};
 use serde::de::DeserializeOwned;
 
 /// Where the API lives. Empty means the page's own origin; a dev build can
@@ -314,6 +315,27 @@ pub async fn send_key(
         keys: vec![key.to_owned()],
     };
     post(&agent_url(address, "keys"), &body).await
+}
+
+pub async fn switch_fleet(on: bool) -> Result<(), String> {
+    post(&format!("{BASE}/api/autonomy/fleet"), &SwitchBody { on }).await
+}
+
+pub async fn switch_agent(
+    address: &portal_types::agents::AgentAddress,
+    on: bool,
+) -> Result<(), String> {
+    post(&agent_url(address, "autonomy"), &SwitchBody { on }).await
+}
+
+pub async fn decisions(
+    address: &portal_types::agents::AgentAddress,
+) -> Result<DecisionList, String> {
+    let response = Request::get(&agent_url(address, "decisions"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    read_json(response).await
 }
 
 async fn post<T: serde::Serialize>(url: &str, body: &T) -> Result<(), String> {
