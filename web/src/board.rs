@@ -6,6 +6,7 @@ use portal_types::agents::{AgentAddress, AgentView};
 use portal_types::{BoardView, GroupView, HostView, RowView, TodoView};
 
 use crate::app::{InboxItem, InboxKind, InboxSelection};
+use crate::components::badge::{Badge, BadgeVariant};
 use crate::components::sidebar::{
     SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarMenu, SidebarMenuButton,
     SidebarMenuButtonSize, SidebarMenuItem,
@@ -53,6 +54,7 @@ pub struct NavigationRow {
     pub host: String,
     pub state: String,
     pub worker: bool,
+    pub autonomous: bool,
     pub unseen: bool,
     pub workers: Vec<NavigationRow>,
     pub jobs: Vec<NavigationRow>,
@@ -117,6 +119,7 @@ pub fn take_waiting(
                     host: host.clone(),
                     state: "waiting".to_owned(),
                     worker: item.selection.kind == InboxKind::UnseenWorker,
+                    autonomous: live.is_some_and(|agent| agent.autonomous.is_some()),
                     unseen: false,
                     workers: Vec::new(),
                     jobs: Vec::new(),
@@ -177,6 +180,7 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 host: agent.host.clone(),
                 state: agent.state.clone(),
                 worker: false,
+                autonomous: agent.autonomous.is_some(),
                 unseen: false,
                 workers: Vec::new(),
                 jobs: Vec::new(),
@@ -278,6 +282,7 @@ pub fn navigation_groups(board: &BoardView, agents: &[AgentView]) -> Navigation 
                 host: agent.host.clone(),
                 state: agent.state.clone(),
                 worker: true,
+                autonomous: !job && agent.autonomous.is_some(),
                 unseen: false,
                 workers: Vec::new(),
                 jobs: Vec::new(),
@@ -492,6 +497,7 @@ fn navigation_row(
         host: row.host.clone(),
         state: row.state.clone(),
         worker: true,
+        autonomous: row.kind == "agent" && agent.is_some_and(|agent| agent.autonomous.is_some()),
         unseen: row.unseen,
         workers: Vec::new(),
         jobs: Vec::new(),
@@ -630,7 +636,10 @@ fn NavigationAgent(row: NavigationRow) -> Element {
     };
     let body = rsx! {
         span { class: "agent-dot", "data-status": status, aria_hidden: "true" }
-        span { class: "agent-title", "{row.title}" }
+        span { class: "agent-label",
+            span { class: "agent-title", "{row.title}" }
+            if row.autonomous { AutoBadge {} }
+        }
         if row.worker { small { "{worker_status}" } }
         else {
             if let Some((done, total)) = row.progress { small { "{done}/{total}" } }
@@ -671,6 +680,11 @@ fn NavigationAgent(row: NavigationRow) -> Element {
             },
         }
     }
+}
+
+#[component]
+pub(crate) fn AutoBadge() -> Element {
+    rsx! { Badge { class: "auto-badge", variant: BadgeVariant::Outline, title: "Autonomous", "Auto" } }
 }
 
 /// A lead's coarse state as the sidebar says it: "working" reads "Working".
