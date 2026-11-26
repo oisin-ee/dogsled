@@ -1099,6 +1099,23 @@ dogsled-read-edge { display: block; height: 1px; }
   border-color: var(--console-accent);
   box-shadow: 0 0 0 3px var(--console-accent-soft);
 }
+.console-provider .console-shell .message-composer[data-drop-target="true"] {
+  position: relative;
+  border-color: var(--console-accent);
+  border-style: dashed;
+  box-shadow: 0 0 0 3px var(--console-accent-soft);
+}
+.console-provider .console-shell .composer-drop-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: var(--console-raised);
+  color: var(--console-accent);
+  font-weight: 600;
+  pointer-events: none;
+}
 .console-provider .console-shell .send-button[data-size] {
   border-radius: 8px;
   background: var(--console-accent);
