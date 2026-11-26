@@ -6,8 +6,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use dioxus_primitives::scroll_area::ScrollDirection;
 use dioxus_sdk_time::{sleep, use_interval};
-use portal_types::agents::AgentView as Agent;
+use portal_types::agents::{ActivityView, AgentAddress, AgentEvent, AgentView as Agent};
 use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
+use portal_types::live::{ClientFrame, ServerFrame};
 use portal_types::{BoardView, PortalEvent};
 
 use crate::agent_view::{AgentView, Composers};
@@ -36,6 +37,74 @@ pub struct AgentPortal {
     pub agent_error: Memo<Option<String>>,
     pub board: Memo<Option<BoardView>>,
     pub board_error: Memo<Option<String>>,
+}
+
+/// Latest data from the current selection on the tab's socket.
+#[derive(Clone, Default)]
+struct LiveSelection {
+    id: u64,
+    address: Option<AgentAddress>,
+    agent: Option<Result<AgentEvent, String>>,
+    activity: Option<Result<ActivityView, crate::activity::Gap>>,
+}
+
+impl LiveSelection {
+    fn select(&mut self, address: Option<AgentAddress>) {
+        *self = Self {
+            id: self.id + 1,
+            address,
+            ..Self::default()
+        };
+    }
+
+    fn command(&self) -> ClientFrame {
+        ClientFrame::Open {
+            id: self.id,
+            address: self.address.clone(),
+        }
+    }
+
+    fn receive(&mut self, frame: ServerFrame) {
+        match frame {
+            ServerFrame::Agent { id, event } if id == self.id => self.agent = Some(Ok(*event)),
+            ServerFrame::AgentUnavailable { id, error } if id == self.id => {
+                self.agent = Some(Err(error))
+            }
+            ServerFrame::Activity { id, view } if id == self.id => self.activity = Some(Ok(*view)),
+            ServerFrame::ActivityUnavailable { id } if id == self.id => {
+                self.activity = Some(Err(crate::activity::Gap::Disconnected));
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LivePortal(Signal<LiveSelection>);
+
+impl LivePortal {
+    /// A tab's socket state before any agent is selected, for component tests.
+    #[cfg(test)]
+    pub(crate) fn idle() -> Self {
+        Self(Signal::new(LiveSelection::default()))
+    }
+
+    pub(crate) fn agent(self, address: &AgentAddress) -> Option<Result<AgentEvent, String>> {
+        let current = self.0.read();
+        (current.address.as_ref() == Some(address))
+            .then(|| current.agent.clone())
+            .flatten()
+    }
+
+    pub(crate) fn activity(
+        self,
+        address: &AgentAddress,
+    ) -> Option<Result<ActivityView, crate::activity::Gap>> {
+        let current = self.0.read();
+        (current.address.as_ref() == Some(address))
+            .then(|| current.activity.clone())
+            .flatten()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -292,7 +361,20 @@ impl PortalState {
         self.agents_received.then_some(self.agents.as_slice())
     }
 
+    fn receive(&mut self, frame: ServerFrame, now: u64) {
+        match frame {
+            ServerFrame::Portal { event } => self.update(Ok(event), now),
+            ServerFrame::Inbox { result } => self.inbox.update(result, now),
+            _ => unreachable!("detail frames go to the selected pane"),
+        }
+    }
+
     pub(crate) fn update(&mut self, result: Result<PortalEvent, String>, now: u64) {
+        // Only transport loss invalidates both lanes. Observer status and the
+        // separately composed inbox publication each update their own projection.
+        if let Err(message) = &result {
+            self.inbox.update(Err(message.clone()), now);
+        }
         let result = result.and_then(|event| match event {
             PortalEvent::Snapshot(snapshot) => Ok(snapshot),
             PortalEvent::Status(status) => Err(status.error),
@@ -368,7 +450,6 @@ impl PortalState {
                         });
                     }
                 }
-                self.inbox.update(snapshot.inbox.ok_or_else(missing), now);
                 // A delivered snapshot proves the stream is live. Its domain gaps are reported
                 // where each domain is shown, never as a paused stream.
                 self.paused = false;
@@ -377,8 +458,7 @@ impl PortalState {
                 self.paused = true;
                 self.board_error = Some(message.clone());
                 self.agent_error = Some(message.clone());
-                self.catalogue.observation_error = Some(message.clone());
-                self.inbox.update(Err(message), now);
+                self.catalogue.observation_error = Some(message);
             }
         }
     }
@@ -424,14 +504,6 @@ pub fn App() -> Element {
         agent_error,
         board,
         board_error,
-    });
-    let mut inbox_state = use_signal(InboxState::default);
-    use_future(move || async move {
-        loop {
-            let result = api::inbox().await;
-            inbox_state.write().update(result, clock_ms());
-            sleep(RETRY).await;
-        }
     });
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
@@ -483,19 +555,49 @@ pub fn App() -> Element {
     });
     use_context_provider(|| Signal::new(Conversations::default()));
 
-    use_future(move || async move {
+    let mut live = use_context_provider(|| {
+        LivePortal(Signal::new(LiveSelection {
+            address: selected.peek().clone(),
+            ..LiveSelection::default()
+        }))
+    })
+    .0;
+    let socket = use_coroutine(move |mut changes| async move {
         loop {
-            let result = api::watch(|event| publication.write().update(event, clock_ms())).await;
+            let mut details = live;
+            let result = api::watch(
+                &mut changes,
+                || live.peek().command(),
+                |frame| match frame {
+                    frame @ (ServerFrame::Portal { .. } | ServerFrame::Inbox { .. }) => {
+                        publication.write().receive(frame, clock_ms())
+                    }
+                    detail => details.write().receive(detail),
+                },
+            )
+            .await;
             if let Err(message) = result {
-                publication.write().update(Err(message), clock_ms());
+                publication.write().update(Err(message.clone()), clock_ms());
+                let mut details = live.write();
+                details.agent = Some(Err(message));
+                details.activity = Some(Err(crate::activity::Gap::Disconnected));
             }
             sleep(RETRY).await;
+            let address = live.peek().address.clone();
+            live.write().select(address);
+        }
+    });
+    use_effect(move || {
+        let address = selected();
+        if address != live.peek().address {
+            live.write().select(address);
+            socket.send(());
         }
     });
     use_interval(RETRY, move |()| now.set(clock_ms()));
 
     let inbox = use_memo(move || {
-        let mut items = inbox_state.read().items();
+        let mut items = publication.read().inbox.items();
         if let Some(board) = &publication.read().board {
             for item in &mut items {
                 if item.selection.kind == InboxKind::UnseenWorker
@@ -519,7 +621,8 @@ pub fn App() -> Element {
             linked.set(true);
             return;
         };
-        let state = inbox_state.read();
+        let current = publication.read();
+        let state = &current.inbox;
         if state.snapshot.is_none() {
             return;
         }
@@ -547,7 +650,7 @@ pub fn App() -> Element {
 
     let view = board();
     let items = inbox();
-    let state = inbox_state();
+    let state = publication.read().inbox.clone();
     let elapsed_ms = now().saturating_sub(state.received_ms);
     let mut groups = view.as_ref().map(|view| navigation_groups(view, &agents()));
     let agent_count = groups.as_ref().map_or(0, |groups| {
@@ -958,6 +1061,7 @@ mod shell_tests {
             agents: Some(agents.clone()),
             inbox: None,
             repos: None,
+            autonomy: None,
             gaps: vec![],
         };
         state.update(Ok(PortalEvent::Snapshot(Box::new(snapshot))), 1);
@@ -970,7 +1074,29 @@ mod shell_tests {
     }
 
     #[test]
-    fn portal_publications_and_status_keep_stream_order() -> Result<(), serde_json::Error> {
+    fn late_detail_frames_are_ignored_even_when_reopening_the_same_pane() {
+        let address = AgentAddress::local("pane");
+        let mut selection = LiveSelection::default();
+        selection.select(Some(address.clone()));
+        let first = selection.id;
+        selection.select(None);
+        selection.select(Some(address));
+        selection.receive(ServerFrame::AgentUnavailable {
+            id: first,
+            error: "old selection".into(),
+        });
+        selection.receive(ServerFrame::ActivityUnavailable { id: first });
+        assert!(selection.agent.is_none());
+        assert!(selection.activity.is_none());
+        selection.receive(ServerFrame::ActivityUnavailable { id: selection.id });
+        assert_eq!(
+            selection.activity,
+            Some(Err(crate::activity::Gap::Disconnected))
+        );
+    }
+
+    #[test]
+    fn portal_publications_and_status_keep_stream_order() -> Result<(), String> {
         use portal_types::{PortalAvailability, PortalSnapshot, PortalStatus};
 
         let gapped = |revision, gaps| {
@@ -988,6 +1114,7 @@ mod shell_tests {
                 agents: Some(vec![]),
                 inbox: Some(InboxView::default()),
                 repos: Some(portal_types::agents::RepoList::default()),
+                autonomy: None,
                 gaps,
             }))
         };
@@ -999,16 +1126,30 @@ mod shell_tests {
             })
         };
         let mut state = PortalState::default();
-        // Exercise the same decoder and reducer as the one-name browser stream.
-        let apply = |state: &mut PortalState, event: PortalEvent, now| {
-            let bytes = serde_json::to_vec(&event)?;
-            state.update(Ok(serde_json::from_slice(&bytes)?), now);
-            Ok::<(), serde_json::Error>(())
+        // Exercise the same decoder and reducer as the browser socket.
+        let mut stamp = None;
+        let mut apply = |state: &mut PortalState, frame: ServerFrame, now| {
+            let text = serde_json::to_string(&frame).map_err(|error| error.to_string())?;
+            state.receive(api::decode_live(&text, &mut stamp)?, now);
+            Ok::<(), String>(())
         };
-        apply(&mut state, disconnected(), 1)?;
+        apply(
+            &mut state,
+            ServerFrame::Portal {
+                event: disconnected(),
+            },
+            1,
+        )?;
         assert!(state.paused);
         assert!(state.board.is_none());
-        apply(&mut state, snapshot(2), 2)?;
+        apply(&mut state, ServerFrame::Portal { event: snapshot(2) }, 2)?;
+        apply(
+            &mut state,
+            ServerFrame::Inbox {
+                result: Ok(InboxView::default()),
+            },
+            2,
+        )?;
         assert!(!state.paused);
         assert!(state.board_error.is_none());
         assert!(state.agent_error.is_none());
@@ -1018,12 +1159,25 @@ mod shell_tests {
             Some(2)
         );
         let retained = state.clone();
-        apply(&mut state, disconnected(), 3)?;
+        apply(
+            &mut state,
+            ServerFrame::Portal {
+                event: disconnected(),
+            },
+            3,
+        )?;
         assert!(state.paused);
         assert!(state.board_error.is_some());
         assert!(state.agent_error.is_some());
         assert_eq!(state.board, retained.board);
         assert_eq!(state.agents, retained.agents);
+        apply(
+            &mut state,
+            ServerFrame::Inbox {
+                result: Err("observation publisher disconnected".into()),
+            },
+            3,
+        )?;
         assert_eq!(state.inbox.snapshot, retained.inbox.snapshot);
         assert_eq!(state.inbox.received_ms, 2);
         assert_eq!(state.inbox.count(), None);
@@ -1033,10 +1187,25 @@ mod shell_tests {
             availability: portal_types::ObservationAvailability::Failed,
             detail: "resource job-validity/lead has no recorded owner pane".into(),
         };
-        apply(&mut state, gapped(4, vec![gap]), 4)?;
+        apply(
+            &mut state,
+            ServerFrame::Portal {
+                event: gapped(4, vec![gap]),
+            },
+            4,
+        )?;
         assert!(!state.paused);
         assert!(state.board_error.is_none());
         assert!(state.agent_error.is_none());
+        // The inbox has its own frames: a portal snapshot does not clear its error.
+        assert_eq!(state.inbox.count(), None);
+        apply(
+            &mut state,
+            ServerFrame::Inbox {
+                result: Ok(InboxView::default()),
+            },
+            4,
+        )?;
         assert_eq!(state.inbox.count(), Some(0));
         assert_eq!(
             state.board.as_ref().map(|board| board.generated_ms),

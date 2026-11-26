@@ -4,6 +4,7 @@ use super::*;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use tokio_tungstenite::tungstenite::{self, Message, client::IntoClientRequest};
 
 struct Portal {
     _process: Owned,
@@ -83,24 +84,29 @@ impl Portal {
         (status, headers, body)
     }
 
-    fn stream(&self) -> Http {
-        let (http, status, headers) = Http::open(self.port, "/api/stream");
-        assert_eq!(status, 200);
-        assert_eq!(headers["content-type"], "text/event-stream");
-        http
+    fn stream(&self) -> Live {
+        let socket = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        socket.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+        socket.set_write_timeout(Some(PROCESS_DEADLINE)).unwrap();
+        let mut request = format!("ws://localhost:{}/api/live", self.port)
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "origin",
+            format!("http://localhost:{}", self.port).parse().unwrap(),
+        );
+        let (socket, response) = tungstenite::client(request, socket).unwrap();
+        assert_eq!(response.status(), 101);
+        assert_eq!(response.headers()["upgrade"], "websocket");
+        Live(socket)
     }
 }
 
 struct Http {
     reader: BufReader<TcpStream>,
-    pending: String,
 }
 
 impl Http {
-    fn open(port: u16, path: &str) -> (Self, u16, BTreeMap<String, String>) {
-        Self::request(port, "GET", path)
-    }
-
     fn request(port: u16, method: &str, path: &str) -> (Self, u16, BTreeMap<String, String>) {
         let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
         socket.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
@@ -124,14 +130,7 @@ impl Http {
             let (name, value) = line.trim().split_once(':').unwrap();
             headers.insert(name.to_lowercase(), value.trim().to_owned());
         }
-        (
-            Self {
-                reader,
-                pending: String::new(),
-            },
-            status,
-            headers,
-        )
+        (Self { reader }, status, headers)
     }
 
     fn chunk(&mut self) -> Vec<u8> {
@@ -148,37 +147,52 @@ impl Http {
         assert_eq!(&end, b"\r\n");
         bytes
     }
+}
 
-    fn event(&mut self) -> (String, String) {
+struct Live(tungstenite::WebSocket<TcpStream>);
+
+impl Live {
+    fn open(&mut self, host: &str, pane: &str) {
+        self.0
+            .send(Message::Text(
+                json!({"type":"open", "id":1, "address":{"host":host,"pane":pane}})
+                    .to_string()
+                    .into(),
+            ))
+            .unwrap();
+    }
+
+    fn event(&mut self, expected: &str) -> (String, Value) {
         loop {
-            if let Some(end) = self.pending.find("\n\n") {
-                let event: String = self.pending.drain(..end + 2).collect();
-                let name = event.lines().find_map(|line| line.strip_prefix("event: "));
-                if let Some(name) = name {
-                    let data = event
-                        .lines()
-                        .filter_map(|line| line.strip_prefix("data: "))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    return (name.to_owned(), data);
+            match self.0.read().unwrap() {
+                Message::Text(text) => {
+                    let frame: Value = serde_json::from_str(&text).unwrap();
+                    let kind = frame["type"].as_str().unwrap();
+                    if kind == expected {
+                        return (kind.to_owned(), frame["event"].clone());
+                    }
+                    assert!(
+                        matches!(
+                            kind,
+                            "portal" | "inbox" | "activity" | "activity_unavailable"
+                        ),
+                        "unexpected live frame: {frame}"
+                    );
                 }
-            } else {
-                let chunk = self.chunk();
-                assert!(!chunk.is_empty(), "SSE ended");
-                self.pending.push_str(std::str::from_utf8(&chunk).unwrap());
+                Message::Ping(_) | Message::Pong(_) => {}
+                message => panic!("unexpected live message: {message:?}"),
             }
         }
     }
 
     fn publication(&mut self) -> Value {
         loop {
-            let (kind, data) = self.event();
-            assert_eq!(kind, "portal", "{kind}: {data}");
-            let mut frame: Value = serde_json::from_str(&data).unwrap();
+            let (kind, mut frame) = self.event("portal");
+            assert_eq!(kind, "portal", "{kind}: {frame}");
             if frame.get("observation").is_none() {
                 // The serving process stamps its release; the rest is the observation's.
                 let stamp = frame.as_object_mut().unwrap().remove("dogsled");
-                assert_eq!(stamp, Some(json!(env!("CARGO_PKG_VERSION"))), "{data}");
+                assert_eq!(stamp, Some(json!(env!("CARGO_PKG_VERSION"))), "{frame}");
                 return frame;
             }
             assert!(frame["error"].is_string());
@@ -781,9 +795,8 @@ fn portal_readers_share_one_revision_and_one_subscription_without_observation() 
     assert!(rig.dir.join("state/state.db").is_dir());
     drop(supplied);
     for client in &mut clients {
-        let (kind, data) = client.event();
+        let (kind, status) = client.event("portal");
         assert_eq!(kind, "portal");
-        let status: Value = serde_json::from_str(&data).unwrap();
         assert_eq!(status["observation"], "disconnected");
         assert!(status["error"].as_str().unwrap().contains("observation"));
     }
@@ -886,10 +899,9 @@ fn detail_readers_use_session_qualified_publication_without_observation() {
             content["revision"].to_string()
         );
     }
-    let (mut events, status, _) = Http::open(portal.port, "/api/agents/local/w1:p1/events");
-    assert_eq!(status, 200);
-    let (kind, data) = events.event();
-    let data: Value = serde_json::from_str(&data).unwrap();
+    let mut events = portal.stream();
+    events.open("local", "w1:p1");
+    let (kind, data) = events.event("agent");
     assert_eq!(kind, "agent");
     supplied.interest("w1:p1", true);
     assert_eq!(data["state"], "working");
@@ -914,9 +926,8 @@ fn cold_portal_reports_unavailable_and_connects_when_publication_arrives() {
     let _locks = isolate(&rig);
     let portal = Portal::start(&rig);
     let mut client = portal.stream();
-    let (kind, data) = client.event();
+    let (kind, status) = client.event("portal");
     assert_eq!(kind, "portal");
-    let status: Value = serde_json::from_str(&data).unwrap();
     assert_eq!(status["observation"], "unavailable");
     assert!(
         status["error"]

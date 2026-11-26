@@ -145,7 +145,7 @@ name = "dogsled"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = "0.29.0"
@@ -175,6 +175,7 @@ axoupdater = { version = "0.10.3", default-features = false, features = ["github
 sysinfo = { version = "=0.40.1", default-features = false, features = ["system"] }
 
 [dev-dependencies]
+tokio-tungstenite = "0.29"
 tower = { version = "0.5.2", features = ["util"] }
 
 [lints.rust]

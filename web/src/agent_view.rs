@@ -10,7 +10,7 @@ use dioxus::web::WebEventExt;
 use dioxus_icons::lucide::{ArrowUp, ExternalLink, Paperclip, Square, X};
 use dioxus_primitives::dioxus_attributes::attributes;
 use dioxus_primitives::scroll_area::ScrollDirection;
-use dioxus_sdk_time::{sleep, use_interval};
+use dioxus_sdk_time::use_interval;
 use gloo_net::http::Request;
 use js_sys::wasm_bindgen::JsCast;
 use portal_types::agents::{self as wire, BlockedPrompt, Role, Turn, current_turn};
@@ -661,74 +661,71 @@ fn AgentSession(
         }
     });
 
-    let event_pane = address.clone();
-    use_future(move || {
-        let pane = event_pane.clone();
-        async move {
-            let mut backoff = Backoff::default();
-            let mut revisions = None;
-            loop {
-                let mut was_blocked = agent.peek().as_ref().is_some_and(is_blocked);
-                let result = api::watch_agent(&pane, |event| {
-                    backoff.reset();
-                    stream_error.set(None);
-                    let parts = changed_parts(revisions.as_ref(), &event, was_blocked);
-                    was_blocked = event_is_blocked(&event, was_blocked);
-                    let session_changed = detail_session.peek().as_ref() != Some(&event.session);
-                    if session_changed {
-                        settings.set(None);
-                        settings_error.set(None);
-                        settings_load_error.set(None);
-                        match &event.session {
-                            wire::DetailSession::Available(session) => conversations
-                                .write()
-                                .host_mut(&pane.host)
-                                .select_session(&pane.pane, session),
-                            wire::DetailSession::Unavailable => conversations
-                                .write()
-                                .host_mut(&pane.host)
-                                .unavailable(&pane.pane),
-                        }
-                        screen.set(None);
-                        files.set(None);
-                        detail_session.set(Some(event.session.clone()));
-                    }
-                    revisions.clone_from(&event.revisions);
-                    let refresh_settings = settings_due(
-                        latest_event.peek().as_ref(),
-                        &event,
-                        &parts,
-                        session_changed,
-                    );
-                    latest_event.set(Some(event));
-                    if refresh_settings {
-                        settings_trigger += 1;
-                    }
-                    if parts.conversation {
-                        conversation_trigger += 1;
-                    }
-                    if parts.screen {
-                        screen_trigger += 1;
-                    }
-                    if parts.files {
-                        files_trigger += 1;
-                    }
-                    if !was_blocked {
-                        screen.set(None);
-                        screen_error.set(None);
-                    }
-                })
-                .await;
-                stream_error.set(Some(
-                    result
-                        .err()
-                        .unwrap_or_else(|| "the agent stream ended".to_owned()),
-                ));
-                revisions = None;
-                latest_event.set(None);
-                sleep(backoff.next_delay()).await;
+    let socket = use_context::<crate::app::LivePortal>();
+    let event_address = address.clone();
+    let updates = use_memo(move || socket.agent(&event_address));
+    let event_address = address.clone();
+    use_effect(move || match updates() {
+        Some(Ok(event)) => {
+            stream_error.set(None);
+            let was_blocked = agent.peek().as_ref().is_some_and(is_blocked);
+            let parts = changed_parts(
+                latest_event
+                    .peek()
+                    .as_ref()
+                    .and_then(|previous| previous.revisions.as_ref()),
+                &event,
+                was_blocked,
+            );
+            let was_blocked = event_is_blocked(&event, was_blocked);
+            let session_changed = detail_session.peek().as_ref() != Some(&event.session);
+            if session_changed {
+                settings.set(None);
+                settings_error.set(None);
+                settings_load_error.set(None);
+                match &event.session {
+                    wire::DetailSession::Available(session) => conversations
+                        .write()
+                        .host_mut(&event_address.host)
+                        .select_session(&event_address.pane, session),
+                    wire::DetailSession::Unavailable => conversations
+                        .write()
+                        .host_mut(&event_address.host)
+                        .unavailable(&event_address.pane),
+                }
+                screen.set(None);
+                files.set(None);
+                detail_session.set(Some(event.session.clone()));
+            }
+            let refresh_settings = settings_due(
+                latest_event.peek().as_ref(),
+                &event,
+                &parts,
+                session_changed,
+            );
+            latest_event.set(Some(event));
+            if refresh_settings {
+                settings_trigger += 1;
+            }
+            if parts.conversation {
+                conversation_trigger += 1;
+            }
+            if parts.screen {
+                screen_trigger += 1;
+            }
+            if parts.files {
+                files_trigger += 1;
+            }
+            if !was_blocked {
+                screen.set(None);
+                screen_error.set(None);
             }
         }
+        Some(Err(error)) => {
+            stream_error.set(Some(error));
+            latest_event.set(None);
+        }
+        None => {}
     });
 
     let send_pane = address.clone();
@@ -1279,26 +1276,6 @@ fn agent_inbox_ids(
         .filter(|item| item.selection.host == address.host && item.selection.pane == address.pane)
         .map(|item| (item.selection.id.clone(), item.revision))
         .collect()
-}
-
-struct Backoff(Duration);
-
-impl Default for Backoff {
-    fn default() -> Self {
-        Self(Duration::from_secs(1))
-    }
-}
-
-impl Backoff {
-    fn next_delay(&mut self) -> Duration {
-        let delay = self.0;
-        self.0 = (delay * 2).min(Duration::from_secs(30));
-        delay
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
 }
 
 fn nonempty(value: &str) -> Option<&str> {
@@ -2508,6 +2485,8 @@ mod tests {
             blocked: None,
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         }
     }
 
@@ -2922,16 +2901,6 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_backoff_doubles_caps_and_resets_after_an_event() {
-        let mut backoff = Backoff::default();
-        let delays: Vec<_> = (0..8).map(|_| backoff.next_delay().as_secs()).collect();
-        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30, 30]);
-        backoff.reset();
-        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
-        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
-    }
-
-    #[test]
     fn pending_list_identity_uses_only_this_agents_inbox_ids_and_revisions() {
         use crate::app::{InboxItem, InboxKind, InboxSelection};
         let item = |host: &str, pane: &str, id: &str| InboxItem {
@@ -3001,6 +2970,8 @@ mod tests {
             blocked: None,
             reply: None,
             launch: None,
+            autonomous: None,
+            decisions: None,
         };
         assert!(!is_blocked(&agent));
         agent.blocked = Some(BlockedPrompt {
