@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dogsled / North Star design book</title>
+<style>
+  * { box-sizing: border-box; }
+  :root { color-scheme: light; --paper:#f5f3ef; --ink:#201d2e; --muted:#595468; --rule:#d5cfd6; --violet:#503b89; --light:#ebe5f6; --mono:ui-monospace,SFMono-Regular,Consolas,monospace; --ui:system-ui,sans-serif; }
+  body { margin:0; background:var(--paper); color:var(--ink); font:16px/1.6 var(--ui); }
+  a { color:inherit; }
+  button { font:inherit; cursor:pointer; }
+  :focus-visible { outline:3px solid #8b65dc; outline-offset:4px; }
+  .skip { position:absolute; z-index:10; left:16px; top:8px; padding:8px 12px; background:white; transform:translateY(-150%); }
+  .skip:focus { transform:none; }
+  .wrap { width:min(1280px, 100% - 96px); margin-inline:auto; }
+  .overline, .folio, .bookbar, .chapter-num, .plate-num, .spec, .budget th, .index-key { font:600 12px/1.5 var(--mono); letter-spacing:.1em; text-transform:uppercase; }
+  .bookbar { position:sticky; top:0; z-index:2; background:var(--paper); border-bottom:1px solid var(--rule); }
+  .bookbar .wrap { min-height:62px; display:flex; align-items:center; justify-content:space-between; gap:24px; }
+  .bookbar a { text-decoration:none; }
+  .bookbar a:hover, .index a:hover { color:var(--violet); text-decoration:underline; text-underline-offset:4px; }
+  .bookbar nav { display:flex; gap:28px; flex-wrap:wrap; }
+  .bookbrand { display:flex; gap:10px; align-items:center; white-space:nowrap; }
+  .mark { width:18px; height:18px; flex:none; color:inherit; }
+  .cover { position:relative; isolation:isolate; overflow:hidden; background:#211a35; color:#fbf6ff; }
+  .cover-inner { min-height:545px; display:flex; flex-direction:column; justify-content:center; position:relative; padding:76px 0; }
+  .cover .overline { color:#d5c4f9; margin:0 0 24px; }
+  .cover h1 { font:400 clamp(68px, 9vw, 135px)/.87 Georgia,serif; letter-spacing:-.065em; margin:0; }
+  .cover h1 em { font-weight:400; color:#d6c3fa; }
+  .cover .thesis { font-size:clamp(19px, 2vw, 25px); line-height:1.42; max-width:465px; margin:34px 0 0; }
+  .cover .folio { position:absolute; bottom:22px; right:0; color:#d5c4f9; }
+  .cover-art { position:absolute; inset:0 0 0 auto; width:60%; height:100%; z-index:-1; }
+  .index { border-bottom:1px solid var(--rule); background:#ebe5f0; }
+  .index .wrap { min-height:74px; display:flex; align-items:center; justify-content:space-between; gap:18px; }
+  .index a { text-decoration:none; font-weight:650; }
+  .index-key { color:var(--violet); margin-right:8px; }
+  [id] { scroll-margin-top:90px; }
+  .chapter { display:grid; grid-template-columns:175px minmax(0,1fr); gap:36px; padding:78px 0; border-bottom:1px solid var(--rule); }
+  .chapter-num { color:var(--violet); padding-top:13px; }
+  .chapter h2, .gallery h2 { font:400 clamp(40px,6vw,77px)/1 Georgia,serif; letter-spacing:-.045em; margin:0 0 20px; text-wrap:balance; }
+  .lede { max-width:680px; font-size:21px; line-height:1.5; color:var(--muted); margin:0 0 36px; }
+  .principles { display:grid; grid-template-columns:1fr 1fr; column-gap:32px; }
+  .principle { border-top:1px solid var(--rule); padding:18px 0 20px; }
+  .principle .overline { color:var(--violet); }
+  .principle h3 { font-size:19px; margin:3px 0 5px; }
+  .principle p { margin:0; color:var(--muted); max-width:42ch; }
+  .goalband { background:var(--light); border-left:3px solid var(--violet); padding:18px 22px; margin:0 0 32px; }
+  .goalband p { margin:5px 0 0; max-width:68ch; }
+  .table-wrap { overflow:auto; }
+  .budget { width:100%; border-collapse:collapse; text-align:left; }
+  .budget th { color:var(--violet); text-align:left; }
+  .budget th, .budget td { padding:12px 12px 12px 0; border-bottom:1px solid var(--rule); vertical-align:top; }
+  .budget td:first-child { font-weight:650; min-width:148px; }
+  .budget td:nth-child(2) { font:700 15px/1.7 var(--mono); white-space:nowrap; min-width:104px; }
+  .method { margin:22px 0 0; max-width:74ch; color:var(--muted); }
+  .swatches { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:0 0 30px; }
+  .swatch { min-height:105px; border-radius:8px; padding:13px; display:grid; align-content:end; gap:2px; font-size:13px; font-weight:650; background:var(--sw); color:var(--label,#e8ecf5); }
+  .swatch code { font-weight:400; }
+  .gallery { padding:79px 0 32px; }
+  .gallery > .overline { color:var(--violet); margin-bottom:12px; }
+  .plate-index { display:flex; flex-wrap:wrap; gap:8px; padding:0; margin:0 0 56px; list-style:none; }
+  .plate-index a { display:block; text-decoration:none; padding:8px 12px; border:1px solid var(--rule); border-radius:5px; font-size:13px; font-weight:600; }
+  .plate-index a:hover { background:var(--light); }
+  .plate { margin:0 0 66px; }
+  .plate-head { display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:18px; margin-bottom:14px; border-top:1px solid var(--rule); padding-top:15px; }
+  .plate-num { color:var(--violet); background:var(--light); border-radius:4px; padding:6px 9px; }
+  .plate h3 { font:400 clamp(25px,4vw,38px)/1 Georgia,serif; letter-spacing:-.025em; margin:0; }
+  .zoom { color:var(--violet); background:transparent; border:1px solid var(--rule); padding:7px 12px; border-radius:5px; font-size:13px; }
+  .zoom:hover { background:var(--light); }
+  .stage { position:relative; overflow:auto; aspect-ratio:8/5; background:#0f1626; border-radius:9px; }
+  .stage > .screen { transform:scale(var(--scale,1)); transform-origin:top left; }
+  .stage.ready { overflow:hidden; }
+  figcaption { display:grid; grid-template-columns:1fr auto; gap:18px; padding-top:12px; color:var(--muted); }
+  figcaption p { margin:0; }
+  .spec { white-space:nowrap; margin-top:3px; }
+  .colophon { background:#211a35; color:#e9def9; padding:36px 0; }
+  .colophon .wrap { display:flex; justify-content:space-between; align-items:start; gap:24px; }
+  .colophon p { margin:0; }
+  #viewer { position:fixed; inset:0; width:100%; height:100%; max-width:none; max-height:none; margin:0; padding:0; border:0; color:#e8ecf5; background:#0f1626; }
+  .viewer-scroll { width:100%; height:100%; overflow:auto; }
+  #back { position:fixed; z-index:3; right:14px; top:8px; border:1px solid #a7afff; background:#242d48; color:white; border-radius:6px; padding:5px 12px; font-size:13px; }
+  @media(max-width:760px) {
+    .wrap { width:calc(100% - 36px); }
+    .bookbar { position:static; }
+    .bookbar .wrap, .index .wrap { flex-wrap:wrap; justify-content:flex-start; gap:10px 16px; padding-block:12px; }
+    .bookbar nav { gap:12px; }
+    .cover-art { width:100%; opacity:.48; }
+    .cover-inner { min-height:470px; }
+    .chapter { display:block; padding:54px 0; }
+    .chapter-num { padding:0; margin-bottom:12px; }
+    .principles, .swatches { grid-template-columns:1fr 1fr; }
+    .plate-head { gap:10px; }
+    figcaption { grid-template-columns:1fr; gap:3px; }
+    .colophon .wrap { flex-direction:column; }
+  }
+  @media(max-width:480px) { .principles { grid-template-columns:1fr; } }
+
+  /* The book scrolls. Each product plate is a fixed 1440 by 900 screen. */
+  .screen { --ground:#0f1626; --panel:#131b2e; --raised:#1a2339; --selected:#1f2943; --line:#222c45; --lightline:#38445f; --text:#e8ecf5; --quiet:#9aa3b9; --signal:#8b95ff; --yellow:#f2c94c; --green:#4cc38a; display:grid; grid-template:52px minmax(0,1fr) / 292px minmax(0,1fr); width:1440px; height:900px; overflow:hidden; color:var(--text); background:var(--ground); color-scheme:dark; font:15px/1.5 "IBM Plex Sans",var(--ui); font-variant-numeric:tabular-nums; }
+  .screen p, .screen ul, .screen ol, .screen dl { margin:0; }
+  .screen h4, .screen h5, .screen h6 { margin:0; line-height:1.25; }
+  .screen h4 { font-size:30px; font-weight:650; letter-spacing:-.025em; }
+  .screen h5 { font-size:19px; font-weight:650; }
+  .screen h6 { font-size:15px; font-weight:650; }
+  .screen code, .screen time, .product-tag, .meta, .seq { font-family:"JetBrains Mono",var(--mono); font-size:12px; }
+  .appbar { grid-column:1/-1; display:flex; align-items:center; gap:22px; padding:0 22px; border-bottom:1px solid var(--line); background:var(--panel); }
+  .appname { display:flex; gap:9px; align-items:center; font-size:16px; font-weight:750; }
+  .appname svg { color:var(--signal); }
+  .top-work { font-size:13px; color:var(--quiet); }
+  .appbar .freshness { margin-left:auto; margin-right:130px; }
+  .stage .appbar .freshness { margin-right:0; }
+  .app-sidebar { display:flex; flex-direction:column; overflow:auto; border-right:1px solid var(--line); background:var(--panel); padding:21px 14px 14px; }
+  .app-sidebar h5 { display:flex; align-items:center; gap:8px; margin:0 8px 10px; font-size:15px; }
+  .app-sidebar .needs { color:var(--yellow); }
+  .count { color:var(--ground); background:var(--yellow); padding:0 7px; border-radius:9px; font:700 12px/18px var(--mono); }
+  .request { position:relative; display:grid; gap:4px; background:var(--raised); border:1px solid var(--line); border-left:3px solid var(--yellow); border-radius:7px; margin-bottom:8px; padding:9px 10px; }
+  .request.current { background:var(--selected); border-color:var(--signal); border-left-color:var(--yellow); }
+  .request small { display:flex; justify-content:space-between; gap:8px; }
+  .request > strong, .leadrow > strong { font-size:14px; }
+  .app-sidebar small, .quiet { color:var(--quiet); }
+  .product-tag { text-transform:uppercase; letter-spacing:.09em; color:var(--quiet); }
+  .repo-label { display:flex; justify-content:space-between; margin:22px 8px 8px; }
+  .leadrow { display:grid; gap:4px; padding:8px 10px; border-radius:6px; border:1px solid transparent; }
+  .leadrow.current { background:var(--selected); border-color:var(--lightline); }
+  .leadrow strong { display:flex; align-items:center; gap:8px; }
+  .leadrow small { padding-left:15px; }
+  .repo-debt { margin:4px 10px 0 !important; font-size:12px; }
+  .sidefoot { margin-top:auto; padding:14px 8px 0; font-size:12px; color:var(--quiet); }
+  .badge, .control { display:inline-flex; align-items:center; justify-content:center; width:fit-content; gap:6px; white-space:nowrap; border:1px solid var(--lightline); border-radius:6px; padding:3px 8px; color:var(--text); font-size:12px; font-weight:600; }
+  .control { padding:0 14px; min-height:38px; font-size:13px; background:var(--panel); }
+  .control.compact { min-height:29px; padding-inline:10px; }
+  .control.primary { background:var(--signal); color:#0b0f2a; border-color:var(--signal); }
+  .control.disabled { background:var(--raised); color:var(--quiet); }
+  .status { display:inline-flex; align-items:center; gap:7px; color:var(--quiet); font-size:12px; white-space:nowrap; }
+  .dot { display:inline-block; flex:none; width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .good { color:var(--green); } .need { color:var(--yellow); } .accent { color:var(--signal); }
+  .surface { min-height:0; min-width:0; display:flex; flex-direction:column; }
+  .pagehead { flex:none; padding:24px 32px 20px; border-bottom:1px solid var(--line); }
+  .pagehead .product-tag { margin-bottom:6px; }
+  .pagehead .head-line { display:flex; gap:12px; align-items:center; justify-content:space-between; }
+  .pagehead .quiet { margin-top:7px; }
+  .pagebody { overflow:auto; min-height:0; padding:26px 32px; }
+  .twocol { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); align-items:start; gap:20px; }
+  .equal { grid-template-columns:1fr 1fr; }
+  .box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; }
+  .box > .quiet, .box > p { margin-top:6px; }
+  .overview { display:grid; gap:23px; }
+  .decision { border-left:3px solid var(--yellow); display:grid; gap:7px; }
+  .decision .control { margin-top:8px; }
+  .work-table { width:100%; border-collapse:collapse; margin-top:12px; text-align:left; }
+  .work-table th, .work-table td { border-top:1px solid var(--line); padding:14px 8px 14px 0; }
+  .work-table th { font-weight:500; color:var(--quiet); font-size:12px; }
+  .work-table td { font-size:14px; }
+  .metric { font:600 42px/1.15 var(--mono); color:var(--signal); }
+  .capacity { display:grid; gap:8px; }
+  .capacity .metaline { margin-top:8px; padding-top:12px; border-top:1px solid var(--line); }
+  .new-body { flex:1; display:grid; align-content:center; padding-bottom:105px; }
+  .new-body > div { width:720px; margin-inline:auto; }
+  .new-body h4 { font-size:38px; margin:6px 0 5px; }
+  .new-body .draft { margin-top:22px; }
+  .draft { border:1px solid var(--lightline); border-radius:12px; background:var(--panel); }
+  .draft-text { padding:19px; min-height:106px; }
+  .new-body .draft-text { min-height:146px; }
+  .draft-controls { display:flex; align-items:center; gap:8px; padding:12px 14px; }
+  .draft-controls .push, .actionbar .push { margin-left:auto; }
+  .notice { padding:12px 14px; border:1px solid var(--lightline); background:var(--raised); border-radius:6px; }
+  .new-body .notice { margin-top:13px; }
+  .lead-grid { flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 300px; }
+  .conversation { min-height:0; min-width:0; display:flex; flex-direction:column; }
+  .thread { overflow:auto; padding:21px 20px; flex:1; min-height:0; }
+  .measure { max-width:640px; margin-inline:auto; }
+  .msg { display:grid; grid-template-columns:46px 1fr; gap:8px; margin:0 0 20px; }
+  .msg time { color:var(--quiet); padding-top:3px; }
+  .msg h6 { margin-bottom:5px; }
+  .msg p + p { margin-top:7px; }
+  .owner-msg { background:var(--raised); padding:11px 13px; border-radius:8px; }
+  .folded { border:1px solid var(--line); padding:8px 10px; border-radius:6px; margin:0 0 19px 54px; color:var(--quiet); font-size:13px; }
+  .composer-wrap { flex:none; padding:13px 20px 21px; border-top:1px solid var(--line); }
+  .composer-wrap .draft-text { min-height:46px; padding:12px 15px 2px; }
+  .inspector { overflow:auto; border-left:1px solid var(--line); padding:18px 15px; background:var(--panel); }
+  .inspector .box { background:var(--raised); padding:13px; margin-bottom:20px; }
+  .screen .tabs { display:flex; gap:15px; border-bottom:1px solid var(--line); color:var(--quiet); font-size:13px; font-weight:650; }
+  .tabs > span { padding:10px 2px; white-space:nowrap; }
+  .tabs .on { border-bottom:2px solid var(--signal); color:var(--text); }
+  .pagehead .tabs { margin-top:13px; margin-bottom:-20px; border-bottom:0; }
+  .step-list { list-style:none; padding:0; }
+  .step-list li { border-bottom:1px solid var(--line); padding:11px 0; }
+  .check { margin-right:6px; color:var(--signal); }
+  .progress { background:var(--selected); border-radius:10px; height:5px; margin:9px 0 3px; }
+  .progress span { display:block; width:60%; height:100%; border-radius:inherit; background:var(--signal); }
+  .prompt { padding:24px 20px; flex:1; min-height:0; overflow:auto; }
+  .prompt h5 { font-size:24px; margin:8px 0; }
+  .choice { border:1px solid var(--lightline); border-radius:8px; padding:12px 14px; margin-top:12px; }
+  .choice.recommended { border-color:var(--signal); background:var(--selected); }
+  .choice p { padding-left:23px; margin-top:4px; }
+  .context { margin-top:19px; }
+  .context .draft-text { min-height:80px; padding:12px; margin-top:6px; }
+  .actionbar { flex:none; display:flex; justify-content:flex-end; gap:10px; align-items:center; padding:15px 24px; min-height:70px; border-top:1px solid var(--line); background:var(--panel); }
+  .actionbar > .quiet:first-child { margin-right:auto; }
+  .review-body { flex:1; display:grid; gap:24px; grid-template-columns:minmax(0,680px) minmax(0,300px); justify-content:center; padding:24px 30px; min-height:0; overflow:auto; }
+  .review-prose { font-size:16px; line-height:1.6; }
+  .review-prose h5, .review-prose h6 { margin:0 0 6px; }
+  .review-prose h6 { margin-top:18px; }
+  .review-prose ol { padding-left:23px; }
+  .review-prose li { padding:4px 0; }
+  .review-prose .note-line { border-left:2px solid var(--signal); padding-left:8px; background:var(--selected); }
+  .notes .box { margin-top:11px; }
+  .job-body, .recovery-body { flex:1; }
+  .job-body .box + .box { margin-top:14px; }
+  .kv { display:grid; grid-template-columns:105px 1fr; gap:8px; padding-top:14px; }
+  .kv dd { margin:0; }
+  .kv dt { color:var(--quiet); }
+  .sequence { list-style:none; padding:0; }
+  .sequence li { border-bottom:1px solid var(--line); padding:14px 0; display:grid; grid-template-columns:26px 1fr; }
+  .sequence small { display:block; color:var(--quiet); }
+  .output { background:#0c1321; border:1px solid var(--line); border-radius:6px; padding:16px; min-height:91px; margin-top:12px; color:var(--quiet); }
+  .recovery-body .twocol { margin-top:18px; }
+  .file-list { list-style:none; margin-top:11px !important; padding:0; }
+  .file-list li { border-top:1px solid var(--line); padding:10px 0; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the book</a>
+<header class="bookbar">
+  <div class="wrap">
+    <a class="bookbrand" href="#cover"><svg aria-hidden="true" class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg> Dogsled / Design</a>
+    <nav aria-label="Book chapters"><a href="#goals">Direction</a><a href="#speed">Speed</a><a href="#visual">System</a><a href="#screens">Screens</a></nav>
+  </div>
+</header>
+<main id="main">
+  <div id="cover" class="cover">
+    <svg class="cover-art" viewBox="0 0 720 545" preserveAspectRatio="none" aria-hidden="true">
+      <defs><pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0v32" fill="none" stroke="#d5c4f9" stroke-opacity=".12"/></pattern></defs>
+      <path fill="url(#grid)" d="M0 0h720v545H0z"/>
+      <g fill="none" stroke="#6b548e" opacity=".65">
+        <path d="M-50 523C110 522 172 476 231 398S401 298 437 227 454 95 549 66 656 86 764 8"/><path d="M-50 548C110 547 185 497 252 413S422 308 458 237 475 112 560 85 662 109 770 25"/><path d="M-50 573C110 572 203 509 270 429S443 318 479 247 496 129 571 104 666 132 782 42"/><path d="M-50 598C110 597 214 536 288 449S464 328 500 257 517 145 582 123 672 154 794 59"/><path d="M-50 623C110 622 220 567 306 469S485 338 521 267 538 162 593 142 678 176 806 76"/><path d="M-50 648C110 647 228 595 324 489S506 348 542 277 559 178 604 161 684 198 818 93"/>
+        <path d="M-50 468C100 470 135 437 187 372S355 274 392 205 416 69 523 38 638 46 739-25"/><path d="M-50 443C100 445 115 420 167 356S332 261 370 194 395 52 512 22 629 27 728-42"/><path d="M-50 418C100 420 96 403 147 340S310 248 348 183 375 36 499 4 620 7 717-58"/>
+      </g>
+      <path d="M36 495C155 484 168 456 216 384S386 287 414 219 435 87 538 52 648 65 767-12" fill="none" stroke="#c8aaff" stroke-width="2"/>
+      <g fill="#211a35" stroke="#c8aaff" stroke-width="2"><circle cx="216" cy="384" r="6"/><circle cx="414" cy="219" r="7"/><circle cx="538" cy="52" r="6"/></g>
+      <g fill="#dec9ff" font-family="monospace" font-size="11" letter-spacing="1"><text x="229" y="375">01 / RETURN</text><text x="427" y="209">02 / DECIDE</text><text x="550" y="44">03 / RESUME</text></g>
+    </svg>
+    <div class="wrap cover-inner">
+      <p class="overline">Dogsled · Product direction</p>
+      <h1>North <em>Star.</em></h1>
+      <p class="thesis">One place to run the work. See what needs you, decide in context, and get back to your own work.</p>
+      <span class="folio">Design book / 01</span>
+    </div>
+  </div>
+  <nav class="index" aria-label="Reading order"><div class="wrap">
+    <a href="#goals"><span class="index-key">01</span> Goals &amp; principles</a>
+    <a href="#speed"><span class="index-key">02</span> Speed budgets</a>
+    <a href="#visual"><span class="index-key">03</span> Visual system</a>
+    <a href="#screens"><span class="index-key">04</span> Seven screens</a>
+  </div></nav>
+  <div class="wrap">
+    <section class="chapter" id="goals">
+      <div class="chapter-num">01 / Direction</div>
+      <div>
+        <h2>Run the work,<br>not the machines.</h2>
+        <p class="lede">Dogsled is the console for one developer coordinating coding agents. After time away, they need to see what changed and what only they can decide.</p>
+        <div class="goalband"><span class="overline">The owner’s loop</span><p><strong>Return → decide → resume.</strong> Find the next decision without scanning every conversation. Act inside the relevant lead, then get back to your own work.</p><p><strong>Success:</strong> Name the next decision at a glance, open it in one action, and see a receipt before leaving. No machine choice.</p></div>
+        <div class="principles">
+          <div class="principle"><span class="overline">P01</span><h3>Attention has a real count.</h3><p>Keep Needs you visible. Count open owner requests, not unread replies or branches that agents must land.</p></div>
+          <div class="principle"><span class="overline">P02</span><h3>Work is the address.</h3><p>Group leads by repository and name them by outcome. Dogsled chooses where work runs. Machine names, pane IDs, and routing evidence belong in diagnostics.</p></div>
+          <div class="principle"><span class="overline">P03</span><h3>Decide where you read.</h3><p>Open questions and plans inside their lead. Keep its conversation one tab away and keep the other requests in sight.</p></div>
+          <div class="principle"><span class="overline">P04</span><h3>Show receipts, not guesses.</h3><p>Queued is not running. Sent is not delivered. A saved copy is not done. Show the evidence for each state.</p></div>
+          <div class="principle"><span class="overline">P05</span><h3>Let leads do the leading.</h3><p>Nest workers under their lead and command jobs under the agent that started them. Give a job output and a result, not a chat.</p></div>
+          <div class="principle"><span class="overline">P06</span><h3>Keep the last good view.</h3><p>When updates stop, show what is cached and when it was current. Keep safe reads available. Disable actions that cannot be verified.</p></div>
+        </div>
+      </div>
+    </section>
+    <section class="chapter" id="speed">
+      <div class="chapter-num">02 / Speed</div>
+      <div>
+        <h2>Fast enough to trust.</h2>
+        <p class="lede">The interface must respond before the work does. These are proposed budgets, not measurements of the current portal.</p>
+        <div class="table-wrap" tabindex="0" role="region" aria-label="Speed budget table">
+          <table class="budget"><thead><tr><th scope="col">Moment</th><th scope="col">Target</th><th scope="col">What to measure</th></tr></thead><tbody>
+            <tr><td>Find the next decision</td><td>≤ 5 s</td><td>From first view to naming the request that needs an answer. No clicks.</td></tr>
+            <tr><td>Get to the request</td><td>1 action</td><td>From any primary screen to the open question or review.</td></tr>
+            <tr><td>First useful screen</td><td>≤ 1 s</td><td>p95 warm open to usable Needs you and the Work overview. Cold open target: ≤ 2.5 s.</td></tr>
+            <tr><td>Switch leads</td><td>≤ 100 ms</td><td>p95 input to selection and any saved conversation. A previously unseen lead paints its latest slice within 600 ms p95.</td></tr>
+            <tr><td>Send or decide</td><td>≤ 100 ms</td><td>p95 input to a visible pending receipt. Durable acknowledgment has a separate 1 s p95 target.</td></tr>
+            <tr><td>Reflect a state change</td><td>≤ 2 s</td><td>p95 recorded event to visible state or inbox count. This excludes agent runtime.</td></tr>
+            <tr><td>Expose lost updates</td><td>≤ 5 s</td><td>From the last expected update signal to a visible stale state. Clear it only after a fresh snapshot.</td></tr>
+          </tbody></table>
+        </div>
+        <p class="method"><strong>Measure before changing the portal.</strong> Run 50 warm and 50 cold trials at 1440 × 900 on the owner’s desktop. Record fleet size, network and cache state. Use at least three repositories, ten leads and two open requests. Report commands separately from agent startup and execution. Repeat with a paused stream. For the five-second goal, observe five return attempts and report misses separately.</p>
+      </div>
+    </section>
+    <section class="chapter" id="visual">
+      <div class="chapter-num">03 / Visual system</div>
+      <div>
+        <h2>The quiet console.</h2>
+        <p class="lede">The book uses paper and ink. The product keeps the slate console from <code>DESIGN.md</code>. Color signals a change in state, not decoration.</p>
+        <div class="swatches" aria-label="Console colors">
+          <div class="swatch" style="--sw:#0f1626">Ground<code>#0F1626</code></div>
+          <div class="swatch" style="--sw:#131b2e">Panel<code>#131B2E</code></div>
+          <div class="swatch" style="--sw:#1a2339">Raised<code>#1A2339</code></div>
+          <div class="swatch" style="--sw:#1f2943">Selection<code>#1F2943</code></div>
+          <div class="swatch" style="--sw:#e8ecf5;--label:#0f1626">Text<code>#E8ECF5</code></div>
+          <div class="swatch" style="--sw:#8b95ff;--label:#0b0f2a">Action / selected<code>#8B95FF</code></div>
+          <div class="swatch" style="--sw:#f2c94c;--label:#0f1626">Needs you<code>#F2C94C</code></div>
+          <div class="swatch" style="--sw:#4cc38a;--label:#0f1626">Running / live<code>#4CC38A</code></div>
+        </div>
+        <div class="principles">
+          <div class="principle"><h3>Type</h3><p>Use IBM Plex Sans for UI and 15px conversation prose. Use JetBrains Mono for code, time and branch names. This offline edition uses system fallbacks when the fonts are absent.</p></div>
+          <div class="principle"><h3>Space</h3><p>Use a 4–24px spacing scale, 1px rules, and 4–12px radii. The desktop grid has a 52px bar, 292px work rail, and 300px lead inspector.</p></div>
+          <div class="principle"><h3>Signals</h3><p>Pair every state color with a label. Use muted steel <code>#9AA3B9</code> for secondary copy and <code>#222C45</code> for dividers. Make focus distinct from selection.</p></div>
+          <div class="principle"><h3>Regions</h3><p>Pin the service bar and action bars. Scroll the rail, transcript, and form inside the viewport. On narrow screens, move the inspector into tabs. Keep Needs you visible.</p></div>
+        </div>
+      </div>
+    </section>
+    <section class="gallery" id="screens" aria-labelledby="plates-title">
+      <p class="overline">04 / The end state</p>
+      <h2 id="plates-title">A day in Dogsled.</h2>
+      <p class="lede">Seven desktop scenes, drawn at 1440 × 900. Full size opens the native viewport. Product controls are illustrations, not connected to a fleet.</p>
+      <ol class="plate-index">
+        <li><a href="#overview">01 Work overview</a></li><li><a href="#new">02 New lead</a></li><li><a href="#lead">03 Lead workspace</a></li><li><a href="#question">04 Question</a></li><li><a href="#review">05 Plan review</a></li><li><a href="#job">06 Job detail</a></li><li><a href="#recovery">07 Recovery</a></li>
+      </ol>
+
+      <figure class="plate" id="overview">
+        <div class="plate-head"><span class="plate-num">01</span><h3>Work overview</h3><button class="zoom" type="button" aria-label="Full size: Work overview">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="overview">
+            <section class="surface">
+              <header class="pagehead">
+                <p class="product-tag">Workspace</p><div class="head-line"><h4>Work overview</h4><span class="badge">3 active leads</span></div>
+                <p class="quiet">Two decisions need your attention.</p>
+              </header>
+              <div class="pagebody overview">
+                <div class="twocol equal">
+                  <section class="box decision"><span class="product-tag need">Question · Portal delivery</span><h5>Choose a rollout</h5><p class="quiet">Pick the first audience for message receipts.</p><span class="control">Open question →</span></section>
+                  <section class="box decision"><span class="product-tag need">Plan review · Recovery flow</span><h5>Review the recovery plan</h5><p class="quiet">Revision 2 includes two changes and one note.</p><span class="control">Open plan →</span></section>
+                </div>
+                <div class="twocol">
+                  <section class="box">
+                    <h5>Work in progress</h5>
+                    <table class="work-table"><thead><tr><th scope="col">Lead</th><th scope="col">State</th><th scope="col">Todos</th></tr></thead><tbody>
+                      <tr><td>Portal delivery<br><small class="quiet">dogsled</small></td><td><span class="status need"><i class="dot"></i>Needs an answer</span></td><td>3 / 5</td></tr>
+                      <tr><td>Recovery flow<br><small class="quiet">dogsled</small></td><td><span class="status need"><i class="dot"></i>Needs review</span></td><td>1 / 3</td></tr>
+                      <tr><td>Index test suite<br><small class="quiet">trailnotes</small></td><td><span class="status"><i class="dot"></i>Waiting on a job</span></td><td>1 / 2</td></tr>
+                    </tbody></table>
+                  </section>
+                  <section class="box capacity"><h5>Capacity</h5><div class="metric">02</div><strong>Standard starts available</strong><p class="quiet">These slots do not meet every job’s requirements.</p><div class="metaline"><strong>1 job queued</strong><p class="quiet">The index tests need more memory than the available slots provide.</p></div><span class="meta quiet">Updated 8 s ago</span></section>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>Return here when no item is selected. Each request names a decision. Capacity answers “Can work start?” without exposing placement.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="new">
+        <div class="plate-head"><span class="plate-num">02</span><h3>New lead</h3><button class="zoom" type="button" aria-label="Full size: New lead">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="new">
+            <section class="surface">
+              <header class="pagehead"><p class="product-tag">Workspace / New lead</p><div class="head-line"><h4>New lead</h4><span class="badge">Draft saved</span></div></header>
+              <div class="pagebody new-body">
+                <div>
+                  <p class="product-tag accent">First message</p><h4>What needs to change?</h4><p class="quiet">Choose a repository and tell the lead what outcome you want.</p>
+                  <div class="draft">
+                    <div class="draft-text">Add a release gate for the new message receipts.<br>Show which checks must pass before rollout.</div>
+                    <div class="draft-controls"><span class="control">Attach</span><span class="control">dogsled ▾</span><span class="control">Default model ▾</span><span class="control">Default effort ▾</span><span class="push control primary">Start lead ↑</span></div>
+                  </div>
+                  <div class="notice"><strong>Using saved repositories.</strong> <span class="quiet">Catalog refresh failed at 10:43. You can still start in dogsled.</span></div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>The owner supplies the goal and repository. Dogsled places the run. If the catalog refresh fails, the draft and valid selection stay in place.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="lead">
+        <div class="plate-head"><span class="plate-num">03</span><h3>Lead workspace</h3><button class="zoom" type="button" aria-label="Full size: Lead workspace">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="lead">
+            <section class="surface">
+              <header class="pagehead">
+                <p class="product-tag">dogsled / lead</p><div class="head-line"><h4>Portal delivery</h4><span class="status need"><i class="dot"></i>Needs an answer</span></div>
+                <p class="quiet"><code>work/message-receipts</code> · Pi</p>
+                <div class="tabs"><span class="on">Conversation</span><span>Question <b class="need">1</b></span></div>
+              </header>
+              <div class="lead-grid">
+                <div class="conversation">
+                  <div class="thread"><div class="measure">
+                    <div class="folded">↑ Show earlier history</div>
+                    <div class="msg"><time>10:17</time><div class="owner-msg"><h6>You</h6><p>Add a release gate for message receipts. I want to know which checks must pass before the first rollout.</p><p class="meta quiet">✓ Recorded in conversation</p></div></div>
+                    <div class="msg"><time>10:25</time><div><h6>Portal delivery</h6><p>The receipt and transcript now agree on the message ID. The focused checks passed.</p><p>I still need to set the first audience before I can write the release gate.</p></div></div>
+                    <div class="folded">▸ 3 completed steps · Show evidence</div>
+                    <div class="msg"><time>10:36</time><div><h6>Portal delivery</h6><p>Should the first rollout be for one repository or all repositories?</p><p><span class="control compact">Open question →</span></p></div></div>
+                  </div></div>
+                  <div class="composer-wrap"><div class="measure"><div class="draft"><div class="draft-text">Keep the gate easy to reverse.</div><div class="draft-controls"><span class="control compact">Attach</span><span class="push control compact">Default model ▾</span><span class="control primary compact">Send ↑</span></div></div></div></div>
+                </div>
+                <aside class="inspector" aria-label="Lead progress">
+                  <div class="box"><h5>Now</h5><p class="status need"><i class="dot"></i>Needs an answer</p><p>Choose the rollout scope.</p><p class="meta quiet">Requested 10:36</p></div>
+                  <div class="tabs"><span class="on">Todos 3/5</span><span>Workers 1</span><span>Files 4</span></div>
+                  <div class="progress" aria-label="60 percent complete"><span></span></div>
+                  <ul class="step-list"><li><span class="check">✓</span>Reproduce receipt gap</li><li><span class="check">✓</span>Record stable message ID</li><li><span class="check">✓</span>Run receipt checks</li><li><span class="need">○</span> Choose rollout scope</li><li><span class="quiet">○</span> Record release checks</li></ul>
+                  <p class="quiet" style="padding-top:13px"><span class="status good"><i class="dot"></i>1 worker working</span></p>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>The conversation carries the reasoning and evidence. Now answers what the lead needs next. The composer stays in reach.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="question">
+        <div class="plate-head"><span class="plate-num">04</span><h3>Question</h3><button class="zoom" type="button" aria-label="Full size: Question">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="question">
+            <section class="surface">
+              <header class="pagehead">
+                <p class="product-tag">dogsled / lead</p><div class="head-line"><h4>Portal delivery</h4><span class="status need"><i class="dot"></i>Needs an answer</span></div>
+                <div class="tabs"><span>Conversation</span><span class="on">Question <b class="need">1</b></span></div>
+              </header>
+              <div class="lead-grid">
+                <div class="conversation">
+                  <div class="prompt"><div class="measure">
+                    <span class="product-tag need">Owner decision · 10:36</span><h5>Choose a rollout</h5><p>Who should get message receipts first?</p>
+                    <div class="choice recommended"><strong><span class="accent">◉</span> One repository</strong> <span class="badge accent">Recommended</span><p class="quiet">Check the receipts in Dogsled before enabling them elsewhere.</p></div>
+                    <div class="choice"><strong><span class="quiet">○</span> All repositories</strong><p class="quiet">Enable the change in one release.</p></div>
+                    <div class="context"><h6>Optional context</h6><div class="draft draft-text quiet">Add a note for the lead…</div></div>
+                  </div></div>
+                  <div class="actionbar"><span class="quiet">1 question</span><span class="control">Decline</span><span class="control primary">Submit answer</span></div>
+                </div>
+                <aside class="inspector" aria-label="Lead progress">
+                  <div class="box"><h5>Now</h5><p class="status need"><i class="dot"></i>Waiting on this answer</p><p>The lead can finish the release gate once it knows the rollout scope.</p></div>
+                  <div class="tabs"><span class="on">Todos 3/5</span><span>Workers 1</span><span>Files 4</span></div>
+                  <div class="progress" aria-label="60 percent complete"><span></span></div>
+                  <ul class="step-list"><li><span class="need">○</span> Choose rollout scope</li><li><span class="quiet">○</span> Record release checks</li></ul>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>The open question becomes the main view. The recommendation explains its tradeoff. Decline and submit are different actions.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="review">
+        <div class="plate-head"><span class="plate-num">05</span><h3>Plan review</h3><button class="zoom" type="button" aria-label="Full size: Plan review">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="review">
+            <section class="surface">
+              <header class="pagehead">
+                <p class="product-tag">dogsled / Recovery flow</p><div class="head-line"><h4>Preserve an interrupted run</h4><span class="badge">Revision 2 · Needs review</span></div>
+                <p class="quiet">Submitted at 10:31</p><div class="tabs"><span class="on">Plan</span><span>Changes 2</span><span>Conversation</span></div>
+              </header>
+              <div class="review-body">
+                <article class="box review-prose">
+                  <h5>Recovery plan</h5><p>If a run loses its live session, keep the work separate from the task state.</p>
+                  <h6>Steps</h6>
+                  <ol><li>Show the last verified state. Do not treat missing evidence as a completed handoff.</li><li>List the saved files and give the owner a read-only diff.</li><li class="note-line">Restore to a new branch. Keep the original branch unchanged.</li></ol>
+                  <h6>Acceptance</h6><p>After an interrupted run, the owner can read the saved changes and restore them without changing the source branch.</p>
+                  <h6>Not in this revision</h6><p>Automatic retries and restoring over an existing branch.</p>
+                </article>
+                <aside class="notes" aria-label="Review notes">
+                  <h5>Notes <span class="badge">1</span></h5><div class="box"><span class="product-tag accent">Step 3 · Revision 2</span><p>Keep the source branch visible in the recovery receipt.</p><p class="quiet">You · 10:41</p></div>
+                </aside>
+              </div>
+              <div class="actionbar"><span class="quiet">Decision applies to revision 2.</span><span class="control">Request changes</span><span class="control primary">Approve plan</span></div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>Read the revision and its notes side by side. Pin the decision to the revision shown. Keep the other open request visible.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="job">
+        <div class="plate-head"><span class="plate-num">06</span><h3>Job detail</h3><button class="zoom" type="button" aria-label="Full size: Job detail">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="job">
+            <section class="surface">
+              <header class="pagehead">
+                <p class="product-tag">trailnotes / Index test suite / job</p><div class="head-line"><h4>Run index documentation tests</h4><span class="badge">Queued</span></div>
+                <p class="quiet">Requested by Index test suite at 10:40</p>
+              </header>
+              <div class="pagebody twocol job-body">
+                <div>
+                  <section class="box"><h5>Queued. Not started.</h5><p>The available slots do not have enough memory for this job.</p><p class="quiet">The timeout starts when execution starts.</p></section>
+                  <section class="box"><h5>Command</h5><dl class="kv"><dt>Command</dt><dd><code>cargo test --doc</code></dd><dt>Repository</dt><dd>trailnotes</dd><dt>Branch</dt><dd><code>work/index-tests</code></dd><dt>Timeout</dt><dd>10 min</dd></dl></section>
+                  <section class="box"><h5>Output</h5><div class="output">No output yet. Execution has not started.</div></section>
+                </div>
+                <section class="box"><h5>Run stages</h5><ol class="sequence"><li><span class="seq accent">01</span><div><strong>Requested</strong><small>Recorded at 10:40</small></div></li><li><span class="seq accent">02</span><div><strong>Admission</strong><small>Waiting for eligible capacity</small></div></li><li><span class="seq quiet">03</span><div><strong>Execution</strong><small>Not started</small></div></li><li><span class="seq quiet">04</span><div><strong>Result</strong><small>Not available</small></div></li></ol></section>
+              </div>
+              <div class="actionbar"><span class="quiet">Cancel prevents future admission. It does not stop a running job.</span><span class="control">Cancel admission</span></div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>A command job has stages and output, not a conversation. The available action reflects the stage that Dogsled has verified.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+
+      <figure class="plate" id="recovery">
+        <div class="plate-head"><span class="plate-num">07</span><h3>Recovery</h3><button class="zoom" type="button" aria-label="Full size: Recovery">Full size ↗</button></div>
+        <div class="stage">
+          <div class="screen" data-view="recovery">
+            <section class="surface">
+              <header class="pagehead">
+                <p class="product-tag">dogsled / Recovery flow / saved work</p><div class="head-line"><h4>Inspect saved work</h4><span class="badge">Current state unknown</span></div>
+                <p class="quiet">Last verified state: working at 10:42</p>
+              </header>
+              <div class="pagebody recovery-body">
+                <div class="notice"><strong>Live updates paused.</strong> <span class="quiet">Showing the last known state from 10:42. Sending messages and changing runs are unavailable.</span></div>
+                <div class="twocol">
+                  <section class="box"><span class="product-tag accent">Recovery copy · Saved at 10:39</span><h5>Restore notes for interrupted runs</h5><p class="quiet">Source <code>work/recovery-notes</code> · 4 saved files</p><ul class="file-list"><li><code>docs/lifecycle.md</code></li><li><code>web/src/recovery.rs</code></li><li><code>web/assets/recovery.css</code></li><li><code>plans/recovery-receipts.md</code></li></ul><span class="control">Inspect saved diff →</span></section>
+                  <section class="box"><h5>What still works</h5><ul class="file-list"><li>Read the saved conversation.</li><li>Inspect the saved diff.</li><li class="quiet">Reconnect before sending or restoring.</li></ul><p class="quiet">A saved copy is not a completed handoff.</p></section>
+                </div>
+              </div>
+              <div class="actionbar"><span class="quiet">Restore uses a new branch and leaves the source unchanged.</span><span class="control disabled">Restore unavailable</span></div>
+            </section>
+          </div>
+        </div>
+        <figcaption><p>Keep the last verified state separate from the current unknown state. Safe reads stay available. Recovery never creates a false completion.</p><span class="spec">1440 × 900</span></figcaption>
+      </figure>
+    </section>
+  </div>
+</main>
+<footer class="colophon"><div class="wrap"><p><strong>Dogsled / North Star</strong><br>Design proposal. No runtime changes.</p><p>Companions: <code>plans/north-star.md</code> and <code>plans/north-star.squig.json</code></p></div></footer>
+
+<template id="console-chrome">
+  <header class="appbar">
+    <div class="appname"><svg aria-hidden="true" class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m3 15 6-6h12m-14 9 6-6h8M3 18h18"/></svg> Dogsled</div>
+    <span class="top-work">Work</span><span class="control primary compact">+ New lead</span>
+    <span class="status good freshness"><i class="dot"></i><span>Live updates</span></span>
+  </header>
+  <aside class="app-sidebar" aria-label="Work and owner requests">
+    <h5 class="needs">Needs you <span class="count">2</span></h5>
+    <div class="request" data-request="question"><small><span>Question</span><span>8 min</span></small><strong>Choose a rollout</strong><small>Portal delivery</small></div>
+    <div class="request" data-request="review"><small><span>Plan review</span><span>13 min</span></small><strong>Review recovery plan</strong><small>Recovery flow</small></div>
+    <div class="repo-label product-tag"><span>dogsled</span><span>02</span></div>
+    <div class="leadrow" data-lead="portal"><strong><i class="dot need"></i>Portal delivery</strong><small>Needs an answer · 3/5 todos</small></div>
+    <div class="leadrow" data-lead="recovery"><strong><i class="dot need"></i>Recovery flow</strong><small>Needs review · Plan v2</small></div>
+    <p class="repo-debt quiet">1 branch to land · Agent owned</p>
+    <div class="repo-label product-tag"><span>trailnotes</span><span>01</span></div>
+    <div class="leadrow" data-lead="index"><strong><i class="dot quiet"></i>Index test suite</strong><small>Waiting · 1 queued job</small></div>
+    <div class="sidefoot">2 repositories · 3 leads</div>
+  </aside>
+</template>
+<dialog id="viewer" aria-label="Full-size screen">
+  <form method="dialog"><button id="back" autofocus>← Back to book</button></form>
+  <div class="viewer-scroll" tabindex="0" role="region" aria-label="Native 1440 by 900 viewport"></div>
+</dialog>
+<script>
+{
+  const chromeTemplate = document.querySelector('#console-chrome');
+  const viewer = document.querySelector('#viewer');
+  const viewport = viewer.querySelector('.viewer-scroll');
+  const activeLead = {lead:'portal', question:'portal', review:'recovery', job:'index', recovery:'recovery'};
+  let opener = null;
+
+  for (const screen of document.querySelectorAll('.stage > .screen')) {
+    const view = screen.dataset.view;
+    screen.prepend(chromeTemplate.content.cloneNode(true));
+    screen.querySelector(`[data-request="${view}"]`)?.classList.add('current');
+    screen.querySelector(`[data-lead="${activeLead[view]}"]`)?.classList.add('current');
+    if (view === 'recovery') {
+      const freshness = screen.querySelector('.freshness');
+      freshness.classList.remove('good');
+      freshness.querySelector('span').textContent = 'Live updates paused';
+      screen.querySelector('.app-sidebar h5').append(' · Last known');
+    }
+  }
+
+  const fit = new ResizeObserver(entries => {
+    for (const {target, contentRect} of entries) {
+      target.style.setProperty('--scale', contentRect.width / 1440);
+      target.classList.add('ready');
+    }
+  });
+  for (const plate of document.querySelectorAll('.plate')) {
+    fit.observe(plate.querySelector('.stage'));
+    const button = plate.querySelector('.zoom');
+    button.addEventListener('click', () => {
+      opener = button;
+      viewport.replaceChildren(plate.querySelector('.screen').cloneNode(true));
+      viewer.setAttribute('aria-label', `${plate.querySelector('h3').textContent} at full size`);
+      viewer.showModal();
+      viewport.scrollTo(0, 0);
+    });
+  }
+  viewer.addEventListener('close', () => {
+    viewport.replaceChildren();
+    opener?.focus({preventScroll:true});
+    opener = null;
+  });
+}
+</script>
+</body>
+</html>
