@@ -1393,7 +1393,12 @@ impl Racing {
 impl Shell for Racing {
     fn run(&self, program: &str, args: &[String]) -> Result<Output> {
         if program == "git"
-            && args.get(2).is_some_and(|a| a == "status")
+            // The subcommand is the first word after `-C <dir>` that is not a global option.
+            && args
+                .iter()
+                .skip(2)
+                .find(|a| !a.starts_with('-'))
+                .is_some_and(|a| a == "status")
             && args
                 .get(1)
                 .is_some_and(|dir| crate::worktree::same(dir, self.tree.to_str().unwrap()))
