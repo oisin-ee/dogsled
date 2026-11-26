@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.43.2](https://github.com/oisin-ee/dogsled/compare/v0.43.1...v0.43.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* **close:** keep ignore rules when resuming a normalization ([#436](https://github.com/oisin-ee/dogsled/issues/436)) ([3c1ef88](https://github.com/oisin-ee/dogsled/commit/3c1ef88da564706392c14a26f235dd1e27f9136a)), closes [#430](https://github.com/oisin-ee/dogsled/issues/430)
+
 ## [0.43.1](https://github.com/oisin-ee/dogsled/compare/v0.43.0...v0.43.1) (2026-11-26)
 
 
