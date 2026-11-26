@@ -1561,7 +1561,8 @@ impl VerifiedRemoval {
 }
 
 /// An interrupted normalization can leave each captured path gone, or rebuilt as its HEAD
-/// entry. Such a path stays as it is. A path with other content refuses the clear.
+/// entry. Such a path stays as it is. A path with other content refuses the clear. A
+/// directory that the interrupted run removed is already cleared.
 fn clear_captured(
     tree: &crate::worktree::Linked,
     pin: &crate::worktree::Pin,
@@ -1598,7 +1599,11 @@ fn clear_captured(
         pin.validate(tree)?;
         match fs::remove_dir(checkout.join(dir)) {
             Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => (),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+                ) => {}
             Err(e) => return Err(e.into()),
         }
     }
