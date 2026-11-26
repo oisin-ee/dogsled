@@ -1533,6 +1533,22 @@ pub(crate) fn observed_agent_launch(
     .then_some(request))
 }
 
+/// An active launch on the live terminal can still name an owner on older records that
+/// do not include the owner's hostname. An unproven terminal match cannot disprove ownership.
+pub(crate) fn has_owned_launch(ledger: &Ledger, agent: &crate::probe::Agent) -> Result<bool> {
+    Ok(recovery::candidates(ledger, Some(&agent.pane))?
+        .into_iter()
+        .any(|(_, progress)| {
+            progress.closed_ms.is_none()
+                && !progress.request.owner.is_empty()
+                && progress
+                    .terminal
+                    .as_ref()
+                    .zip(agent.terminal_id.as_ref())
+                    .is_none_or(|(saved, live)| saved == live)
+        }))
+}
+
 /// Find the durable launch identity for a pane, independent of Herdr's terminal ids.
 pub fn identity(ledger: &Ledger, pane: &str) -> Result<Option<String>> {
     let found = recovery::candidates(ledger, Some(pane))?;

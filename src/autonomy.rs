@@ -1,7 +1,10 @@
-//! The host-local switches and decisions in `state.db`.
+//! Host-local switches and decisions, and the rules for resolving their fleet view.
 
-use portal_types::autonomy::{DecideBody, DecisionSource, DecisionView};
+use portal_types::autonomy::{AutonomyCause, DecideBody, DecisionSource, DecisionView};
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::error::{Error, Result};
 use crate::ledger::Ledger;
@@ -28,10 +31,6 @@ CREATE TABLE autonomy_decisions (
 ) STRICT;
 ";
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the autonomy resolver unit")
-)]
 pub(crate) fn fleet(ledger: &Ledger) -> Result<bool> {
     store::read(ledger, |tx| {
         Ok(
@@ -42,10 +41,6 @@ pub(crate) fn fleet(ledger: &Ledger) -> Result<bool> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the autonomy switch routes")
-)]
 pub(crate) fn set_fleet(ledger: &Ledger, on: bool, now: u64) -> Result<()> {
     store::write(ledger, |tx| {
         if on {
@@ -60,10 +55,6 @@ pub(crate) fn set_fleet(ledger: &Ledger, on: bool, now: u64) -> Result<()> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the autonomy resolver unit")
-)]
 pub(crate) fn agents(ledger: &Ledger) -> Result<Vec<(String, String)>> {
     store::read(ledger, |tx| {
         let mut statement =
@@ -74,10 +65,6 @@ pub(crate) fn agents(ledger: &Ledger) -> Result<Vec<(String, String)>> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the autonomy switch routes")
-)]
 pub(crate) fn set_agent(
     ledger: &Ledger,
     pane: &str,
@@ -103,6 +90,130 @@ pub(crate) fn set_agent(
         }
         Ok(())
     })
+}
+
+pub(crate) const VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Extension {
+    pub(crate) fleet: bool,
+    pub(crate) agents: Vec<String>,
+    pub(crate) decisions: Vec<DecisionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostExtension {
+    Ready(Extension),
+    Unavailable,
+    Unsupported,
+}
+
+impl HostExtension {
+    pub(crate) fn decode(host: &Value) -> Self {
+        let Some(value) = host.get("autonomy") else {
+            return Self::Unsupported;
+        };
+        if value.get("version").and_then(Value::as_u64) != Some(VERSION) {
+            return Self::Unsupported;
+        }
+        Extension::deserialize(value).map_or(Self::Unavailable, Self::Ready)
+    }
+}
+
+pub(crate) type Pane<'a> = (&'a str, &'a str);
+
+/// A worker inherits autonomy from a resolved owner. Walk outwards from switched-on
+/// panes; an unseeded ownership cycle never resolves, and each pane is visited once.
+/// Only a host that publishes the extension enforces autonomy, so only its panes get a
+/// cause: a pane on an older host still asks its owner, whatever the switches say.
+pub(crate) fn resolve<'a>(
+    panes: impl IntoIterator<Item = Pane<'a>>,
+    extensions: impl IntoIterator<Item = (&'a str, &'a Extension)>,
+    executions: impl IntoIterator<Item = (&'a str, &'a crate::observation::owned_work::Execution)>,
+    labels_by_hostname: &BTreeMap<&str, &'a str>,
+) -> BTreeMap<Pane<'a>, AutonomyCause> {
+    use crate::observation::owned_work::Kind;
+    use std::collections::btree_map::Entry;
+
+    let mut causes = BTreeMap::new();
+    let mut fleet = false;
+    let mut enforcing = std::collections::BTreeSet::new();
+    for (host, extension) in extensions {
+        enforcing.insert(host);
+        fleet |= extension.fleet;
+        causes.extend(
+            extension
+                .agents
+                .iter()
+                .map(|pane| ((host, pane.as_str()), AutonomyCause::Agent)),
+        );
+    }
+    if fleet {
+        return panes
+            .into_iter()
+            .chain(causes.into_keys())
+            .chain(executions.into_iter().filter_map(|(host, execution)| {
+                (execution.kind == Kind::Agent).then_some((host, execution.pane.as_str()))
+            }))
+            .filter(|(host, _)| enforcing.contains(host))
+            .map(|pane| (pane, AutonomyCause::Fleet))
+            .collect();
+    }
+    let mut workers = BTreeMap::<_, Vec<_>>::new();
+    for (host, execution) in executions {
+        if execution.kind == Kind::Agent
+            && let Some(&owner_host) = labels_by_hostname.get(execution.owner_hostname.as_str())
+        {
+            workers
+                .entry((owner_host, execution.owner_pane.as_str()))
+                .or_default()
+                .push((host, execution.pane.as_str()));
+        }
+    }
+    let mut active: Vec<_> = causes.keys().copied().collect();
+    while let Some(owner) = active.pop() {
+        for &pane in workers.get(&owner).into_iter().flatten() {
+            if let Entry::Vacant(entry) = causes.entry(pane) {
+                entry.insert(AutonomyCause::Owner);
+                active.push(pane);
+            }
+        }
+    }
+    causes.retain(|(host, _), _| enforcing.contains(host));
+    causes
+}
+
+/// Decision ownership is recorded with the machine hostname, not its portal alias.
+pub(crate) fn decision_owner(decision: &DecisionView) -> Option<Pane<'_>> {
+    Some((
+        decision.owner_host.as_deref()?,
+        decision.owner_pane.as_deref()?,
+    ))
+}
+
+pub(crate) const VIEW: &str = "autonomy";
+pub(crate) const GAP_PREFIX: &str = "autonomy:";
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PublishedAutonomy {
+    pub(crate) panes: BTreeMap<String, AutonomyCause>,
+    pub(crate) decisions: Vec<DecisionView>,
+}
+
+impl PublishedAutonomy {
+    pub(crate) fn cause_of(&self, pane: &str) -> Option<AutonomyCause> {
+        self.panes.get(pane).copied()
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the autonomy enforcement unit")
+)]
+pub(crate) fn cause_of(ledger: &Ledger, pane: &str) -> Result<Option<AutonomyCause>> {
+    use crate::observation::{ipc, read};
+    let published = ipc::Client::at(&ledger.dir).current(&ipc::Select::views([VIEW]))?;
+    Ok(read::view::<PublishedAutonomy>(&published, VIEW)?.cause_of(pane))
 }
 
 pub(crate) fn record(
@@ -229,6 +340,79 @@ mod tests {
     use super::*;
     use crate::web::store::Entry;
     use crate::web_store::questions;
+
+    #[test]
+    fn autonomy_resolve_fleet_agent_owner_and_cycles() {
+        use crate::observation::owned_work::{Execution, Kind};
+        let mut a = Extension {
+            fleet: false,
+            agents: vec!["lead".into()],
+            decisions: vec![],
+        };
+        let mut b = Extension {
+            fleet: false,
+            agents: vec![],
+            decisions: vec![],
+        };
+        let execution = |pane: &str, owner_hostname: &str, owner_pane: &str| Execution {
+            request_id: pane.into(),
+            kind: Kind::Agent,
+            owner_hostname: owner_hostname.into(),
+            owner_pane: owner_pane.into(),
+            pane: pane.into(),
+            title: pane.into(),
+            job_label: None,
+            turn_clock: None,
+        };
+        let worker = execution("worker", "host-a", "lead");
+        let nested = execution("nested", "host-b", "worker");
+        let cycle_a = execution("cycle-a", "host-b", "cycle-b");
+        let cycle_b = execution("cycle-b", "host-a", "cycle-a");
+        let executions = [
+            ("B", &worker),
+            ("B", &nested),
+            ("A", &cycle_a),
+            ("B", &cycle_b),
+        ];
+        let labels = BTreeMap::from([("host-a", "A"), ("host-b", "B")]);
+        let panes = [
+            ("A", "lead"),
+            ("B", "lead"),
+            ("B", "worker"),
+            ("B", "nested"),
+            ("A", "cycle-a"),
+            ("B", "cycle-b"),
+        ];
+        assert_eq!(
+            resolve(panes, [("A", &a), ("B", &b)], executions, &labels),
+            BTreeMap::from([
+                (("A", "lead"), AutonomyCause::Agent),
+                (("B", "worker"), AutonomyCause::Owner),
+                (("B", "nested"), AutonomyCause::Owner),
+            ])
+        );
+        // Host B runs an older release: it publishes no extension and enforces nothing.
+        assert_eq!(
+            resolve(panes, [("A", &a)], executions, &labels),
+            BTreeMap::from([(("A", "lead"), AutonomyCause::Agent)])
+        );
+        b.fleet = true;
+        assert_eq!(
+            resolve(panes, [("A", &a), ("B", &b)], executions, &labels),
+            panes
+                .into_iter()
+                .map(|pane| (pane, AutonomyCause::Fleet))
+                .collect()
+        );
+        a.fleet = true;
+        assert_eq!(
+            resolve(panes, [("A", &a)], executions, &labels),
+            BTreeMap::from([
+                (("A", "lead"), AutonomyCause::Fleet),
+                (("A", "cycle-a"), AutonomyCause::Fleet),
+            ])
+        );
+    }
 
     #[test]
     fn autonomy_upgrades_v8_without_losing_questions_or_answers() -> Result<()> {

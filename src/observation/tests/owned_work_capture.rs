@@ -90,6 +90,31 @@ fn capture(
 }
 
 #[test]
+fn autonomy_host_extension_only_exports_switches_for_live_sessions() {
+    let ledger = Ledger::temporary();
+    for (pane, session) in [("lead", "live"), ("replaced", "old"), ("closed", "gone")] {
+        crate::autonomy::set_agent(&ledger, pane, session, true, 1).unwrap();
+    }
+    let report = report(
+        &ledger,
+        [("lead", "live"), ("replaced", "new")]
+            .into_iter()
+            .map(|(pane, session)| Agent {
+                pane: pane.into(),
+                agent_session: Some(session.into()),
+                ..Agent::default()
+            })
+            .collect(),
+    );
+    assert_eq!(
+        capture(&ledger, &report, &[])["autonomy"],
+        json!({
+            "version":1,"fleet":false,"agents":["lead"],"decisions":[]
+        })
+    );
+}
+
+#[test]
 fn owned_work_wire_capture_deduplicates_admission_and_filters_origin() {
     let ledger = Ledger::temporary();
     let mut tickets = [
@@ -317,6 +342,10 @@ fn owned_work_wire_capture_failure_preserves_base_report() {
     assert_eq!(
         extension,
         json!({"version": 1, "status": "unavailable", "reason": "status unavailable"})
+    );
+    assert_eq!(
+        host.as_object_mut().unwrap().remove("autonomy").unwrap(),
+        json!({"version": 1, "fleet": false, "agents": [], "decisions": []})
     );
     assert_eq!(host, serde_json::to_value(&report).unwrap());
 }
