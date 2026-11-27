@@ -23,6 +23,47 @@ fn snapshot() -> PortalSnapshot {
     }
 }
 
+fn turn(id: &str, text: &str) -> agents::Turn {
+    agents::Turn {
+        id: id.into(),
+        role: agents::Role::User,
+        text: text.into(),
+        source: agents::Source::Harness {
+            harness: "pi".into(),
+            model: None,
+            provider: None,
+        },
+        timestamp: None,
+        tool: None,
+        end_turn: None,
+    }
+}
+
+#[test]
+fn conversation_splices_reconstruct_the_next_history() {
+    let a = turn("a", "first");
+    let b = turn("b", "second");
+    let c = turn("c", "third");
+    let d = turn("d", "fourth");
+    let base = [a.clone(), b.clone(), c.clone()];
+    for (next, expected) in [
+        (vec![a.clone(), b.clone(), c.clone(), d.clone()], (0, 3)),
+        (vec![a, turn("b", "edited"), c.clone()], (0, 1)),
+        (vec![b, c, d.clone()], (1, 2)),
+    ] {
+        let (drop_front, keep) = live::diff(&base, &next).unwrap();
+        assert_eq!((drop_front, keep), expected);
+        assert_eq!(
+            live::splice(&base, drop_front, keep, next[keep..].to_vec()),
+            Some(next)
+        );
+    }
+    assert_eq!(live::diff(&base, &[d]), None);
+    assert_eq!(live::diff(&base, &[]), None);
+    assert_eq!(live::splice(&base, 2, 2, vec![]), None);
+    assert_eq!(live::splice(&base, usize::MAX, 1, vec![]), None);
+}
+
 #[test]
 fn portal_snapshot_round_trips_only_as_snapshot() -> Result<(), serde_json::Error> {
     let frame = PortalEvent::Snapshot(Box::new(snapshot()));
