@@ -1,8 +1,33 @@
 # Portal speed: causes and fixes
 
-Status: approved, 2026-11-27. The owner approved revision 1 (portal review `842001cc`) and revision 2 (portal review `b85eecf1`), with no notes. No decision is open. No code changed yet.
+Status: approved, 2026-11-27. The owner approved revision 1 (portal review `842001cc`) and revision 2 (portal review `b85eecf1`), with no notes. S1, S2, S3 and S4a are merged; see Progress.
 Owner request: every portal interaction must feel as fast as Herdr.
 Related: the north-star design book (`docs/design/north-star/`, branch `design/north-star`) sets the end state and the speed budgets. This plan removes the measured causes of the delays.
+
+## Progress
+
+Updated 2026-11-27.
+
+| Unit | Merged | What it does |
+| --- | --- | --- |
+| S1 Live socket | #450 (`d0e5957`) | One WebSocket per tab carries the publication, the open agent, its activity and the inbox |
+| S3a Transcript watch | #453 (`046d055`) | The reader reads a transcript when its file changes (`notify` 8.2.2) |
+| S4a Herdr socket | #457 (`b10ed7c`) | `serve` reads Herdr over its socket, with no command fallback |
+| S3b Conversation updates | #460 (`bc9f1aa`), #461 (`a21662d`), #462 (`2a73cfb`) | The socket sends only the changed turns. A selected agent on this machine holds one detail subscription |
+| S2 Lead start (owner's option B) | #464 (`dc14f17`), #465 (`1bc998d`) | `POST /api/leads` answers `202` once the request is saved. The service runs the start, and the publication carries its progress (`lead_starts`). Send opens the thread at once |
+
+Release check: `proto run moon -- run :check` on netcup passed at `2a73cfb` (9 tasks; tests 6 m 50 s). The first run at `a21662d` found the double subscription that #462 fixed.
+
+Not measured yet: every row of the table below. A browser measurement of a candidate build is not possible beside the live service. On 2026-11-27, a candidate `dogsled web` of `2a73cfb` upgraded the live `state.db` from schema 8 to 9 in place, and the installed 0.43.3 service exited until the database was set back to 8 from a backup. The rows are measured on the release build.
+
+Correction to C2: one `herdr` call costs about 5 ms through the binary and 72 ms through the mise shim, and less than 1 ms over the socket. The 0.4 s per call was measured under load.
+
+Added to S6 by this work:
+- Any `dogsled` command of a newer release upgrades `state.db` in place and locks out the installed service. An upgrade must belong to the service that is installed.
+- `DOGSLED_STATE` does not move the temporary root (`src/temporary.rs:30`), so a second setup on one machine shares the sweep with the live one.
+- "observation unavailable: closed or oversized frame" refused a job launch twice, not diagnosed.
+
+Next: S4b (sub-phase timings, from the release build), then S5, then S6.
 
 ## Measured now
 
