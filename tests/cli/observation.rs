@@ -146,10 +146,16 @@ impl Supplied {
 impl Drop for Supplied {
     fn drop(&mut self) {
         let _ = self.updates.send(None);
-        if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
+        let joined = self.thread.take().map(std::thread::JoinHandle::join);
+        let removed = fs::remove_file(&self.path);
+        // A second panic while a test already fails aborts the whole test binary and hides
+        // every other result. The first failure is the one to report.
+        if !std::thread::panicking() {
+            if let Some(joined) = joined {
+                joined.unwrap();
+            }
+            removed.unwrap();
         }
-        fs::remove_file(&self.path).unwrap();
     }
 }
 

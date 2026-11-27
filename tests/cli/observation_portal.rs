@@ -174,7 +174,11 @@ impl Live {
                     assert!(
                         matches!(
                             kind,
-                            "portal" | "inbox" | "activity" | "activity_unavailable"
+                            "portal"
+                                | "inbox"
+                                | "activity"
+                                | "activity_unavailable"
+                                | "conversation"
                         ),
                         "unexpected live frame: {frame}"
                     );
