@@ -33,7 +33,6 @@ use crate::components::{
     tabs::{TabContent, TabList, TabTrigger, Tabs},
     textarea::Textarea,
 };
-use crate::conversations::{Conversations, use_conversation};
 use crate::decisions::{AgentAutonomySwitch, Decisions};
 use crate::notice::{Alert, Status};
 use crate::question_form::QuestionForm;
@@ -460,14 +459,16 @@ fn AgentSession(
     let mut reviews = use_signal(|| None::<Vec<ReviewSummary>>);
     let mut questions = use_signal(|| None::<Vec<Pending>>);
     let mut selection = use_context::<Signal<Option<crate::app::InboxSelection>>>();
-    let mut conversations = use_context::<Signal<Conversations>>();
+    let socket = use_context::<crate::app::LivePortal>();
+    let transcript_address = address.clone();
+    let transcript = use_memo(move || socket.transcript(&transcript_address));
     // A revisit renders the cached history at once; the first event confirms or replaces it.
     let mut detail_session = use_signal(|| {
-        conversations
+        transcript
             .peek()
-            .host(&address.host)
-            .and_then(|cache| cache.session(&address.pane))
-            .cloned()
+            .0
+            .as_ref()
+            .map(|snapshot| wire::DetailSession::Available(snapshot.session.clone()))
     });
     let mut screen = use_signal(|| None::<wire::Screen>);
     let mut files = use_signal(|| None::<portal_types::files::FilesState>);
@@ -477,7 +478,6 @@ fn AgentSession(
     let mut action_error = use_signal(|| None::<String>);
     let mut switch_busy = use_signal(|| false);
     let mut busy = use_signal(|| false);
-    let mut conversation_trigger = use_signal(|| 0_u64);
     let mut screen_trigger = use_signal(|| 0_u64);
     let mut files_trigger = use_signal(|| 0_u64);
     let mut settings_trigger = use_signal(|| 0_u64);
@@ -557,8 +557,17 @@ fn AgentSession(
     } = composer;
     use_context_provider(|| Draft(draft));
 
-    // Transcript I/O must start and render without waiting for the full agent list.
-    let transcript = use_conversation(address.clone(), conversation_trigger, detail_session);
+    // A transcript can identify an unknown session. Replacing a known session is
+    // handled with the agent event, which also clears its screen, files, and settings.
+    use_effect(move || {
+        if let Some(snapshot) = &transcript.read().0
+            && detail_session.peek().is_none()
+        {
+            detail_session.set(Some(wire::DetailSession::Available(
+                snapshot.session.clone(),
+            )));
+        }
+    });
     let live = use_live_activity(address.clone(), detail_session);
 
     let screen_pane = address.clone();
@@ -663,10 +672,8 @@ fn AgentSession(
         }
     });
 
-    let socket = use_context::<crate::app::LivePortal>();
     let event_address = address.clone();
     let updates = use_memo(move || socket.agent(&event_address));
-    let event_address = address.clone();
     use_effect(move || match updates() {
         Some(Ok(event)) => {
             stream_error.set(None);
@@ -685,16 +692,6 @@ fn AgentSession(
                 settings.set(None);
                 settings_error.set(None);
                 settings_load_error.set(None);
-                match &event.session {
-                    wire::DetailSession::Available(session) => conversations
-                        .write()
-                        .host_mut(&event_address.host)
-                        .select_session(&event_address.pane, session),
-                    wire::DetailSession::Unavailable => conversations
-                        .write()
-                        .host_mut(&event_address.host)
-                        .unavailable(&event_address.pane),
-                }
                 screen.set(None);
                 files.set(None);
                 detail_session.set(Some(event.session.clone()));
@@ -708,9 +705,6 @@ fn AgentSession(
             latest_event.set(Some(event));
             if refresh_settings {
                 settings_trigger += 1;
-            }
-            if parts.conversation {
-                conversation_trigger += 1;
             }
             if parts.screen {
                 screen_trigger += 1;
@@ -747,13 +741,7 @@ fn AgentSession(
         delivery_error.set(None);
         let id = next_message();
         next_message += 1;
-        let snapshot = match detail_session.peek().as_ref() {
-            Some(wire::DetailSession::Available(session)) => conversations
-                .peek()
-                .host(&send_pane.host)
-                .and_then(|cache| cache.get_session(&send_pane.pane, session)),
-            _ => None,
-        };
+        let snapshot = transcript.peek().0.clone();
         let turns = snapshot
             .as_ref()
             .map_or(&[][..], |snapshot| snapshot.turns.as_slice());
@@ -805,19 +793,9 @@ fn AgentSession(
     };
     let mut interrupt = send_key.clone();
     let current = agent();
-    let retained = match detail_session.read().as_ref() {
-        Some(wire::DetailSession::Available(session)) => conversations
-            .read()
-            .host(&host)
-            .and_then(|cache| cache.get_session(&pane, session)),
-        _ => None,
-    };
+    let (retained, transcript_error) = transcript();
     let transcript_loading =
-        retained.is_none() && (conversation_trigger() == 0 || transcript.read().is_none());
-    let transcript_error = transcript
-        .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().err().cloned());
+        retained.is_none() && transcript_error.is_none() && stream_error().is_none();
     let board_view = (portal.board)();
     let row = board_view.as_ref().and_then(|board| {
         board
@@ -1282,6 +1260,7 @@ fn event_is_blocked(event: &wire::AgentEvent, was_blocked: bool) -> bool {
 }
 
 /// Older peers lack revisions; their events must invalidate all three parts.
+/// Conversation changes can refresh settings; only the socket delivers the transcript.
 fn changed_parts(
     held: Option<&wire::DetailRevisions>,
     event: &wire::AgentEvent,
