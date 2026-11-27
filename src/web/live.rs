@@ -149,25 +149,41 @@ impl Selection {
     ) -> Self {
         let (sender, frames) = mpsc::channel(2);
         let mut interests = JoinSet::new();
-        interests.spawn(follow(
-            state.clone(),
-            address.clone(),
-            sender.clone(),
-            PeerOperation::Event,
-            |client, pane| client.detail(pane).map_err(|error| error.to_string()),
-            |publication, pane| agent_event(publication, pane),
-            move |result| match result {
-                Ok(event) => ServerFrame::Agent {
-                    id,
-                    event: Box::new(event),
+        if address.host == crate::hosts::LOCAL {
+            interests.spawn(follow_local_detail(
+                state.clone(),
+                address.clone(),
+                sender.clone(),
+                id,
+                conversation,
+            ));
+        } else {
+            interests.spawn(follow(
+                state.clone(),
+                address.clone(),
+                sender.clone(),
+                PeerOperation::Event,
+                |client, pane| client.detail(pane).map_err(|error| error.to_string()),
+                |publication, pane| agent_event(publication, pane),
+                move |result| match result {
+                    Ok(event) => ServerFrame::Agent {
+                        id,
+                        event: Box::new(event),
+                    },
+                    Err(error) => ServerFrame::AgentUnavailable { id, error },
                 },
-                Err(error) => ServerFrame::AgentUnavailable { id, error },
-            },
-        ));
+            ));
+            interests.spawn(follow_remote_conversation(
+                state.clone(),
+                address.clone(),
+                sender.clone(),
+                id,
+            ));
+        }
         interests.spawn(follow(
             state.clone(),
             address.clone(),
-            sender.clone(),
+            sender,
             PeerOperation::Activity,
             |client, pane| client.activity_subscribe(pane).map_err(|error| error.error),
             |view: &Arc<ActivityView>, _| Ok((**view).clone()),
@@ -178,13 +194,6 @@ impl Selection {
                 },
                 Err(_) => ServerFrame::ActivityUnavailable { id },
             },
-        ));
-        interests.spawn(follow_conversation(
-            state.clone(),
-            address.clone(),
-            sender,
-            id,
-            conversation,
         ));
         Self {
             frames,
@@ -281,94 +290,139 @@ fn cursor(host: &str, session: &str, epoch: &str, revision: u64) -> Conversation
     ConversationCursor { token, revision }
 }
 
-/// Hold the publication by reference; screen-only changes need not copy or compare turns.
+/// Hold the publication by reference. The subscription yields a new value only for a new
+/// publication, so identity is the comparison; screen-only changes copy no turns.
 #[derive(Clone)]
-struct ConversationDetail(Arc<DetailFrame>);
+struct Publication(Arc<DetailFrame>);
 
-impl PartialEq for ConversationDetail {
+impl PartialEq for Publication {
     fn eq(&self, other: &Self) -> bool {
-        let (a, b) = (&self.0, &other.0);
-        a.epoch == b.epoch
-            && match (&a.parts, &b.parts) {
-                (Some(a), Some(b)) => a.conversation == b.conversation,
-                (None, None) => a.detail.conversation == b.detail.conversation,
-                _ => false,
-            }
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-async fn follow_conversation(
+/// One held detail subscription for a selected agent on this machine. Each publication
+/// gives the agent event and the conversation update, so the service sees one interest.
+async fn follow_local_detail(
     state: AppState,
     address: AgentAddress,
     sender: mpsc::Sender<ServerFrame>,
     id: u64,
     offered: Option<ConversationCursor>,
 ) {
-    let on_host = address.host == crate::hosts::LOCAL;
+    let mut interest = ConversationInterest {
+        sender: sender.clone(),
+        id,
+        offered,
+        sent: None,
+        error: None,
+    };
+    let mut last_error = None;
+    let mut backoff = Backoff::default();
+    loop {
+        let mut updates = local(
+            &state,
+            address.pane.clone(),
+            |client, pane| client.detail(pane).map_err(|error| error.to_string()),
+            |frame, _| Ok(Publication(Arc::clone(frame))),
+        );
+        let mut sent_event = None;
+        let error = loop {
+            match current(&mut updates).await {
+                Some(Ok(Publication(frame))) => {
+                    let event = match agent_event(&frame, &address.pane) {
+                        Ok(event) => event,
+                        Err(error) => break error.to_string(),
+                    };
+                    last_error = None;
+                    if sent_event.as_ref() != Some(&event) {
+                        sent_event = Some(event.clone());
+                        let frame = ServerFrame::Agent {
+                            id,
+                            event: Box::new(event),
+                        };
+                        if sender.send(frame).await.is_err() {
+                            return;
+                        }
+                    }
+                    if !local_conversation(&mut interest, &address, &frame).await {
+                        return;
+                    }
+                }
+                Some(Err(error)) => break error,
+                None => break "observation disconnected".to_owned(),
+            }
+            if updates.changed().await.is_err() {
+                break "observation disconnected".to_owned();
+            }
+        };
+        // A delivered value clears the last error, so this attempt worked before it failed.
+        if last_error.is_none() {
+            backoff.reset();
+        }
+        if last_error.as_ref() != Some(&error) {
+            last_error = Some(error.clone());
+            let frame = ServerFrame::AgentUnavailable {
+                id,
+                error: error.clone(),
+            };
+            if sender.send(frame).await.is_err() || !interest.unavailable(error).await {
+                return;
+            }
+        }
+        tokio::time::sleep(backoff.next_delay()).await;
+    }
+}
+
+/// The conversation of an agent on another machine. Its events come from the shared held
+/// peer stream; each new conversation revision is read once.
+async fn follow_remote_conversation(
+    state: AppState,
+    address: AgentAddress,
+    sender: mpsc::Sender<ServerFrame>,
+    id: u64,
+) {
+    // A peer's revisions restart with its service, so a remote cursor is never confirmed.
     let mut interest = ConversationInterest {
         sender,
         id,
-        offered: if on_host { offered } else { None },
+        offered: None,
         sent: None,
         error: None,
     };
     let mut backoff = Backoff::default();
     loop {
         let mut connected = false;
-        let error = if on_host {
-            let mut updates = local(
-                &state,
-                address.pane.clone(),
-                |client, pane| client.detail(pane).map_err(|error| error.to_string()),
-                |frame, _| Ok(ConversationDetail(Arc::clone(frame))),
-            );
-            loop {
-                match current(&mut updates).await {
-                    Some(Ok(ConversationDetail(frame))) => {
+        // Peers without an epoch can still supply revisioned updates within one held stream.
+        // A new follow must not reuse their cursor after a possible service restart.
+        let follow_epoch = crate::ledger::new_id();
+        let mut requested = None;
+        let error = match PeerUpdates::open(&state, &address, &PeerOperation::Event).await {
+            Ok(mut updates) => loop {
+                match updates.next::<PeerAgentEvent>().await {
+                    Ok(publication) => {
                         connected = true;
-                        if !local_conversation(&mut interest, &address, &frame).await {
-                            return;
+                        match remote_conversation(
+                            &state,
+                            &address,
+                            &mut interest,
+                            &mut requested,
+                            publication,
+                            &follow_epoch,
+                        )
+                        .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => return,
+                            // A failed read is tried again after the wait below, not only
+                            // when the agent next writes.
+                            Err(error) => break error,
                         }
                     }
-                    Some(Err(error)) => break error,
-                    None => break "observation disconnected".to_owned(),
+                    Err(error) => break error,
                 }
-                if updates.changed().await.is_err() {
-                    break "observation disconnected".to_owned();
-                }
-            }
-        } else {
-            // Peers without an epoch can still supply revisioned updates within one held stream.
-            // A new follow must not reuse their cursor after a possible service restart.
-            let follow_epoch = crate::ledger::new_id();
-            let mut requested = None;
-            match PeerUpdates::open(&state, &address, &PeerOperation::Event).await {
-                Ok(mut updates) => loop {
-                    match updates.next::<PeerAgentEvent>().await {
-                        Ok(publication) => {
-                            connected = true;
-                            match remote_conversation(
-                                &state,
-                                &address,
-                                &mut interest,
-                                &mut requested,
-                                publication,
-                                &follow_epoch,
-                            )
-                            .await
-                            {
-                                Ok(true) => {}
-                                Ok(false) => return,
-                                // A failed read is tried again after the wait below, not only
-                                // when the agent next writes.
-                                Err(error) => break error,
-                            }
-                        }
-                        Err(error) => break error,
-                    }
-                },
-                Err(error) => error,
-            }
+            },
+            Err(error) => error,
         };
         if connected {
             backoff.reset();
