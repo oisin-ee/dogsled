@@ -4,11 +4,11 @@ use super::{CreateContext, Failure, FailureKind, LaunchContext, Phase, Started, 
 use crate::error::{Error, Result};
 use crate::ledger::{Ledger, now_ms};
 use crate::{lead_store, rows, store};
+pub(crate) use portal_types::agents::LeadStartState as State;
+use portal_types::agents::{AgentAddress, LeadStartView};
 use portal_types::models::{ModelRef, ThinkingLevel};
 use rusqlite::{Row, Transaction, params};
-use serde::{Deserialize, Serialize};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use serde::Serialize;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE lead_requests (
@@ -30,16 +30,6 @@ CREATE TABLE lead_requests (
 CREATE INDEX lead_requests_work ON lead_requests (state, created_ms, id);
 ";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum State {
-    Accepted,
-    Dispatching,
-    Ready,
-    Failed,
-    Uncertain,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Status {
     pub id: String,
@@ -52,6 +42,53 @@ pub(crate) struct Status {
     pub failure_kind: Option<FailureKind>,
     pub phase: Option<Phase>,
     pub error: Option<String>,
+    pub created_ms: u64,
+}
+
+impl Status {
+    pub(crate) fn view(self) -> Result<LeadStartView> {
+        Ok(LeadStartView {
+            id: self.id,
+            revision: self.revision,
+            state: self.state,
+            name: self.name,
+            address: self.pane.map(|pane| AgentAddress {
+                host: self.host,
+                pane,
+            }),
+            phase: self.phase.as_ref().map(rows::name).transpose()?,
+            error: self.error,
+            created_ms: self.created_ms,
+        })
+    }
+}
+
+/// Snapshot only origin receipts, never the saved delivery or its prompt.
+pub(crate) fn recent(ledger: &Ledger, now: u64) -> Result<Vec<LeadStartView>> {
+    let cutoff = rows::integer(now.saturating_sub(10 * 60 * 1000))?;
+    store::read(ledger, |tx| {
+        let mut statement = tx.prepare_cached(
+            "SELECT r.*, l.name AS live_name, l.pane AS live_pane, l.phase AS live_phase
+             FROM lead_requests r LEFT JOIN leads l
+               ON r.state = 'dispatching' AND r.host = ?2 AND l.id = r.id
+             WHERE r.state IN ('accepted', 'dispatching') OR r.updated_ms >= ?1
+             ORDER BY r.created_ms DESC, r.id DESC LIMIT 50",
+        )?;
+        let mut results = statement.query(params![cutoff, crate::hosts::LOCAL])?;
+        let mut views = Vec::new();
+        while let Some(row) = results.next()? {
+            let mut status = load_status(row)?;
+            if let Some(name) = rows::text(row, "live_name")? {
+                status.name = Some(name);
+                status.pane = rows::text(row, "live_pane")?;
+                status.phase = rows::text(row, "live_phase")?
+                    .map(rows::variant)
+                    .transpose()?;
+            }
+            views.push(status.view()?);
+        }
+        Ok(views)
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,10 +105,6 @@ pub(crate) enum AcceptFailure {
 
 /// Replays read their receipt without consulting the publication. The origin lock
 /// serializes acceptance across processes, without holding SQLite open during placement.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "portal acceptance is wired in S2-B")
-)]
 pub(crate) fn accept(
     context: &CreateContext<'_>,
     key: &str,
@@ -108,7 +141,6 @@ pub(crate) fn accept(
             insert(tx, key, &delivery)?;
             read_status(tx, &delivery.id)?.ok_or_else(|| missing(&delivery.id))
         })?;
-        changed(1);
         Ok(Ok(status))
     })?
 }
@@ -123,10 +155,7 @@ fn insert(tx: &Transaction<'_>, key: &str, delivery: &routing::Delivery) -> Resu
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "portal status is wired in S2-B")
-)]
+#[cfg(test)]
 pub(crate) fn status(ledger: &Ledger, id: &str) -> Result<Option<Status>> {
     store::read(ledger, |tx| read_status(tx, id))
 }
@@ -160,6 +189,7 @@ fn load_status(row: &Row<'_>) -> Result<Status> {
             .transpose()?,
         phase: rows::text(row, "phase")?.map(rows::variant).transpose()?,
         error: rows::text(row, "error")?,
+        created_ms: rows::unsigned(row.get("created_ms")?)?,
     })
 }
 
@@ -191,12 +221,11 @@ pub(crate) fn work(context: &LaunchContext<'_>) -> Result<bool> {
         },
     };
     store::write(ledger, |tx| finish(tx, &delivery.id, &outcome))?;
-    changed(1);
     Ok(true)
 }
 
 fn claim(ledger: &Ledger) -> Result<Option<routing::Delivery>> {
-    let claimed = store::write(ledger, |tx| {
+    store::write(ledger, |tx| {
         let delivery = {
             let mut statement = tx.prepare_cached(
                 "SELECT id, host, delivery FROM lead_requests WHERE state = 'accepted'
@@ -213,11 +242,7 @@ fn claim(ledger: &Ledger) -> Result<Option<routing::Delivery>> {
             )?;
         }
         Ok(delivery)
-    })?;
-    if claimed.is_some() {
-        changed(1);
-    }
-    Ok(claimed)
+    })
 }
 
 fn missing(id: &str) -> Error {
@@ -274,24 +299,18 @@ fn finish(tx: &Transaction<'_>, id: &str, outcome: &Outcome) -> Result<()> {
 /// Run once at service startup under the service's host-local lifetime lock.
 /// Only persisted local launch evidence can resolve a dispatch after restart.
 pub(crate) fn recover(ledger: &Ledger, local_host: &str) -> Result<()> {
-    let recovered = store::write(ledger, |tx| {
+    store::write(ledger, |tx| {
         let mut statement =
             tx.prepare_cached("SELECT id, host FROM lead_requests WHERE state = 'dispatching'")?;
         let requests = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
-        let mut recovered = 0;
         for request in requests.collect::<rusqlite::Result<Vec<_>>>()? {
             let (id, host) = request;
             finish(tx, &id, &interrupted(tx, &id, host, local_host)?)?;
-            recovered += 1;
         }
-        Ok(recovered)
-    })?;
-    if recovered != 0 {
-        changed(recovered);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn interrupted(tx: &Transaction<'_>, id: &str, host: String, local_host: &str) -> Result<Outcome> {
@@ -333,35 +352,4 @@ fn interrupted(tx: &Transaction<'_>, id: &str, host: String, local_host: &str) -
             error: "the service stopped before the lead was recorded; no pane was started".into(),
         },
     })
-}
-
-static REVISION: Mutex<u64> = Mutex::new(0);
-static CHANGED: Condvar = Condvar::new();
-
-fn counter() -> MutexGuard<'static, u64> {
-    REVISION.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn changed(count: u64) {
-    *counter() += count;
-    CHANGED.notify_all();
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "portal publication is wired in S2-B")
-)]
-pub(crate) fn revision() -> u64 {
-    *counter()
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "portal publication is wired in S2-B")
-)]
-pub(crate) fn wait(after: u64, timeout: Duration) -> u64 {
-    let (revision, _) = CHANGED
-        .wait_timeout_while(counter(), timeout, |revision| *revision <= after)
-        .unwrap_or_else(PoisonError::into_inner);
-    *revision
 }

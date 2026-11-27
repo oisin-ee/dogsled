@@ -19,6 +19,7 @@ fn snapshot() -> PortalSnapshot {
             fleet: vec!["netcup".to_owned()],
             unsupported: vec![],
         }),
+        lead_starts: Some(vec![]),
         gaps: vec![],
     }
 }

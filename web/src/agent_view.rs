@@ -50,6 +50,8 @@ pub struct ComposerState {
     pub draft: Signal<String>,
     pub images: Signal<Vec<String>>,
     outbox: Signal<Vec<Outgoing>>,
+    lead_name: Signal<Option<String>>,
+    awaiting_lead_inventory: Signal<bool>,
     /// Messages waiting for the one before them, so the agent receives them in order.
     queue: Signal<std::collections::VecDeque<Delivering>>,
     delivering: Signal<bool>,
@@ -66,12 +68,28 @@ impl ComposerState {
             draft: Signal::new_in_scope(String::new(), owner),
             images: Signal::new_in_scope(Vec::new(), owner),
             outbox: Signal::new_in_scope(Vec::new(), owner),
+            lead_name: Signal::new_in_scope(None, owner),
+            awaiting_lead_inventory: Signal::new_in_scope(false, owner),
             queue: Signal::new_in_scope(std::collections::VecDeque::new(), owner),
             delivering: Signal::new_in_scope(false, owner),
             error: Signal::new_in_scope(None, owner),
             next: Signal::new_in_scope(0, owner),
             owner,
         }
+    }
+
+    /// The lead worker already sent this prompt. Only seed the transcript outbox.
+    pub(crate) fn record_lead_opening(mut self, prompt: String, name: Option<String>) {
+        self.lead_name.set(name);
+        self.awaiting_lead_inventory.set(true);
+        let id = *self.next.peek();
+        self.next.set(id + 1);
+        self.outbox.write().push(Outgoing {
+            id,
+            text: prompt,
+            delivery: Delivery::Sent,
+            after: None,
+        });
     }
 
     /// Send one message after the ones before it. The send outlives the agent's view.
@@ -417,6 +435,8 @@ fn AgentSession(
         pane: pane.clone(),
     };
     let portal = use_context::<crate::app::AgentPortal>();
+    let composer = use_composer(&format!("{host}:{pane}"));
+    let mut awaiting_lead_inventory = composer.awaiting_lead_inventory;
     let mut latest_event = use_signal(|| None::<wire::AgentEvent>);
     let agent_address = address.clone();
     let metadata = use_memo(move || {
@@ -425,6 +445,11 @@ fn AgentSession(
             portal.agent_error.read().as_deref(),
             &agent_address,
         )
+    });
+    use_effect(move || {
+        if awaiting_lead_inventory() && matches!(&*metadata.read(), AgentMetadata::Present(_)) {
+            awaiting_lead_inventory.set(false);
+        }
     });
     let loading = use_memo(move || matches!(&*metadata.read(), AgentMetadata::Loading));
     let agent = use_memo(move || {
@@ -451,6 +476,8 @@ fn AgentSession(
     });
     let metadata_error = use_memo(move || match &*metadata.read() {
         AgentMetadata::Loading | AgentMetadata::Present(_) => None,
+        // A ready receipt can arrive before the first inventory sample of its pane.
+        AgentMetadata::Missing if awaiting_lead_inventory() => None,
         AgentMetadata::Missing => {
             Some("This agent is no longer available. Select another agent.".to_owned())
         }
@@ -546,7 +573,6 @@ fn AgentSession(
         let _ = selection();
         choice.set(None);
     });
-    let composer = use_composer(&format!("{host}:{pane}"));
     let ComposerState {
         mut draft,
         mut images,
@@ -839,7 +865,9 @@ fn AgentSession(
         .map(|section| section.count)
         .sum();
     let todo_title = todos.iter().find_map(|todo| nonempty(&todo.current));
-    let title = if let Some(row) = row {
+    let title = if let Some(name) = (composer.lead_name)() {
+        name
+    } else if let Some(row) = row {
         row.title
             .as_deref()
             .filter(|title| !title.trim().is_empty())
@@ -1064,7 +1092,7 @@ fn AgentSession(
                     div { class: "lead-heading", h1 { "{title}" }
                         p { class: "lead-meta",
                             span { "{state}" }
-                            span { "{role} on {address.host}" if let Some(harness) = harness { " · {harness}" } }
+                            span { "{role}" if let Some(harness) = harness { " · {harness}" } }
                             if let Some(branch) = branch { code { "{branch}" } }
                         }
                     }
@@ -1148,7 +1176,9 @@ fn AgentSession(
                 }
                 if let Some(message) = metadata_error() { Alert { "{message}" } }
                 if let Some(message) = screen_error() { Alert { "{message}" } }
-                if let Some(message) = transcript_error { Alert { "{message}" } }
+                if !awaiting_lead_inventory() {
+                    if let Some(message) = transcript_error { Alert { "{message}" } }
+                }
                 if let Some(message) = pending_error() { Alert { "{message}" } }
                 if let Some(message) = (portal.board_error)() { Alert { "{message}" } }
                 if stream_error().is_some() { Status { "Live updates paused. Reconnecting." } }
@@ -1521,7 +1551,7 @@ pub(crate) fn Conversation(
                     } else if snapshot.truncated {
                         p { class: "conversation-history-notice", "Earlier history was not returned." }
                     }
-                    if snapshot.turns.is_empty() && !snapshot.truncated {
+                    if snapshot.turns.is_empty() && !snapshot.truncated && unsent.is_empty() {
                         Status { "No conversation yet. Send a message to start." }
                     }
                 }

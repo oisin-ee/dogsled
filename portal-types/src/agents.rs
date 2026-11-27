@@ -448,11 +448,27 @@ pub struct RepoList {
     pub error: Option<String>,
 }
 
-/// A lead that started and accepted its first prompt.
+/// The origin's durable lead start receipt, without the opening prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreatedLead {
-    pub host: String,
-    pub pane: String,
+pub struct LeadStartView {
+    pub id: String,
+    pub revision: u64,
+    pub state: LeadStartState,
+    pub name: Option<String>,
+    pub address: Option<AgentAddress>,
+    pub phase: Option<String>,
+    pub error: Option<String>,
+    pub created_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeadStartState {
+    Accepted,
+    Dispatching,
+    Ready,
+    Failed,
+    Uncertain,
 }
 
 /// Body of the keys request. Only the keys the server allows are accepted.

@@ -468,7 +468,7 @@ fn placement_fixture(
 
 #[test]
 fn accept_is_durable_and_replays_without_placing_again() {
-    use requests::{AcceptFailure, State, accept, revision, status, wait};
+    use requests::{AcceptFailure, State, accept, status};
     let ledger = ledger();
     let shell = Fake::new();
     let herdr = crate::herdr_socket::fake::Server::start(|_, _| json!({"result":{}}));
@@ -481,11 +481,9 @@ fn accept_is_durable_and_replays_without_placing_again() {
         herdr: Some(&socket),
     };
     let published = placement_fixture(&ledger, &crate::hosts::Host::local());
-    let before = revision();
     let accepted = accept(&context, "one", "owner/repo", "first", None, None).unwrap();
     assert_eq!(accepted.state, State::Accepted);
     assert_eq!(accepted.revision, 1);
-    assert!(wait(before, std::time::Duration::ZERO) > before);
     // The original publication is unavailable; replays cannot place a second time.
     drop(published);
     crate::store::release();

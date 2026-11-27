@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 mod autonomy;
+pub(super) mod lead_starts;
 
 /// Every domain carries its gaps with its data. `None` means no usable input, not empty
 /// success. Retained source values remain useful, but their failures travel with them.
@@ -472,6 +473,7 @@ fn portal_views(
         &autonomy_gaps,
     )?;
     agents_view(views, agents.as_ref(), gaps)?;
+    let starts = lead_starts::project(&input.local, views, gaps)?;
     let mut portal = portal(
         local,
         agents,
@@ -481,6 +483,7 @@ fn portal_views(
         gaps,
         input.published_ms,
     );
+    portal.lead_starts = starts;
     project_ownership(&mut portal, reports, ownership, status);
     // Ownership gaps describe the portal hierarchy, not failure of the local board.
     insert(views, "portal_board", portal.board.as_ref(), gaps)?;
@@ -770,6 +773,7 @@ fn portal(
         inbox,
         repos: local.repos.clone(),
         autonomy,
+        lead_starts: None,
         gaps: gaps.to_vec(),
     }
 }

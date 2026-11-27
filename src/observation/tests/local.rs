@@ -246,7 +246,8 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
     let input = collection.input;
     assert_eq!(input.gaps, []);
     assert!(input.views.is_empty(), "fleet projections belong to O6");
-    assert_eq!(input.local.len(), 8);
+    assert_eq!(input.local.len(), 9);
+    assert_eq!(input.local["lead_starts"], json!([]));
     assert_eq!(
         input.local["terminals"]["agents"],
         input.local["host"]["probe"]["agent_panes"]
@@ -605,12 +606,13 @@ fn cold_collection_failure_is_not_empty_success() {
     let collection = Collector::with_scripted_shell().collect(&fixture.node(), 100);
     assert!(collection.sample.is_err());
     let input = collection.input;
-    assert_eq!(input.local.len(), 4);
+    assert_eq!(input.local.len(), 5);
     assert_eq!(input.local["todos"], json!([]));
     assert_eq!(input.local["sidebar_preferences"], json!({}));
     assert_eq!(
         input.sources.local,
         BTreeMap::from([
+            ("lead_starts".into(), 100),
             ("todos".into(), 100),
             ("sidebar_preferences".into(), 100),
             ("repos".into(), 100),
@@ -703,13 +705,14 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
     collection.sample.unwrap();
     let mut publisher = Publisher::new().unwrap();
     let frame = publisher.replace(collection.input).unwrap();
-    assert_eq!(frame.local.len(), 5);
+    assert_eq!(frame.local.len(), 6);
     assert_eq!(frame.local["terminals"]["agents"][0]["pane"], "worker");
     assert_eq!(frame.local["todos"][0]["revision"], 7);
     assert_eq!(frame.local["todos"][0]["pane"], "worker");
     assert_eq!(
         frame.sources.local,
         BTreeMap::from([
+            ("lead_starts".into(), 100),
             ("todos".into(), 100),
             ("terminals".into(), 100),
             ("sidebar_preferences".into(), 100),

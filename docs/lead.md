@@ -37,6 +37,14 @@ The tool returns the same lead result as the CLI.
 {"repo":"owner/name","prompt":"Plan the next release"}
 ```
 
-After the lead accepts its first prompt, the endpoint returns `201` with `host` and `pane`.
-Invalid input returns `400`. Unavailable launch capability returns `503`. A launch or prompt failure returns `502`.
-The endpoint does not retry an uncertain launch or close a partially started pane.
+The request must include one `Idempotency-Key` header with 1 to 128 visible ASCII characters.
+The endpoint returns `202 Accepted` as soon as it saves the request. The response contains a lead start receipt, not the prompt.
+The service runs the start separately. The lead does not need to accept its first prompt before the endpoint returns.
+
+The same key and body return the current receipt. The same key with a different body returns `409 Conflict`.
+A missing or invalid key or body returns `400`. Unavailable placement or launch capability returns `503`.
+Other placement failures can return `502`. A store failure returns `500`.
+
+The `lead_starts` field of the portal publication carries the state, name, phase, and pane address when known.
+The service publishes up to 50 receipts, newest first. It includes finished receipts for 10 minutes after their last update.
+The service does not retry an uncertain launch or close a partially started pane.

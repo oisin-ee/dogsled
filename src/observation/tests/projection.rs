@@ -919,7 +919,7 @@ fn collection_gaps_reach_every_view_and_missing_inputs_are_not_empty_success() {
     for (key, view) in &input.views {
         // Agents and catalogues do not derive from the failed capture;
         // catalogues report their own read failure in `data.error`.
-        if matches!(key.as_str(), "agents" | "repos" | "models") {
+        if matches!(key.as_str(), "agents" | "repos" | "models" | "lead_starts") {
             assert_eq!(view["gaps"], json!([]));
             continue;
         }

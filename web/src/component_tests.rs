@@ -218,9 +218,13 @@ fn catalogue_root(props: (PortalHandle, DraftHandle)) -> Element {
     let catalogue = use_memo(move || publication.read().catalogue.clone());
     use_context_provider(|| crate::app::CataloguePortal(catalogue));
     use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
-    use_context_provider(|| crate::new_lead::NewConversation {
-        open: Signal::new(true),
-        repository: Signal::new(Some("github.com/owner/beta".into())),
+    use_context_provider(|| {
+        let mut conversation = crate::new_lead::NewConversation::new();
+        conversation.open.set(true);
+        conversation
+            .repository
+            .set(Some("github.com/owner/beta".into()));
+        conversation
     });
     let composers = use_context_provider(crate::agent_view::Composers::default);
     props.1.set(Some(composers.state("new").draft));
@@ -238,9 +242,10 @@ fn new_model_catalogue_root(
     let catalogue = use_memo(move || publication.read().catalogue.clone());
     use_context_provider(|| crate::app::CataloguePortal(catalogue));
     use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
-    use_context_provider(|| crate::new_lead::NewConversation {
-        open: Signal::new(true),
-        repository: Signal::new(None),
+    use_context_provider(|| {
+        let mut conversation = crate::new_lead::NewConversation::new();
+        conversation.open.set(true);
+        conversation
     });
     let composers = use_context_provider(crate::agent_view::Composers::default);
     use_hook(|| composers.state("new").draft.set("First message".into()));

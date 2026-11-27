@@ -60,6 +60,9 @@ pub struct PortalSnapshot {
     /// The fleet switch. Absent when autonomy could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomy: Option<autonomy::AutonomyView>,
+    /// Recent lead starts accepted by this machine. Absent when the ledger cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_starts: Option<Vec<agents::LeadStartView>>,
     pub gaps: Vec<ObservationGap>,
 }
 
