@@ -79,9 +79,11 @@ pub(crate) fn Decisions(
                     if !list.gaps.is_empty() {
                         // The hosts that answered are current; only the named hosts are missing.
                         Alert {
-                            p { if list.decisions.is_empty() { "Decisions are unavailable." } else { "Some decisions are unavailable." } }
-                            for gap in &list.gaps {
-                                p { key: "{gap.host}", "Host {gap.host} did not answer." }
+                            div { class: "decision-gaps",
+                                p { if list.decisions.is_empty() { "Decisions are unavailable." } else { "Some decisions are unavailable." } }
+                                for gap in &list.gaps {
+                                    p { key: "{gap.host}", "Host {gap.host}: {gap.error}." }
+                                }
                             }
                         }
                     } else if list.decisions.is_empty() {

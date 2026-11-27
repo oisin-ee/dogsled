@@ -15,7 +15,7 @@ interface Call { method: string; path: string; headers: Record<string, string | 
 const DECISION = { review_id: "rev-1", path: "/repo/plans/plan.md", decision: "approved", message: "Looks good.", plan_content: "# Plan" };
 
 /** A portal that answers the review, decision, and stream routes. */
-function portal(decisions: string[] = [], reviews = [{ id: "rev-1", revision: 7 }]) {
+function portal(decisions: string[] = [], reviews: { id: string; revision: number; approved?: boolean }[] = [{ id: "rev-1", revision: 7 }]) {
 	const calls: Call[] = [];
 	let submitted = 0;
 	const server = createServer((request, response) => {
@@ -159,7 +159,7 @@ test("submit_plan posts the plan and answers at once without reopening a later r
 });
 
 test("plan reviews open only the first revision of each review id", async t => {
-	const p = portal([], [{ id: "rev-1", revision: 1 }, { id: "rev-1", revision: 2 }, { id: "rev &2", revision: 1 }]);
+	const p = portal([], [{ id: "rev-1", revision: 1 }, { id: "rev-1", revision: 2 }, { id: "rev &2", revision: 1 }, { id: "auto", revision: 1, approved: true }]);
 	const port = await listen(p.server);
 	t.after(() => p.server.close());
 	const directory = mkdtempSync(join(tmpdir(), "dogsled-plan-open-"));
@@ -177,6 +177,9 @@ test("plan reviews open only the first revision of each review id", async t => {
 	assert.deepEqual(opened, [firstUrl]);
 	const nextUrl = `http://127.0.0.1:${port}/?review=rev%20%262`;
 	assert.deepEqual(await mode.submit(file, context()), { id: "rev &2", revision: 1, url: nextUrl });
+	assert.deepEqual(opened, [firstUrl, nextUrl]);
+	// Autonomous mode approved this one in the request, so no tab opens for it.
+	await mode.submit(file, context());
 	assert.deepEqual(opened, [firstUrl, nextUrl]);
 });
 

@@ -233,9 +233,12 @@ fn decision_list(ledger: &Ledger, host: &str, pane: &str) -> crate::error::Resul
             .cmp(&left.created_ms)
             .then_with(|| right.id.cmp(&left.id))
     });
+    // A host without the extension has no decisions, so it is no missing part of the list.
+    // The portal names such hosts beside the fleet switch.
     let gaps = view
         .gaps
         .into_iter()
+        .filter(|gap| gap.availability != crate::observation::Availability::Unsupported)
         .filter_map(|gap| {
             Some(HostGap {
                 host: gap.domain.strip_prefix(autonomy::GAP_PREFIX)?.to_owned(),

@@ -1404,6 +1404,10 @@ dogsled-read-edge { display: block; height: 1px; }
 .console-provider .console-shell .decisions-list [data-part="decision-rows"] {
   width: 100%;
 }
+.console-provider .console-shell .decisions-list .decision-gaps {
+  display: grid;
+  gap: 4px;
+}
 .console-provider .console-shell .decisions-list [role="alert"] + [data-part="decision-rows"] {
   margin-top: 12px;
 }

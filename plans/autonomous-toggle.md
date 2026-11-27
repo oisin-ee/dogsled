@@ -1,6 +1,6 @@
 # Autonomous toggle and decision log
 
-Status: approved on 2026-11-27 (portal review `a5974878`, revision 1, no notes). Implementation is in progress.
+Status: approved on 2026-11-27 (portal review `a5974878`, revision 1, no notes). Implemented and merged to `main` on 2026-11-27; not released.
 The owner answered the product questions on 2026-11-27. Their answers are in "Owner decisions".
 Revision 2 records what the code settled after approval: see "Settled after approval". No owner decision changed.
 
@@ -251,3 +251,28 @@ Settled in review of the units (merged in #451, #452, and #454):
 - The writer profile cannot run a build. The lead builds the portal bundle in each service worktree before the writer runs `cargo test`.
 - A binary from these branches must not open a live `state.db`: it upgrades the file to schema 9, and a 0.43.3 service then refuses it.
   Every review run used a temporary state directory.
+
+## Real run
+
+Run on `netcup` on 2026-11-27 with the build of `main` at `09ac15c` plus the fixes below.
+It used a temporary state directory, a temporary service, and the portal on port 7515. The live service and its `state.db` were not touched.
+A real Pi session ran with the dogsled extension from the repository, as the pane `w2MM:p1`.
+
+1. The agent switch for the pane was set on in the portal. The next publication showed the pane as autonomous.
+2. The session called `interview`. It got the instruction text, and no question was stored or shown in the inbox.
+3. The session called `decide` before it had a todo unit. The record was stored.
+4. The session called `submit_plan` twice. Each review was stored, approved with the note "Approved by autonomous mode", and recorded as a `plan` decision. The approval reached the session.
+5. The portal showed `Decisions 3` for the pane, the `Auto` badge, and the note "not on local-mac, momokaya-2".
+
+Screenshots: `.impeccable/mocks/autonomous-toggle/real-run-1600.png` and `real-run-1280.png`.
+
+The run found four faults. All are fixed in the same change:
+
+- The todo gate blocked `decide` until a unit was active. `decide` is now a control tool, as `end_turn` is.
+- An approved plan still opened a browser tab on the session's host. The submit answer now says `approved`, and no tab opens for it.
+- The Decisions tab listed hosts on an older release as hosts that "did not answer". Such a host holds no decisions; the list no longer names it.
+- The lines of the gap notice sat side by side. They are stacked now and give the host's reason.
+
+Not covered by a real run: a waiting question that is released at switch-on (covered by `autonomy_switch_on_releases_requests_and_queues_one_notice`), a worker that inherits from a lead on another host (covered by the projection test), and Claude Code and Codex sessions.
+A job pane is not an agent pane for Herdr, so it has no agent session; `decide` and plan approval refuse such a pane.
+

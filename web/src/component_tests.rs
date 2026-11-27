@@ -928,7 +928,7 @@ fn decisions_show_newest_first_with_host_qualified_authors() {
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("Some decisions are unavailable."), "{html}");
-    assert!(html.contains("Host momokaya-2 did not answer."), "{html}");
+    assert!(html.contains("Host momokaya-2: timeout."), "{html}");
     assert!(html.contains("Keep the CSV column order"), "{html}");
     let mut dom = VirtualDom::new_with_props(decisions_root, (true, list));
     dom.rebuild_in_place();
@@ -976,7 +976,7 @@ fn decisions_distinguish_empty_switch_states_and_gaps() {
             }],
             [
                 "Decisions are unavailable.",
-                "Host netcup did not answer.",
+                "Host netcup: timeout.",
                 "Recorded decisions",
             ],
         ),
@@ -998,7 +998,7 @@ fn decisions_distinguish_empty_switch_states_and_gaps() {
         }
         assert_eq!(
             html.contains("No decisions"),
-            !html.contains("Host netcup did not answer.")
+            !html.contains("Host netcup: timeout.")
         );
     }
 }

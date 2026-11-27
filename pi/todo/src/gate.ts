@@ -50,6 +50,8 @@ const planningSelections = new Set(["plan-claude", "plan-gpt"]),
     "mcp__dogsled__close",
     "end_turn",
     "mcp__dogsled__end_turn",
+    // Recording a decision changes no work, and an agent can settle a question before a unit exists.
+    "mcp__dogsled__decide",
     "mcp__dogsled__stop",
     "mcp__dogsled__read",
     "mcp__dogsled__status",
