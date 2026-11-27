@@ -1,12 +1,15 @@
 //! The persistent portal shell and its one sidebar: agents waiting on the owner first, then
 //! repository navigation.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_primitives::scroll_area::ScrollDirection;
 use dioxus_sdk_time::{sleep, use_interval};
-use portal_types::agents::{ActivityView, AgentAddress, AgentEvent, AgentView as Agent};
+use portal_types::agents::{
+    ActivityView, AgentAddress, AgentEvent, AgentView as Agent, Conversation, DetailSession,
+};
 use portal_types::autonomy::AutonomyView;
 use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use portal_types::live::{ClientFrame, ServerFrame};
@@ -27,7 +30,7 @@ use crate::components::sidebar::{
 };
 use crate::components::skeleton::Skeleton;
 use crate::components::tabs::{TabContent, Tabs};
-use crate::conversations::Conversations;
+use crate::conversations::{Conversations, UpdateResult};
 use crate::new_lead::{NewConversation, NewLead};
 use dioxus_icons::lucide::Plus;
 
@@ -47,34 +50,91 @@ struct LiveSelection {
     address: Option<AgentAddress>,
     agent: Option<Result<AgentEvent, String>>,
     activity: Option<Result<ActivityView, crate::activity::Gap>>,
+    session: Option<DetailSession>,
+    conversations: Conversations,
+    transcript_error: Option<String>,
+    reset_conversation: bool,
 }
 
 impl LiveSelection {
     fn select(&mut self, address: Option<AgentAddress>) {
+        // Once we leave, this base cannot receive more splices. Don't show an
+        // already fenced snapshot on a later visit before the first agent event.
+        if let Some(previous) = &self.address
+            && let Some(snapshot) = self.conversations.snapshot(previous)
+            && !self.session_matches(&snapshot)
+        {
+            self.conversations.discard(previous);
+        }
+        if let Some(address) = &address {
+            self.conversations.visit(address);
+        }
         *self = Self {
             id: self.id + 1,
             address,
+            conversations: std::mem::take(&mut self.conversations),
             ..Self::default()
         };
     }
 
+    fn session_matches(&self, snapshot: &Conversation) -> bool {
+        match &self.session {
+            Some(DetailSession::Available(session)) => &snapshot.session == session,
+            Some(DetailSession::Unavailable) => false,
+            None => true,
+        }
+    }
+
+    fn reconnect(&mut self) {
+        self.id += 1;
+        self.agent = None;
+        self.activity = None;
+    }
+
     fn command(&self) -> ClientFrame {
+        let conversation = if self.reset_conversation {
+            None
+        } else {
+            self.address
+                .as_ref()
+                .and_then(|address| self.conversations.cursor(address))
+                .cloned()
+        };
         ClientFrame::Open {
             id: self.id,
             address: self.address.clone(),
-            conversation: None,
+            conversation,
         }
     }
 
     fn receive(&mut self, frame: ServerFrame) {
         match frame {
-            ServerFrame::Agent { id, event } if id == self.id => self.agent = Some(Ok(*event)),
+            ServerFrame::Agent { id, event } if id == self.id => {
+                self.session = Some(event.session.clone());
+                self.agent = Some(Ok(*event));
+            }
             ServerFrame::AgentUnavailable { id, error } if id == self.id => {
                 self.agent = Some(Err(error))
             }
             ServerFrame::Activity { id, view } if id == self.id => self.activity = Some(Ok(*view)),
             ServerFrame::ActivityUnavailable { id } if id == self.id => {
                 self.activity = Some(Err(crate::activity::Gap::Disconnected));
+            }
+            ServerFrame::Conversation { id, update } if id == self.id => {
+                let Some(address) = &self.address else { return };
+                match self.conversations.apply_update(address, *update) {
+                    UpdateResult::Current => {
+                        self.transcript_error = None;
+                        self.reset_conversation = false;
+                    }
+                    UpdateResult::Unavailable(error) => self.transcript_error = Some(error),
+                    UpdateResult::NeedsReset => {
+                        // Reopen without a base. Late frames from the old subscription
+                        // cannot change the snapshot we retain until the reset arrives.
+                        self.id += 1;
+                        self.reset_conversation = true;
+                    }
+                }
             }
             _ => {}
         }
@@ -85,10 +145,41 @@ impl LiveSelection {
 pub(crate) struct LivePortal(Signal<LiveSelection>);
 
 impl LivePortal {
+    fn new(address: Option<AgentAddress>) -> Self {
+        Self(Signal::new(LiveSelection {
+            address,
+            ..LiveSelection::default()
+        }))
+    }
+
     /// A tab's socket state before any agent is selected, for component tests.
     #[cfg(test)]
     pub(crate) fn idle() -> Self {
-        Self(Signal::new(LiveSelection::default()))
+        Self::new(None)
+    }
+
+    pub(crate) fn select(mut self, address: Option<AgentAddress>) {
+        self.0.write().select(address);
+    }
+
+    pub(crate) fn receive(mut self, frame: ServerFrame) {
+        self.0.write().receive(frame);
+    }
+
+    pub(crate) fn transcript(
+        self,
+        address: &AgentAddress,
+    ) -> (Option<Rc<Conversation>>, Option<String>) {
+        let current = self.0.read();
+        let selected = current.address.as_ref() == Some(address);
+        // Agent and transcript frames arrive independently. Keep a mismatched base for
+        // splices but never display it once the agent has identified another session.
+        let snapshot = current
+            .conversations
+            .snapshot(address)
+            .filter(|snapshot| !selected || current.session_matches(snapshot));
+        let error = selected.then(|| current.transcript_error.clone()).flatten();
+        (snapshot, error)
     }
 
     pub(crate) fn agent(self, address: &AgentAddress) -> Option<Result<AgentEvent, String>> {
@@ -573,44 +664,35 @@ pub fn App() -> Element {
             recorded_review.set(None);
         }
     });
-    use_context_provider(|| Signal::new(Conversations::default()));
-
-    let mut live = use_context_provider(|| {
-        LivePortal(Signal::new(LiveSelection {
-            address: selected.peek().clone(),
-            ..LiveSelection::default()
-        }))
-    })
-    .0;
+    let live = use_context_provider(|| LivePortal::new(selected.peek().clone()));
     let socket = use_coroutine(move |mut changes| async move {
+        let mut details = live.0;
         loop {
-            let mut details = live;
             let result = api::watch(
                 &mut changes,
-                || live.peek().command(),
+                || live.0.peek().command(),
                 |frame| match frame {
                     frame @ (ServerFrame::Portal { .. } | ServerFrame::Inbox { .. }) => {
                         publication.write().receive(frame, clock_ms())
                     }
-                    detail => details.write().receive(detail),
+                    detail => live.receive(detail),
                 },
             )
             .await;
             if let Err(message) = result {
                 publication.write().update(Err(message.clone()), clock_ms());
-                let mut details = live.write();
+                let mut details = details.write();
                 details.agent = Some(Err(message));
                 details.activity = Some(Err(crate::activity::Gap::Disconnected));
             }
             sleep(RETRY).await;
-            let address = live.peek().address.clone();
-            live.write().select(address);
+            details.write().reconnect();
         }
     });
     use_effect(move || {
         let address = selected();
-        if address != live.peek().address {
-            live.write().select(address);
+        if address != live.0.peek().address {
+            live.select(address);
             socket.send(());
         }
     });
@@ -1134,6 +1216,136 @@ mod shell_tests {
             selection.activity,
             Some(Err(crate::activity::Gap::Disconnected))
         );
+    }
+
+    #[test]
+    fn reopening_resumes_only_the_matching_address_and_requests_reset_on_bad_base() {
+        use portal_types::live::{ConversationCursor, ConversationUpdate};
+
+        let address = AgentAddress::local("pane");
+        let other = AgentAddress {
+            host: "peer".into(),
+            ..address.clone()
+        };
+        let mut selection = LiveSelection::default();
+        selection.select(Some(address.clone()));
+        let first = selection.id;
+        let cursor = ConversationCursor {
+            token: "epoch".into(),
+            revision: 1,
+        };
+        let frame = |id, update| ServerFrame::Conversation {
+            id,
+            update: Box::new(update),
+        };
+        selection.receive(frame(
+            first,
+            ConversationUpdate::Reset {
+                cursor: cursor.clone(),
+                session: "native".into(),
+                turns: Vec::new(),
+                truncated: true,
+            },
+        ));
+        selection.select(Some(other));
+        assert!(matches!(
+            selection.command(),
+            ClientFrame::Open {
+                conversation: None,
+                ..
+            }
+        ));
+        selection.select(Some(address.clone()));
+        assert!(
+            matches!(selection.command(), ClientFrame::Open { conversation: Some(base), .. } if base == cursor)
+        );
+        selection.receive(frame(
+            first,
+            ConversationUpdate::Unavailable {
+                error: "stale".into(),
+            },
+        ));
+        assert!(selection.transcript_error.is_none());
+        selection.reconnect();
+        assert!(
+            matches!(selection.command(), ClientFrame::Open { conversation: Some(base), .. } if base == cursor)
+        );
+        let id = selection.id;
+        let replaced = ConversationCursor {
+            revision: 2,
+            ..cursor.clone()
+        };
+        selection.receive(frame(
+            id,
+            ConversationUpdate::Confirm {
+                cursor: replaced.clone(),
+            },
+        ));
+        assert!(
+            matches!(selection.command(), ClientFrame::Open { id: retry, conversation: None, .. } if retry != id)
+        );
+        assert_eq!(selection.conversations.cursor(&address), Some(&cursor));
+        selection.receive(frame(
+            selection.id,
+            ConversationUpdate::Reset {
+                cursor: replaced.clone(),
+                session: "native".into(),
+                turns: Vec::new(),
+                truncated: false,
+            },
+        ));
+        assert!(
+            matches!(selection.command(), ClientFrame::Open { conversation: Some(base), .. } if base == replaced)
+        );
+    }
+
+    #[test]
+    fn a_changed_session_hides_the_old_history_and_leaving_discards_it() -> Result<(), String> {
+        use portal_types::live::{ConversationCursor, ConversationUpdate};
+
+        let address = AgentAddress::local("pane");
+        let mut selection = LiveSelection::default();
+        selection.select(Some(address.clone()));
+        selection.receive(ServerFrame::Conversation {
+            id: selection.id,
+            update: Box::new(ConversationUpdate::Reset {
+                cursor: ConversationCursor {
+                    token: "epoch".into(),
+                    revision: 1,
+                },
+                session: "native".into(),
+                turns: Vec::new(),
+                truncated: false,
+            }),
+        });
+        let snapshot = selection
+            .conversations
+            .snapshot(&address)
+            .ok_or("the reset stored no history")?;
+        assert!(selection.session_matches(&snapshot));
+        selection.receive(ServerFrame::Agent {
+            id: selection.id,
+            event: Box::new(AgentEvent {
+                revisions: None,
+                pending: None,
+                session: DetailSession::Available("other".into()),
+                kind: "pane.agent_status_changed".into(),
+                pane: "pane".into(),
+                state: None,
+                blocked: None,
+            }),
+        });
+        assert!(!selection.session_matches(&snapshot));
+        selection.select(None);
+        selection.select(Some(address));
+        assert!(matches!(
+            selection.command(),
+            ClientFrame::Open {
+                conversation: None,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[test]

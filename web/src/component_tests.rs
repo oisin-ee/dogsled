@@ -806,37 +806,88 @@ fn a_failed_fetch_without_repositories_keeps_the_retained_catalogue_and_selectio
     assert_eq!(draft(), "Keep this draft");
 }
 
-type SessionHandle =
-    std::rc::Rc<std::cell::Cell<Option<Signal<Option<portal_types::agents::DetailSession>>>>>;
+type SocketHandle = std::rc::Rc<std::cell::Cell<Option<crate::app::LivePortal>>>;
 
-fn session_notification_root(
-    props: (SessionHandle, std::rc::Rc<std::cell::Cell<usize>>),
-) -> Element {
-    let session = use_signal(|| None::<portal_types::agents::DetailSession>);
-    props.0.set(Some(session));
-    props.1.set(props.1.get() + 1);
-    rsx! { "{session():?}" }
+fn socket_transcript_root(handle: SocketHandle) -> Element {
+    let address = portal_types::agents::AgentAddress::local("pane");
+    let socket = use_context_provider(crate::app::LivePortal::idle);
+    use_hook(|| socket.select(Some(address.clone())));
+    handle.set(Some(socket));
+    let (snapshot, error) = socket.transcript(&address);
+    let loading = snapshot.is_none() && error.is_none();
+    rsx! {
+        if let Some(error) = error {
+            crate::notice::Alert { "{error}" }
+        }
+        crate::agent_view::Conversation { snapshot, loading, assistant: "Assistant", live: crate::activity::Live::Pending }
+    }
 }
 
 #[test]
-fn unchanged_conversation_keys_do_not_notify_session_subscribers()
--> Result<(), Box<dyn std::error::Error>> {
-    let handle = SessionHandle::default();
-    let renders = std::rc::Rc::new(std::cell::Cell::new(0));
-    let mut dom =
-        VirtualDom::new_with_props(session_notification_root, (handle.clone(), renders.clone()));
+fn socket_transcript_renders_before_agent_events_and_while_the_reader_is_unavailable()
+-> Result<(), String> {
+    use portal_types::agents::{AgentEvent, DetailSession, PendingParts, Role};
+    use portal_types::live::{ConversationCursor, ConversationUpdate, ServerFrame};
+
+    let handle = SocketHandle::default();
+    let mut dom = VirtualDom::new_with_props(socket_transcript_root, handle.clone());
     dom.rebuild_in_place();
-    let session = handle.get().ok_or("Missing session signal")?;
-    dom.in_runtime(|| crate::conversations::accept_session(session, "native".into()));
+    let socket = handle.get().ok_or("Missing live socket state")?;
+    let reset = |session: &str, token: &str, text: &str| ServerFrame::Conversation {
+        id: 1,
+        update: Box::new(ConversationUpdate::Reset {
+            cursor: ConversationCursor {
+                token: token.into(),
+                revision: 1,
+            },
+            session: session.into(),
+            turns: vec![history_turn(token, Role::Assistant, text)],
+            truncated: false,
+        }),
+    };
+    dom.in_runtime(|| socket.receive(reset("first", "a", "Original history.")));
     dom.render_immediate_to_vec();
-    let first = renders.get();
-    assert!(first > 1, "first accepted key must notify subscribers");
-    dom.in_runtime(|| crate::conversations::accept_session(session, "native".into()));
+    assert!(dioxus_ssr::render(&dom).contains("Original history."));
+
+    dom.in_runtime(|| {
+        socket.receive(ServerFrame::Conversation {
+            id: 1,
+            update: Box::new(ConversationUpdate::Unavailable {
+                error: "Reader unavailable.".into(),
+            }),
+        })
+    });
     dom.render_immediate_to_vec();
-    assert_eq!(renders.get(), first, "unchanged key notified subscribers");
-    dom.in_runtime(|| crate::conversations::accept_session(session, "replacement".into()));
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Original history."), "{html}");
+    assert!(html.contains("Reader unavailable."), "{html}");
+
+    dom.in_runtime(|| {
+        socket.receive(ServerFrame::Agent {
+            id: 1,
+            event: Box::new(AgentEvent {
+                kind: "pane.agent_status_changed".into(),
+                pane: "pane".into(),
+                session: DetailSession::Available("replacement".into()),
+                state: None,
+                blocked: None,
+                revisions: None,
+                pending: Some(PendingParts {
+                    conversation: true,
+                    screen: false,
+                    files: false,
+                }),
+            }),
+        })
+    });
     dom.render_immediate_to_vec();
-    assert!(renders.get() > first, "a new key must notify subscribers");
+    assert!(!dioxus_ssr::render(&dom).contains("Original history."));
+    dom.in_runtime(|| socket.receive(reset("replacement", "b", "New session history.")));
+    dom.render_immediate_to_vec();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("New session history."), "{html}");
+    assert!(!html.contains("Original history."), "{html}");
+    assert!(!html.contains("Reader unavailable."), "{html}");
     Ok(())
 }
 

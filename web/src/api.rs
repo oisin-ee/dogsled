@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use gloo_net::http::Request;
 use gloo_net::websocket::{Message, futures::WebSocket};
 use portal_types::PortalEvent;
-use portal_types::agents::{Conversation, KeysBody, PromptBody, Screen};
+use portal_types::agents::{KeysBody, PromptBody, Screen};
 use portal_types::autonomy::{DecisionList, SwitchBody};
 use portal_types::live::{ClientFrame, ServerFrame};
 use serde::de::DeserializeOwned;
@@ -58,20 +58,6 @@ async fn failure(response: gloo_net::http::Response) -> String {
             .map_or_else(|| format!("the server answered {status}"), str::to_owned),
         Err(_) => format!("the server answered {status}"),
     }
-}
-
-/// The turns of the agent in `pane`, or `None` when the agent no longer exists.
-pub async fn fetch_conversation(
-    address: &portal_types::agents::AgentAddress,
-) -> Result<Option<Conversation>, String> {
-    let response = Request::get(&agent_url(address, "conversation"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if response.status() == 404 {
-        return Ok(None);
-    }
-    read_json(response).await.map(Some)
 }
 
 /// Read the live Pi session's settings from its execution host.
