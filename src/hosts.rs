@@ -178,6 +178,25 @@ fn agent_files_refusal(
 /// in an `Error`, a ticket, a handoff, a unit record, or a log line.
 pub const SSH_DEBUG_FILE: &str = "DOGSLED_SSH_DEBUG_FILE";
 
+/// Classify the old peer's rejection of the requested autonomy variant only.
+fn autonomy_refusal(args: &[String], out: &crate::shell::Output) -> Option<crate::error::Refusal> {
+    if args.first().map(String::as_str) != Some("agent-detail") {
+        return None;
+    }
+    let input = args.windows(2).find(|pair| pair[0] == "--input")?;
+    let input: serde_json::Value = serde_json::from_str(&input[1]).ok()?;
+    let operation = input["operation"].as_str()?;
+    if !matches!(operation, "set_agent_autonomy" | "set_fleet_autonomy") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&out.stdout).ok()?;
+    (value.get("code").is_none()
+        && value["error"]
+            .as_str()?
+            .starts_with(&format!("JSON: unknown variant `{operation}`, expected ")))
+    .then_some(crate::error::Refusal::AutonomyUnsupported)
+}
+
 fn record_ssh_detail(target: &str, detail: &str) {
     let Some(path) = std::env::var_os(SSH_DEBUG_FILE) else {
         return;
@@ -651,7 +670,8 @@ impl<'a> Fleet<'a> {
             });
         }
         if out.status != 0
-            && let Some(refusal) = agent_files_refusal(args, out)
+            && let Some(refusal) =
+                agent_files_refusal(args, out).or_else(|| autonomy_refusal(args, out))
         {
             return Err(Error::Ssh {
                 target: host.label.clone(),

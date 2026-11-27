@@ -297,6 +297,12 @@ Dogsled also derives `waiting` from open items and pending or admitting child ti
 Identical same-turn signals replay successfully. Conflicting signals refuse without a change.
 The next positively identified turn clears a visible question or blocker, but not its pending delivery.
 
+Use `dogsled decide --title TITLE --decision CHOICE --why REASON` or the MCP tool `decide` to record a choice you made without your owner.
+The title must fit on one line and take at most 200 bytes. Each other field has a 2000-byte limit.
+Use `--question` for the question you settled and `--alternatives` for the options you did not choose.
+`dogsled decisions [--pane PANE]` lists the newest decisions on this host. Each host retains 100 decisions.
+Both commands accept `--json`.
+
 Dogsled derives one agent state: `queued`, `starting`, `working`, `waiting`, `asking`, `blocked`, `finishing`, `done`, `stopped`, `lost`, or `unknown`.
 Herdr `done` means that a turn ended, not that the task completed.
 An accepted native `done` remains `finishing` until the required final handoff evidence exists.
@@ -880,7 +886,7 @@ Plugin commands end with `|| true`. Pi also leaves the prompt unchanged if the b
 
 ### Tools
 
-`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `end_turn`, `stop`, `cancel`, and `place`.
+`dogsled mcp` serves the dogsled commands as MCP tools over stdio: `status`, `spawn`, `run`, `send`, `inbox`, `read`, `close`, `drop`, `end_turn`, `decide`, `stop`, `cancel`, and `place`.
 Tools share the CLI action code. `spawn` returns a durable queued ticket, even when a host has room.
 The service owns startup confirmation outside the MCP call budget. `dogsled agent` still starts synchronously under `--max`.
 Startup errors include recent pane output in the launch record and ticket when the pane read succeeds.

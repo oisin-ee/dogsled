@@ -34,6 +34,7 @@ use crate::components::{
     textarea::Textarea,
 };
 use crate::conversations::{Conversations, use_conversation};
+use crate::decisions::{AgentAutonomySwitch, Decisions};
 use crate::notice::{Alert, Status};
 use crate::question_form::QuestionForm;
 use crate::review_view::ReviewView;
@@ -474,6 +475,7 @@ fn AgentSession(
     let mut pending_error = use_signal(|| None::<String>);
     let mut stream_error = use_signal(|| None::<String>);
     let mut action_error = use_signal(|| None::<String>);
+    let mut switch_busy = use_signal(|| false);
     let mut busy = use_signal(|| false);
     let mut conversation_trigger = use_signal(|| 0_u64);
     let mut screen_trigger = use_signal(|| 0_u64);
@@ -846,6 +848,9 @@ fn AgentSession(
         .filter(|row| row.kind == "agent")
         .map(|row| (row.id.clone(), format!("{} · {}", row.what, row.host)))
         .collect();
+    let autonomy_cause = current.as_ref().and_then(|agent| agent.autonomous);
+    let decision_mark = current.as_ref().and_then(|agent| agent.decisions);
+    let decision_count = decision_mark.map_or(0, |mark| mark.count);
     let files_count = crate::files::path_count(files.read().as_ref())
         .map_or_else(String::new, |paths| paths.to_string());
     let worker_count = crate::workers::active_count(&worker_rows);
@@ -926,7 +931,9 @@ fn AgentSession(
     }));
     let width = use_context::<crate::app::ConsoleWidth>().0;
     let mut detail = use_context::<crate::app::LeadDetail>().0;
-    let worker_view = row.is_some();
+    let worker_view = row.is_some() || lead.is_some();
+    let switch_pane = address.clone();
+    let switch_disabled = !matches!(&*metadata.read(), AgentMetadata::Present(_)) || switch_busy();
     let placeholder = worker_view.then(|| "Message the worker…".to_owned());
     let completed: usize = todos
         .iter()
@@ -1004,6 +1011,21 @@ fn AgentSession(
         }
     };
     let wide = width() >= 1400;
+    let decisions_open =
+        !plan_open && (if wide { detail() } else { panel() }) == crate::app::LeadPanel::Decisions;
+    let decision_request = decisions_open.then(|| (address.clone(), decision_mark));
+    let decisions = use_resource(use_reactive(&decision_request, |request| async move {
+        if let Some((address, _)) = request.as_ref() {
+            let result = api::decisions(address).await;
+            Some((request, result))
+        } else {
+            None
+        }
+    }));
+    let decision_result = decisions.read().as_ref().and_then(|entry| {
+        let (request, result) = entry.as_ref()?;
+        (request == &decision_request).then(|| result.clone())
+    });
     let now = rsx! {
         LiveActivity { live, snapshot: retained.clone(), coarse: coarse.clone(),
             connected: loading() || (reachable() && stream_error().is_none()),
@@ -1081,8 +1103,21 @@ fn AgentSession(
                             TabTrigger { value: "todos", index: 1usize, "Todos {completed}/{todo_count}" }
                             TabTrigger { value: "workers", index: 2usize, "Workers {worker_count}" }
                             TabTrigger { value: "files", index: 3usize, "Files {files_count}" }
+                            TabTrigger { value: "decisions", index: 4usize, "Decisions {decision_count}" }
                         }
                     }
+                }
+                AgentAutonomySwitch { cause: autonomy_cause, worker: worker_view, disabled: switch_disabled,
+                    on_change: move |on| {
+                        let pane = switch_pane.clone();
+                        async move {
+                            if switch_disabled || switch_busy() { return; }
+                            switch_busy.set(true);
+                            action_error.set(None);
+                            action_error.set(api::switch_agent(&pane, on).await.err());
+                            switch_busy.set(false);
+                        }
+                    },
                 }
                 div { class: "lead-actions",
                     if worker_view { span { class: "lead-meta", "Lead host: {lead_hostname}" } }
@@ -1168,6 +1203,7 @@ fn AgentSession(
                                 let next = match value.as_str() {
                                     "workers" => crate::app::LeadPanel::Workers,
                                     "files" => crate::app::LeadPanel::Files,
+                                    "decisions" => crate::app::LeadPanel::Decisions,
                                     _ => crate::app::LeadPanel::Todos,
                                 };
                                 detail.set(next);
@@ -1178,6 +1214,7 @@ fn AgentSession(
                                     TabTrigger { value: "todos", index: 0usize, "Todos {completed}/{todo_count}" }
                                     TabTrigger { value: "workers", index: 1usize, "Workers {worker_count}" }
                                     TabTrigger { value: "files", index: 2usize, "Files {files_count}" }
+                                    TabTrigger { value: "decisions", index: 3usize, "Decisions {decision_count}" }
                                 } }
                                 if detail() == crate::app::LeadPanel::Workers { span { "{working_count} working" } }
                             }
@@ -1187,6 +1224,9 @@ fn AgentSession(
                             }
                             TabContent { class: "detail-content", value: "files", index: 2usize,
                                 crate::files::Files { state: files() }
+                            }
+                            TabContent { class: "detail-content", value: "decisions", index: 3usize,
+                                if decisions_open { Decisions { address: address.clone(), autonomous: autonomy_cause.is_some(), result: decision_result.clone() } }
                             }
                         }
                     }
@@ -1202,6 +1242,9 @@ fn AgentSession(
                     }
                     TabContent { class: "files-tab", value: "files", index: 3usize,
                         crate::files::Files { state: files() }
+                    }
+                    TabContent { class: "decisions-tab", value: "decisions", index: 4usize,
+                        if decisions_open { Decisions { address: address.clone(), autonomous: autonomy_cause.is_some(), result: decision_result } }
                     }
                 }
             }
@@ -1799,12 +1842,12 @@ fn ConversationTime(
 
 /// This boundary deliberately has no native test calendar or synthetic dates.
 #[cfg(not(target_arch = "wasm32"))]
-fn platform_time(_ms: u64) -> Option<(String, String, String)> {
+pub(crate) fn platform_time(_ms: u64) -> Option<(String, String, String)> {
     None
 }
 
 #[cfg(target_arch = "wasm32")]
-fn platform_time(ms: u64) -> Option<(String, String, String)> {
+pub(crate) fn platform_time(ms: u64) -> Option<(String, String, String)> {
     use js_sys::{Date, Intl::DateTimeFormat, wasm_bindgen::JsValue};
     thread_local! {
         // Building an Intl formatter costs far more than formatting with one, and every

@@ -203,6 +203,21 @@ fn end_turn_kind(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DecideArgs {
+    /// A one-line title of at most 200 bytes.
+    pub title: String,
+    /// What you chose.
+    pub decision: String,
+    /// The reason and the facts you used.
+    pub why: String,
+    /// The open question you settled.
+    pub question: Option<String>,
+    /// The options you did not choose.
+    pub alternatives: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Target {
     /// A child's name or pane, a job id, or any agent's name or pane.
     pub target: String,
@@ -698,6 +713,32 @@ impl Server {
                 crate::inbox::own_pane(None),
                 args.kind,
                 &args.message,
+                now_ms(),
+            )?)?)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Record a decision you made without your owner: what you chose and why. Use it for each open question you settle yourself."
+    )]
+    async fn decide(&self, Parameters(args): Parameters<DecideArgs>) -> Result<String, String> {
+        use portal_types::autonomy::{DecideBody, DecisionSource};
+        self.call(move |fleet| {
+            let body = DecideBody {
+                title: args.title,
+                decision: args.decision,
+                why: args.why,
+                question: args.question,
+                alternatives: args.alternatives,
+            };
+            Ok(serde_json::to_value(crate::autonomy::record(
+                fleet.ledger,
+                fleet.shell,
+                &crate::inbox::own_pane(None)?,
+                &body,
+                DecisionSource::Agent,
+                None,
                 now_ms(),
             )?)?)
         })

@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 use dioxus_primitives::scroll_area::ScrollDirection;
 use dioxus_sdk_time::{sleep, use_interval};
 use portal_types::agents::{ActivityView, AgentAddress, AgentEvent, AgentView as Agent};
+use portal_types::autonomy::AutonomyView;
 use portal_types::inbox::{InboxKind as ServerInboxKind, InboxView};
 use portal_types::live::{ClientFrame, ServerFrame};
 use portal_types::{BoardView, PortalEvent};
@@ -150,6 +151,7 @@ pub enum LeadPanel {
     Todos,
     Workers,
     Files,
+    Decisions,
 }
 
 impl LeadPanel {
@@ -159,6 +161,7 @@ impl LeadPanel {
             Self::Todos => "todos",
             Self::Workers => "workers",
             Self::Files => "files",
+            Self::Decisions => "decisions",
         }
     }
 }
@@ -294,6 +297,7 @@ impl InboxState {
 struct DeepLink {
     host: Option<String>,
     review: Option<String>,
+    recorded_review: Option<String>,
     question: Option<String>,
     pane: Option<String>,
 }
@@ -311,6 +315,7 @@ impl DeepLink {
         Self {
             host: get("host"),
             review: get("review"),
+            recorded_review: get("recorded_review"),
             question: get("question"),
             pane: get("pane"),
         }
@@ -352,6 +357,7 @@ pub(crate) struct PortalState {
     inbox: InboxState,
     pub(crate) catalogue: CatalogueState,
     paused: bool,
+    autonomy: Option<AutonomyView>,
     /// The Dogsled release of the service that serves this portal.
     dogsled: Option<String>,
 }
@@ -381,6 +387,7 @@ impl PortalState {
         });
         match result {
             Ok(snapshot) => {
+                self.autonomy = snapshot.autonomy;
                 if !snapshot.dogsled.is_empty() {
                     self.dogsled = Some(snapshot.dogsled.clone());
                 }
@@ -456,6 +463,7 @@ impl PortalState {
             }
             Err(message) => {
                 self.paused = true;
+                self.autonomy = None;
                 self.board_error = Some(message.clone());
                 self.agent_error = Some(message.clone());
                 self.catalogue.observation_error = Some(message);
@@ -470,6 +478,9 @@ pub fn App() -> Element {
     let board = use_memo(move || publication.read().board.clone());
     let board_error = use_memo(move || publication.read().board_error.clone());
     let stream_paused = use_memo(move || publication.read().paused);
+    let autonomy = use_memo(move || publication.read().autonomy.clone());
+    let mut fleet_busy = use_signal(|| false);
+    let mut action_error = use_signal(|| None::<String>);
     let dogsled = use_memo(move || publication.read().dogsled.clone());
     let catalogue = use_memo(move || publication.read().catalogue.clone());
     use_context_provider(|| CataloguePortal(catalogue));
@@ -507,6 +518,11 @@ pub fn App() -> Element {
     });
     let mut now = use_signal(|| 0_u64);
     let link = use_hook(DeepLink::read);
+    let mut recorded_review = use_signal(|| {
+        link.recorded_review
+            .clone()
+            .map(|id| (link.host.clone().unwrap_or_else(|| "local".to_owned()), id))
+    });
     let mut selected = use_context_provider(|| {
         Signal::new(
             link.pane
@@ -551,6 +567,9 @@ pub fn App() -> Element {
         if selected().is_some() {
             composing.set(false);
             metrics_open.set(false);
+            recorded_review.set(None);
+        } else if composing() || metrics_open() {
+            recorded_review.set(None);
         }
     });
     use_context_provider(|| Signal::new(Conversations::default()));
@@ -759,8 +778,14 @@ pub fn App() -> Element {
         SidebarProvider { class: "console-provider",
         Tabs { class: "console-shell", "data-panel": panel().value(), horizontal: true, value: Some(panel().value().to_owned()),
             on_value_change: move |value: String| {
-                let next = match value.as_str() { "todos" => LeadPanel::Todos, "workers" => LeadPanel::Workers, "files" => LeadPanel::Files, _ => LeadPanel::Chat };
-                if matches!(next, LeadPanel::Todos | LeadPanel::Workers | LeadPanel::Files) { detail.set(next); }
+                let next = match value.as_str() {
+                    "todos" => LeadPanel::Todos,
+                    "workers" => LeadPanel::Workers,
+                    "files" => LeadPanel::Files,
+                    "decisions" => LeadPanel::Decisions,
+                    _ => LeadPanel::Chat,
+                };
+                if next != LeadPanel::Chat { detail.set(next); }
                 panel.set(next);
             },
             header { class: "console-topbar",
@@ -785,6 +810,15 @@ pub fn App() -> Element {
                             panel.set(LeadPanel::Chat);
                         },
                         "Metrics"
+                    }
+                    crate::decisions::FleetAutonomySwitch { view: autonomy(), busy: fleet_busy(),
+                        on_change: move |on| async move {
+                            if fleet_busy() || autonomy.peek().is_none() { return; }
+                            fleet_busy.set(true);
+                            action_error.set(None);
+                            action_error.set(api::switch_fleet(on).await.err());
+                            fleet_busy.set(false);
+                        },
                     }
                 }
                 p { class: "console-tally", aria_label: "Fleet",
@@ -817,7 +851,12 @@ pub fn App() -> Element {
             }
             {navigation}
             main { class: "console-main",
-                match selected() {
+                if let Some(message) = action_error() {
+                    div { class: "fleet-action-error", Alert { "Could not switch fleet autonomy: {message}" } }
+                }
+                if let Some((host, review_id)) = recorded_review() {
+                    crate::review_view::ReviewView { host, review_id, revision: 0, recorded: true }
+                } else { match selected() {
                     Some(_) if unavailable.is_some() => rsx! { Status { "{unavailable.unwrap_or_default()}" } },
                     Some(pane) => {
                         let picked = selection().filter(|item| item.host == pane.host && item.pane == pane.pane);
@@ -840,7 +879,7 @@ pub fn App() -> Element {
                             }
                         } else { h1 { "Select an agent" } p { "Choose an agent or a waiting item to open its work." } }
                     } } } },
-                }
+                } }
             }
         }
         }
@@ -897,6 +936,7 @@ pub(crate) fn NeedsYou(
                             let body = rsx! {
                                 span { class: "inbox-kind",
                                     span { class: "inbox-place", "{kind.label()} · {place}" }
+                                    if agent.row.autonomous { crate::board::AutoBadge {} }
                                     if more > 0 { span { class: "inbox-more", "+{more}" } }
                                     span { class: "inbox-age", "{age}" }
                                     crate::unread::UnreadDot { host: address.host.clone(), pane: address.pane.clone() }
@@ -1343,6 +1383,7 @@ mod shell_tests {
         let link = DeepLink {
             host: Some("local".into()),
             review: Some("plan".to_owned()),
+            recorded_review: None,
             question: None,
             pane: Some("pane".to_owned()),
         };

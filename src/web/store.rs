@@ -22,11 +22,13 @@ pub(crate) struct Entry {
     pub(crate) rejection: Option<Rejection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) answered_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) released: bool,
 }
 
 impl Entry {
     fn resolved(&self) -> bool {
-        self.answers.is_some() || self.rejection.is_some()
+        self.released || self.answers.is_some() || self.rejection.is_some()
     }
 }
 
@@ -40,6 +42,8 @@ enum Resolution {
 pub enum Poll {
     /// The owner answered or rejected the interview. The outcome is retained.
     Answered(Responses),
+    /// Autonomous mode ended the wait without an owner response.
+    Released,
     /// Nothing changed before the time ended.
     Timeout,
     /// The question was withdrawn, or it is not there.
@@ -74,29 +78,45 @@ impl Store {
         }
     }
 
-    /// Keep a new question and return its id.
+    /// Insert a fixture without reading the service publication.
+    #[cfg(test)]
     pub async fn create(&self, body: AskBody) -> Result<String> {
         let ledger = self.ledger.clone();
+        run(move || Self::insert(&ledger, body)).await
+    }
+
+    pub(super) async fn create_interactive(&self, body: AskBody) -> Result<Option<String>> {
+        let ledger = self.ledger.clone();
         run(move || {
-            let id = ledger::new_id();
-            let entry = Entry {
-                pending: Pending {
-                    host: crate::hosts::LOCAL.into(),
-                    id: id.clone(),
-                    pane: body.pane,
-                    session: body.session,
-                    cwd: body.cwd,
-                    created_ms: ledger::now_ms(),
-                    questions: body.questions,
-                },
-                answers: None,
-                rejection: None,
-                answered_ms: None,
-            };
-            crate::store::write(&ledger, |tx| records::put(tx, &entry))?;
-            Ok(id)
+            ledger.with_lock(crate::autonomy::REQUEST_LOCK, || {
+                if crate::autonomy::cause_of(&ledger, &body.pane)?.is_some() {
+                    return Ok(None);
+                }
+                Self::insert(&ledger, body).map(Some)
+            })
         })
         .await
+    }
+
+    fn insert(ledger: &Ledger, body: AskBody) -> Result<String> {
+        let id = ledger::new_id();
+        let entry = Entry {
+            pending: Pending {
+                host: crate::hosts::LOCAL.into(),
+                id: id.clone(),
+                pane: body.pane,
+                session: body.session,
+                cwd: body.cwd,
+                created_ms: ledger::now_ms(),
+                questions: body.questions,
+            },
+            answers: None,
+            rejection: None,
+            answered_ms: None,
+            released: false,
+        };
+        crate::store::write(ledger, |tx| records::put(tx, &entry))?;
+        Ok(id)
     }
 
     /// The questions that wait for an answer, oldest first.
@@ -143,6 +163,15 @@ impl Store {
             self.wake(id);
         }
         Ok(outcome)
+    }
+
+    /// Release a pending question and wake every poll after the commit.
+    pub(crate) fn release(&self, id: &str, now: u64) -> Result<bool> {
+        let released = crate::store::write(&self.ledger, |tx| records::release(tx, id, now))?;
+        if released {
+            self.wake(id);
+        }
+        Ok(released)
     }
 
     /// Cancel only a pending question. A racing answer or rejection must survive.
@@ -230,6 +259,9 @@ impl Store {
                 let Some(entry) = records::get(tx, &owned)? else {
                     return Ok(Some(Poll::Gone));
                 };
+                if entry.released {
+                    return Ok(Some(Poll::Released));
+                }
                 if !entry.resolved() {
                     return Ok(None);
                 }

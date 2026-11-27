@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use axum::extract::{Path as RoutePath, RawQuery, State};
+use axum::extract::{Path as RoutePath, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -28,6 +28,7 @@ const POLL_LIMIT: Duration = Duration::from_secs(60);
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/questions", get(list).post(create))
+        .route("/api/questions/autonomy", get(autonomy_status))
         .route("/api/questions/{id}/answer", get(answer_wait).post(answer))
         .route("/api/questions/{id}/reject", axum::routing::post(reject))
         .route("/api/questions/{id}", axum::routing::delete(withdraw))
@@ -42,9 +43,38 @@ async fn create(
     if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    match state.questions.create(body).await {
-        Ok(id) => Json(PendingId { id }).into_response(),
+    match state.questions.create_interactive(body).await {
+        Ok(Some(id)) => Json(PendingId { id }).into_response(),
+        Ok(None) => (StatusCode::CONFLICT, Json(json!({ "code": "autonomous" }))).into_response(),
         Err(error) => failed(&error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AutonomyQuery {
+    #[serde(default)]
+    pane: String,
+}
+
+/// Check before uploading attachments for a form. Create checks again before saving.
+async fn autonomy_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AutonomyQuery>,
+) -> Response {
+    if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
+        return refused("the request needs the portal token");
+    }
+    match tokio::task::spawn_blocking(move || crate::autonomy::cause_of(&state.web, &query.pane))
+        .await
+    {
+        Ok(Ok(cause)) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({ "autonomous": cause.is_some() })),
+        )
+            .into_response(),
+        Ok(Err(error)) => failed(&error),
+        Err(error) => failed(&Error::Invalid(error.to_string())),
     }
 }
 
@@ -82,6 +112,7 @@ async fn answer_wait(
         () = state.stop.cancelled() => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         result = state.questions.wait(&id, limit) => match result {
             Ok(Poll::Answered(responses)) => Json(responses).into_response(),
+            Ok(Poll::Released) => Json(json!({ "id": id, "released": true })).into_response(),
             Ok(Poll::Timeout) => StatusCode::NO_CONTENT.into_response(),
             Ok(Poll::Gone) => gone(),
             Err(error) => failed(&error),
@@ -315,6 +346,78 @@ mod tests {
             .as_str()
             .expect("the question id")
             .to_owned()
+    }
+
+    #[tokio::test]
+    async fn autonomy_refuses_question_creation_without_storing_a_form() {
+        let state = fresh_state();
+        let _server = crate::autonomy::test_publication(&state.web, "%1");
+        let response = call(
+            &state,
+            token_request(Method::POST, "/api/questions", Some(&ask_body())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(response).await, json!({ "code": "autonomous" }));
+        let count = crate::store::read(&state.web, |tx| {
+            Ok(
+                tx.query_row("SELECT count(*) FROM web_questions", [], |row| {
+                    row.get::<_, u32>(0)
+                })?,
+            )
+        })
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn autonomy_preflight_requires_bearer_and_reports_the_requested_pane() {
+        let state = fresh_state();
+        let _server = crate::autonomy::test_publication(&state.web, "%1");
+        for (pane, autonomous) in [("%251", true), ("other", false), ("", false)] {
+            let path = format!("/api/questions/autonomy?pane={pane}");
+            let response = call(&state, token_request(Method::GET, &path, None)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(response).await,
+                json!({ "autonomous": autonomous })
+            );
+        }
+        let missing = call(
+            &state,
+            request(Method::GET, "/api/questions/autonomy?pane=%251", None),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn autonomy_release_wakes_the_long_poll_and_hides_the_question() {
+        let state = fresh_state();
+        let id = ask(&state).await;
+        let path = format!("/api/questions/{id}/answer?wait=60");
+        let waiting = call(&state, token_request(Method::GET, &path, None));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .questions
+                .release(&id, crate::ledger::now_ms())
+                .unwrap()
+        );
+        let response = tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await,
+            json!({ "id": id, "released": true })
+        );
+        assert_eq!(state.questions.list().await.unwrap(), []);
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ mod component_tests;
 pub mod components;
 mod conversation_events;
 mod conversations;
+mod decisions;
 mod files;
 mod highlight;
 mod metrics;

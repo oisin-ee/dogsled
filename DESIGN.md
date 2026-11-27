@@ -201,12 +201,12 @@ Both faces are in `web/assets/fonts/` with their SIL Open Font License files. `w
 
 The application fills the viewport (`100dvh`), and the document never scrolls.
 
-The top bar is 48px high. From left to right, it shows Dogsled, then Metrics and New, then the fleet tally ("3 need you · 12 working · 4 idle · 1 to land"). The host meters are on the right: the host name, a 64px load meter and the busy cores out of all cores.
+The top bar is 48px high. It shows Dogsled, New, Metrics, the fleet Autonomous switch and the fleet tally ("3 need you · 12 working · 4 idle · 1 to land"). The host meters are on the right: the host name, a 64px load meter and the busy cores out of all cores.
 
 Below the top bar, the columns sit side by side. Each column has a body that scrolls on its own.
 
-- **Wide (1400px and up):** a 292px sidebar, the conversation (messages at a 640px measure) and a 300px right column.
-- **Medium (1100–1399px):** the right column folds into a segmented `Chat` / `Todos` / `Workers` / `Files` control in the conversation header. The Now panel moves above the composer.
+- **Wide (1400px and up):** a 292px sidebar, a full-width conversation with 16px side padding and a 400px right column.
+- **Medium (1100–1399px):** the right column folds into `Chat` / `Todos` / `Workers` / `Files` / `Decisions` tabs in the conversation header. The Now panel moves above the composer.
 - **Narrow (800–1099px):** the sidebar stays. The conversation keeps its tabs. The minimum supported width is 800px.
 - **Plan review:** replaces everything right of the sidebar. The plan sits at a 680px measure with a 300px notes margin and a decision bar pinned to the bottom. Below 1100px, the notes become a `Notes N` tab.
 - **Questions and key prompts:** replace the conversation in the centre column.
@@ -240,6 +240,10 @@ The console uses the official Dioxus components for every control and changes th
 - **Disabled:** the raised tone with dim text.
 - **Secondary:** Metrics is a ghost button that takes the selection tone when it is open. Request changes is an outline button.
 
+### Autonomous switch
+The official Switch shows the current setting. Fleet mode locks the lead switch on. A worker switch is read-only.
+Beside the fleet switch, a yellow note names each host whose release ignores the switches ("not on momokaya-2").
+
 ### Chips
 - **Count badge:** an 18px pill (12px/600). Yellow fill with dark text when something waits.
 - **Tally:** "need you" is a yellow pill with the count in a solid yellow badge. Other tally counts are bold white numbers with muted words.
@@ -255,7 +259,7 @@ The console uses the official Dioxus components for every control and changes th
 - **Sidebar:** the Needs you cards come first. Then the "Agents" label and count, then the repository groups. A group shows its name, and its count or "n to land". A lead row shows a status dot, its title (500 weight), its todo progress, and a state line below ("Working", "Idle", or "Waiting for you" in yellow). Workers are indented and muted, with their state on the right.
 
 ### Message timeline
-The conversation is one centred column, 704px wide. Each record has a 46px time column on the left and the message body on the right. The time column shows the recorded time in 11.5px mono, or "—" when no time is recorded. There is no marker track. Each message starts with its author (600) and its source in dim steel. Owner messages put their text in a raised bubble. An unsent owner message has a dashed outline and shows its state: Sending…, Queued or Sent. Thoughts are italic and muted. A finished turn folds its thinking and tool records into one bordered row: "Worked for 4m 10s · 3 thoughts · 12 tool calls". The row opens to the records.
+The conversation fills its column, with 16px side padding. Each record has a 46px time column on the left and the message body on the right. The time column shows the recorded time in 11.5px mono, or "—" when no time is recorded. There is no marker track. Each message starts with its author (600) and its source in dim steel. Owner messages put their text in a raised bubble. An unsent owner message has a dashed outline and shows its state: Sending…, Queued or Sent. Thoughts are italic and muted. A finished turn folds its thinking and tool records into one bordered row: "Worked for 4m 10s · 3 thoughts · 12 tool calls". The row opens to the records.
 
 ### Now panel
 The Now panel shows what the agent does now. On a wide screen, it is at the top of the right column. On a smaller screen, it sits above the composer. It shows a status dot, the live phase ("Running tools: bash"), the agent's current todo, and the thought and tool call counts of this turn. The time of the current turn is large green mono. The panel names the live state only when a producer reports it. Otherwise, it shows the coarse agent state and says that detail is unavailable.
@@ -264,7 +268,7 @@ The Now panel shows what the agent does now. On a wide screen, it is at the top 
 The signature component, at the top of the sidebar. There is one raised card for each agent that needs the owner, newest first. A card has a yellow left edge. Its first line, in yellow, gives the kind, the repository and the age, and `+n` when the agent has more items. Below it are the item title (500 weight, two lines at most) and the agent title. Key prompts show their keys as small mono buttons in the card. The agent leaves its repository group while it waits. The open card takes the selection tone.
 
 ### Right column
-The Now panel is at the top. Below it are the `Todos n/m`, `Workers n` and `Files n` tabs. The todos are accordions by section (In progress, Pending, Completed, Abandoned), and empty sections are not shown. An in-progress todo has a green ring. A completed todo has an indigo dot and a muted title.
+The Now panel is at the top of the 400px column. Below it are `Todos n/m`, `Workers n`, `Files n` and `Decisions n`. The Decisions tab lists recorded decisions from the lead and its workers, newest first. The todos are accordions by section (In progress, Pending, Completed, Abandoned), and empty sections are not shown. An in-progress todo has a green ring. A completed todo has an indigo dot and a muted title.
 
 ### New page
 The New page is centred in the main area. It shows the title, one sentence that says where the lead starts, and the composer. Below the composer, it shows the host with the most free cores now, and the leads that already run in the chosen repository, with their state and host. A key legend (Enter, Tab, Shift Enter) closes the page. The keyboard order is message, repository, model, effort.

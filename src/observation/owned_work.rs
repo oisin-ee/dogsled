@@ -148,7 +148,37 @@ pub(super) fn serialize_host(
         Err(reason) => json!({"version": VERSION, "status": "unavailable", "reason": reason}),
     };
     value["owned_work"] = extension;
+    value["autonomy"] = match capture_autonomy(ledger, report.snapshot.as_ref()) {
+        Ok(extension) => {
+            let mut value = serde_json::to_value(extension)?;
+            value["version"] = json!(crate::autonomy::VERSION);
+            value
+        }
+        Err(_) => json!({"version": crate::autonomy::VERSION, "status": "unavailable"}),
+    };
     Ok(value)
+}
+
+fn capture_autonomy(
+    ledger: &Ledger,
+    snapshot: Option<&Snapshot>,
+) -> crate::error::Result<crate::autonomy::Extension> {
+    use crate::autonomy;
+    let switched: std::collections::BTreeSet<_> = autonomy::agents(ledger)?.into_iter().collect();
+    let agents = snapshot
+        .into_iter()
+        .flat_map(|snapshot| &snapshot.probe.agent_panes)
+        .filter_map(|agent| {
+            let session = super::details::Session::of(agent)?.session;
+            let key = (agent.pane.clone(), session);
+            switched.contains(&key).then_some(key.0)
+        })
+        .collect();
+    Ok(autonomy::Extension {
+        fleet: autonomy::fleet(ledger)?,
+        agents,
+        decisions: autonomy::decisions(ledger, None)?,
+    })
 }
 
 fn capture(

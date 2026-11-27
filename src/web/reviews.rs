@@ -200,7 +200,8 @@ async fn submit(
     if !state.private_producer && !crate::web::guard::bearer_allowed(&headers, &state.token) {
         return refused("the request needs the portal token");
     }
-    match submit_plan(&state.web, body).await {
+    let web = state.web.clone();
+    match blocking(move || submit_plan(&web, &crate::shell::System::default(), &body)).await {
         Ok(submitted) => Json(submitted).into_response(),
         Err(error) => failed(&error),
     }
@@ -289,21 +290,13 @@ pub(super) async fn approve(
             let Some(mut record) = records::get(tx, &owned)? else {
                 return Ok(None);
             };
-            record.review.decision = Some(Decision::Approved {
-                notes: notes.clone(),
-            });
-            record.delivered = false;
-            records::put(tx, &record)?;
-            Ok(Some(record.review))
+            Ok(Some(approve_locked(tx, &mut record, notes)?))
         })
     })
     .await;
     match decided {
         Ok(Some(review)) => {
-            let _ = decisions_channel(&state.web).send(Delivery {
-                session: review.session.clone(),
-                event: decision_event(&review),
-            });
+            send_decision(&state.web, &review);
             Json(review).into_response()
         }
         Ok(None) => not_found(&id),
@@ -435,10 +428,105 @@ async fn ack(
     }
 }
 
-/// Submit through the same locked store as the HTTP endpoint.
-pub(crate) async fn submit_plan(web: &Ledger, body: SubmitBody) -> Result<Submitted> {
-    let web = web.clone();
-    blocking(move || crate::store::write(&web, |tx| submit_locked(tx, &body))).await
+const AUTONOMOUS_APPROVAL: &str = "Approved by autonomous mode";
+
+/// Submit a plan, approving it atomically with its decision record if the pane is autonomous.
+pub(crate) fn submit_plan(
+    web: &Ledger,
+    shell: &dyn crate::shell::Shell,
+    body: &SubmitBody,
+) -> Result<Submitted> {
+    web.with_lock(crate::autonomy::REQUEST_LOCK, || {
+        let decision = if crate::autonomy::cause_of(web, &body.pane)?.is_some() {
+            let agent = crate::inbox::local_agent(shell, &body.pane)?;
+            Some(plan_decision(web, agent, &body.path, ledger::now_ms())?)
+        } else {
+            None
+        };
+        let (submitted, approved) = crate::store::write(web, |tx| {
+            let submitted = submit_locked(tx, body)?;
+            let approved = decision
+                .map(|decision| approve_pending(tx, &submitted.id, decision))
+                .transpose()?
+                .flatten();
+            Ok((submitted, approved))
+        })?;
+        if let Some(approved) = approved {
+            send_decision(web, &approved);
+        }
+        Ok(submitted)
+    })
+}
+
+pub(crate) fn approve_autonomous(
+    web: &Ledger,
+    review: &Review,
+    agent: &crate::probe::Agent,
+    now: u64,
+) -> Result<bool> {
+    let decision = plan_decision(web, agent.clone(), &review.path, now)?;
+    let approved = crate::store::write(web, |tx| approve_pending(tx, &review.id, decision))?;
+    if let Some(approved) = approved {
+        send_decision(web, &approved);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn plan_decision(
+    web: &Ledger,
+    agent: crate::probe::Agent,
+    path: &str,
+    now: u64,
+) -> Result<(portal_types::autonomy::DecisionView, String)> {
+    use portal_types::autonomy::{DecideBody, DecisionSource, TITLE_BYTES};
+    let title = format!("Approved its own plan: {}", path.replace(['\r', '\n'], " "));
+    let body = DecideBody {
+        title: title[..title.floor_char_boundary(TITLE_BYTES)].to_owned(),
+        decision: "Approved without the owner.".into(),
+        why: "Autonomous mode is on.".into(),
+        question: None,
+        alternatives: None,
+    };
+    crate::autonomy::prepare_record(web, &body, DecisionSource::Plan, None, now, || Ok(agent))
+}
+
+fn approve_pending(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    (mut decision, session): (portal_types::autonomy::DecisionView, String),
+) -> Result<Option<Review>> {
+    let Some(mut record) = records::get(tx, id)? else {
+        return Ok(None);
+    };
+    if record.review.decision.is_some() {
+        return Ok(None);
+    }
+    decision.review = Some(id.to_owned());
+    crate::autonomy::save_record(tx, &decision, &session)?;
+    Ok(Some(approve_locked(
+        tx,
+        &mut record,
+        Some(AUTONOMOUS_APPROVAL.into()),
+    )?))
+}
+
+fn approve_locked(
+    tx: &rusqlite::Transaction<'_>,
+    record: &mut Record,
+    notes: Option<String>,
+) -> Result<Review> {
+    record.review.decision = Some(Decision::Approved { notes });
+    record.delivered = false;
+    records::put(tx, record)?;
+    Ok(record.review.clone())
+}
+
+fn send_decision(web: &Ledger, review: &Review) {
+    let _ = decisions_channel(web).send(Delivery {
+        session: review.session.clone(),
+        event: decision_event(review),
+    });
 }
 
 /// Replay pending decisions, then follow live decisions without a subscribe/read race.
@@ -1171,6 +1259,41 @@ mod tests {
         let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
         bytes.extend_from_slice(b"not a real image, but it has the magic bytes");
         bytes
+    }
+
+    #[test]
+    fn autonomy_approves_the_submitted_review_and_records_one_decision() -> Result<()> {
+        use portal_types::autonomy::DecisionSource;
+        let web = Ledger::temporary();
+        let _publication = crate::autonomy::test_publication(&web, "w1:p1");
+        let shell = crate::shell::Fake::new();
+        shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w1:p1","agent":"pi","agent_status":"working","agent_session":{"kind":"path","value":"session-1"}}]}}"#);
+        let mut stream = decisions_channel(&web).subscribe();
+        let submitted = super::submit_plan(
+            &web,
+            &shell,
+            &SubmitBody {
+                path: "plans/one.md".into(),
+                content: "a plan".into(),
+                pane: "w1:p1".into(),
+                session: "session-1".into(),
+                cwd: "/repo".into(),
+            },
+        )?;
+        let record = load(&web, &submitted.id)?.unwrap();
+        assert_eq!(
+            record.review.decision,
+            Some(Decision::Approved {
+                notes: Some(AUTONOMOUS_APPROVAL.into())
+            })
+        );
+        assert_eq!(stream.try_recv().unwrap().event.review_id, submitted.id);
+        let decisions = crate::autonomy::decisions(&web, Some("w1:p1"))?;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].source, DecisionSource::Plan);
+        assert_eq!(decisions[0].review.as_deref(), Some(submitted.id.as_str()));
+        assert_eq!(decisions[0].title, "Approved its own plan: plans/one.md");
+        Ok(())
     }
 
     #[tokio::test]

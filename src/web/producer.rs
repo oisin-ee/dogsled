@@ -87,7 +87,11 @@ pub(crate) enum Interactive {
 pub(crate) const INTERACTIVE_LIMIT: usize = 40 * 1024 * 1024 + 64 * 1024;
 
 /// One lifetime owner for producer HTTP and owner IPC, including long-poll waiters.
-pub(crate) fn interactive_state(dir: &FsPath, stop: CancellationToken) -> super::AppState {
+pub(crate) fn interactive_state(
+    dir: &FsPath,
+    stop: CancellationToken,
+    questions: super::store::Store,
+) -> super::AppState {
     let mut state = super::AppState::new(
         tokio::sync::watch::channel(super::PortalState::default()).1,
         0,
@@ -96,6 +100,7 @@ pub(crate) fn interactive_state(dir: &FsPath, stop: CancellationToken) -> super:
         crate::ledger::Ledger::new(dir.to_owned()),
     );
     state.private_producer = true;
+    state.questions = questions;
     state.stop = stop;
     state
 }

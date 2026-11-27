@@ -619,6 +619,61 @@ fn closed_owner_requests_leave_publication_but_keep_durable_history() {
 }
 
 #[test]
+fn autonomy_projection_attributes_a_remote_workers_decision_to_its_lead() {
+    let fixture = Fixture::new();
+    let mut input = fixture.input();
+    input.local.insert("host".into(), json!({
+        "owned_work": {"version":1,"status":"ready","hostname":"machine-a","owned":[],"executions":[]},
+        "autonomy":{"version":1,"fleet":false,"agents":["local-worker"],"decisions":[]},
+    }));
+    let mut worker = host("peer-id", "working");
+    worker.host.label = "peer-label".into();
+    let decision = json!({"id":"d1","host":"machine-b","pane":"peer-id-worker",
+        "owner_host":"machine-a","owner_pane":"local-worker","created_ms":7,"source":"agent",
+        "title":"Export CSV","decision":"Use CSV","why":"The reader accepts CSV"});
+    let mut peer = super::super::peers::Ownership::default();
+    peer.replace(Some(&json!({
+        "owned_work":{"version":1,"status":"ready","hostname":"machine-b","owned":[],"executions":[{
+            "kind":"agent","request_id":"r1","owner_hostname":"machine-a","owner_pane":"local-worker",
+            "pane":"peer-id-worker","title":"worker","job_label":null
+        }]},
+        "autonomy":{"version":1,"fleet":false,"agents":[],"decisions":[decision.clone()]}
+    })), true);
+    let mut older = super::super::peers::Ownership::default();
+    older.replace(Some(&json!({})), true);
+    let mut projector = project::Projector::default();
+    let local = projector.inputs(&fixture.fleet(), &input);
+    project::derive_with_ownership(
+        &local,
+        vec![fixture.local.clone(), worker, host("older", "idle")],
+        &(&fixture.policy).into(),
+        &mut input,
+        BTreeMap::from([("peer-id".into(), peer), ("older".into(), older)]),
+    )
+    .unwrap();
+    let snapshot = &input.views["portal"]["data"];
+    assert_eq!(
+        snapshot["autonomy"],
+        json!({"fleet":[],"unsupported":["older"]})
+    );
+    let agents = &snapshot["agents"];
+    assert_eq!(agents[0]["autonomous"], "agent");
+    assert_eq!(agents[0]["decisions"], json!({"count":1,"newest_ms":7}));
+    assert_eq!(agents[1]["autonomous"], "owner");
+    assert_eq!(agents[1]["decisions"], agents[0]["decisions"]);
+    assert_eq!(
+        input.views["autonomy"]["data"]["panes"],
+        json!({"local-worker":"agent"})
+    );
+    let mut expected = decision;
+    expected["host"] = "peer-label".into();
+    assert_eq!(
+        input.views["autonomy"]["data"]["decisions"],
+        json!([expected])
+    );
+}
+
+#[test]
 fn fleet_agent_projection_keeps_same_pane_on_distinct_hosts() {
     let mut fixture = Fixture::new();
     fixture.local.probe.as_mut().unwrap().agent_panes[0]

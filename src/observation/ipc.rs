@@ -22,6 +22,7 @@ use tokio::sync::{oneshot, watch};
 /// The size of one frame, not of one reply. A larger reply has more frames.
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = crate::web::producer::INTERACTIVE_LIMIT;
+const NOT_RUNNING: &str = "observation unavailable: dogsled serve is not running";
 const MAX_CLIENTS: usize = 64;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKET: &str = "observation.sock";
@@ -162,6 +163,7 @@ pub(crate) struct Server {
     dirty: Option<crate::service::wake::Dirty>,
     /// Pi's producer endpoint, answered beside the observation socket.
     producer: Option<(PathBuf, tokio_util::sync::CancellationToken)>,
+    questions: crate::web::store::Store,
 }
 
 impl Server {
@@ -187,6 +189,7 @@ impl Server {
             activity: None,
             dirty: None,
             producer: None,
+            questions: crate::web::store::Store::new(crate::ledger::Ledger::new(state.to_owned())),
         })
     }
 
@@ -209,6 +212,10 @@ impl Server {
         feed: super::live_activity::ActivityFeed,
     ) {
         self.activity = Some((commands, feed));
+    }
+
+    pub fn questions(&self) -> &crate::web::store::Store {
+        &self.questions
     }
 
     pub fn bind(&mut self, receiver: watch::Receiver<Option<Arc<Frame>>>) -> Result<()> {
@@ -266,8 +273,11 @@ impl Server {
             }
         };
         let producer_stop = tokio_util::sync::CancellationToken::new();
-        let interactive =
-            crate::web::producer::interactive_state(&self.state, producer_stop.clone());
+        let interactive = crate::web::producer::interactive_state(
+            &self.state,
+            producer_stop.clone(),
+            self.questions.clone(),
+        );
         runtime.spawn(crate::web::producer::run(
             producer_listener,
             crate::web::producer::Producer::serve(&self.state, producer_stop.clone()),
@@ -924,8 +934,7 @@ impl Client {
     }
 
     fn connect(&self) -> Result<UnixStream> {
-        let not_running =
-            || Error::Invalid("observation unavailable: dogsled serve is not running".into());
+        let not_running = || Error::Invalid(NOT_RUNNING.into());
         // A long state path resolves its socket through the state directory itself, so a
         // missing state directory is the same fact as a missing socket: nothing serves it.
         let path = super::socket_path(&self.state, SOCKET).map_err(|error| match error {
@@ -1224,6 +1233,23 @@ impl Client {
             None,
             select.chosen(),
         )?))
+    }
+
+    /// A standalone command can run without an observer, or before its first frame.
+    /// Other transport or decoding failures must not look like an empty publication.
+    pub fn current_if_published(&self, select: &Select) -> Result<Option<Published>> {
+        match self.current(select) {
+            Ok(published) => Ok(Some(published)),
+            Err(Error::Invalid(detail))
+                if matches!(
+                    detail.as_str(),
+                    NOT_RUNNING | "observation unavailable: observation unavailable"
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn subscribe(&self, select: &Select) -> Result<Subscription> {

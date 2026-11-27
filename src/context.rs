@@ -1,5 +1,6 @@
 //! One prompt-context formatter for Pi, Claude Code, and Codex.
 
+use crate::autonomy::{PublishedAutonomy, VIEW as AUTONOMY};
 use crate::commands::Status;
 use crate::error::Result;
 use crate::gate::Findings;
@@ -34,12 +35,11 @@ pub enum Event {
 
 /// What `format` reads.
 pub(crate) fn select() -> crate::observation::ipc::Select {
-    crate::observation::ipc::Select::views(
-        read::BOARD
-            .into_iter()
-            .chain(read::FINDINGS)
-            .chain(["status", "status_display"]),
-    )
+    crate::observation::ipc::Select::views(read::BOARD.into_iter().chain(read::FINDINGS).chain([
+        "status",
+        "status_display",
+        AUTONOMY,
+    ]))
 }
 
 /// `owner` is the caller's Herdr pane. Its own children and jobs come first, with those that
@@ -60,6 +60,10 @@ pub fn format(
         .transpose()?
         .unwrap_or_default();
     let display: Display = read::view(published, "status_display")?;
+    let autonomous = owner.is_some_and(|pane| {
+        read::view::<PublishedAutonomy>(published, AUTONOMY)
+            .is_ok_and(|view| view.cause_of(pane).is_some())
+    });
     Ok(text(
         harness,
         event,
@@ -67,8 +71,18 @@ pub fn format(
         board.as_ref(),
         &display,
         &found,
+        autonomous,
     ))
 }
+
+pub(crate) const AUTONOMOUS_RULE: &str = concat!(
+    "Your owner is away. ",
+    "Do not ask your owner a question and do not wait for an approval. ",
+    "For each open question, choose the most reasonable option from the plan, the request, and the code. ",
+    "Record each choice with the decide tool before you act on it. ",
+    "Stop only when you need something that only your owner has: credentials, access, or payment. ",
+    "Then end the turn and say what you need.",
+);
 
 fn text(
     harness: Harness,
@@ -77,8 +91,12 @@ fn text(
     board: Option<&crate::board::Board>,
     display: &Display,
     found: &Findings,
+    autonomous: bool,
 ) -> String {
-    if status.hosts.iter().all(|host| host.sampled_ms.is_none()) && status.sweep.is_none() {
+    if !autonomous
+        && status.hosts.iter().all(|host| host.sampled_ms.is_none())
+        && status.sweep.is_none()
+    {
         return String::new();
     }
     let mut text = board.map_or_else(String::new, crate::board::Board::owner_lines);
@@ -94,6 +112,11 @@ fn text(
             found.failures.len(),
             found.holds.len()
         );
+    }
+    if autonomous {
+        text.push_str("Autonomous mode is on. ");
+        text.push_str(AUTONOMOUS_RULE);
+        text.push('\n');
     }
     match harness {
         Harness::Pi => text,
@@ -136,6 +159,7 @@ mod tests {
             board.as_ref(),
             &Display::capture(status),
             found,
+            false,
         )
     }
 

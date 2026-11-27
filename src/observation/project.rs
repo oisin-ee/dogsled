@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+mod autonomy;
+
 /// Every domain carries its gaps with its data. `None` means no usable input, not empty
 /// success. Retained source values remain useful, but their failures travel with them.
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +29,7 @@ pub(crate) struct View<T> {
 pub(crate) struct LocalInputs {
     pub now: u64,
     captured_ms: u64,
+    hostname: String,
     ownership: super::peers::Ownership,
     inventory: Option<Value>,
     todos: Option<Vec<TodoSections>>,
@@ -181,6 +184,7 @@ impl LocalInputs {
         Self {
             now,
             captured_ms: input.published_ms,
+            hostname: crate::inbox::hostname(),
             ownership: super::peers::Ownership::default(),
             inventory: status.and_then(|status| {
                 capture(
@@ -426,23 +430,62 @@ pub(crate) fn derive_with_ownership(
     insert(views, "active_jobs", Some(active_jobs), &gaps)?;
     scoped_views(views, status.as_ref(), local, &reports, &jobs, &gaps)?;
     insert(views, "findings", local.findings.as_ref(), &gaps)?;
-    let agents = fleet_agents(local, &reports, input.published_ms);
-    agents_view(views, agents.as_ref(), &gaps)?;
-    let mut portal = portal(
+    portal_views(
+        input,
         local,
-        agents,
+        &reports,
+        &ownership,
         board.as_ref(),
         status.as_ref(),
         &gaps,
-        input.published_ms,
-    );
-    project_ownership(&mut portal, &reports, &ownership, status.as_ref());
-    // Ownership gaps describe the portal hierarchy, not failure of the local board.
-    insert(views, "portal_board", portal.board.as_ref(), &gaps)?;
-    insert(views, "inbox", portal.inbox.as_ref(), &gaps)?;
-    insert(views, "portal", Some(portal), &gaps)?;
+    )?;
     input.gaps = gaps;
     Ok(())
+}
+
+fn portal_views(
+    input: &mut Publication,
+    local: &LocalInputs,
+    reports: &[HostReport],
+    ownership: &BTreeMap<String, super::peers::Ownership>,
+    board: Option<&Board>,
+    status: Option<&Status>,
+    gaps: &[Gap],
+) -> Result<()> {
+    let views = &mut input.views;
+    let mut agents = fleet_agents(local, reports, input.published_ms);
+    let autonomy = autonomy::project(
+        &local.hostname,
+        reports,
+        ownership,
+        &input.sources.peers,
+        agents.as_deref_mut().unwrap_or_default(),
+        !gaps.iter().any(|gap| gap.domain == "host"),
+    );
+    // Owner causes use the ownership evidence, which needs the status capture. So the view
+    // carries the collection gaps beside the gaps of its own hosts.
+    let autonomy_gaps: Vec<Gap> = gaps.iter().chain(&autonomy.gaps).cloned().collect();
+    insert(
+        views,
+        crate::autonomy::VIEW,
+        Some(autonomy.published),
+        &autonomy_gaps,
+    )?;
+    agents_view(views, agents.as_ref(), gaps)?;
+    let mut portal = portal(
+        local,
+        agents,
+        autonomy.snapshot,
+        board,
+        status,
+        gaps,
+        input.published_ms,
+    );
+    project_ownership(&mut portal, reports, ownership, status);
+    // Ownership gaps describe the portal hierarchy, not failure of the local board.
+    insert(views, "portal_board", portal.board.as_ref(), gaps)?;
+    insert(views, "inbox", portal.inbox.as_ref(), gaps)?;
+    insert(views, "portal", Some(portal), gaps)
 }
 
 fn project_ownership(
@@ -691,6 +734,7 @@ fn scoped_views(
 fn portal(
     local: &LocalInputs,
     agents: Option<Vec<AgentView>>,
+    autonomy: Option<portal_types::autonomy::AutonomyView>,
     board: Option<&Board>,
     status: Option<&Status>,
     gaps: &[Gap],
@@ -725,7 +769,7 @@ fn portal(
         agents,
         inbox,
         repos: local.repos.clone(),
-        autonomy: None,
+        autonomy,
         gaps: gaps.to_vec(),
     }
 }

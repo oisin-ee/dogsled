@@ -2,7 +2,7 @@
 
 use super::{Gap, Published, project::View};
 use crate::error::{Error, Result};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 /// The views that each reader function below reads. A caller selects what it reads, so
@@ -39,14 +39,17 @@ pub(crate) fn report(published: &Published, domain: Option<&str>) {
     }
 }
 
+pub(crate) fn projected<T: DeserializeOwned>(
+    published: &Published,
+    domain: &str,
+) -> Result<View<T>> {
+    Ok(View::deserialize(
+        published.views.get(domain).ok_or_else(|| missing(domain))?,
+    )?)
+}
+
 pub(crate) fn view<T: DeserializeOwned>(published: &Published, domain: &str) -> Result<T> {
-    let value: View<T> = serde_json::from_value(
-        published
-            .views
-            .get(domain)
-            .ok_or_else(|| missing(domain))?
-            .clone(),
-    )?;
+    let value = projected(published, domain)?;
     value.data.ok_or_else(|| {
         if value.gaps.is_empty() {
             missing(domain)
