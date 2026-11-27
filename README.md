@@ -225,7 +225,7 @@ Repository directories map to the same path relative to home. A linked-worktree 
 
 The pane runs `dogsled exec ID -- COMMAND`. Output goes to the pane and `jobs/ID.log` on that host.
 A job runs only from its own durable claim in `jobs/ID.json`. `exec` refuses a job whose record is missing, unreadable, for another job, incomplete, for another command, already started, ended, or uncertain. A refusal starts no new process, log, or pane: a job that already started keeps the process and log it already has.
-The launch publishes a non-executable intent before it allocates a pane, and an executable claim once the pane is known. An allocation that stops, or a dispatch that was never proved, stays uncertain and never runs again. A launch replays a saved receipt only when the receipt matches the request and the recorded job; a claim alone is not a receipt.
+The launch publishes a non-executable intent before it allocates a pane, and an executable claim once the pane is known. An allocation that stops, or a dispatch that was never proved, stays uncertain and never runs again. `dogsled stop` ends a job whose dispatch failed, because no wrapper can start it; the job then no longer holds its checkout. An intent that is still claiming its pane stays. A launch replays a saved receipt only when the receipt matches the request and the recorded job; a claim alone is not a receipt.
 If the pane output closes, capture continues to the log and preserves the child exit code.
 The atomic `jobs/ID.json` contains the command, directory, host, owner, exit code, signal, reason, and millisecond timestamps.
 After the job ends, `exec` saves this final record, reports completion, then closes its own pane and tab.

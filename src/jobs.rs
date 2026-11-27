@@ -693,13 +693,22 @@ pub fn stop(ledger: &Ledger, id: &str) -> Result<()> {
     store(ledger).with_lock(id, || {
         let job = get(ledger, id)?;
         if job.ended_ms.is_none() {
-            if let Ownership::Pending(mut pending) = ownership(ledger, id)? {
-                pending.state = "blocked".into();
-                pending.reason = Some("stopped".into());
-                pending.exit = None;
-                pending.signal = None;
-                pending.ended_ms = Some(now_ms());
-                save(ledger, &pending)?;
+            // A pending claim has not started, and a failed dispatch left an uncertain claim
+            // that no wrapper may start: `start` requires a pending claim. Neither ran a
+            // process, so the owner's stop ends both. An intent still claiming its pane
+            // stays: its launch may still be allocating.
+            let unstarted = match ownership(ledger, id)? {
+                Ownership::Pending(pending) => Some(pending),
+                Ownership::Uncertain(held) if held.state == UNCERTAIN => Some(held),
+                _ => None,
+            };
+            if let Some(mut unstarted) = unstarted {
+                unstarted.state = "blocked".into();
+                unstarted.reason = Some("stopped".into());
+                unstarted.exit = None;
+                unstarted.signal = None;
+                unstarted.ended_ms = Some(now_ms());
+                save(ledger, &unstarted)?;
             }
             crate::job_store::request_stop(ledger, id, true)?;
         }
