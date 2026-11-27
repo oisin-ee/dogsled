@@ -31,7 +31,7 @@ use crate::components::sidebar::{
 use crate::components::skeleton::Skeleton;
 use crate::components::tabs::{TabContent, Tabs};
 use crate::conversations::{Conversations, UpdateResult};
-use crate::new_lead::{NewConversation, NewLead};
+use crate::new_lead::{LeadOpening, NewConversation, NewLead};
 use dioxus_icons::lucide::Plus;
 
 /// Portal stream projections shared with the selected agent view.
@@ -450,6 +450,7 @@ pub(crate) struct PortalState {
     pub(crate) catalogue: CatalogueState,
     paused: bool,
     autonomy: Option<AutonomyView>,
+    lead_starts: Vec<portal_types::agents::LeadStartView>,
     /// The Dogsled release of the service that serves this portal.
     dogsled: Option<String>,
 }
@@ -480,6 +481,7 @@ impl PortalState {
         match result {
             Ok(snapshot) => {
                 self.autonomy = snapshot.autonomy;
+                self.lead_starts = snapshot.lead_starts.unwrap_or_default();
                 if !snapshot.dogsled.is_empty() {
                     self.dogsled = Some(snapshot.dogsled.clone());
                 }
@@ -632,11 +634,9 @@ pub fn App() -> Element {
         use_context_provider(|| Signal::new(link.selection().filter(|_| link.host.is_some())));
     let mut linked = use_signal(|| link.host.is_some());
     let mut link_error = use_signal(|| None::<String>);
-    use_context_provider(Composers::default);
-    let conversation = use_context_provider(|| NewConversation {
-        open: Signal::new(false),
-        repository: Signal::new(None),
-    });
+    let composers = use_context_provider(Composers::default);
+    let mut conversation = use_context_provider(NewConversation::new);
+    let mut starting = conversation.thread;
     let mut composing = conversation.open;
     let mut metrics_open = use_signal(|| false);
     let mut hint = conversation.repository;
@@ -651,17 +651,30 @@ pub fn App() -> Element {
         }));
         selected.set(None);
         selection.set(None);
+        starting.set(None);
         composing.set(true);
         metrics_open.set(false);
         panel.set(LeadPanel::Chat);
     };
     use_effect(move || {
         if selected().is_some() {
+            starting.set(None);
             composing.set(false);
             metrics_open.set(false);
             recorded_review.set(None);
         } else if composing() || metrics_open() {
             recorded_review.set(None);
+        }
+    });
+    let starts = use_memo(move || publication.read().lead_starts.clone());
+    use_effect(move || {
+        if selected.peek().is_none()
+            && let Some(ready) = conversation.follow(&starts.read())
+        {
+            composers
+                .state(&format!("{}:{}", ready.address.host, ready.address.pane))
+                .record_lead_opening(ready.prompt, ready.name);
+            selected.set(Some(ready.address));
         }
     });
     let live = use_context_provider(|| LivePortal::new(selected.peek().clone()));
@@ -888,6 +901,7 @@ pub fn App() -> Element {
                         onclick: move |_| {
                             selected.set(None);
                             selection.set(None);
+                            starting.set(None);
                             composing.set(false);
                             metrics_open.set(true);
                             panel.set(LeadPanel::Chat);
@@ -949,6 +963,9 @@ pub fn App() -> Element {
                         rsx! { AgentView { key: "{pane.host}:{pane.pane}", host: pane.host, pane: pane.pane, review, question, lead: lead.clone(), inbox: items.clone() } }
                     }
                     None if metrics_open() => rsx! { crate::metrics::Metrics {} },
+                    None if starting.read().is_some() => rsx! {
+                        if let Some(thread) = starting() { LeadOpening { thread } }
+                    },
                     None if composing() => rsx! { NewLead { hosts: view.as_ref().map(|view| view.hosts.clone()).unwrap_or_default(), running } },
                     None => rsx! { div { class: "empty-lead",
                         TabContent { class: "empty-chat", value: "chat", index: 0usize,
@@ -1185,6 +1202,7 @@ mod shell_tests {
             inbox: None,
             repos: None,
             autonomy: None,
+            lead_starts: None,
             gaps: vec![],
         };
         state.update(Ok(PortalEvent::Snapshot(Box::new(snapshot))), 1);
@@ -1368,6 +1386,7 @@ mod shell_tests {
                 inbox: Some(InboxView::default()),
                 repos: Some(portal_types::agents::RepoList::default()),
                 autonomy: None,
+                lead_starts: None,
                 gaps,
             }))
         };

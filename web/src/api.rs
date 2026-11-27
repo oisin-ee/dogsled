@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use gloo_net::http::Request;
 use gloo_net::websocket::{Message, futures::WebSocket};
 use portal_types::PortalEvent;
-use portal_types::agents::{KeysBody, PromptBody, Screen};
+use portal_types::agents::{CreateLeadBody, KeysBody, LeadStartView, PromptBody, Screen};
 use portal_types::autonomy::{DecisionList, SwitchBody};
 use portal_types::live::{ClientFrame, ServerFrame};
 use serde::de::DeserializeOwned;
@@ -228,21 +228,76 @@ pub(crate) fn create_lead_body(
     }
 }
 
-/// Start a lead in `repo` with its first prompt. The result is the lead's pane.
-pub async fn create_lead(
-    repo: &str,
-    prompt: &str,
-    model: Option<portal_types::models::ModelRef>,
-    thinking: Option<portal_types::models::ThinkingLevel>,
-) -> Result<portal_types::agents::AgentAddress, String> {
-    let body = create_lead_body(repo, prompt, model, thinking);
+pub(crate) fn lead_key() -> Result<String, String> {
+    let mut bytes = [0; 16];
+    let unavailable = "Could not generate a lead request key.";
+    let crypto = web_sys::window()
+        .ok_or(unavailable)?
+        .crypto()
+        .map_err(|_| unavailable)?;
+    crypto
+        .get_random_values_with_u8_array(&mut bytes)
+        .map_err(|_| unavailable)?;
+    Ok(format!("{:032x}", u128::from_be_bytes(bytes)))
+}
+
+enum LeadPostFailure {
+    Lost,
+    Refused(String),
+}
+
+/// Accept a lead. Only a lost reply gets another attempt, always with the original key and body.
+pub(crate) async fn create_lead(key: &str, body: &CreateLeadBody) -> Result<LeadStartView, String> {
+    retry_lead(key, body, post_lead, dioxus_sdk_time::sleep).await
+}
+
+async fn retry_lead<F: std::future::Future<Output = ()>>(
+    key: &str,
+    body: &CreateLeadBody,
+    mut post: impl AsyncFnMut(&str, &CreateLeadBody) -> Result<LeadStartView, LeadPostFailure>,
+    mut sleep: impl FnMut(std::time::Duration) -> F,
+) -> Result<LeadStartView, String> {
+    for delay in [250, 500, 1000] {
+        match post(key, body).await {
+            Ok(view) => return Ok(view),
+            Err(LeadPostFailure::Refused(error)) => return Err(error),
+            Err(LeadPostFailure::Lost) => sleep(std::time::Duration::from_millis(delay)).await,
+        }
+    }
+    match post(key, body).await {
+        Ok(view) => Ok(view),
+        Err(LeadPostFailure::Refused(error)) => Err(error),
+        Err(LeadPostFailure::Lost) => {
+            Err("Could not confirm that the request was saved. The lead may still start.".into())
+        }
+    }
+}
+
+async fn post_lead(key: &str, body: &CreateLeadBody) -> Result<LeadStartView, LeadPostFailure> {
     let response = Request::post(&format!("{BASE}/api/leads"))
-        .json(&body)
-        .map_err(|error| error.to_string())?
+        .header("Idempotency-Key", key)
+        .json(body)
+        .map_err(|error| LeadPostFailure::Refused(error.to_string()))?
         .send()
         .await
-        .map_err(|error| error.to_string())?;
-    read_json::<portal_types::agents::AgentAddress>(response).await
+        .map_err(|_| LeadPostFailure::Lost)?;
+    let status = response.status();
+    let text = response.text().await.map_err(|_| LeadPostFailure::Lost)?;
+    if status == 202 {
+        return serde_json::from_str(&text).map_err(|_| {
+            LeadPostFailure::Refused(
+                "Could not read the saved request. The lead may still start.".into(),
+            )
+        });
+    }
+    if (500..600).contains(&status) && text.trim().is_empty() {
+        return Err(LeadPostFailure::Lost);
+    }
+    let error = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|body| body["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("The server answered {status}."));
+    Err(LeadPostFailure::Refused(error))
 }
 
 /// Answer a blocked prompt with one key.
@@ -401,6 +456,74 @@ fn validate_portal(event: &PortalEvent, stamp: &mut Option<(String, u64)>) -> Re
         *stamp = Some((snapshot.epoch.clone(), snapshot.revision));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lead_tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[test]
+    fn lost_post_reuses_the_key_and_body_for_at_most_three_retries() {
+        let body = create_lead_body("owner/repo", "First prompt", None, None);
+        let receipt = LeadStartView {
+            id: "saved".into(),
+            revision: 1,
+            state: portal_types::agents::LeadStartState::Accepted,
+            name: None,
+            address: None,
+            phase: None,
+            error: None,
+            created_ms: 1,
+        };
+        for succeeds in [true, false] {
+            let mut attempts = 0;
+            let mut delays = Vec::new();
+            let actual = retry_lead(
+                "one-send",
+                &body,
+                async |key, attempted| {
+                    assert_eq!(key, "one-send");
+                    assert_eq!(attempted, &body);
+                    attempts += 1;
+                    if succeeds && attempts == 2 {
+                        Ok(receipt.clone())
+                    } else {
+                        Err(LeadPostFailure::Lost)
+                    }
+                },
+                |delay| {
+                    delays.push(delay.as_millis());
+                    std::future::ready(())
+                },
+            )
+            .now_or_never()
+            .unwrap();
+            if succeeds {
+                assert_eq!(actual, Ok(receipt.clone()));
+                assert_eq!(attempts, 2);
+                assert_eq!(delays, [250]);
+            } else {
+                assert!(actual.unwrap_err().contains("may still start"));
+                assert_eq!(attempts, 4);
+                assert_eq!(delays, [250, 500, 1000]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_server_refusal_does_not_retry() {
+        let body = create_lead_body("owner/repo", "First prompt", None, None);
+        let actual = retry_lead(
+            "one-send",
+            &body,
+            async |_, _| Err(LeadPostFailure::Refused("Conflict".into())),
+            |_| async { panic!("a refusal cannot enter backoff") },
+        )
+        .now_or_never()
+        .unwrap();
+        assert_eq!(actual, Err("Conflict".into()));
+    }
 }
 
 #[cfg(test)]

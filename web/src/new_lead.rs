@@ -6,7 +6,9 @@ use dioxus_primitives::combobox::{
     Combobox, ComboboxEmpty, ComboboxInput, ComboboxList, ComboboxOption, default_combobox_filter,
 };
 use portal_types::HostView;
-use portal_types::agents::RepoChoice;
+use portal_types::agents::{
+    AgentAddress, CreateLeadBody, LeadStartState, LeadStartView, RepoChoice,
+};
 use portal_types::models::{ModelCatalogue, ModelChoice, ModelRef, SettingsChange, ThinkingLevel};
 
 use crate::agent_view::{Composer, PendingMessage, message_with_images, use_composer};
@@ -15,12 +17,164 @@ use crate::board::{NavigationRepo, NavigationRow, repository_name};
 use crate::components::skeleton::Skeleton;
 use crate::notice::{Alert, Status};
 
-/// Whether the main panel shows a new conversation, and the repository of the agent that
-/// was selected when it opened.
+/// The New composer and its submitted thread share the shell's lifetime.
 #[derive(Clone, Copy)]
-pub struct NewConversation {
+pub(crate) struct NewConversation {
     pub open: Signal<bool>,
     pub repository: Signal<Option<String>>,
+    pub thread: Signal<Option<LeadThread>>,
+    owner: ScopeId,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct LeadThread {
+    key: String,
+    prompt: String,
+    receipt: Option<Result<LeadStartView, String>>,
+}
+
+impl LeadThread {
+    fn view(&self) -> Option<&LeadStartView> {
+        self.receipt.as_ref()?.as_ref().ok()
+    }
+}
+
+pub(crate) struct ReadyLead {
+    pub address: AgentAddress,
+    pub prompt: String,
+    pub name: Option<String>,
+}
+
+impl NewConversation {
+    pub(crate) fn new() -> Self {
+        Self {
+            open: Signal::new(false),
+            repository: Signal::new(None),
+            thread: Signal::new(None),
+            owner: dioxus::core::current_scope_id(),
+        }
+    }
+
+    fn open_thread(&mut self, key: String, prompt: String) {
+        self.thread.set(Some(LeadThread {
+            key,
+            prompt,
+            receipt: None,
+        }));
+        self.open.set(false);
+    }
+
+    fn complete(&mut self, key: &str, result: Result<LeadStartView, String>) {
+        if let Some(thread) = self
+            .thread
+            .write()
+            .as_mut()
+            .filter(|thread| thread.key == key)
+        {
+            thread.receipt = Some(result);
+        }
+    }
+
+    /// Follow only the receipt returned for this Send. Consume it once the pane is ready.
+    pub(crate) fn follow(&mut self, starts: &[LeadStartView]) -> Option<ReadyLead> {
+        let mut thread = (self.thread)()?;
+        let saved = thread.view()?;
+        let live = starts
+            .iter()
+            .find(|view| view.id == saved.id && view.revision >= saved.revision);
+        let current = live.unwrap_or(saved);
+        if current.state == LeadStartState::Ready
+            && let Some(address) = &current.address
+        {
+            let ready = ReadyLead {
+                address: address.clone(),
+                name: current.name.clone(),
+                prompt: thread.prompt,
+            };
+            self.thread.set(None);
+            return Some(ready);
+        }
+        if let Some(live) = live.filter(|view| *view != saved) {
+            thread.receipt = Some(Ok(live.clone()));
+            self.thread.set(Some(thread));
+        }
+        None
+    }
+
+    fn send(self, key: String, body: CreateLeadBody) {
+        let prompt = body.prompt.clone();
+        self.submit(key, prompt, |key| async move {
+            api::create_lead(&key, &body).await
+        });
+    }
+
+    fn submit<F>(mut self, key: String, prompt: String, accept: impl FnOnce(String) -> F)
+    where
+        F: std::future::Future<Output = Result<LeadStartView, String>> + 'static,
+    {
+        self.open_thread(key.clone(), prompt);
+        let accepted = accept(key.clone());
+        dioxus::core::Runtime::current().spawn(self.owner, async move {
+            self.complete(&key, accepted.await);
+        });
+    }
+}
+
+#[component]
+pub(crate) fn LeadOpening(thread: LeadThread) -> Element {
+    let view = thread.view();
+    let title = view
+        .as_ref()
+        .and_then(|view| view.name.clone())
+        .unwrap_or_else(|| {
+            let words = thread.prompt.split_whitespace().take(8).collect::<Vec<_>>();
+            words.join(" ").chars().take(72).collect::<String>()
+        });
+    let state = view.as_ref().map(|view| view.state);
+    let refusal = thread
+        .receipt
+        .as_ref()
+        .and_then(|result| result.as_ref().err());
+    let (label, detail) = match (state, refusal) {
+        (None, None) => ("Saving", "Saving the lead request."),
+        (None, Some(_)) => (
+            "Start not confirmed",
+            "The portal did not receive a receipt.",
+        ),
+        (Some(LeadStartState::Accepted | LeadStartState::Dispatching), _) => {
+            ("Starting", "The service will start the lead.")
+        }
+        (Some(LeadStartState::Ready), _) => ("Ready", "Opening the lead's transcript."),
+        (Some(LeadStartState::Failed), _) => {
+            ("Start failed", "The service could not start the lead.")
+        }
+        (Some(LeadStartState::Uncertain), _) => (
+            "Start uncertain",
+            "The lead may have started. Dogsled did not retry it.",
+        ),
+    };
+    rsx! {
+        section { class: "lead-panel", aria_label: "Lead conversation",
+            header { class: "lead-header", div { class: "lead-heading", h1 { "{title}" } } }
+            div { class: "lead-chat", div { class: "conversation-scroll", div { class: "conversation-turns",
+            div { class: "conversation-column",
+                PendingMessage { text: thread.prompt.clone(), label: label.to_owned(), detail: detail.to_owned() }
+                if let Some(error) = refusal { Alert { "{error}" } }
+                if let Some(view) = view {
+                    if view.state == LeadStartState::Failed {
+                        if let Some(error) = &view.error { Alert { "{error}" } }
+                    }
+                    if view.state == LeadStartState::Uncertain { Alert { "{detail}" } }
+                    if let Some(phase) = view.phase.as_deref().filter(|_| view.state != LeadStartState::Ready) {
+                        Status { "Launch phase: {phase}" }
+                    }
+                    if matches!(view.state, LeadStartState::Failed | LeadStartState::Uncertain) {
+                        if let Some(address) = &view.address { Status { "Pane: {address.pane}" } }
+                    }
+                }
+            } } } }
+        }
+    }
 }
 
 /// An origin as `host/owner/repo`, the form agent rows carry.
@@ -139,9 +293,7 @@ pub(crate) fn NewLeadForm(
     #[props(default)] running: Vec<NavigationRepo>,
 ) -> Element {
     let mut settings = use_signal(LaunchSettings::default);
-    let mut selected = use_context::<Signal<Option<portal_types::agents::AgentAddress>>>();
     let conversation = use_context::<NewConversation>();
-    let mut composing = conversation.open;
     let hint = conversation.repository;
     let crate::agent_view::ComposerState {
         mut draft,
@@ -149,9 +301,6 @@ pub(crate) fn NewLeadForm(
         ..
     } = use_composer("new");
     let uploading = use_signal(|| false);
-    let mut busy = use_signal(|| false);
-    // The first message, shown while its lead starts.
-    let mut starting = use_signal(|| None::<(String, String)>);
     let mut error = use_signal(|| None::<String>);
     let mut repo = use_signal(|| None::<String>);
     let mut initialized = use_signal(|| false);
@@ -199,37 +348,25 @@ pub(crate) fn NewLeadForm(
         let text = draft();
         let sent = images();
         let message = message_with_images(&text, &sent);
-        if busy() || uploading() || message.trim().is_empty() {
+        if !*conversation.open.peek() || uploading() || message.trim().is_empty() {
             return;
         }
         let Some(target) = repo().filter(|_| valid()) else {
             error.set(Some("Select a repository before sending.".to_owned()));
             return;
         };
+        let key = match api::lead_key() {
+            Ok(key) => key,
+            Err(message) => {
+                error.set(Some(message));
+                return;
+            }
+        };
         let launch = settings();
-        // The box clears at once; a refusal puts the text back.
+        let body = api::create_lead_body(&target, &message, launch.model, launch.thinking);
         draft.set(String::new());
         images.set(Vec::new());
-        starting.set(Some((message.clone(), target.clone())));
-        busy.set(true);
-        error.set(None);
-        spawn(async move {
-            match api::create_lead(&target, &message, launch.model, launch.thinking).await {
-                Ok(pane) => {
-                    composing.set(false);
-                    selected.set(Some(pane));
-                }
-                Err(message) => {
-                    if draft.peek().is_empty() && images.peek().is_empty() {
-                        draft.set(text);
-                        images.set(sent);
-                    }
-                    error.set(Some(message));
-                }
-            }
-            starting.set(None);
-            busy.set(false);
-        });
+        conversation.send(key, body);
     };
     let catalogue = repos();
     let choices = catalogue
@@ -257,7 +394,7 @@ pub(crate) fn NewLeadForm(
         .collect::<Vec<_>>();
     // Message, repository, model, effort: the composer holds them in that keyboard order.
     rsx! {
-        section { class: "new-lead", aria_label: "New conversation", aria_busy: busy(),
+        section { class: "new-lead", aria_label: "New conversation",
           div { class: "new-lead-center",
             h1 { class: "new-lead-title", "New conversation" }
             p { class: "new-lead-lede", "Describe the task. A lead starts on the host with the most room." }
@@ -286,15 +423,10 @@ pub(crate) fn NewLeadForm(
                 }
             }
             if let Some(message) = error() { Alert { "{message}" } }
-            if let Some((text, target)) = starting() {
-                div { class: "new-lead-starting",
-                    PendingMessage { text, label: "Starting a lead…", detail: "Starting a lead in {target}. Its conversation opens when it is ready." }
-                }
-            }
             div { class: "new-lead-composer",
-                Composer { draft, images, uploading, disabled: false, busy: busy(), autofocus: true,
+                Composer { draft, images, uploading, disabled: false, busy: false, autofocus: true,
                     placeholder: "Send a message or start a task…".to_owned(),
-                    controls: rsx! { RepositoryPicker { choices, selected: repo, busy: busy(),
+                    controls: rsx! { RepositoryPicker { choices, selected: repo, busy: false,
                         on_select: move |()| {
                             initialized.set(true);
                             selection_removed.set(false);
@@ -302,7 +434,7 @@ pub(crate) fn NewLeadForm(
                     } },
                     model_picker: rsx! { crate::model_picker::ModelPicker {
                         choices: model_choices.clone(), selected_model: launch.model,
-                        selected_level: launch.thinking, busy: busy(),
+                        selected_level: launch.thinking, busy: false,
                         on_change: move |change| settings.write().change(change, &model_choices),
                     } },
                     on_error: move |message| error.set(Some(message)), on_send: send }
@@ -462,6 +594,132 @@ mod tests {
         );
     }
 
+    fn lead_opening_root() -> Element {
+        let start = use_context_provider(super::NewConversation::new);
+        rsx! {
+            if let Some(thread) = (start.thread)() { super::LeadOpening { thread } }
+        }
+    }
+
+    fn receipt(state: super::LeadStartState, revision: u64) -> super::LeadStartView {
+        super::LeadStartView {
+            id: "receipt".into(),
+            revision,
+            state,
+            name: None,
+            address: None,
+            phase: None,
+            error: None,
+            created_ms: 0,
+        }
+    }
+
+    #[test]
+    fn send_draws_the_opening_turn_before_post_and_ready_binds_the_same_prompt() {
+        use super::LeadStartState::{Accepted, Dispatching, Ready};
+        let mut dom = VirtualDom::new(lead_opening_root);
+        dom.rebuild_in_place();
+        let mut start = dom.in_runtime(|| {
+            dioxus::core::Runtime::current()
+                .consume_context::<super::NewConversation>(ScopeId::APP)
+                .unwrap()
+        });
+        start.open.set(true);
+        let posts = std::cell::Cell::new(0);
+        let prompt = "Plan the release and keep notes. Include a second line.";
+        dom.in_runtime(|| {
+            start.submit("send-key".into(), prompt.into(), |key| {
+                assert_eq!(key, "send-key");
+                posts.set(posts.get() + 1);
+                std::future::pending()
+            })
+        });
+        dom.render_immediate_to_vec();
+        let html = dioxus_ssr::render(&dom);
+        assert!(!*start.open.peek());
+        assert!(html.contains("Lead conversation"), "{html}");
+        assert!(
+            html.contains("<h1>Plan the release and keep notes. Include a</h1>"),
+            "{html}"
+        );
+        assert!(html.contains(prompt) && html.contains("Saving"), "{html}");
+        start.complete("send-key", Ok(receipt(Accepted, 1)));
+        let named = super::LeadStartView {
+            name: Some("release-checklist".into()),
+            phase: Some("starting".into()),
+            ..receipt(Dispatching, 2)
+        };
+        assert!(start.follow(std::slice::from_ref(&named)).is_none());
+        dom.render_immediate_to_vec();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("Starting") && html.contains("release-checklist"),
+            "{html}"
+        );
+        let address = super::AgentAddress::local("w2:p1");
+        let ready = super::LeadStartView {
+            state: Ready,
+            address: Some(address.clone()),
+            revision: 3,
+            ..named
+        };
+        let bound = start.follow(std::slice::from_ref(&ready)).unwrap();
+        assert_eq!(bound.address, address);
+        assert_eq!(bound.prompt, prompt);
+        assert_eq!(bound.name.as_deref(), Some("release-checklist"));
+        assert!(start.follow(&[ready]).is_none());
+        assert_eq!(posts.get(), 1);
+    }
+
+    #[test]
+    fn failed_and_uncertain_starts_stay_in_the_thread_without_retry() {
+        use super::LeadStartState::{Accepted, Failed, Uncertain};
+        for (state, expected) in [
+            (Failed, "Could not send the first prompt"),
+            (
+                Uncertain,
+                "The lead may have started. Dogsled did not retry it.",
+            ),
+        ] {
+            let mut dom = VirtualDom::new(lead_opening_root);
+            dom.rebuild_in_place();
+            let mut start = dom.in_runtime(|| {
+                dioxus::core::Runtime::current()
+                    .consume_context::<super::NewConversation>(ScopeId::APP)
+                    .unwrap()
+            });
+            start.open_thread("send-key".into(), "First message".into());
+            start.complete("send-key", Ok(receipt(Accepted, 1)));
+            assert!(
+                start
+                    .follow(&[super::LeadStartView {
+                        phase: Some("prompting".into()),
+                        address: Some(super::AgentAddress {
+                            host: "other-machine".into(),
+                            pane: "w2:p1".into()
+                        }),
+                        error: Some("Could not send the first prompt".into()),
+                        ..receipt(state, 3)
+                    }])
+                    .is_none()
+            );
+            dom.render_immediate_to_vec();
+            let html = dioxus_ssr::render(&dom);
+            for text in [
+                expected,
+                "Launch phase: prompting",
+                "Pane: w2:p1",
+                "First message",
+            ] {
+                assert!(html.contains(text), "{text}: {html}");
+            }
+            assert!(
+                !html.contains("Retry") && !html.contains("other-machine"),
+                "{html}"
+            );
+        }
+    }
+
     fn picker_root() -> Element {
         let selected = use_signal(|| Some("owner/repo-0".to_owned()));
         let choices = (0..70)
@@ -480,10 +738,7 @@ mod tests {
         let catalogue = use_memo(move || publication.read().catalogue.clone());
         use_context_provider(|| crate::app::CataloguePortal(catalogue));
         use_context_provider(|| Signal::new(None::<portal_types::agents::AgentAddress>));
-        use_context_provider(|| super::NewConversation {
-            open: Signal::new(true),
-            repository: Signal::new(None),
-        });
+        use_context_provider(super::NewConversation::new);
         rsx! { super::NewLeadForm {} }
     }
 
