@@ -100,6 +100,7 @@ impl LaneDiagnostics {
 #[derive(Debug)]
 pub(crate) enum Event {
     Finished(usize, Result<()>),
+    LeadsFinished(Result<()>),
     /// A durable request (cleanup or quota refresh) may be pending.
     Wake,
     Swept(Result<()>),
@@ -616,6 +617,89 @@ impl Observation {
     }
 }
 
+/// Lead launches drain independently of publication and the routine action lanes.
+struct LeadWorker {
+    wake: mpsc::SyncSender<()>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LeadWorker {
+    fn start(node: &Node<'_>, once: bool, send: &mpsc::Sender<Event>) -> Self {
+        use crate::leads::{LaunchContext, requests};
+        use std::sync::atomic::Ordering;
+
+        let (wake, pending) = mpsc::sync_channel(1);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let send = send.clone();
+        let mut ledger = node.ledger.clone();
+        ledger.budget = crate::budget::Budget::default();
+        let home = node.home.to_owned();
+        let thread = std::thread::spawn(move || {
+            let result = (|| {
+                requests::recover(&ledger, crate::hosts::LOCAL)?;
+                let shell = System::default();
+                let context = LaunchContext {
+                    shell: &shell,
+                    ledger: &ledger,
+                    home: &home,
+                    herdr: None,
+                };
+                loop {
+                    // The stop check is the admission point for one work attempt.
+                    // Once admitted, a launch runs through its durable result write.
+                    while !stopping.load(Ordering::Acquire) {
+                        match requests::work(&context) {
+                            Ok(true) => (),
+                            Ok(false) => break,
+                            Err(error) if once => return Err(error),
+                            Err(error) => {
+                                eprintln!("dogsled service lead requests: {error}");
+                                break;
+                            }
+                        }
+                    }
+                    if once || stopping.load(Ordering::Acquire) || pending.recv().is_err() {
+                        return Ok(());
+                    }
+                }
+            })();
+            let _ = send.send(Event::LeadsFinished(result));
+        });
+        Self {
+            wake,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn wake(&self) {
+        let _ = self.wake.try_send(());
+    }
+
+    fn drain(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.wake();
+    }
+
+    fn finished(&mut self, result: Result<()>) -> Result<()> {
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .map_err(|_| Error::Invalid("service lead worker failed".into()))?;
+        }
+        result
+    }
+}
+
+impl Drop for LeadWorker {
+    fn drop(&mut self) {
+        self.drain();
+        let _ = self.finished(Ok(()));
+    }
+}
+
 const BASELINE_SAMPLE_DELAY: Duration = Duration::from_secs(1);
 
 fn start_sweep(
@@ -635,20 +719,36 @@ fn start_sweep(
     })
 }
 
+fn finish_sweep(
+    sweep: &mut Option<std::thread::JoinHandle<()>>,
+    dirty: &wake::Dirty,
+    result: Result<()>,
+) -> Result<()> {
+    dirty.mark(wake::LOCAL);
+    if let Some(handle) = sweep.take() {
+        handle
+            .join()
+            .map_err(|_| Error::Invalid("service sweep worker failed".into()))?;
+    }
+    if let Err(error) = result {
+        eprintln!("dogsled service sweep: {error}");
+    }
+    Ok(())
+}
+
 fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Result<()> {
     let (send, recv) = mpsc::channel();
     let dirty = wake::Dirty::new(send.clone());
     let mut observation = Observation::new(node, interval, &dirty)?;
-    let _listener = match Listener::start(node.ledger, send.clone()) {
-        Ok(listener) => Some(listener),
-        Err(error) => {
+    let _listener = Listener::start(node.ledger, send.clone())
+        .inspect_err(|error| {
             eprintln!("dogsled service: warning: cleanup wake socket unavailable: {error}");
-            None
-        }
-    };
+        })
+        .ok();
     let mut sweep: Option<std::thread::JoinHandle<()>> = None;
     let mut requested = false;
     let mut workers = Workers::new(Arc::new(crate::launch::ReleaseRetries::default()));
+    let mut leads = LeadWorker::start(node, once, &send);
     let mut diagnostics = LaneDiagnostics::default();
     let mut next = Instant::now();
     let mut baseline = (!once).then(|| next + BASELINE_SAMPLE_DELAY);
@@ -676,8 +776,9 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
         // The socket only reduces latency. Recover pending requests on every publication
         // iteration, including when the socket cannot bind or a notification was lost.
         requested |= workers.requests(node, policy, once, &send, &observation.publisher)?;
+        leads.wake();
         loop {
-            if workers.drained() && sweep.is_none() {
+            if workers.drained() && leads.thread.is_none() && sweep.is_none() {
                 eprintln!("dogsled service: exiting to start the new release");
                 return Ok(());
             }
@@ -685,32 +786,32 @@ fn run(node: &Node<'_>, policy: &Policy, interval: Duration, once: bool) -> Resu
                 requested = false;
                 sweep = Some(start_sweep(node, policy, &send));
             }
-            if once && workers.completed.iter().all(|done| *done) && sweep.is_none() {
+            if once
+                && workers.completed.iter().all(|done| *done)
+                && leads.thread.is_none()
+                && sweep.is_none()
+            {
                 return Ok(());
             }
             let observation_due = Observation::due(next, baseline);
             match recv.recv_timeout(observation_due.saturating_duration_since(Instant::now())) {
                 Ok(Event::Wake) => {
+                    leads.wake();
                     requested |=
                         workers.requests(node, policy, once, &send, &observation.publisher)?;
                 }
-                Ok(Event::Restart) => workers.draining = true,
+                Ok(Event::Restart) => {
+                    workers.draining = true;
+                    leads.drain();
+                }
                 Ok(Event::Observe) => {
+                    leads.wake();
                     if dirty.pending() && !once {
                         break;
                     }
                 }
-                Ok(Event::Swept(result)) => {
-                    dirty.mark(wake::LOCAL);
-                    if let Some(handle) = sweep.take() {
-                        handle
-                            .join()
-                            .map_err(|_| Error::Invalid("service sweep worker failed".into()))?;
-                    }
-                    if let Err(error) = result {
-                        eprintln!("dogsled service sweep: {error}");
-                    }
-                }
+                Ok(Event::LeadsFinished(result)) => leads.finished(result)?,
+                Ok(Event::Swept(result)) => finish_sweep(&mut sweep, &dirty, result)?,
                 Ok(Event::Finished(lane, result)) => {
                     workers.finished(lane)?;
                     diagnostics.record(node.ledger, LANES[lane], result);

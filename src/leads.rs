@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod checkout;
 mod naming;
+pub(crate) mod requests;
 mod routing;
 
 pub(crate) use naming::valid_name;
@@ -77,6 +78,25 @@ pub(crate) struct CreateContext<'a> {
     pub herdr: Option<&'a crate::herdr_socket::Client>,
 }
 
+impl<'a> CreateContext<'a> {
+    fn launch_context(&self) -> LaunchContext<'a> {
+        LaunchContext {
+            shell: self.shell,
+            ledger: self.ledger,
+            home: self.home,
+            herdr: self.herdr,
+        }
+    }
+}
+
+/// Execution uses only the saved route and local effects, not placement settings.
+pub(crate) struct LaunchContext<'a> {
+    pub shell: &'a dyn crate::shell::Shell,
+    pub ledger: &'a crate::ledger::Ledger,
+    pub home: &'a str,
+    pub herdr: Option<&'a crate::herdr_socket::Client>,
+}
+
 /// A lead that started and accepted its first prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Started {
@@ -107,6 +127,7 @@ pub(crate) struct Failure {
     pub pane: Option<String>,
     pub phase: Option<Phase>,
     pub error: Box<crate::error::Error>,
+    pub uncertain: bool,
 }
 
 impl std::fmt::Display for Failure {
@@ -186,10 +207,11 @@ fn failure(kind: FailureKind, error: crate::error::Error) -> Failure {
         pane: None,
         phase: None,
         error: Box::new(error),
+        uncertain: false,
     }
 }
 
-fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<Started, Failure> {
+fn start(context: &LaunchContext<'_>, delivery: &routing::Delivery) -> Result<Started, Failure> {
     let unavailable = |error| failure(FailureKind::Unavailable, error);
     let discovered;
     let herdr = if let Some(herdr) = context.herdr {
@@ -199,7 +221,7 @@ fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<St
         &discovered
     };
     let agents = herdr.agent_list().map_err(unavailable)?;
-    let context = &CreateContext {
+    let context = &LaunchContext {
         herdr: Some(herdr),
         ..*context
     };
@@ -241,6 +263,7 @@ fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<St
         pane: None,
         phase: None,
         error: Box::new(error),
+        uncertain: false,
     })?;
     launch(
         context,
@@ -268,6 +291,7 @@ fn start(context: &CreateContext<'_>, delivery: &routing::Delivery) -> Result<St
             pane: record.pane.clone(),
             phase: Some(record.phase),
             error: Box::new(error),
+            uncertain: false,
         }
     })?;
     Ok(Started {
@@ -289,7 +313,7 @@ pub(crate) fn peer(
 
 /// Advance one saved phase per effect. `record` mirrors what is saved.
 fn launch(
-    context: &CreateContext<'_>,
+    context: &LaunchContext<'_>,
     record: &mut Record,
     model: Option<&ModelRef>,
     thinking: Option<ThinkingLevel>,

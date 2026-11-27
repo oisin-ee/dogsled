@@ -1,6 +1,6 @@
 //! Lead validation and shared main checkout resolution.
 
-use super::CreateContext;
+use super::LaunchContext;
 use crate::checkout::{Repository, slug_origin};
 use crate::error::{Error, Result};
 
@@ -12,7 +12,7 @@ pub(super) fn validate(slug: &str, prompt: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn ensure(context: &CreateContext<'_>, slug: &str) -> Result<Repository> {
+pub(super) fn ensure(context: &LaunchContext<'_>, slug: &str) -> Result<Repository> {
     let origin = slug_origin(slug)?;
     crate::checkout::resolve(context.shell, context.ledger, context.home, &origin)
         .map(|(repository, _)| repository)

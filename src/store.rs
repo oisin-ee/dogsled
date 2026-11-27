@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::ledger::Ledger;
 
 /// Versions 6 and later upgrade in place. Earlier versions retain their reset policy.
-const VERSION: i64 = 9;
+const VERSION: i64 = 10;
 
 /// The whole `state.db` schema.
 pub(crate) fn schema() -> String {
@@ -17,6 +17,7 @@ pub(crate) fn schema() -> String {
         crate::admissions::SCHEMA,
         crate::launch_store::SCHEMA,
         crate::lead_store::SCHEMA,
+        crate::leads::requests::SCHEMA,
         crate::autonomy::SCHEMA,
         crate::web_store::SCHEMA,
         crate::job_store::SCHEMA,
@@ -89,8 +90,13 @@ fn open(ledger: &Ledger) -> Result<Connection> {
                 if current < 8 {
                     tx.execute_batch("ALTER TABLE host_marks_entries ADD COLUMN end_turn_message TEXT;")?;
                 }
-                tx.execute_batch(crate::autonomy::SCHEMA)?;
-                crate::web_store::upgrade_questions(&tx)?;
+                if current < 9 {
+                    tx.execute_batch(crate::autonomy::SCHEMA)?;
+                    crate::web_store::upgrade_questions(&tx)?;
+                }
+                if current < 10 {
+                    tx.execute_batch(crate::leads::requests::SCHEMA)?;
+                }
                 tx.pragma_update(None, "user_version", VERSION)?;
                 tx.commit()?;
             } else if current < VERSION {
@@ -563,10 +569,35 @@ mod tests {
         write(&ledger, |tx| sync_items(tx, &[item("keep")])).unwrap();
         release();
         let conn = Connection::open(ledger.dir.join("state.db")).unwrap();
-        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; ALTER TABLE host_marks_entries DROP COLUMN end_turn_message; DROP TABLE autonomy_fleet; DROP TABLE autonomy_agents; DROP TABLE autonomy_decisions; PRAGMA user_version=6;").unwrap();
+        conn.execute_batch("ALTER TABLE host_snapshot_probe_agent_panes DROP COLUMN session_reply_id; ALTER TABLE host_marks_entries DROP COLUMN end_turn_message; DROP TABLE autonomy_fleet; DROP TABLE autonomy_agents; DROP TABLE autonomy_decisions; DROP TABLE lead_requests; PRAGMA user_version=6;").unwrap();
         drop(conn);
         assert_eq!(items(&ledger).unwrap(), json!([item("keep")]));
         std::fs::remove_dir_all(ledger.dir).unwrap();
+    }
+
+    #[test]
+    fn lead_request_upgrade_preserves_existing_rows() {
+        let ledger = ledger();
+        write(&ledger, |tx| sync_items(tx, &[item("keep")])).unwrap();
+        release();
+        let conn = Connection::open(ledger.dir.join("state.db")).unwrap();
+        conn.execute_batch("DROP TABLE lead_requests; PRAGMA user_version=9;")
+            .unwrap();
+        drop(conn);
+        assert_eq!(items(&ledger).unwrap(), json!([item("keep")]));
+        read(&ledger, |tx| {
+            assert_eq!(
+                tx.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?,
+                VERSION
+            );
+            assert_eq!(
+                tx.query_row("SELECT COUNT(*) FROM lead_requests", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
@@ -637,7 +668,7 @@ mod tests {
         write(&ledger, |tx| {
             let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             assert_eq!(version, VERSION);
-            assert_eq!(version, 9);
+            assert_eq!(version, 10);
             assert!(!crate::lead_store::exists_in(tx, "absent")?);
             let columns: Vec<String> = tx
                 .prepare("PRAGMA table_info(leads)")?

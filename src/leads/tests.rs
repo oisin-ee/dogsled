@@ -148,7 +148,7 @@ fn lead_launch_passes_model_settings_to_native_pi() {
             "herdr agent start lead-{id} --kind pi --pane w1:p1 --timeout 120000 -- --name lead-{id}{suffix}"
         );
         shell.on(&command, r#"{"result":{}}"#);
-        launch(&context, &mut saved, selected, thinking).unwrap();
+        launch(&context.launch_context(), &mut saved, selected, thinking).unwrap();
         assert_eq!(saved.phase, Phase::Ready);
         assert!(calls(&shell).contains(&command));
     }
@@ -433,6 +433,255 @@ fn lead_panes(shell: &Fake, terminal: &str, status: &str) {
 
 fn calls(shell: &Fake) -> Vec<String> {
     shell.calls.lock().unwrap().clone()
+}
+
+fn placement_fixture(
+    ledger: &Ledger,
+    host: &crate::hosts::Host,
+) -> (
+    crate::observation::ipc::Server,
+    crate::observation::Publisher,
+) {
+    use crate::observation::{Publication, Publisher, Sources, ipc};
+    let mut publisher = Publisher::new().unwrap();
+    publisher
+        .replace(Publication {
+            published_ms: crate::ledger::now_ms(),
+            sources: Sources::default(),
+            local: std::collections::BTreeMap::new(),
+            views: [(
+                "hosts".into(),
+                json!({"data":[{
+            "id": host.id, "label": host.label, "target": host.target,
+            "service":"running", "reachable":true, "jobs":[],
+            "headroom":{"host":host.id,"headroom":5.0,"eligible":true,"live_agents":0}
+        }],"gaps":[]}),
+            )]
+            .into(),
+            gaps: vec![],
+        })
+        .unwrap();
+    let mut server = ipc::Server::new(&ledger.dir).unwrap();
+    server.bind(publisher.subscribe()).unwrap();
+    (server, publisher)
+}
+
+#[test]
+fn accept_is_durable_and_replays_without_placing_again() {
+    use requests::{AcceptFailure, State, accept, revision, status, wait};
+    let ledger = ledger();
+    let shell = Fake::new();
+    let herdr = crate::herdr_socket::fake::Server::start(|_, _| json!({"result":{}}));
+    let socket = herdr.client();
+    let context = CreateContext {
+        shell: &shell,
+        ledger: &ledger,
+        config_path: std::path::Path::new("unused"),
+        home: "/",
+        herdr: Some(&socket),
+    };
+    let published = placement_fixture(&ledger, &crate::hosts::Host::local());
+    let before = revision();
+    let accepted = accept(&context, "one", "owner/repo", "first", None, None).unwrap();
+    assert_eq!(accepted.state, State::Accepted);
+    assert_eq!(accepted.revision, 1);
+    assert!(wait(before, std::time::Duration::ZERO) > before);
+    // The original publication is unavailable; replays cannot place a second time.
+    drop(published);
+    crate::store::release();
+    assert_eq!(
+        status(&ledger, &accepted.id).unwrap(),
+        Some(accepted.clone())
+    );
+    assert_eq!(
+        accept(&context, "one", "owner/repo", "first", None, None).unwrap(),
+        accepted
+    );
+    assert!(matches!(
+        accept(&context, "one", "owner/repo", "changed", None, None),
+        Err(AcceptFailure::Conflict)
+    ));
+    assert!(matches!(
+        accept(&context, "with space", "owner/repo", "first", None, None),
+        Err(AcceptFailure::InvalidKey)
+    ));
+    assert_eq!(calls(&shell), Vec::<String>::new());
+    assert_eq!(herdr.methods(), Vec::<String>::new());
+    assert_eq!(crate::job_store::validities(&ledger).unwrap().len(), 1);
+    assert_eq!(
+        crate::job_store::selection(&ledger, &accepted.id)
+            .unwrap()
+            .as_deref(),
+        Some("local")
+    );
+    let selections = crate::store::read(&ledger, |tx| {
+        Ok(
+            tx.query_row("SELECT COUNT(*) FROM placement_attempts", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+        )
+    })
+    .unwrap();
+    assert_eq!(selections, 1);
+}
+
+#[test]
+fn work_records_prompt_success_or_failure_and_never_reprompts() {
+    use requests::{State, accept, status, work};
+    for prompt_fails in [false, true] {
+        let ledger = ledger();
+        let shell = Fake::new();
+        let herdr = crate::herdr_socket::fake::Server::start(move |method, _| {
+            if method == "agent.prompt" && prompt_fails {
+                json!({"error":{"code":"refused","message":"prompt was refused"}})
+            } else {
+                json!({"result":{}})
+            }
+        });
+        let socket = herdr.client();
+        let home = ledger.dir.to_str().unwrap();
+        let context = CreateContext {
+            shell: &shell,
+            ledger: &ledger,
+            config_path: std::path::Path::new("unused"),
+            home,
+            herdr: Some(&socket),
+        };
+        let published = placement_fixture(&ledger, &crate::hosts::Host::local());
+        let accepted = accept(&context, "one", "owner/repo", "first", None, None).unwrap();
+        drop(published);
+        let path = ledger.dir.join("dev/repo");
+        std::fs::create_dir_all(path.join(".git")).unwrap();
+        let path = path.to_str().unwrap();
+        let name = format!("lead-{}", accepted.id);
+        shell
+            .on(&format!("git -C {path} remote get-url origin"), "https://github.com/owner/repo")
+            .on(&format!("git -C {path} rev-parse --is-inside-work-tree"), "true")
+            .on(&format!("git -C {path} rev-parse --path-format=absolute --git-common-dir"), &format!("{path}/.git"))
+            .on(&format!("git -C {path} rev-parse --show-toplevel"), path)
+            .on(&format!("herdr worktree list --cwd {path}"), r#"{"result":{"worktrees":[]}}"#)
+            .on(&format!("herdr workspace create --cwd {path} --no-focus"), r#"{"result":{"root_pane":{"pane_id":"w1:p1","terminal_id":"lead-terminal"}}}"#)
+            .on(&format!("herdr agent start {name} --kind pi --pane w1:p1 --timeout 120000 -- --name {name}"), r#"{"result":{}}"#);
+        lead_panes(&shell, "lead-terminal", "idle");
+        assert!(work(&context.launch_context()).unwrap());
+        let finished = status(&ledger, &accepted.id).unwrap().unwrap();
+        assert_eq!(finished.revision, 3);
+        assert_eq!(finished.pane.as_deref(), Some("w1:p1"));
+        if prompt_fails {
+            assert_eq!(finished.state, State::Failed);
+            assert_eq!(finished.phase, Some(Phase::Prompting));
+            assert_eq!(finished.failure_kind, Some(FailureKind::Launch));
+            assert!(finished.error.unwrap().contains("prompt was refused"));
+        } else {
+            assert_eq!(finished.state, State::Ready);
+            assert_eq!(finished.name.as_deref(), Some(name.as_str()));
+            assert_eq!(finished.workspace.as_deref(), Some("w1"));
+        }
+        let prior = calls(&shell);
+        assert!(prior.iter().all(|call| !call.contains("pane close")));
+        assert!(!work(&context.launch_context()).unwrap());
+        assert_eq!(calls(&shell), prior);
+        assert_eq!(herdr.methods(), vec!["agent.list", "agent.prompt"]);
+    }
+}
+
+fn peer_host() -> crate::hosts::Host {
+    crate::hosts::Host {
+        id: "peer-id".into(),
+        label: "peer".into(),
+        target: Some("peer-target".into()),
+    }
+}
+
+#[test]
+fn work_distinguishes_lost_peer_response_from_typed_failure() {
+    use requests::{State, accept, status, work};
+    let ledger = ledger();
+    let shell = Fake::new();
+    let context = CreateContext {
+        shell: &shell,
+        ledger: &ledger,
+        config_path: std::path::Path::new("unused"),
+        home: "/",
+        herdr: None,
+    };
+    let published = placement_fixture(&ledger, &peer_host());
+    let policy = crate::config::Policy::default();
+    for (key, state) in [("lost", State::Uncertain), ("typed", State::Failed)] {
+        let accepted = accept(&context, key, "owner/repo", "first", None, None).unwrap();
+        let fleet = crate::hosts::Fleet::cold(&shell, &ledger, &policy, "/".into(), vec![]);
+        let argv = fleet.remote_argv(&peer_host(), &["lead".into(), "--input".into(), "-".into()]);
+        let command = format!("ssh {}", argv.join(" "));
+        let before = calls(&shell).len();
+        if state == State::Failed {
+            shell.on(&command, &json!({"outcome":"failed","id":accepted.id,"kind":"launch","pane":"w1:p1","phase":"prompting"}).to_string());
+        }
+        assert!(work(&context.launch_context()).unwrap());
+        let finished = status(&ledger, &accepted.id).unwrap().unwrap();
+        assert_eq!(finished.state, state);
+        if state == State::Failed {
+            assert_eq!(finished.phase, Some(Phase::Prompting));
+            assert_eq!(finished.pane.as_deref(), Some("w1:p1"));
+        }
+        assert!(!work(&context.launch_context()).unwrap());
+        assert_eq!(&calls(&shell)[before..], &[command]);
+    }
+    drop(published);
+}
+
+#[test]
+fn recover_resolves_local_evidence_without_retrying_or_contacting_peers() {
+    use requests::{State, accept, recover, status, work};
+    let ledger = ledger();
+    let shell = Fake::new();
+    let herdr = crate::herdr_socket::fake::Server::start(|_, _| json!({"result":{}}));
+    let socket = herdr.client();
+    let context = CreateContext {
+        shell: &shell,
+        ledger: &ledger,
+        config_path: std::path::Path::new("unused"),
+        home: "/",
+        herdr: Some(&socket),
+    };
+    let published = placement_fixture(&ledger, &crate::hosts::Host::local());
+    let starting = accept(&context, "starting", "owner/repo", "first", None, None).unwrap();
+    let ready = accept(&context, "ready", "owner/repo", "second", None, None).unwrap();
+    let absent = accept(&context, "absent", "owner/repo", "third", None, None).unwrap();
+    drop(published);
+    let published = placement_fixture(&ledger, &peer_host());
+    let remote = accept(&context, "remote", "owner/repo", "fourth", None, None).unwrap();
+    drop(published);
+    // Simulate loss of the worker after its dispatch claims committed.
+    crate::store::write(&ledger, |tx| {
+        tx.execute(
+            "UPDATE lead_requests SET state = 'dispatching', revision = revision + 1",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    for (status, phase) in [(&starting, Phase::Starting), (&ready, Phase::Ready)] {
+        let mut saved = record(&status.id);
+        saved.phase = phase;
+        saved.pane = Some("w1:p1".into());
+        lead_store::insert(&ledger, &saved).unwrap();
+    }
+    recover(&ledger, "local").unwrap();
+    let starting = status(&ledger, &starting.id).unwrap().unwrap();
+    assert_eq!(starting.state, State::Failed);
+    assert_eq!(starting.phase, Some(Phase::Starting));
+    assert_eq!(starting.pane.as_deref(), Some("w1:p1"));
+    let ready = status(&ledger, &ready.id).unwrap().unwrap();
+    assert_eq!(ready.state, State::Ready);
+    let absent = status(&ledger, &absent.id).unwrap().unwrap();
+    assert_eq!(absent.state, State::Failed);
+    assert!(absent.error.unwrap().contains("no pane was started"));
+    let remote = status(&ledger, &remote.id).unwrap().unwrap();
+    assert_eq!(remote.state, State::Uncertain);
+    assert_eq!(remote.revision, 3);
+    assert!(!work(&context.launch_context()).unwrap());
+    assert_eq!(calls(&shell), Vec::<String>::new());
+    assert_eq!(herdr.methods(), Vec::<String>::new());
 }
 
 #[test]
