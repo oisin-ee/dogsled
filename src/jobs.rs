@@ -152,8 +152,21 @@ pub fn issue_request_validity(
 }
 
 /// A lead's request validity: the same stamp and ingress, with no owner or reservation.
+#[cfg(test)]
 pub fn issue_unowned_validity(ledger: &Ledger, id: &str) -> Result<Validity> {
     issue_validity(ledger, id, |_| Ok(()))
+}
+
+pub(crate) fn issue_unowned_validity_in(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    floor: u64,
+) -> Result<Validity> {
+    let now = now_ms();
+    let clock = load_clock(tx, now.max(floor))?;
+    let validity = stamp_origin(now, &clock)?;
+    issue_validity_in(tx, id, validity)?;
+    Ok(validity)
 }
 
 fn issue_validity(
@@ -164,14 +177,18 @@ fn issue_validity(
     validate_id(id)?;
     let validity = origin_validity(ledger)?;
     crate::store::write(ledger, |tx| {
-        if crate::job_store::validity(tx, id)?.is_some() || crate::job_store::ingress(tx, id)? {
-            return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
-        }
-        crate::job_store::put_ingress(tx, id)?;
-        crate::job_store::put_validity(tx, id, validity)?;
+        issue_validity_in(tx, id, validity)?;
         record(tx)?;
         Ok(validity)
     })
+}
+
+fn issue_validity_in(tx: &rusqlite::Transaction<'_>, id: &str, validity: Validity) -> Result<()> {
+    if crate::job_store::validity(tx, id)?.is_some() || crate::job_store::ingress(tx, id)? {
+        return Err(refuse(crate::error::Refusal::JobValidityUnprovable));
+    }
+    crate::job_store::put_ingress(tx, id)?;
+    crate::job_store::put_validity(tx, id, validity)
 }
 
 /// Versioned non-job transport capability. No effectful downgrade is permitted.
@@ -546,7 +563,10 @@ pub fn check_validity_at(ledger: &Ledger, validity: Option<&Validity>, now: u64)
 /// issuance when this host's clock is behind its own high-water time.
 pub fn origin_validity(ledger: &Ledger) -> Result<Validity> {
     let now = crate::ledger::now_ms();
-    let clock = clock(ledger)?;
+    stamp_origin(now, &clock(ledger)?)
+}
+
+fn stamp_origin(now: u64, clock: &Clock) -> Result<Validity> {
     if clock.high_water_ms > now.saturating_add(VALIDITY_SKEW_MS) {
         return Err(refuse(crate::error::Refusal::JobClockUnavailable));
     }

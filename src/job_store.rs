@@ -567,18 +567,20 @@ pub(crate) fn selection(ledger: &Ledger, id: &str) -> Result<Option<String>> {
 }
 
 pub(crate) fn put_selection(ledger: &Ledger, id: &str, host: Option<&str>) -> Result<()> {
+    store::write(ledger, |tx| put_selection_in(tx, id, host))
+}
+
+pub(crate) fn put_selection_in(tx: &Transaction<'_>, id: &str, host: Option<&str>) -> Result<()> {
     crate::jobs::validate_id(id)?;
-    store::write(ledger, |tx| {
-        if let Some(host) = host {
-            let mut columns = Columns::default();
-            columns.text("id", Some(id));
-            columns.text("host", Some(host));
-            columns.upsert(tx, "placement_attempts", "id")?;
-        } else {
-            tx.execute("DELETE FROM placement_attempts WHERE id = ?1", [id])?;
-        }
-        Ok(())
-    })
+    if let Some(host) = host {
+        let mut columns = Columns::default();
+        columns.text("id", Some(id));
+        columns.text("host", Some(host));
+        columns.upsert(tx, "placement_attempts", "id")?;
+    } else {
+        tx.execute("DELETE FROM placement_attempts WHERE id = ?1", [id])?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ pub(crate) fn get(ledger: &Ledger, id: &str) -> Result<Option<Record>> {
     store::read(ledger, |tx| get_in(tx, id))
 }
 
-fn get_in(tx: &Transaction<'_>, id: &str) -> Result<Option<Record>> {
+pub(crate) fn get_in(tx: &Transaction<'_>, id: &str) -> Result<Option<Record>> {
     let mut statement = tx.prepare_cached("SELECT * FROM leads WHERE id = ?1")?;
     let mut records = statement.query([id])?;
     records.next()?.map(load).transpose()
