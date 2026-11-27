@@ -164,7 +164,11 @@ fn follow_output(
     let client = ipc::Client::at(&ledger.dir);
     match operation {
         PeerOperation::Event => follow_subscription(client.detail(pane)?, stop, output, |frame| {
-            event_reply(frame, pane)
+            let mut reply = event_reply(frame, pane)?;
+            if reply.status == 200 {
+                reply.body["epoch"] = json!(frame.epoch);
+            }
+            Ok(reply)
         }),
         PeerOperation::Activity => match client.activity_subscribe(pane) {
             Ok(subscription) => follow_subscription(subscription, stop, output, |view| {
@@ -410,6 +414,36 @@ pub(super) fn peer_call(
         reply.body = serde_json::to_value(view)?;
     }
     Ok(reply)
+}
+
+/// The held peer event adds its epoch without changing the browser's `AgentEvent`.
+#[derive(serde::Deserialize)]
+pub(super) struct PeerAgentEvent {
+    pub epoch: Option<String>,
+    #[serde(flatten)]
+    pub event: AgentEvent,
+}
+
+pub(super) async fn peer_conversation(
+    state: AppState,
+    host: String,
+    pane: String,
+) -> std::result::Result<portal_types::agents::Conversation, String> {
+    let unavailable = format!("host {host}: agent detail unavailable");
+    let reply = tokio::task::spawn_blocking(move || {
+        peer_call(&state, &host, &pane, &PeerOperation::Conversation)
+    })
+    .await
+    .ok()
+    .and_then(std::result::Result::ok)
+    .ok_or_else(|| unavailable.clone())?;
+    match reply.status {
+        200 => serde_json::from_value(reply.body).map_err(|_| unavailable),
+        400..=499 => Err(reply.body["error"]
+            .as_str()
+            .map_or(unavailable, str::to_owned)),
+        _ => Err(unavailable),
+    }
 }
 
 fn peer_error(host: &str, error: &crate::error::Error) -> Response {
@@ -1876,6 +1910,59 @@ mod tests {
         assert!(payload["detail"]["valid_for_ms"].as_u64().unwrap() <= 5000);
         fixture.shell.calls.lock().unwrap().clear();
         assert_peer_updates_on_live_socket(&mut fixture).await;
+    }
+
+    #[tokio::test]
+    async fn live_socket_reads_a_peer_conversation_once_per_revision() {
+        let fixture = PeerFixture::new();
+        let mut state = fixture.state.clone();
+        state.followers = super::super::peer_stream::Followers::with_launcher("sh", vec![
+            "-c".into(),
+            r#"printf '%s
+' '{"status":200,"body":{"epoch":"peer-serve","revisions":{"conversation":4,"screen":1,"files":1},"pending":{"conversation":false,"screen":false,"files":false},"kind":"pane.agent_status_changed","pane":"w1:p1","session":{"availability":"available","key":"peer-session"}}}'; cat >/dev/null"#.into(),
+        ]);
+        let read = fixture.command("w1:p1", &PeerOperation::Conversation);
+        fixture.shell.on(
+            &read,
+            &json!({"status":200,"body":{"pane":"w1:p1","session":"peer-session","truncated":false,
+                "turns":[{"id":"one","role":"user","text":"first turn","source":{"kind":"harness","harness":"pi"}}]}})
+            .to_string(),
+        );
+        let server = live::Server::start(&state).await;
+        let mut stream = server.connect().await;
+        let address = AgentAddress {
+            host: "netcup".into(),
+            pane: "w1:p1".into(),
+        };
+        live::select(&mut stream, 1, Some(address)).await;
+        let update = live::next(&mut stream, |frame| match frame {
+            ServerFrame::Conversation { id: 1, update } => Some(*update),
+            _ => None,
+        })
+        .await;
+        let portal_types::live::ConversationUpdate::Reset {
+            cursor,
+            session,
+            turns,
+            truncated,
+        } = update
+        else {
+            panic!("expected a conversation reset, got {update:?}");
+        };
+        assert_eq!(cursor.revision, 4);
+        assert_eq!(session, "peer-session");
+        assert!(!truncated);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].text, "first turn");
+        let reads = fixture
+            .shell
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| **call == read)
+            .count();
+        assert_eq!(reads, 1);
     }
 
     async fn assert_peer_updates_on_live_socket(fixture: &mut PeerFixture) {

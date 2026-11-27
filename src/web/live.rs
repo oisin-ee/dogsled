@@ -1,19 +1,22 @@
 //! One browser socket multiplexes portal publications and the selected pane's interests.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use portal_types::agents::{ActivityView, AgentAddress};
-use portal_types::live::{ClientFrame, ServerFrame};
+use portal_types::agents::{ActivityView, AgentAddress, Conversation, DetailSession};
+use portal_types::live::{ClientFrame, ConversationCursor, ConversationUpdate, ServerFrame, diff};
 use portal_types::{PortalAvailability, PortalEvent, PortalStatus};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
-use super::agents::{PeerOperation, agent_event};
+use super::agents::{PeerAgentEvent, PeerOperation, agent_event, peer_conversation};
 use super::{AppState, PortalState};
+use crate::observation::details::{Content, DetailFrame};
 use crate::observation::{ipc, live_activity};
 
 pub(super) async fn upgrade(
@@ -74,18 +77,18 @@ async fn serve(state: &AppState, mut socket: WebSocket) {
             message = socket.recv() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        let Ok(ClientFrame::Open { id, address }) = serde_json::from_str(&text) else {
+                        let Ok(ClientFrame::Open { id, address, conversation }) = serde_json::from_str(&text) else {
                             let _ = socket.send(Message::Close(None)).await;
                             return;
                         };
-                        // Dropping the previous selection releases both interests and queued frames.
+                        // Dropping the previous selection releases its interests and queued frames.
                         selected = None;
                         if let Some(address) = address {
                             if !valid(&address) {
                                 let _ = socket.send(Message::Close(None)).await;
                                 return;
                             }
-                            selected = Some(Selection::new(state, id, &address));
+                            selected = Some(Selection::new(state, id, &address, conversation));
                         }
                         continue;
                     }
@@ -138,7 +141,12 @@ struct Selection {
 }
 
 impl Selection {
-    fn new(state: &AppState, id: u64, address: &AgentAddress) -> Self {
+    fn new(
+        state: &AppState,
+        id: u64,
+        address: &AgentAddress,
+        conversation: Option<ConversationCursor>,
+    ) -> Self {
         let (sender, frames) = mpsc::channel(2);
         let mut interests = JoinSet::new();
         interests.spawn(follow(
@@ -147,7 +155,7 @@ impl Selection {
             sender.clone(),
             PeerOperation::Event,
             |client, pane| client.detail(pane).map_err(|error| error.to_string()),
-            agent_event,
+            |publication, pane| agent_event(publication, pane),
             move |result| match result {
                 Ok(event) => ServerFrame::Agent {
                     id,
@@ -159,10 +167,10 @@ impl Selection {
         interests.spawn(follow(
             state.clone(),
             address.clone(),
-            sender,
+            sender.clone(),
             PeerOperation::Activity,
             |client, pane| client.activity_subscribe(pane).map_err(|error| error.error),
-            |view: &ActivityView, _| Ok(view.clone()),
+            |view: &Arc<ActivityView>, _| Ok((**view).clone()),
             move |result| match result {
                 Ok(view) => ServerFrame::Activity {
                     id,
@@ -170,6 +178,13 @@ impl Selection {
                 },
                 Err(_) => ServerFrame::ActivityUnavailable { id },
             },
+        ));
+        interests.spawn(follow_conversation(
+            state.clone(),
+            address.clone(),
+            sender,
+            id,
+            conversation,
         ));
         Self {
             frames,
@@ -179,6 +194,258 @@ impl Selection {
 }
 
 type Update<T> = Result<T, String>;
+
+struct ConversationInterest {
+    sender: mpsc::Sender<ServerFrame>,
+    id: u64,
+    offered: Option<ConversationCursor>,
+    sent: Option<(ConversationCursor, Conversation)>,
+    error: Option<String>,
+}
+
+impl ConversationInterest {
+    async fn available(&mut self, cursor: ConversationCursor, snapshot: &Conversation) -> bool {
+        if self.sent.as_ref().is_some_and(|(base, _)| base == &cursor) && self.error.is_none() {
+            return true;
+        }
+        let update = if self.offered.take().as_ref() == Some(&cursor) {
+            ConversationUpdate::Confirm {
+                cursor: cursor.clone(),
+            }
+        } else if let Some((base, previous)) = &self.sent
+            && base != &cursor
+            && base.token == cursor.token
+            && previous.session == snapshot.session
+            && let Some((drop_front, keep)) = diff(&previous.turns, &snapshot.turns)
+        {
+            ConversationUpdate::Splice {
+                base: base.clone(),
+                cursor: cursor.clone(),
+                drop_front,
+                keep,
+                turns: snapshot.turns[keep..].to_vec(),
+                truncated: snapshot.truncated,
+            }
+        } else {
+            ConversationUpdate::Reset {
+                cursor: cursor.clone(),
+                session: snapshot.session.clone(),
+                turns: snapshot.turns.clone(),
+                truncated: snapshot.truncated,
+            }
+        };
+        if !self.send(update).await {
+            return false;
+        }
+        self.sent = Some((cursor, snapshot.clone()));
+        self.error = None;
+        true
+    }
+
+    async fn unavailable(&mut self, error: String) -> bool {
+        if self.error.as_ref() == Some(&error) {
+            return true;
+        }
+        self.error = Some(error.clone());
+        self.send(ConversationUpdate::Unavailable { error }).await
+    }
+
+    async fn send(&self, update: ConversationUpdate) -> bool {
+        self.sender
+            .send(ServerFrame::Conversation {
+                id: self.id,
+                update: Box::new(update),
+            })
+            .await
+            .is_ok()
+    }
+}
+
+fn cursor(host: &str, session: &str, epoch: &str, revision: u64) -> ConversationCursor {
+    let mut hash = Sha256::new();
+    hash.update(host.as_bytes());
+    hash.update([0]);
+    hash.update(session.as_bytes());
+    hash.update([0]);
+    hash.update(epoch.as_bytes());
+    let token = hash.finalize()[..16]
+        .iter()
+        .flat_map(|byte| {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            [
+                char::from(HEX[usize::from(byte >> 4)]),
+                char::from(HEX[usize::from(byte & 15)]),
+            ]
+        })
+        .collect();
+    ConversationCursor { token, revision }
+}
+
+/// Hold the publication by reference; screen-only changes need not copy or compare turns.
+#[derive(Clone)]
+struct ConversationDetail(Arc<DetailFrame>);
+
+impl PartialEq for ConversationDetail {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (&self.0, &other.0);
+        a.epoch == b.epoch
+            && match (&a.parts, &b.parts) {
+                (Some(a), Some(b)) => a.conversation == b.conversation,
+                (None, None) => a.detail.conversation == b.detail.conversation,
+                _ => false,
+            }
+    }
+}
+
+async fn follow_conversation(
+    state: AppState,
+    address: AgentAddress,
+    sender: mpsc::Sender<ServerFrame>,
+    id: u64,
+    offered: Option<ConversationCursor>,
+) {
+    let on_host = address.host == crate::hosts::LOCAL;
+    let mut interest = ConversationInterest {
+        sender,
+        id,
+        offered: if on_host { offered } else { None },
+        sent: None,
+        error: None,
+    };
+    let mut backoff = Backoff::default();
+    loop {
+        let mut connected = false;
+        let error = if on_host {
+            let mut updates = local(
+                &state,
+                address.pane.clone(),
+                |client, pane| client.detail(pane).map_err(|error| error.to_string()),
+                |frame, _| Ok(ConversationDetail(Arc::clone(frame))),
+            );
+            loop {
+                match current(&mut updates).await {
+                    Some(Ok(ConversationDetail(frame))) => {
+                        connected = true;
+                        if !local_conversation(&mut interest, &address, &frame).await {
+                            return;
+                        }
+                    }
+                    Some(Err(error)) => break error,
+                    None => break "observation disconnected".to_owned(),
+                }
+                if updates.changed().await.is_err() {
+                    break "observation disconnected".to_owned();
+                }
+            }
+        } else {
+            // Peers without an epoch can still supply revisioned updates within one held stream.
+            // A new follow must not reuse their cursor after a possible service restart.
+            let follow_epoch = crate::ledger::new_id();
+            let mut requested = None;
+            match PeerUpdates::open(&state, &address, &PeerOperation::Event).await {
+                Ok(mut updates) => loop {
+                    match updates.next::<PeerAgentEvent>().await {
+                        Ok(publication) => {
+                            connected = true;
+                            match remote_conversation(
+                                &state,
+                                &address,
+                                &mut interest,
+                                &mut requested,
+                                publication,
+                                &follow_epoch,
+                            )
+                            .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => return,
+                                // A failed read is tried again after the wait below, not only
+                                // when the agent next writes.
+                                Err(error) => break error,
+                            }
+                        }
+                        Err(error) => break error,
+                    }
+                },
+                Err(error) => error,
+            }
+        };
+        if connected {
+            backoff.reset();
+        }
+        if !interest.unavailable(error).await {
+            return;
+        }
+        tokio::time::sleep(backoff.next_delay()).await;
+    }
+}
+
+async fn local_conversation(
+    interest: &mut ConversationInterest,
+    address: &AgentAddress,
+    frame: &DetailFrame,
+) -> bool {
+    match &frame.detail.conversation {
+        Content::Pending => true,
+        Content::Failed(error) | Content::Unavailable(error) => {
+            interest.unavailable(error.clone()).await
+        }
+        Content::Available(snapshot) => {
+            let Some(parts) = &frame.parts else {
+                return interest
+                    .unavailable("conversation revision unavailable".into())
+                    .await;
+            };
+            let session = match frame.detail.key() {
+                Ok(session) => session,
+                Err(error) => return interest.unavailable(error.to_string()).await,
+            };
+            let cursor = cursor(&address.host, &session, &frame.epoch, parts.conversation);
+            interest.available(cursor, snapshot).await
+        }
+    }
+}
+
+async fn remote_conversation(
+    state: &AppState,
+    address: &AgentAddress,
+    interest: &mut ConversationInterest,
+    requested: &mut Option<ConversationCursor>,
+    publication: PeerAgentEvent,
+    follow_epoch: &str,
+) -> Update<bool> {
+    let event = publication.event;
+    if event.pending.is_some_and(|parts| parts.conversation) {
+        return Ok(true);
+    }
+    let (Some(parts), DetailSession::Available(session)) = (event.revisions, event.session) else {
+        return Ok(interest
+            .unavailable("conversation revision or session unavailable".into())
+            .await);
+    };
+    if event.pane != address.pane {
+        return Ok(interest
+            .unavailable("agent event belongs to another pane".into())
+            .await);
+    }
+    let cursor = cursor(
+        &address.host,
+        &session,
+        publication.epoch.as_deref().unwrap_or(follow_epoch),
+        parts.conversation,
+    );
+    if requested.as_ref() == Some(&cursor) {
+        return Ok(true);
+    }
+    let snapshot =
+        peer_conversation(state.clone(), address.host.clone(), address.pane.clone()).await?;
+    if snapshot.session != session || snapshot.pane != address.pane {
+        // The session changed between the event and the read; the next event names it.
+        return Ok(true);
+    }
+    *requested = Some(cursor.clone());
+    Ok(interest.available(cursor, &snapshot).await)
+}
 
 /// The wait before one failed interest is tried again: 1 s, doubling to 30 s, and 1 s again
 /// after the interest delivered a value. An unreachable host is not asked every two seconds.
@@ -208,7 +475,7 @@ async fn follow<T, W>(
     sender: mpsc::Sender<ServerFrame>,
     operation: PeerOperation,
     open: fn(ipc::Client, &str) -> Update<ipc::Subscription<W>>,
-    project: fn(&W, &str) -> crate::error::Result<T>,
+    project: fn(&Arc<W>, &str) -> crate::error::Result<T>,
     frame: impl Fn(Update<T>) -> ServerFrame + Send + Sync,
 ) where
     T: serde::de::DeserializeOwned + PartialEq + Clone + Send + Sync + 'static,
@@ -235,15 +502,20 @@ async fn follow<T, W>(
                 }
             }
         } else {
-            peer::<T>(
-                &state,
-                &address,
-                &operation,
-                &sender,
-                &frame,
-                &mut last_error,
-            )
-            .await
+            match PeerUpdates::open(&state, &address, &operation).await {
+                Ok(mut updates) => loop {
+                    match updates.next::<T>().await {
+                        Ok(value) => {
+                            last_error = None;
+                            if sender.send(frame(Ok(value))).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => break error,
+                    }
+                },
+                Err(error) => error,
+            }
         };
         // A delivered value clears the last error, so this attempt worked before it failed.
         if last_error.is_none() {
@@ -264,7 +536,7 @@ fn local<T, W>(
     state: &AppState,
     pane: String,
     open: fn(ipc::Client, &str) -> Update<ipc::Subscription<W>>,
-    project: fn(&W, &str) -> crate::error::Result<T>,
+    project: fn(&Arc<W>, &str) -> crate::error::Result<T>,
 ) -> watch::Receiver<Option<Update<T>>>
 where
     T: PartialEq + Send + Sync + 'static,
@@ -325,55 +597,54 @@ async fn current<T: Clone>(updates: &mut watch::Receiver<Option<T>>) -> Option<T
     }
 }
 
-async fn peer<T: serde::de::DeserializeOwned>(
-    state: &AppState,
-    address: &AgentAddress,
-    operation: &PeerOperation,
-    sender: &mpsc::Sender<ServerFrame>,
-    frame: &impl Fn(Update<T>) -> ServerFrame,
-    last_error: &mut Option<String>,
-) -> String {
-    let unavailable = || format!("host {}: agent stream unavailable", address.host);
-    let Ok(mut lines) =
-        state
+struct PeerUpdates {
+    host: String,
+    lines: watch::Receiver<Option<super::peer_stream::Line>>,
+    first: Option<super::peer_stream::Line>,
+}
+
+impl PeerUpdates {
+    async fn open(
+        state: &AppState,
+        address: &AgentAddress,
+        operation: &PeerOperation,
+    ) -> Update<Self> {
+        let unavailable = || format!("host {}: agent stream unavailable", address.host);
+        let mut lines = state
             .followers
             .subscribe(state, address.host.clone(), address.pane.clone(), operation)
-    else {
-        return unavailable();
-    };
-    let Ok(Some(mut line)) =
-        tokio::time::timeout(crate::budget::CALL_LIMIT, current(&mut lines)).await
-    else {
-        return unavailable();
-    };
-    loop {
-        match line {
-            Ok(reply) if reply.status == 200 => {
-                let Ok(value) = serde_json::from_value(reply.body) else {
-                    return unavailable();
-                };
-                *last_error = None;
-                if sender.send(frame(Ok(value))).await.is_err() {
-                    return unavailable();
-                }
-            }
-            Ok(reply) if reply.status < 500 => {
-                return reply.body["error"]
-                    .as_str()
-                    .map_or_else(unavailable, |error| {
-                        format!("host {}: {error}", address.host)
-                    });
-            }
-            Ok(_) => return unavailable(),
-            Err(error) => return error,
-        }
-        if lines.changed().await.is_err() {
-            return unavailable();
-        }
-        let Some(next) = lines.borrow_and_update().clone() else {
-            return unavailable();
+            .map_err(|_| unavailable())?;
+        let Ok(Some(first)) =
+            tokio::time::timeout(crate::budget::CALL_LIMIT, current(&mut lines)).await
+        else {
+            return Err(unavailable());
         };
-        line = next;
+        Ok(Self {
+            host: address.host.clone(),
+            lines,
+            first: Some(first),
+        })
+    }
+
+    async fn next<T: serde::de::DeserializeOwned>(&mut self) -> Update<T> {
+        let unavailable = || format!("host {}: agent stream unavailable", self.host);
+        let line = if let Some(first) = self.first.take() {
+            first
+        } else {
+            self.lines.changed().await.map_err(|_| unavailable())?;
+            self.lines
+                .borrow_and_update()
+                .clone()
+                .ok_or_else(unavailable)?
+        };
+        let reply = line?;
+        match reply.status {
+            200 => serde_json::from_value(reply.body).map_err(|_| unavailable()),
+            ..500 => Err(reply.body["error"]
+                .as_str()
+                .map_or_else(unavailable, |error| format!("host {}: {error}", self.host))),
+            _ => Err(unavailable()),
+        }
     }
 }
 
@@ -442,8 +713,22 @@ pub(super) mod tests {
         id: u64,
         address: Option<AgentAddress>,
     ) {
+        open(socket, id, address, None).await;
+    }
+
+    async fn open(
+        socket: &mut Socket,
+        id: u64,
+        address: Option<AgentAddress>,
+        conversation: Option<ConversationCursor>,
+    ) {
         use futures_util::SinkExt as _;
-        let text = serde_json::to_string(&ClientFrame::Open { id, address }).unwrap();
+        let text = serde_json::to_string(&ClientFrame::Open {
+            id,
+            address,
+            conversation,
+        })
+        .unwrap();
         socket
             .send(tungstenite::Message::Text(text.into()))
             .await
@@ -500,6 +785,100 @@ pub(super) mod tests {
         backoff.reset();
         assert_eq!(backoff.next_delay(), Duration::from_secs(1));
         assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn live_socket_resets_splices_and_confirms_conversation_history() {
+        use crate::herdr_socket::fake;
+        use crate::observation::details::fixture::Fixture;
+        use serde_json::json;
+        use std::io::Write as _;
+
+        let (_, portal) = watch::channel(PortalState::default());
+        let ledger = crate::ledger::Ledger::temporary();
+        std::fs::create_dir_all(&ledger.dir).unwrap();
+        let path = ledger.dir.join("session.jsonl");
+        let line = |id: &str, text: &str| json!({"type":"message","id":id,"message":{"role":"user","content":text}});
+        std::fs::write(&path, format!("{}\n", line("one", "first turn"))).unwrap();
+        let transcript = path.clone();
+        let herdr = fake::Server::start(move |method, _| match method {
+            "agent.list" => json!({"result":{"agents":[{
+                "pane_id":"w1:p1","agent":"pi","agent_status":"working",
+                "agent_session":{"kind":"path","value":transcript}
+            }]}}),
+            "pane.read" => json!({"result":{"read":{"text":"screen","revision":1}}}),
+            other => panic!("unexpected method {other}"),
+        });
+        let state = AppState::new(
+            portal,
+            0,
+            Some(Arc::new(herdr.client())),
+            super::super::guard::Token::new(String::new()),
+            ledger,
+        );
+        let fixture = Fixture::at(herdr.client(), state.web.clone());
+        let server = Server::start(&state).await;
+        let address = AgentAddress::local("w1:p1");
+        let mut socket = server.connect().await;
+        select(&mut socket, 1, Some(address.clone())).await;
+        let for_id = |id| {
+            move |frame| match frame {
+                ServerFrame::Conversation {
+                    id: selected,
+                    update,
+                } if selected == id => Some(*update),
+                _ => None,
+            }
+        };
+        let ConversationUpdate::Reset {
+            cursor: initial,
+            session,
+            turns,
+            truncated,
+        } = next(&mut socket, for_id(1)).await
+        else {
+            panic!("expected a conversation reset");
+        };
+        assert_ne!(session, "");
+        assert!(!truncated);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, "one");
+        assert_eq!(turns[0].text, "first turn");
+
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{}",
+            line("two", "second turn")
+        )
+        .unwrap();
+        assert!(fixture.tick("w1:p1"));
+        let ConversationUpdate::Splice {
+            base,
+            cursor,
+            drop_front,
+            keep,
+            turns: appended,
+            truncated,
+        } = next(&mut socket, for_id(1)).await
+        else {
+            panic!("expected a conversation splice");
+        };
+        assert_eq!(base, initial);
+        assert_eq!(cursor.token, base.token);
+        assert!(cursor.revision > base.revision);
+        assert_eq!((drop_front, keep), (0, turns.len()));
+        assert!(!truncated);
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].id, "two");
+        assert_eq!(appended[0].text, "second turn");
+
+        let mut resumed = server.connect().await;
+        open(&mut resumed, 2, Some(address), Some(cursor.clone())).await;
+        assert_eq!(
+            next(&mut resumed, for_id(2)).await,
+            ConversationUpdate::Confirm { cursor }
+        );
+        state.stop.cancel();
     }
 
     #[tokio::test]

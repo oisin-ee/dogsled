@@ -62,6 +62,7 @@ impl LiveSelection {
         ClientFrame::Open {
             id: self.id,
             address: self.address.clone(),
+            conversation: None,
         }
     }
 
