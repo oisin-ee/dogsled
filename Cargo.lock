@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "dogsled"
-version = "0.43.3"
+version = "0.44.0"
 dependencies = [
  "axoupdater",
  "axum",
