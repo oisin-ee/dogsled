@@ -59,7 +59,7 @@ describe("todo owner collision", () => {
 });
 
 describe("missing activation", () => {
-  it.each(["end_turn", "mcp__dogsled__end_turn", "hindsight_search_pages"])(
+  it.each(["end_turn", "mcp__dogsled__end_turn", "mcp__dogsled__decide", "hindsight_search_pages"])(
     "allows %s while keeping shell blocked",
     { timeout: 20_000 },
     async (name) => {

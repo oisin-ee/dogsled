@@ -444,11 +444,12 @@ pub(crate) fn submit_plan(
             None
         };
         let (submitted, approved) = crate::store::write(web, |tx| {
-            let submitted = submit_locked(tx, body)?;
+            let mut submitted = submit_locked(tx, body)?;
             let approved = decision
                 .map(|decision| approve_pending(tx, &submitted.id, decision))
                 .transpose()?
                 .flatten();
+            submitted.approved = approved.is_some();
             Ok((submitted, approved))
         })?;
         if let Some(approved) = approved {
@@ -607,6 +608,7 @@ fn submit_locked(tx: &rusqlite::Transaction<'_>, body: &SubmitBody) -> Result<Su
         return Ok(Submitted {
             id: record.review.id,
             revision: 1,
+            approved: false,
         });
     };
     let revision = record.review.revisions.last().map_or(0, |last| last.n) + 1;
@@ -623,6 +625,7 @@ fn submit_locked(tx: &rusqlite::Transaction<'_>, body: &SubmitBody) -> Result<Su
     Ok(Submitted {
         id: record.review.id.clone(),
         revision,
+        approved: false,
     })
 }
 
@@ -1287,6 +1290,7 @@ mod tests {
                 notes: Some(AUTONOMOUS_APPROVAL.into())
             })
         );
+        assert!(submitted.approved);
         assert_eq!(stream.try_recv().unwrap().event.review_id, submitted.id);
         let decisions = crate::autonomy::decisions(&web, Some("w1:p1"))?;
         assert_eq!(decisions.len(), 1);

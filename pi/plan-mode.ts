@@ -106,7 +106,7 @@ function planningBlock(event: ToolCallEvent, cwd: string): string | undefined {
 	return undefined;
 }
 
-interface ReviewCreated { id: string; revision: number }
+interface ReviewCreated { id: string; revision: number; approved?: boolean }
 
 /** The plan-mode state of one Pi session. */
 export class PlanMode {
@@ -181,7 +181,8 @@ export class PlanMode {
 		const revision = Number(created?.revision);
 		if (!id || !Number.isFinite(revision)) throw new Error("dogsled web did not return a review id and revision");
 		const url = portalUrl(`/?review=${encodeURIComponent(id)}`, this.client.env);
-		if (revision === 1) this.open(url);
+		// A plan that autonomous mode approved waits for nobody, so it opens no browser tab.
+		if (revision === 1 && created.approved !== true) this.open(url);
 		this.watch(ctx);
 		return { id, revision, url };
 	}

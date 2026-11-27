@@ -157,6 +157,9 @@ pub struct SubmitBody {
 pub struct Submitted {
     pub id: String,
     pub revision: u32,
+    /// Autonomous mode approved the plan in the same request. Nothing waits for the owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approved: bool,
 }
 
 /// One row of `GET /api/reviews`.

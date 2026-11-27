@@ -56,7 +56,8 @@ async fn autonomy_routes_read_decisions_and_refuse_a_worker_switch() {
             },"gaps":[]})),
             (autonomy::VIEW.into(), json!({
                 "data":{"panes":{"lead":"agent"},"decisions":[lead_decision, unrelated, decision]},
-                "gaps":[{"domain":"autonomy:old-host","availability":"unsupported","detail":"autonomous unsupported"}]
+                "gaps":[{"domain":"autonomy:old-host","availability":"unsupported","detail":"autonomous unsupported"},
+                    {"domain":"autonomy:lost-host","availability":"unavailable","detail":"host unreachable"}]
             })),
         ]),
         gaps: vec![],
@@ -102,8 +103,8 @@ async fn autonomy_routes_read_decisions_and_refuse_a_worker_switch() {
         assert_eq!(
             list.gaps,
             vec![HostGap {
-                host: "old-host".into(),
-                error: "autonomous unsupported".into()
+                host: "lost-host".into(),
+                error: "host unreachable".into()
             }]
         );
         let path = "/api/agents/local/local-worker/autonomy";
