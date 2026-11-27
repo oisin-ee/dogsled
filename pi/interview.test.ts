@@ -16,7 +16,7 @@ interface Call { method: string; path: string; headers: Record<string, string | 
 const ANSWER = { id: "q-1", responses: [{ id: "q1", value: "B" }] };
 
 /** A portal that answers the interview routes, so the tool can be tested over real HTTP. */
-function portal(answer: (poll: number) => { status: number; body?: unknown }, attachment: { name?: string; status?: number } = {}, withdrawal = 204) {
+function portal(answer: (poll: number) => { status: number; body?: unknown }, attachment: { name?: string; status?: number } = {}, withdrawal = 204, autonomy: { preflight?: boolean; create?: boolean } = {}) {
 	const calls: Call[] = [];
 	let polls = 0;
 	const server = createServer((request, response) => {
@@ -24,9 +24,14 @@ function portal(answer: (poll: number) => { status: number; body?: unknown }, at
 		request.on("data", chunk => chunks.push(chunk as Buffer));
 		request.on("end", () => {
 			calls.push({ method: request.method ?? "", path: request.url ?? "", headers: request.headers, body: Buffer.concat(chunks).toString("utf8") });
-			if (request.method === "POST" && request.url === "/api/questions") {
+			if (request.method === "GET" && request.url?.split("?")[0] === "/api/questions/autonomy") {
 				response.writeHead(200, { "content-type": "application/json" });
-				response.end(JSON.stringify({ id: "q-1" }));
+				response.end(JSON.stringify({ autonomous: autonomy.preflight ?? false }));
+				return;
+			}
+			if (request.method === "POST" && request.url === "/api/questions") {
+				response.writeHead(autonomy.create ? 409 : 200, { "content-type": "application/json" });
+				response.end(JSON.stringify(autonomy.create ? { code: "autonomous" } : { id: "q-1" }));
 				return;
 			}
 			if (request.method === "POST" && request.url === "/api/attachments") {
@@ -101,6 +106,7 @@ test("the interview stays in the inbox and returns its deep link without opening
 });
 
 test("serve receives interview images, creation and polls without a portal token", async t => {
+	withPane(t);
 	const directory = mkdtempSync(join(tmpdir(), "dogsled-interview-serve-"));
 	const socket = join(directory, "producer.sock");
 	const image = join(directory, "image.png");
@@ -115,7 +121,7 @@ test("serve receives interview images, creation and polls without a portal token
 	const form = JSON.stringify({ questions: [{ id: "q1", type: "single", question: "Which?", options: ["A", "B"], media: { type: "image", src: image } }] });
 	const result = await tool.run({ questions: form }, context(), undefined);
 	assert.equal(result.details.status, "completed");
-	assert.deepEqual(p.calls.map(call => [call.method, call.path]), [["GET", "/api/questions"], ["POST", "/api/attachments"], ["POST", "/api/questions"], ["GET", "/api/questions/q-1/answer"]]);
+	assert.deepEqual(p.calls.map(call => [call.method, call.path]), [["GET", "/api/questions/autonomy?pane=w1%3Ap1"], ["POST", "/api/attachments"], ["POST", "/api/questions"], ["GET", "/api/questions/q-1/answer"]]);
 	assert.ok(p.calls.every(call => call.headers["authorization"] === undefined));
 	assert.equal(JSON.parse(p.calls[2]!.body).questions.questions[0].media.src, "/api/attachments/image.png");
 	assert.match(result.details.url, /\?question=q-1&pane=/);
@@ -233,6 +239,28 @@ test("a serve restart during the long poll keeps the interview waiting for its a
 	assert.deepEqual(result.details.responses, ANSWER.responses);
 	assert.equal(p.polls(), 3);
 	assert.ok(p.calls.every(call => call.method !== "DELETE"), JSON.stringify(p.calls));
+});
+
+test("a refused autonomous form returns normally and is not withdrawn", async t => {
+	const p = portal(() => ({ status: 500 }), {}, 204, { create: true });
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const result = await tool.run({ questions }, context(), undefined);
+	assert.equal(result.details.status, "autonomous");
+	assert.equal(result.details.url, "");
+	assert.deepEqual(p.calls.map(call => [call.method, call.path]), [["POST", "/api/questions"]]);
+});
+
+test("a released autonomous form returns normally and is not withdrawn", async t => {
+	const p = portal(() => ({ status: 200, body: { id: "q-1", released: true } }));
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const result = await tool.run({ questions }, context(), undefined);
+	assert.equal(result.details.status, "autonomous");
+	assert.equal(result.details.url, "");
+	assert.deepEqual(p.calls.map(call => [call.method, call.path]), [["POST", "/api/questions"], ["GET", "/api/questions/q-1/answer"]]);
 });
 
 test("a withdrawn form ends gracefully", async t => {
@@ -420,6 +448,21 @@ function mediaQuestions(src: string): string {
 		questions: [{ id: "q1", type: "info", question: "Look", media: { type: "image", src, alt: "A" } }],
 	});
 }
+
+test("autonomy preflight refuses an image form before uploading anything", async t => {
+	withPane(t);
+	const p = portal(() => ({ status: 500 }), {}, 204, { preflight: true });
+	const port = await listen(p.server);
+	t.after(() => p.server.close());
+	const directory = mkdtempSync(join(tmpdir(), "dogsled-media-autonomous-"));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const image = join(directory, "shot.png");
+	writeFileSync(image, "PNG-BYTES");
+	const tool = new InterviewTool(new PortalClient(environment(port)));
+	const result = await tool.run({ questions: mediaQuestions(image) }, context(), undefined);
+	assert.equal(result.details.status, "autonomous");
+	assert.deepEqual(p.calls.map(call => [call.method, call.path]), [["GET", "/api/questions/autonomy?pane=w1%3Ap1"]]);
+});
 
 test("a local image is uploaded to the portal and its source becomes the portal URL", async t => {
 	const p = portal(() => ({ status: 200, body: ANSWER }), { name: "shot.png" });

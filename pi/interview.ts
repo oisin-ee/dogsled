@@ -70,7 +70,7 @@ export interface ResponseItem {
 
 /** The result shape of pi-interview 0.13.0. */
 export interface InterviewDetails {
-	status: "completed" | "rejected" | "cancelled" | "timeout" | "aborted" | "queued" | "started";
+	status: "completed" | "rejected" | "cancelled" | "timeout" | "aborted" | "autonomous" | "queued" | "started";
 	responses: ResponseItem[];
 	reason?: string;
 	url: string;
@@ -264,10 +264,22 @@ function isResponseItem(value: unknown): value is ResponseItem {
 }
 
 interface Outcome {
-	status: "completed" | "rejected" | "cancelled" | "timeout" | "aborted";
+	status: "completed" | "rejected" | "cancelled" | "timeout" | "aborted" | "autonomous";
 	text: string;
 	responses: ResponseItem[];
 	reason?: string;
+}
+
+function autonomousOutcome(): Outcome {
+	return {
+		status: "autonomous", responses: [],
+		text: "Autonomous mode is on. No form was shown. Do not ask again. Choose the most reasonable answer from the plan, the request, and the code. Record it with the decide tool, then continue.",
+	};
+}
+
+function interviewResult({ text, ...details }: Outcome, url = ""): AgentToolResult<InterviewDetails> {
+	const visibleUrl = details.status !== "autonomous" ? url : "";
+	return { content: [{ type: "text", text: visibleUrl ? `${text}\n\n${visibleUrl}` : text }], details: { ...details, url: visibleUrl } };
 }
 
 /** The `interview` tool: ask the user a form through the portal and wait for the answers. */
@@ -292,16 +304,32 @@ export class InterviewTool {
 		if (params.timeout !== undefined && (!Number.isFinite(params.timeout) || params.timeout < 1 || params.timeout > 2_147_483)) {
 			throw new Error("Interview timeout must be between 1 and 2147483 seconds.");
 		}
-		let created: { id?: unknown };
+		let response: Response;
 		try {
-			const uploaded = await this.uploadMedia(file, cwd, signal);
-			created = await this.client.json<{ id?: unknown }>("POST", "/api/questions", {
-				questions: uploaded, pane, session, cwd,
-			}, signal);
+			let form = file;
+			if (this.hasLocalImages(file["questions"])) {
+				const status = await this.client.json<{ autonomous?: unknown }>("GET", `/api/questions/autonomy?pane=${encodeURIComponent(pane)}`, undefined, signal);
+				if (status?.autonomous === true) return interviewResult(autonomousOutcome());
+				if (status?.autonomous !== false) throw new Error("dogsled did not return the interview autonomy status");
+				form = await this.uploadMedia(file, cwd, signal);
+			}
+			response = await this.client.request("POST", "/api/questions", {
+				body: { questions: form, pane, session, cwd }, signal,
+			});
 		} catch (error) {
 			if (!(error instanceof ServeDown)) throw error;
 			return this.fallback(file, params, cwd, pane, session, signal);
 		}
+		if (!response.ok) {
+			const detail = (await response.text()).trim();
+			if (response.status === 409) {
+				let payload: unknown;
+				try { payload = JSON.parse(detail); } catch { /* Keep the original HTTP error. */ }
+				if (payload && typeof payload === "object" && "code" in payload && payload.code === "autonomous") return interviewResult(autonomousOutcome());
+			}
+			throw new Error(`dogsled POST /api/questions failed: ${response.status} ${detail}`);
+		}
+		const created = (await response.json()) as { id?: unknown };
 		const id = typeof created?.id === "string" ? created.id : "";
 		if (!id) throw new Error("dogsled web did not return an interview id");
 		const url = portalUrl(`/?question=${encodeURIComponent(id)}&pane=${encodeURIComponent(pane)}`, this.client.env);
@@ -327,8 +355,7 @@ export class InterviewTool {
 				details: { status: "started", responses: [], url },
 			};
 		}
-		const { text, ...details } = await answer;
-		return { content: [{ type: "text", text: `${text}\n\n${url}` }], details: { ...details, url } };
+		return interviewResult(await answer, url);
 	}
 
 	/** Keep the existing CLI one-shot transport when this host has no serve. */
@@ -354,8 +381,7 @@ export class InterviewTool {
 				.catch(error => { if (!own.signal.aborted) this.deliver(`Interview did not finish: ${String(error)}`); });
 			return { content: [{ type: "text", text: "The one-shot interview is open. Its outcome arrives later; keep working and do not poll." }], details: { status: "started", responses: [], url: "" } };
 		}
-		const { text, ...details } = await answer;
-		return { content: [{ type: "text", text }], details: { ...details, url: "" } };
+		return interviewResult(await answer);
 	}
 
 	/** Finish withdrawal before the extension runtime exits or is replaced. */
@@ -375,17 +401,10 @@ export class InterviewTool {
 	 * cannot reach, because the file lives on the agent's machine and the
 	 * browser runs on the owner's. The bytes go to the portal as an
 	 * attachment, and the `src` becomes the URL the portal serves.
-	 *
-	 * The portal is asked whether it is there before the first local file is
-	 * read. If it is down, report that directly without starting another server.
 	 */
 	private async uploadMedia(file: QuestionsFile, cwd: string, signal: AbortSignal | undefined): Promise<QuestionsFile> {
 		const list = file["questions"];
 		if (!Array.isArray(list)) return file;
-		const local = this.localImages(list, cwd);
-		if (local.length === 0) return file;
-		// The portal that would hold the images has to be there.
-		await this.client.request("GET", "/api/questions", { signal });
 		const questions: Record<string, unknown>[] = [];
 		for (const entry of list) {
 			if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
@@ -413,9 +432,9 @@ export class InterviewTool {
 		return { ...file, questions };
 	}
 
-	/** The local images of a form, as the paths they name. */
-	private localImages(list: unknown[], cwd: string): string[] {
-		const paths: string[] = [];
+	/** Only forms with local images need a preflight before create. */
+	private hasLocalImages(list: unknown): boolean {
+		if (!Array.isArray(list)) return false;
 		for (const entry of list) {
 			if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
 			const media = (entry as Record<string, unknown>)["media"];
@@ -423,9 +442,9 @@ export class InterviewTool {
 			const block = media as Record<string, unknown>;
 			const src = block["src"];
 			if (block["type"] !== "image" || typeof src !== "string" || !src || !isLocalSource(src)) continue;
-			paths.push(resolveQuestionPath(src, cwd));
+			return true;
 		}
-		return paths;
+		return false;
 	}
 
 	/**
@@ -448,6 +467,7 @@ export class InterviewTool {
 
 	/** Resolve saved outcomes consistently in sync, async, and cancellation races. */
 	private outcome(payload: unknown, file: QuestionsFile): Outcome {
+		if (payload && typeof payload === "object" && "released" in payload && payload.released === true) return autonomousOutcome();
 		const { responses, rejection } = parseAnswers(payload);
 		if (rejection) return {
 			status: "rejected", responses: [], reason: rejection.reason,

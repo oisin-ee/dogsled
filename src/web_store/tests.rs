@@ -265,6 +265,7 @@ fn question_forms_answers_and_attachments_round_trip_and_clear_updates() -> Resu
         }]),
         rejection: None,
         answered_ms: Some(4),
+        released: false,
     };
     write(&ledger, |tx| questions::put(tx, &entry))?;
     assert_eq!(
