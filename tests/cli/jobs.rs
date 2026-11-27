@@ -791,6 +791,41 @@ fn stop_ends_a_pending_job_that_never_started() {
     assert_eq!(rig.stop_requested("started"), json!(true));
 }
 
+/// A failed dispatch leaves an uncertain claim that no wrapper may start. The owner's stop
+/// ends it, so it no longer holds its checkout. An intent that is still claiming its pane
+/// stays, because its launch may still be allocating.
+#[test]
+fn stop_ends_an_uncertain_job_whose_dispatch_failed() {
+    let rig = Rig::new("stop-uncertain-job");
+    let marker = rig.dir.join("marker");
+    let command = format!("touch {}", marker.display());
+    rig.claim("uncertain", &["sh", "-c", &command]);
+    let mut uncertain = rig.job("uncertain");
+    uncertain["state"] = json!("uncertain");
+    uncertain["reason"] = json!("pane_send_failed");
+    rig.put_job("uncertain", &uncertain);
+
+    let output = rig.run(&["stop", "uncertain"]);
+    assert!(output.status.success(), "{output:?}");
+    let stopped = rig.job("uncertain");
+    assert_eq!(stopped["state"], "blocked");
+    assert_eq!(stopped["reason"], "stopped");
+    assert!(stopped["ended_ms"].as_u64().is_some());
+    assert!(stopped["started_ms"].is_null());
+    let output = rig.run(&["exec", "uncertain", "--", "sh", "-c", &command]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!marker.exists());
+
+    rig.claim("claiming", &["sh", "-c", &command]);
+    let mut claiming = rig.job("claiming");
+    claiming["state"] = json!("claiming");
+    claiming["pane"] = json!("");
+    rig.put_job("claiming", &claiming);
+    let output = rig.run(&["stop", "claiming"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(rig.job("claiming"), claiming);
+}
+
 /// A wrapper runs nothing when its claim is missing, corrupt, for another command, already
 /// started, ended, or uncertain. No process, no log, and no pane exist for such a job.
 #[test]
