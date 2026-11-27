@@ -61,19 +61,9 @@ pub(super) fn ack(rig: &Rig, input: &Value) -> (i32, Value) {
 }
 
 /// Native-refusal fixtures must reach agent.start even on macOS's long tempdir paths.
+/// `shortened` moves the rig and restarts its Herdr socket in the new directory.
 fn refusal_rig(name: &str) -> Rig {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut rig = rig(name, false);
-    let short = PathBuf::from("/tmp").join(format!(
-        "ds-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    assert!(!short.exists(), "{}", short.display());
-    fs::rename(&rig.dir, &short).unwrap();
-    rig.dir = short;
-    rig
+    rig(name, false).shortened()
 }
 
 /// Serve's lanes settle refusals too. This observer finishes its startup lane pass before the
