@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-const PROCESS_INFO: &str = r#"{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}"#;
-
 type Handlers = Arc<Mutex<BTreeMap<&'static str, Box<dyn FnMut(UnixStream, Value) + Send>>>>;
 
 pub(super) struct Server {
@@ -75,39 +73,51 @@ impl Server {
     }
 }
 
+/// Answer a read with the rig's own `herdr` command, so the socket and the command are one
+/// fake Herdr: a test that scripts the command (an answer, a failure, a log line) scripts
+/// the socket too.
 fn read(dir: &Path, agents: &Path, method: &str, params: &Value) -> Value {
-    let file = |path: &Path| {
-        fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_else(|| {
-            json!({"error":{"code":"fixture_unavailable","message":format!("{} is missing or invalid JSON", path.display())}})
-        })
-    };
-    let (call, reply) = match method {
-        "agent.list" => ("agent list".into(), file(agents)),
-        "pane.list" => ("pane list".into(), file(&dir.join("panes.json"))),
-        "pane.process_info" => (
-            format!(
-                "pane process-info --pane {}",
-                params["pane_id"].as_str().unwrap()
-            ),
-            serde_json::from_str(PROCESS_INFO).unwrap(),
-        ),
+    let args: Vec<String> = match method {
+        "agent.list" => vec!["agent".into(), "list".into()],
+        "pane.list" => vec!["pane".into(), "list".into()],
+        "pane.process_info" => vec![
+            "pane".into(),
+            "process-info".into(),
+            "--pane".into(),
+            params["pane_id"].as_str().unwrap().into(),
+        ],
         _ => {
             return json!({"error":{"code":"unsupported","message":format!("fixture does not implement {method}")}});
         }
     };
-    append(&dir.join("herdr.log"), &format!("{call}\n"));
-    append(&dir.join("herdr-roles.log"), &format!("observer {call}\n"));
-    reply
-}
-
-fn append(path: &Path, line: &str) {
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .unwrap()
-        .write_all(line.as_bytes())
+    let path = format!(
+        "{}:{}",
+        dir.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = super::isolated(dir.join("bin").join("herdr"))
+        .args(&args)
+        .env("PATH", path)
+        .env("RIG", dir)
+        .env("RIG_AGENTS", agents)
+        .env("HOME", dir.join("home"))
+        .env("DOGSLED_TEST_ROLE", "observer")
+        .current_dir(dir)
+        .output()
         .unwrap();
+    // The command prints Herdr's reply. A failure carries Herdr's error on either stream.
+    let reply = [&output.stdout, &output.stderr]
+        .into_iter()
+        .find_map(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        .filter(|reply| output.status.success() || reply.get("error").is_some());
+    reply.unwrap_or_else(|| {
+        json!({"error":{"code":"command_failed","message":format!(
+            "herdr {}: {}: {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )}})
+    })
 }
 
 impl Drop for Server {
