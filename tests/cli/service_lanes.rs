@@ -295,41 +295,26 @@ impl Observer {
     }
 
     fn start_rig(rig: Rig, interval: &str) -> Self {
-        use std::io::{BufRead as _, BufReader, Write as _};
         rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
-        let path = rig.dir.join("herdr.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
+        let (subscribed, subscriptions) = std::sync::mpsc::channel();
+        rig.on_herdr("events.subscribe", move |mut stream, request| {
+            let filters = request["params"]["subscriptions"].as_array().unwrap();
+            if herdr_fixture::Server::reply(
+                &mut stream,
+                &request,
+                json!({"result":{"type":"subscription_started"}}),
+            ) && filters.iter().any(|filter| filter["pane_id"] == "w1:p1")
+            {
+                let _ = subscribed.send((stream, filters.clone()));
+            }
+        });
         let mut cmd = rig.cmd(&["serve", "--interval", interval]);
-        cmd.env("HERDR_SOCKET_PATH", &path)
-            .stdout(Stdio::null())
+        cmd.stdout(Stdio::null())
             .stderr(fs::File::create(rig.dir.join("journal")).unwrap());
         let child = Owned::spawn(&mut cmd);
-        let deadline = Instant::now() + PROCESS_DEADLINE;
-        let (events, subscriptions) = loop {
-            assert!(Instant::now() < deadline, "Herdr subscription missing");
-            let Ok((mut stream, _)) = listener.accept() else {
-                std::thread::yield_now();
-                continue;
-            };
-            // Darwin streams inherit the listener's O_NONBLOCK; Linux streams do not.
-            stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
-            let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["method"], "events.subscribe");
-            writeln!(
-                stream,
-                "{}",
-                json!({"id":request["id"],"result":{"type":"subscription_started"}})
-            )
-            .unwrap();
-            let filters = request["params"]["subscriptions"].as_array().unwrap();
-            if filters.iter().any(|filter| filter["pane_id"] == "w1:p1") {
-                break (stream, filters.clone());
-            }
-        };
+        let (events, subscriptions) = subscriptions
+            .recv_timeout(PROCESS_DEADLINE)
+            .unwrap_or_else(|error| panic!("Herdr subscription missing: {error}"));
         let observer = Self {
             rig,
             child,
@@ -437,9 +422,8 @@ impl Drop for Observer {
 fn cold_serve_samples_cpu_before_long_interval_without_local_events() {
     let rig = Rig::short("observe-baseline");
     rig.script("df", "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 1000 500 500 50%% /\n'\n");
-    let mut command = rig.cmd(&["serve", "--interval", "3600"]);
-    command.env("HERDR_SOCKET_PATH", rig.dir.join("no-herdr-events.sock"));
-    let _observer = Rig::background(command);
+    // The fixture supports native reads but rejects event subscriptions.
+    let _observer = Rig::background(rig.cmd(&["serve", "--interval", "3600"]));
     let frame = wait_publication(&rig, |frame| {
         frame["local"]["host"]["probe"]["busy"].is_number()
             && frame["local"]["host"]["sampled_ms"]

@@ -6,15 +6,18 @@ mod catalogue;
 #[path = "models.rs"]
 mod models;
 
+use super::timing::{Phases, measure};
 use super::{Availability, Domains, Gap, Publication, Sources};
 use crate::commands::Status;
 use crate::error::Result;
+use crate::herdr_socket::Client;
 use crate::hosts::{Host, HostReport};
 use crate::ledger::Ledger;
 use crate::node::{Node, Snapshot, SnapshotReport};
+use crate::probe::{self, CpuSampler, Terminals};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Capture host-owned facts without probing liveness or rereading the capacity sample.
 /// The service supplies its exact new sample; the legacy snapshot adapter supplies its cache.
@@ -24,22 +27,38 @@ pub(crate) fn host(
     running: bool,
     now: u64,
 ) -> Result<SnapshotReport> {
+    timed_host(node, snapshot, running, now, &mut Vec::new())
+}
+
+fn timed_host(
+    node: &Node<'_>,
+    snapshot: Option<Snapshot>,
+    running: bool,
+    now: u64,
+    timings: &mut Phases,
+) -> Result<SnapshotReport> {
     Ok(SnapshotReport {
-        service_lanes: crate::store::read(node.ledger, crate::tables::failing_lanes)?,
+        service_lanes: measure(timings, "collect.host.service_lanes", || {
+            crate::store::read(node.ledger, crate::tables::failing_lanes)
+        })?,
         snapshot,
         running: Some(running),
-        handoffs: crate::done::list(node.ledger)?,
+        handoffs: measure(timings, "collect.host.handoffs", || {
+            crate::done::list(node.ledger)
+        })?,
         job_validity: Some(crate::jobs::VALIDITY_PROTOCOL_VERSION),
         repo_open: Some(crate::checkout::OPEN_VERSION),
         request_validity: Some(crate::jobs::REQUEST_VALIDITY_PROTOCOL_VERSION),
         placement_replay: Some(crate::node::PLACEMENT_VERSION),
         transfer: Some(crate::node::TRANSFER_VERSION),
-        holds: crate::holds::local(
-            node.ledger,
-            crate::hosts::LOCAL,
-            now,
-            node.thresholds.reservation_ttl_ms,
-        )?,
+        holds: measure(timings, "collect.host.holds", || {
+            crate::holds::local(
+                node.ledger,
+                crate::hosts::LOCAL,
+                now,
+                node.thresholds.reservation_ttl_ms,
+            )
+        })?,
     })
 }
 
@@ -99,13 +118,15 @@ fn todos(ledger: &Ledger) -> Result<Vec<crate::board::TodoSections>> {
 pub(crate) struct Collection {
     pub input: Publication,
     pub sample: Result<()>,
-    pub timings: Vec<(&'static str, Duration)>,
+    pub timings: Phases,
 }
 
 /// Retained values keep their original observation time when a source fails. Gaps describe
 /// the current failure, including a cold failure where there is no value to retain.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Collector {
+    terminal_source: TerminalSource,
+    cpu: CpuSampler,
     local: Domains,
     measured: BTreeMap<String, u64>,
     gaps: BTreeMap<String, Gap>,
@@ -117,7 +138,63 @@ pub(crate) struct Collector {
     models: models::Catalogue,
 }
 
+enum TerminalSource {
+    Socket(Option<Client>),
+    // Existing unit fixtures exercise collection/retention using a scripted Shell.
+    #[cfg(test)]
+    ScriptedShell,
+}
+
+impl Default for TerminalSource {
+    fn default() -> Self {
+        Self::Socket(None)
+    }
+}
+
+impl TerminalSource {
+    fn capture(
+        &mut self,
+        shell: &dyn crate::shell::Shell,
+        timings: &mut Phases,
+    ) -> Result<Terminals> {
+        match self {
+            Self::Socket(socket) => {
+                let client = match socket.take() {
+                    Some(client) => client,
+                    None => measure(timings, "collect.terminals.discover", || {
+                        Client::discover_with(shell, std::env::var_os("HERDR_SOCKET_PATH"))
+                    })?,
+                };
+                let result = probe::socket_terminals(&client, timings);
+                // A restarted server can move its socket; resolve the path on the next sample.
+                if result.is_ok() {
+                    *socket = Some(client);
+                }
+                result
+            }
+            #[cfg(test)]
+            Self::ScriptedShell => probe::terminals(shell),
+        }
+    }
+}
+
 impl Collector {
+    #[cfg(test)]
+    pub(super) fn with_scripted_shell() -> Self {
+        Self {
+            terminal_source: TerminalSource::ScriptedShell,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_socket(socket: Client) -> Self {
+        Self {
+            terminal_source: TerminalSource::Socket(Some(socket)),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn with_activity(feed: super::live_activity::ActivityFeed) -> Self {
         Self {
             worker_clocks: super::owned_work::WorkerClocks::with_feed(feed),
@@ -222,22 +299,29 @@ impl Collector {
         node: &Node<'_>,
         now: u64,
         sample: bool,
-        mut terminals: Result<crate::probe::Terminals>,
-    ) -> (Result<Snapshot>, Result<crate::probe::Terminals>) {
+        mut terminals: Result<Terminals>,
+        timings: &mut Phases,
+    ) -> (Result<Snapshot>, Result<Terminals>) {
         let snapshot = if let Some(error) = self.sample_error.as_ref().filter(|_| !sample) {
             Err(crate::error::Error::Invalid(error.clone()))
         } else if let Some(snapshot) = self.snapshot.as_ref().filter(|_| !sample) {
             let mut snapshot = snapshot.clone();
             (|| {
-                snapshot.jobs = crate::jobs::list(node.ledger)?;
-                snapshot.probe.reservations = node
-                    .ledger
-                    .reservations(now, node.thresholds.reservation_ttl_ms)?;
+                snapshot.jobs = measure(timings, "collect.snapshot.jobs", || {
+                    crate::jobs::list(node.ledger)
+                })?;
+                snapshot.probe.reservations =
+                    measure(timings, "collect.snapshot.reservations", || {
+                        node.ledger
+                            .reservations(now, node.thresholds.reservation_ttl_ms)
+                    })?;
                 Ok(snapshot)
             })()
         } else {
             let captured = match terminals {
-                Ok(ref terminals) => node.tick_with_terminals(now, terminals.clone()),
+                Ok(ref terminals) => {
+                    node.tick_with_terminals(now, terminals.clone(), &mut self.cpu, timings)
+                }
                 Err(error) => {
                     terminals = Err(crate::error::Error::Invalid(error.to_string()));
                     Err(error)
@@ -261,7 +345,7 @@ impl Collector {
     /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
     /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
     pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
-        let mut timings = Vec::with_capacity(7);
+        let mut timings = Vec::with_capacity(28);
         let started = Instant::now();
         if let Some(catalogue) = self.catalogue.refresh(node.shell, now) {
             self.record("repos", now, Ok(catalogue));
@@ -275,13 +359,14 @@ impl Collector {
         let started = Instant::now();
         let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
         let terminals = if capture_terminals {
-            crate::probe::terminals(node.shell)
+            self.terminal_source.capture(node.shell, &mut timings)
         } else {
             self.retained_terminals()
         };
         timings.push(("collect.terminals", started.elapsed()));
         let started = Instant::now();
-        let (snapshot, mut terminals) = self.capture_snapshot(node, now, sample, terminals);
+        let (snapshot, mut terminals) =
+            self.capture_snapshot(node, now, sample, terminals, &mut timings);
         timings.push(("collect.snapshot", started.elapsed()));
         let started = Instant::now();
         let (host, sample) = match snapshot {
@@ -290,7 +375,10 @@ impl Collector {
                     agents: snapshot.probe.agent_panes.clone(),
                     panes: snapshot.probe.panes.clone(),
                 });
-                (host(node, Some(snapshot), true, now), Ok(()))
+                (
+                    timed_host(node, Some(snapshot), true, now, &mut timings),
+                    Ok(()),
+                )
             }
             Err(error) => (
                 Err(crate::error::Error::Invalid(error.to_string())),

@@ -2219,23 +2219,19 @@ esac
 fn peer_ingestion_never_corrupts_the_live_peer_probe_source() {
     let (rig, _peer) = settled_peer_rig("ingestion-source-isolation");
     let original = fs::read(rig.dir.join("agents.json")).unwrap();
-    let script = rig.log("bin/herdr");
-    rig.script(
-        "herdr",
-        &script.replacen(
-            "case \"$*\" in",
-            r#"if test "$DOGSLED_STATE" = "$RIG/state" && test "$*" = 'agent list'; then
-  cp "$RIG/agents.json" "$RIG/peer-source-during-origin.json"
-fi
-case "$*" in"#,
-            1,
-        ),
-    );
-    rig.ingest_peers();
-    assert_eq!(
-        fs::read(rig.dir.join("peer-source-during-origin.json")).unwrap(),
-        original
-    );
+    let peer_source = rig.dir.join("agents.json");
+    let (observed, probe) = std::sync::mpsc::channel();
+    rig.ingest_peers_with(|socket| {
+        socket.on("agent.list", move |mut stream, request| {
+            observed.send(fs::read(&peer_source).unwrap()).unwrap();
+            herdr_fixture::Server::reply(
+                &mut stream,
+                &request,
+                json!({"error":{"code":"fixture_unavailable","message":"origin probe unavailable"}}),
+            );
+        });
+    });
+    assert_eq!(probe.recv_timeout(PROCESS_DEADLINE).unwrap(), original);
 }
 
 #[test]

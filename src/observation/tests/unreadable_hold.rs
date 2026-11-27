@@ -51,7 +51,7 @@ fn lead_validity_is_owned_by_its_pane_and_publishes_no_gap() {
     let node = crate::node::Node::new(&shell, &ledger, &policy, "/home");
     let validity = crate::jobs::issue_unowned_validity(&ledger, "lead-request").unwrap();
     let now = validity.created_ms;
-    let mut collector = collect::Collector::default();
+    let mut collector = collect::Collector::with_scripted_shell();
     let allocating = collector.collect(&node, now);
     allocating.sample.unwrap();
     // Without a matching lead record, validity still has no proved owner.
@@ -109,7 +109,7 @@ fn ownerless_ingress_hold_is_counted_with_a_gap_while_host_facts_stay_fresh() {
     let node = crate::node::Node::new(&shell, &ledger, &policy, "/home");
     let validity = crate::jobs::origin_validity(&ledger).unwrap();
     let now = validity.created_ms;
-    let mut collector = collect::Collector::default();
+    let mut collector = collect::Collector::with_scripted_shell();
     collector.collect(&node, now).sample.unwrap();
 
     // Real ingress commits authority before Node::reserve records its owner.

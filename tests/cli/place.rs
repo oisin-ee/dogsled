@@ -1736,6 +1736,10 @@ pub(super) fn place_rig_with(name: &str, config: &str) -> (Rig, PathBuf) {
     let at = now();
     fs::write(rig.dir.join("clock"), at.to_string()).unwrap();
     rig.snapshot("state", at, 0.0, 8);
+    rig.put(
+        "panes.json",
+        &json!({"result":{"panes":[{"pane_id":"w8:p1","terminal_id":"term_tree"}]}}),
+    );
     rig.script(
         "herdr",
         r#"#!/bin/sh
@@ -1744,7 +1748,7 @@ case "$*" in
   'machine list --json') cat "$RIG/machines.json" ;;
   'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"caller"}]}}' ;;
   'agent list') cat "${RIG_AGENTS:-$RIG/agents.json}" ;;
-  'pane list') printf '%s\n' '{"result":{"panes":[{"pane_id":"w8:p1","terminal_id":"term_tree"}]}}' ;;
+  'pane list') cat "$RIG/panes.json" ;;
   'pane process-info'*) printf '%s\n' '{"result":{"process_info":{"shell_pid":10,"foreground_processes":[{"pid":10,"name":"zsh","argv":["zsh"]}]}}}' ;;
   'agent start'*)
     if test -f "$RIG/start-fails"; then echo 'original startup failed' >&2; exit 1; fi

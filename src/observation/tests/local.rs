@@ -150,7 +150,7 @@ fn catalogue_failed_refresh_publishes_previous_repos_and_recovers_in_portal() {
         "/home".into(),
         vec![Host::local()],
     );
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let mut projector = project::Projector::default();
     let mut publisher = Publisher::new().unwrap();
     let mut publish = |collector: &mut Collector, now| {
@@ -240,7 +240,7 @@ fn complete_local_facts_include_ownership_todos_capacity_and_diagnostics() {
         crate::tables::record_lane(tx, "handoff", Some("handoff unavailable"), 50)
     })
     .unwrap();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let collection = collector.collect(&fixture.node(), 100);
     collection.sample.unwrap();
     let input = collection.input;
@@ -335,7 +335,7 @@ fn collection_prunes_expired_reservations_without_rewriting_live_rows() {
         Ok(())
     })
     .unwrap();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let collection = collector.collect(&fixture.node(), 100_100);
     collection.sample.unwrap();
     assert_eq!(collection.input.gaps, []);
@@ -418,7 +418,7 @@ fn reservation_pruning_preserves_committed_clears_releases_and_creations() {
         );
         fixture.seed_job("renewed");
         fixture.seed_job("new");
-        let collection = Collector::default().collect(&fixture.node(), now);
+        let collection = Collector::with_scripted_shell().collect(&fixture.node(), now);
         collection.sample.unwrap();
         assert_eq!(collection.input.gaps, []);
         let frame = Publisher::new().unwrap().replace(collection.input).unwrap();
@@ -439,7 +439,7 @@ fn reservation_pruning_preserves_committed_clears_releases_and_creations() {
 #[test]
 fn reservation_commits_refresh_probe_holds_and_headroom_without_resampling() {
     let fixture = Fixture::new();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let mut publisher = Publisher::new().unwrap();
     collector.collect(&fixture.node(), 100).sample.unwrap();
     fixture
@@ -500,7 +500,7 @@ fn reservation_commits_refresh_probe_holds_and_headroom_without_resampling() {
 #[test]
 fn ledger_refresh_reuses_terminal_sample_and_preserves_failed_sample_gaps() {
     let fixture = Fixture::new();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let original = collector.collect(&fixture.node(), 100).input;
     let calls = fixture.shell.calls.lock().unwrap().len();
     fixture.seed_job("new-job");
@@ -548,7 +548,7 @@ fn ledger_refresh_reuses_terminal_sample_and_preserves_failed_sample_gaps() {
 #[test]
 fn failed_collection_retains_values_and_times_then_recovers() {
     let fixture = Fixture::new();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let mut publisher = Publisher::new().unwrap();
     let old = publisher
         .replace(collector.collect(&fixture.node(), 100).input)
@@ -602,7 +602,7 @@ fn failed_collection_retains_values_and_times_then_recovers() {
 fn cold_collection_failure_is_not_empty_success() {
     let fixture = Fixture::new();
     fixture.fail_probe();
-    let collection = Collector::default().collect(&fixture.node(), 100);
+    let collection = Collector::with_scripted_shell().collect(&fixture.node(), 100);
     assert!(collection.sample.is_err());
     let input = collection.input;
     assert_eq!(input.local.len(), 4);
@@ -626,7 +626,7 @@ fn cold_collection_failure_is_not_empty_success() {
 #[test]
 fn preferences_stay_fresh_when_host_capture_fails() {
     let fixture = Fixture::new();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     collector.collect(&fixture.node(), 100).sample.unwrap();
     let saved = crate::sidebar::model::Saved {
         focus: crate::sidebar::model::Panel::Todos,
@@ -658,7 +658,7 @@ fn failed_preferences_capture_retains_last_value_without_failing_other_domains()
     let fixture = Fixture::new();
     let saved = crate::sidebar::model::Model::default().saved();
     crate::sidebar::model::save(&fixture.ledger, "owner", &saved).unwrap();
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let original = collector.collect(&fixture.node(), 100);
     original.sample.unwrap();
     crate::store::write(&fixture.ledger, |tx| {
@@ -699,7 +699,7 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
     })
     .unwrap();
     assert_eq!(crate::board::cached_todos(&fixture.ledger).unwrap(), []);
-    let collection = Collector::default().collect(&fixture.node(), 100);
+    let collection = Collector::with_scripted_shell().collect(&fixture.node(), 100);
     collection.sample.unwrap();
     let mut publisher = Publisher::new().unwrap();
     let frame = publisher.replace(collection.input).unwrap();
@@ -733,7 +733,7 @@ fn failed_host_capture_still_imports_and_publishes_todos() {
 fn publication_freezes_inputs_and_readers_do_not_collect() {
     let fixture = Fixture::new();
     fixture.seed_job("first");
-    let mut collector = Collector::default();
+    let mut collector = Collector::with_scripted_shell();
     let input = collector.collect(&fixture.node(), 100).input;
     fixture.seed_job("second");
     let mut publisher = Publisher::new().unwrap();
@@ -822,7 +822,7 @@ fn failed_local_capture_keeps_inventory_and_peer_only_composition_immutable() {
     for warm in [false, true] {
         let fixture = Fixture::new();
         fixture.seed_job("first");
-        let mut collector = Collector::default();
+        let mut collector = Collector::with_scripted_shell();
         if warm {
             collector.collect(&fixture.node(), 100);
         }
@@ -910,7 +910,7 @@ fn failed_local_capture_keeps_inventory_and_peer_only_composition_immutable() {
 #[test]
 fn observation_without_serve_never_falls_back_to_persisted_facts() {
     let fixture = Fixture::new();
-    Collector::default().collect(&fixture.node(), 100);
+    Collector::with_scripted_shell().collect(&fixture.node(), 100);
     let calls = fixture.shell.calls.lock().unwrap().len();
     let client = ipc::Client::at(&fixture.ledger.dir);
     assert!(

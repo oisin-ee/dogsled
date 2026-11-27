@@ -137,8 +137,8 @@ fn live_activity_register_acknowledges_while_main_collection_is_blocked() {
     let collection = std::thread::spawn(move || {
         let policy = crate::config::Policy::default();
         let node = crate::node::Node::new(&shell, &ledger, &policy, "/");
-        let _collection =
-            super::super::collect::Collector::default().collect(&node, crate::ledger::now_ms());
+        let _collection = super::super::collect::Collector::with_scripted_shell()
+            .collect(&node, crate::ledger::now_ms());
         finished.send(()).unwrap();
     });
     started.recv_timeout(PROCESS_DEADLINE).unwrap();

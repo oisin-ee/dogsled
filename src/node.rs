@@ -3,6 +3,7 @@
 use crate::config::{Policy, Thresholds};
 use crate::error::Result;
 use crate::ledger::{Ledger, Reservation};
+use crate::observation::timing::{Phases, measure};
 use crate::plan::{Headroom, evaluate};
 use crate::probe::{self, Probe};
 use crate::shell::Shell;
@@ -355,18 +356,30 @@ impl<'a> Node<'a> {
     /// persisted sample so publication cannot accidentally reread a newer reservation write.
     #[cfg(test)]
     pub(crate) fn tick(&self, now: u64) -> Result<Snapshot> {
-        self.tick_with_terminals(now, probe::terminals(self.shell)?)
+        self.tick_with_terminals(
+            now,
+            probe::terminals(self.shell)?,
+            &mut probe::CpuSampler::default(),
+            &mut Vec::new(),
+        )
     }
 
     pub(crate) fn tick_with_terminals(
         &self,
         now: u64,
         terminals: probe::Terminals,
+        cpu: &mut probe::CpuSampler,
+        timings: &mut Phases,
     ) -> Result<Snapshot> {
-        let probe = probe::local_with_terminals(self.shell, self.home, terminals)?;
-        let mut probe = observe_probe(self.ledger, self.shell, probe)?;
+        let probe =
+            probe::local_capacity(self.shell, self.home, terminals, timings, || cpu.busy())?;
+        let mut probe = observe_probe(self.ledger, self.shell, probe, timings)?;
+        let lock_started = std::time::Instant::now();
         self.ledger.with_lock("host", || {
-            let previous: Option<Snapshot> = crate::host_store::snapshot(self.ledger)?;
+            timings.push(("collect.snapshot.lock_wait", lock_started.elapsed()));
+            let previous: Option<Snapshot> = measure(timings, "collect.snapshot.previous", || {
+                crate::host_store::snapshot(self.ledger)
+            })?;
             crate::watchdog::observe(&mut probe, previous.as_ref().map(|s| &s.probe), now);
             if probe.busy.is_none() {
                 probe.busy = busy_since(&probe, previous.as_ref().map(|s| &s.probe));
@@ -381,15 +394,23 @@ impl<'a> Node<'a> {
                     probe.cpu_ticks = previous.probe.cpu_ticks;
                 }
             }
-            probe.reservations = self.live_reservations(now)?;
+            probe.reservations = measure(timings, "collect.snapshot.reservations", || {
+                self.live_reservations(now)
+            })?;
             let headroom = evaluate(&probe, &self.thresholds);
-            self.append_sample(&probe, &headroom, now)?;
+            measure(timings, "collect.snapshot.samples", || {
+                self.append_sample(&probe, &headroom, now)
+            })?;
             let snapshot = Snapshot {
                 sampled_ms: now,
                 probe,
-                jobs: crate::jobs::list(self.ledger)?,
+                jobs: measure(timings, "collect.snapshot.jobs", || {
+                    crate::jobs::list(self.ledger)
+                })?,
             };
-            crate::host_store::put_snapshot(self.ledger, &snapshot)?;
+            measure(timings, "collect.snapshot.persist", || {
+                crate::host_store::put_snapshot(self.ledger, &snapshot)
+            })?;
             Ok(snapshot)
         })
     }
@@ -722,24 +743,44 @@ pub(crate) fn expire_grants(ledger: &Ledger, now: u64) -> Result<()> {
 
 /// Observe the same lifecycle facts for publication and host-side close verification.
 pub fn observed_probe(ledger: &Ledger, shell: &dyn Shell, home: &str) -> Result<Probe> {
-    observe_probe(ledger, shell, probe::local(shell, home)?)
+    observe_probe(ledger, shell, probe::local(shell, home)?, &mut Vec::new())
 }
 
-fn observe_probe(ledger: &Ledger, shell: &dyn Shell, mut probe: Probe) -> Result<Probe> {
+fn observe_probe(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    mut probe: Probe,
+    timings: &mut Phases,
+) -> Result<Probe> {
     // Transcript and Git reads stay outside the lock, so a reservation never waits on them.
     // Reading the last snapshot without the lock is safe: writes replace it atomically.
-    let last: Option<Snapshot> = crate::host_store::snapshot(ledger)?;
-    crate::facts::observe(shell, &mut probe, last.as_ref().map(|s| &s.probe));
+    let last: Option<Snapshot> = measure(timings, "collect.snapshot.facts_baseline", || {
+        crate::host_store::snapshot(ledger)
+    })?;
+    measure(timings, "collect.snapshot.facts", || {
+        crate::facts::observe(shell, &mut probe, last.as_ref().map(|s| &s.probe));
+    });
     // Publish launch progress before deriving states, including pending and contended launches.
-    for agent in &mut probe.agent_panes {
-        let progress = crate::launch::progress(ledger, &agent.pane)?;
-        agent.launch_progress = match progress {
-            crate::launch::LaunchProgress::None => None,
-            progress => Some(progress.as_str().to_owned()),
-        };
-    }
-    crate::done::observe(ledger, &mut probe.agent_panes)?;
-    let leads = crate::lead_store::list(ledger)?;
+    measure(
+        timings,
+        "collect.snapshot.launch_progress",
+        || -> Result<()> {
+            for agent in &mut probe.agent_panes {
+                let progress = crate::launch::progress(ledger, &agent.pane)?;
+                agent.launch_progress = match progress {
+                    crate::launch::LaunchProgress::None => None,
+                    progress => Some(progress.as_str().to_owned()),
+                };
+            }
+            Ok(())
+        },
+    )?;
+    measure(timings, "collect.snapshot.done", || {
+        crate::done::observe(ledger, &mut probe.agent_panes)
+    })?;
+    let leads = measure(timings, "collect.snapshot.leads", || {
+        crate::lead_store::list(ledger)
+    })?;
     probe.agents = probe::AgentCounts::from_agents(probe.agent_panes.iter().filter(|agent| {
         !leads
             .iter()

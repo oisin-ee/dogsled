@@ -40,7 +40,7 @@ impl Client {
         )
     }
 
-    fn discover_with(
+    pub(crate) fn discover_with(
         shell: &dyn crate::shell::Shell,
         path: Option<std::ffi::OsString>,
     ) -> Result<Self> {
@@ -74,6 +74,16 @@ impl Client {
     /// Send one request and return its `result`. A Herdr error response, a
     /// transport failure, or a malformed reply is `Error::Invalid` with the detail.
     pub fn call(&self, method: &str, params: &Value) -> Result<Value> {
+        self.call_optional(method, params, None)?
+            .ok_or_else(|| Error::Invalid(format!("herdr {method}: response has no result")))
+    }
+
+    fn call_optional(
+        &self,
+        method: &str,
+        params: &Value,
+        absent: Option<&str>,
+    ) -> Result<Option<Value>> {
         let fail = |detail: String| Error::Invalid(format!("herdr {method}: {detail}"));
         let mut stream = UnixStream::connect(&self.path)
             .map_err(|error| fail(format!("{}: {error}", self.path.display())))?;
@@ -95,21 +105,26 @@ impl Client {
         if reply.trim().is_empty() {
             return Err(fail("connection closed without a response".into()));
         }
-        let reply: Value = serde_json::from_str(&reply)
+        let mut reply: Value = serde_json::from_str(&reply)
             .map_err(|error| fail(format!("invalid response: {error}")))?;
-        if let Some(error) = reply.get("error") {
-            return Err(fail(format!(
-                "{}: {}",
-                error["code"].as_str().unwrap_or("error"),
-                error["message"].as_str().unwrap_or_default()
-            )));
-        }
         if reply["id"] != id.as_str() {
             return Err(fail("response id does not match the request".into()));
         }
+        if let Some(error) = reply.get("error") {
+            let code = error["code"].as_str();
+            if absent.is_some() && code == absent {
+                return Ok(None);
+            }
+            return Err(fail(format!(
+                "{}: {}",
+                code.unwrap_or("error"),
+                error["message"].as_str().unwrap_or_default()
+            )));
+        }
         reply
-            .get("result")
-            .cloned()
+            .as_object_mut()
+            .and_then(|reply| reply.remove("result"))
+            .map(Some)
             .ok_or_else(|| fail("response has no result".into()))
     }
 
@@ -154,6 +169,23 @@ impl Client {
     pub fn agent_list(&self) -> Result<Vec<Value>> {
         let result = self.call("agent.list", &json!({}))?;
         Ok(result["agents"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Process evidence for a listed pane, or `None` if it has since closed.
+    pub(crate) fn pane_process_info(&self, pane_id: &str) -> Result<Option<Value>> {
+        self.call_optional(
+            "pane.process_info",
+            &json!({"pane_id": pane_id}),
+            Some("pane_not_found"),
+        )?
+        .map(|result| {
+            result
+                .get("process_info")
+                .filter(|info| info.is_object())
+                .cloned()
+                .ok_or_else(|| Error::Invalid(format!("{pane_id} has no process information")))
+        })
+        .transpose()
     }
 
     /// The text on a pane, as a `pane_read` reply.
