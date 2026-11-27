@@ -403,6 +403,7 @@ fn mcp_lists_the_tools_with_their_schemas() {
             expect("cancel", &["id"]),
             expect("claim", &["item"]),
             expect("close", &["pane"]),
+            expect("decide", &["decision", "title", "why"]),
             expect("drop", &["id"]),
             expect("end_turn", &["kind", "message"]),
             expect("inbox", &[]),
