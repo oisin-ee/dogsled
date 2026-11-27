@@ -8,7 +8,7 @@
 //! cannot type an arbitrary sequence into a terminal.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -627,30 +627,38 @@ async fn models(State(state): State<AppState>) -> Response {
     }
 }
 
-/// Start a lead through the same creator as `dogsled lead`. 201 only after its first
-/// prompt was accepted; a partial launch keeps its pane and reports its phase.
+/// Accept a durable request. The service, not the HTTP handler, starts the lead.
 async fn create_lead(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: std::result::Result<
         Json<portal_types::agents::CreateLeadBody>,
         axum::extract::rejection::JsonRejection,
     >,
 ) -> Response {
-    let Some(launch) = state.leads.clone() else {
+    use crate::leads::requests::{self, AcceptFailure};
+
+    let Some(launch) = state.leads else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error": "this server cannot start leads"})),
         )
             .into_response();
     };
+    let mut keys = headers.get_all("idempotency-key").iter();
+    let Some(key) = keys.next().and_then(|value| value.to_str().ok()) else {
+        return refuse("A valid Idempotency-Key header is required");
+    };
+    if keys.next().is_some() {
+        return refuse("Send only one Idempotency-Key header");
+    }
+    let key = key.to_owned();
     let Json(body) = match body {
         Ok(body) => body,
         Err(rejection) => return refuse(&rejection.body_text()),
     };
-    let socket = socket(&state).cloned();
-    let ledger = state.web.clone();
+    let mut ledger = state.web;
     let outcome = tokio::task::spawn_blocking(move || {
-        let mut ledger = ledger;
         ledger.budget =
             crate::budget::Budget::until(std::time::Instant::now() + crate::budget::SETUP_LIMIT);
         let context = crate::leads::CreateContext {
@@ -658,27 +666,36 @@ async fn create_lead(
             ledger: &ledger,
             config_path: &launch.config_path,
             home: &launch.home,
-            herdr: socket.as_ref(),
+            herdr: None,
         };
-        crate::leads::create(
+        requests::accept(
             &context,
+            &key,
             &body.repo,
             &body.prompt,
             body.model,
             body.thinking,
-        )
+        )?
+        .view()
+        .map_err(AcceptFailure::Store)
     })
     .await;
     match outcome {
-        Ok(Ok(started)) => (
-            StatusCode::CREATED,
-            Json(portal_types::agents::CreatedLead {
-                host: started.host,
-                pane: started.pane,
-            }),
+        Ok(Ok(view)) => (
+            StatusCode::ACCEPTED,
+            [("cache-control", "no-store")],
+            Json(view),
         )
             .into_response(),
-        Ok(Err(failure)) => lead_error_response(&failure),
+        Ok(Err(error)) => {
+            let status = match error {
+                AcceptFailure::InvalidKey => StatusCode::BAD_REQUEST,
+                AcceptFailure::Conflict => StatusCode::CONFLICT,
+                AcceptFailure::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                AcceptFailure::Placement(failure) => return lead_error_response(&failure),
+            };
+            (status, Json(json!({"error": error.to_string()}))).into_response()
+        }
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error.to_string()})),
@@ -1202,18 +1219,16 @@ mod tests {
     }
 
     async fn post_lead(state: AppState, body: &str) -> (StatusCode, serde_json::Value) {
-        let response = state.oneshot_lead(body).await;
+        let mut request = request(Method::POST, "/api/leads", Some(body));
+        request
+            .headers_mut()
+            .insert("idempotency-key", "test-key".parse().unwrap());
+        let response = super::test_request(state, request).await;
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap_or_default())
-    }
-
-    impl AppState {
-        async fn oneshot_lead(self, body: &str) -> Response {
-            super::test_request(self, request(Method::POST, "/api/leads", Some(body))).await
-        }
     }
 
     fn launch(state: AppState, config: &str) -> AppState {
@@ -1235,6 +1250,22 @@ mod tests {
         let (status, body) = post_lead(with_socket(&server), r#"{"repo":"r","prompt":"go"}"#).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         let leads = || launch(with_socket(&server), "");
+        let no_key = super::test_request(
+            leads(),
+            request(
+                Method::POST,
+                "/api/leads",
+                Some(r#"{"repo":"owner/repo","prompt":"go"}"#),
+            ),
+        )
+        .await;
+        assert_eq!(no_key.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            body_json(no_key).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("Idempotency-Key")
+        );
         for bad in [
             r#"{"repo":"r"}"#,
             r#"{"repo":"r","prompt":"go","owner":"w1:p1"}"#,
@@ -1266,6 +1297,43 @@ mod tests {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         }
         assert!(!server.methods().iter().any(|m| m == "agent.prompt"));
+    }
+
+    #[tokio::test]
+    async fn lead_route_accepts_without_launching_and_replays_the_saved_receipt() {
+        let herdr = fake::Server::start(|_, _| json!({"result":{}}));
+        let shell = Arc::new(crate::shell::Fake::new());
+        let state = with_socket(&herdr).with_leads(crate::web::LeadLaunch {
+            config_path: "unused".into(),
+            home: "/".into(),
+            shell: shell.clone(),
+        });
+        let mut publisher = crate::observation::Publisher::new().unwrap();
+        publisher.replace(crate::observation::Publication {
+            published_ms: crate::ledger::now_ms(),
+            sources: crate::observation::Sources::default(),
+            local: crate::observation::Domains::new(),
+            views: [("hosts".into(), json!({"data":[{
+                "id":"local", "label":"local", "service":"running", "reachable":true,
+                "jobs":[], "headroom":{"host":"local","headroom":5.0,"eligible":true,"live_agents":0}
+            }],"gaps":[]}))].into(),
+            gaps: vec![],
+        }).unwrap();
+        let mut server = ipc::Server::new(&state.web.dir).unwrap();
+        server.bind(publisher.subscribe()).unwrap();
+        let input = r#"{"repo":"owner/repo","prompt":"first"}"#;
+        let (status, accepted) = post_lead(state.clone(), input).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{accepted}");
+        assert_eq!(accepted["state"], "accepted");
+        assert_eq!(accepted["revision"], 1);
+        assert!(accepted["address"].is_null());
+        assert!(accepted.get("prompt").is_none());
+        drop(server);
+        assert_eq!(post_lead(state.clone(), input).await, (status, accepted));
+        let (status, _) = post_lead(state, r#"{"repo":"owner/repo","prompt":"second"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(shell.calls.lock().unwrap().is_empty());
+        assert_eq!(herdr.methods(), Vec::<String>::new());
     }
 
     #[tokio::test]

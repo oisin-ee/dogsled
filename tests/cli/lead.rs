@@ -4,7 +4,7 @@ use super::close::git;
 use super::*;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixListener;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 const SLUG: &str = "owner/repo";
 const ORIGIN: &str = "git@github.com:owner/repo.git";
@@ -190,6 +190,86 @@ fn lead_reuses_matching_main_checkout_preserves_branch_and_prompts_once() {
     assert!(repo.join(".git").exists());
     assert!(leads(&rig)[0]["closed_ms"].is_i64());
     assert_eq!(socket.prompts().len(), 1);
+}
+
+#[test]
+fn portal_lead_commit_wakes_the_service_and_publishes_ready() {
+    use std::io::Read as _;
+
+    // A long interval makes the store commit, not a background sample, drive progress.
+    let observer = super::service_lanes::Observer::start("lead-web", "300");
+    let rig = &observer.rig;
+    checkout(rig, "repo", ORIGIN);
+    rig.database()
+        .execute(
+            "INSERT INTO lead_requests (id,key,delivery,state,revision,host,created_ms,updated_ms)
+         VALUES ('expired','expired','{}','ready',3,'local',1,1)",
+            [],
+        )
+        .unwrap();
+    rig.script(
+        "pi",
+        "#!/bin/sh\ncat > \"$RIG/name-input.json\"\necho release-checklist\n",
+    );
+    let (sent, prompts) = mpsc::channel();
+    rig.on_herdr("agent.prompt", move |mut stream, request| {
+        sent.send(request["params"].clone()).unwrap();
+        herdr_fixture::Server::reply(
+            &mut stream,
+            &request,
+            json!({"result":{"type":"agent_prompted"}}),
+        );
+    });
+    let mut command = rig.cmd(&["web", "--port", "0"]);
+    command.stdout(Stdio::piped());
+    let mut portal = Owned::spawn(&mut command);
+    let mut line = String::new();
+    BufReader::new(portal.child_mut().stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let port: u16 = line
+        .split("127.0.0.1:")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let input = r#"{"repo":"owner/repo","prompt":"Plan the release"}"#;
+    let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    connection.set_read_timeout(Some(PROCESS_DEADLINE)).unwrap();
+    write!(connection,
+        "POST /api/leads HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\nContent-Type: application/json\r\nIdempotency-Key: fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{input}",
+        input.len(),
+    ).unwrap();
+    let mut response = String::new();
+    connection.read_to_string(&mut response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 202 "), "{response}");
+    assert!(headers.contains("cache-control: no-store"), "{headers}");
+    let accepted: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(accepted["state"], "accepted");
+    let frame = observer
+        .wait(|frame| frame["views"]["portal"]["data"]["lead_starts"][0]["state"] == "ready");
+    let starts = frame["views"]["portal"]["data"]["lead_starts"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        starts.len(),
+        1,
+        "the old terminal receipt must not be published"
+    );
+    let ready = &starts[0];
+    assert_eq!(ready["id"], accepted["id"]);
+    assert_eq!(ready["phase"], "ready");
+    assert_eq!(ready["name"], "release-checklist");
+    assert_eq!(ready["address"], json!({"host":"local","pane":"w2:p1"}));
+    assert_eq!(
+        prompts.recv_timeout(PROCESS_DEADLINE).unwrap()["text"],
+        "Plan the release"
+    );
+    assert!(prompts.try_recv().is_err());
 }
 
 #[test]

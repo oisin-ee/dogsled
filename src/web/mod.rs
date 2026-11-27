@@ -59,7 +59,7 @@ impl Default for PortalState {
     }
 }
 
-/// What the portal needs to start a lead. One-shot servers have none.
+/// What the portal needs to accept a lead start for the service. One-shot servers have none.
 #[derive(Debug, Clone)]
 pub struct LeadLaunch {
     /// Reloaded for every lead, so a host policy change needs no portal restart.

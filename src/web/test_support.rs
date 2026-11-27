@@ -31,6 +31,7 @@ pub(super) fn publish(
         inbox: Some(inbox),
         repos: None,
         autonomy: None,
+        lead_starts: None,
         gaps: vec![],
     };
     let frame = publisher.replace(Publication {

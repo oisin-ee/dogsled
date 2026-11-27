@@ -342,10 +342,7 @@ impl Collector {
         (snapshot, terminals)
     }
 
-    /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
-    /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
-    pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
-        let mut timings = Vec::with_capacity(28);
+    fn refresh_catalogues(&mut self, node: &Node<'_>, now: u64, timings: &mut Phases) {
         let started = Instant::now();
         if let Some(catalogue) = self.catalogue.refresh(node.shell, now) {
             self.record("repos", now, Ok(catalogue));
@@ -356,6 +353,17 @@ impl Collector {
             self.record("models", now, Ok(models));
         }
         timings.push(("collect.models", started.elapsed()));
+    }
+
+    /// Ledger changes reuse the last terminal/resource sample. The source's `sampled_ms`
+    /// stays unchanged; newly persisted jobs, holds, inventory and todos are recaptured.
+    pub fn refresh(&mut self, node: &Node<'_>, now: u64, sample: bool) -> Collection {
+        let mut timings = Vec::with_capacity(28);
+        let starts = measure(&mut timings, "collect.lead_starts", || {
+            crate::leads::requests::recent(node.ledger, now)
+        });
+        self.record(super::project::lead_starts::VIEW, now, starts);
+        self.refresh_catalogues(node, now, &mut timings);
         let started = Instant::now();
         let capture_terminals = sample || (self.snapshot.is_none() && self.sample_error.is_none());
         let terminals = if capture_terminals {
