@@ -575,10 +575,13 @@ mod tests {
         let ledger = Ledger::temporary();
         std::fs::create_dir_all(&ledger.dir)?;
         let mut conn = rusqlite::Connection::open(ledger.dir.join("state.db"))?;
-        let v8 = store::schema().replace(SCHEMA, "").replace(
-            "'pending','answered','rejected','released'",
-            "'pending','answered','rejected'",
-        );
+        let v8 = store::schema()
+            .replace(SCHEMA, "")
+            .replace(crate::leads::requests::SCHEMA, "")
+            .replace(
+                "'pending','answered','rejected','released'",
+                "'pending','answered','rejected'",
+            );
         conn.execute_batch(&v8)?;
         conn.pragma_update(None, "user_version", 8)?;
         let pending = Entry {
@@ -630,7 +633,8 @@ mod tests {
         assert_eq!(decisions(&ledger, None)?, []);
         store::read(&ledger, |tx| {
             let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            assert_eq!(version, 9);
+            // Version 8 upgrades through 9 to the current schema.
+            assert_eq!(version, 10);
             assert_eq!(
                 questions::pending(tx)?,
                 std::slice::from_ref(&pending.pending)
