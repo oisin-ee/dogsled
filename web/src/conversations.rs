@@ -289,7 +289,7 @@ mod tests {
         cache.apply_update(&peer, reset("peer-native", vec![turn("remote")]));
         for index in 0..CAPACITY {
             cache.apply_update(
-                &AgentAddress::local(&index.to_string()),
+                &AgentAddress::local(index.to_string()),
                 reset("native", vec![turn("local")]),
             );
         }
