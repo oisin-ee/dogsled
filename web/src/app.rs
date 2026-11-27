@@ -1300,6 +1300,55 @@ mod shell_tests {
     }
 
     #[test]
+    fn a_changed_session_hides_the_old_history_and_leaving_discards_it() -> Result<(), String> {
+        use portal_types::live::{ConversationCursor, ConversationUpdate};
+
+        let address = AgentAddress::local("pane");
+        let mut selection = LiveSelection::default();
+        selection.select(Some(address.clone()));
+        selection.receive(ServerFrame::Conversation {
+            id: selection.id,
+            update: Box::new(ConversationUpdate::Reset {
+                cursor: ConversationCursor {
+                    token: "epoch".into(),
+                    revision: 1,
+                },
+                session: "native".into(),
+                turns: Vec::new(),
+                truncated: false,
+            }),
+        });
+        let snapshot = selection
+            .conversations
+            .snapshot(&address)
+            .ok_or("the reset stored no history")?;
+        assert!(selection.session_matches(&snapshot));
+        selection.receive(ServerFrame::Agent {
+            id: selection.id,
+            event: Box::new(AgentEvent {
+                revisions: None,
+                pending: None,
+                session: DetailSession::Available("other".into()),
+                kind: "pane.agent_status_changed".into(),
+                pane: "pane".into(),
+                state: None,
+                blocked: None,
+            }),
+        });
+        assert!(!selection.session_matches(&snapshot));
+        selection.select(None);
+        selection.select(Some(address));
+        assert!(matches!(
+            selection.command(),
+            ClientFrame::Open {
+                conversation: None,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn portal_publications_and_status_keep_stream_order() -> Result<(), String> {
         use portal_types::{PortalAvailability, PortalSnapshot, PortalStatus};
 
