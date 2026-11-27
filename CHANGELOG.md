@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.44.0](https://github.com/oisin-ee/dogsled/compare/v0.43.3...v0.44.0) (2026-11-27)
+
+
+### Features
+
+* **autonomy:** refuse and release owner requests ([#456](https://github.com/oisin-ee/dogsled/issues/456)) ([09ac15c](https://github.com/oisin-ee/dogsled/commit/09ac15cf61b8eeb1deeffaaa9f5b895b12de4ab7))
+* **autonomy:** resolve and publish agent autonomy ([#454](https://github.com/oisin-ee/dogsled/issues/454)) ([5c04de7](https://github.com/oisin-ee/dogsled/commit/5c04de79036131ecfd42558f5760104262d50281))
+* **autonomy:** store switches and record agent decisions ([#451](https://github.com/oisin-ee/dogsled/issues/451)) ([23e54de](https://github.com/oisin-ee/dogsled/commit/23e54dec76c25eb2ebe739f000f94489b7fe677e))
+* **leads:** accept a lead start durably and run it in the service ([#464](https://github.com/oisin-ee/dogsled/issues/464)) ([dc14f17](https://github.com/oisin-ee/dogsled/commit/dc14f17db2f9959e2f0506dd08f85aab93aab3c6))
+* **portal-types:** add autonomy and decision wire types ([#447](https://github.com/oisin-ee/dogsled/issues/447)) ([c55c4ff](https://github.com/oisin-ee/dogsled/commit/c55c4ff1ce32779ead1ff0880ec80b0548c670c3))
+* **portal:** accept a lead start at once and open its thread on Send ([#465](https://github.com/oisin-ee/dogsled/issues/465)) ([1bc998d](https://github.com/oisin-ee/dogsled/commit/1bc998d4dc6e5794ba948e700ff4b61984e6e639))
+* **portal:** add autonomy switches and the Decisions tab ([#452](https://github.com/oisin-ee/dogsled/issues/452)) ([405b571](https://github.com/oisin-ee/dogsled/commit/405b571e997754549537c1b649556a7f78927dfb))
+* **portal:** apply conversation updates from the live socket ([#461](https://github.com/oisin-ee/dogsled/issues/461)) ([a21662d](https://github.com/oisin-ee/dogsled/commit/a21662d0080c9ad587e89943779bb0bd5aea1fe8))
+* **portal:** attach images dropped on the composer ([#441](https://github.com/oisin-ee/dogsled/issues/441)) ([bf5b886](https://github.com/oisin-ee/dogsled/commit/bf5b8861294ba3a28d3d42264dd65e46fb58276c))
+* **portal:** carry live updates on one WebSocket per tab ([#450](https://github.com/oisin-ee/dogsled/issues/450)) ([d0e5957](https://github.com/oisin-ee/dogsled/commit/d0e5957ec4a9da70626d24f674025d596638cb37))
+* **portal:** send conversation updates on the live socket ([#460](https://github.com/oisin-ee/dogsled/issues/460)) ([bc9f1aa](https://github.com/oisin-ee/dogsled/commit/bc9f1aaf794ed077fa9a09b397a548a3e7d05211))
+
+
+### Bug Fixes
+
+* **autonomy:** repair the faults of the real run ([#459](https://github.com/oisin-ee/dogsled/issues/459)) ([747fb55](https://github.com/oisin-ee/dogsled/commit/747fb55c3d4e86fcf1029aaae4c7d54a272a22d5))
+* **jobs:** let stop end a job whose dispatch failed ([#467](https://github.com/oisin-ee/dogsled/issues/467)) ([2978f48](https://github.com/oisin-ee/dogsled/commit/2978f485dcb974e55d7d9cc20999023d882cd5f1)), closes [#463](https://github.com/oisin-ee/dogsled/issues/463)
+* **portal:** hold one detail subscription per selected local agent ([#462](https://github.com/oisin-ee/dogsled/issues/462)) ([2a73cfb](https://github.com/oisin-ee/dogsled/commit/2a73cfbf0f00879e73e252c0d54b28ae5eb9dfe1))
+* **portal:** name the hosts that ignore the autonomy switches ([#455](https://github.com/oisin-ee/dogsled/issues/455)) ([cf57ba3](https://github.com/oisin-ee/dogsled/commit/cf57ba30d1f8ce34c78a05a52083e4df44f8e632))
+
+
+### Performance Improvements
+
+* **observation:** read a transcript when its file changes ([#453](https://github.com/oisin-ee/dogsled/issues/453)) ([046d055](https://github.com/oisin-ee/dogsled/commit/046d05533e1987efa58c9d06a556a43429e90f32))
+* **serve:** read Herdr over its socket and sample CPU without a sleep ([#457](https://github.com/oisin-ee/dogsled/issues/457)) ([b10ed7c](https://github.com/oisin-ee/dogsled/commit/b10ed7c01ca5dd8675a23777f159111319ea6bb1))
+
 ## [0.43.3](https://github.com/oisin-ee/dogsled/compare/v0.43.2...v0.43.3) (2026-11-26)
 
 
