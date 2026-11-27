@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use portal_types::questions::{AskBody, Responses};
+use portal_types::questions::AskBody;
 use portal_types::reviews::{DecisionEvent, SubmitBody};
 use tokio::sync::watch;
 
@@ -113,9 +113,11 @@ async fn interview(
     shell: &dyn Shell,
     body: AskBody,
     timeout: Option<Duration>,
-) -> Result<Option<Responses>> {
+) -> Result<Option<serde_json::Value>> {
     let pane = query_value(&body.pane);
-    let id = state.questions.create(body).await?;
+    let Some(id) = state.questions.create_interactive(body).await? else {
+        return Ok(Some(serde_json::json!({ "released": true })));
+    };
     let url = format!(
         "http://127.0.0.1:{}/?question={id}&pane={pane}&host=local",
         state.port
@@ -139,7 +141,8 @@ async fn interview(
         () = super::shutdown() => Poll::Gone,
     };
     match answer {
-        Poll::Answered(answers) => Ok(Some(answers)),
+        Poll::Answered(answers) => Ok(Some(serde_json::to_value(answers)?)),
+        Poll::Released => Ok(Some(serde_json::json!({ "id": id, "released": true }))),
         Poll::Timeout | Poll::Gone => {
             state.questions.withdraw(&id).await?;
             Ok(None)
@@ -151,7 +154,7 @@ async fn interview(
 async fn review(state: &AppState, shell: &dyn Shell, body: SubmitBody) -> Result<DecisionEvent> {
     let session = body.session.clone();
     let pane = query_value(&body.pane);
-    let submitted = reviews::submit_plan(&state.web, body).await?;
+    let submitted = reviews::submit_plan(&state.web, shell, &body)?;
     let url = format!(
         "http://127.0.0.1:{}/?review={}&pane={pane}&host=local",
         state.port, submitted.id
@@ -409,7 +412,7 @@ mod tests {
         let _ = server.await;
         posted?;
         let answers = answers?.ok_or_else(|| Error::Invalid("no answer".to_owned()))?;
-        assert_eq!(serde_json::to_value(answers)?["responses"][0]["value"], "B");
+        assert_eq!(answers["responses"][0]["value"], "B");
         std::fs::remove_dir_all(ledger.dir)?;
         Ok(())
     }

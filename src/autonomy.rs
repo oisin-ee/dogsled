@@ -206,14 +206,119 @@ impl PublishedAutonomy {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the autonomy enforcement unit")
-)]
+/// Serialize request admission with the switch-on sweep. A request that saw an older
+/// publication must commit before the sweep lists pending requests.
+pub(crate) const REQUEST_LOCK: &str = "autonomy-requests";
+
 pub(crate) fn cause_of(ledger: &Ledger, pane: &str) -> Result<Option<AutonomyCause>> {
     use crate::observation::{ipc, read};
-    let published = ipc::Client::at(&ledger.dir).current(&ipc::Select::views([VIEW]))?;
+    if pane.is_empty() {
+        return Ok(None);
+    }
+    // A standalone server (or a service that has not published yet) has no cause.
+    let Some(published) =
+        ipc::Client::at(&ledger.dir).current_if_published(&ipc::Select::views([VIEW]))?
+    else {
+        return Ok(None);
+    };
+    if !published.views.contains_key(VIEW) {
+        return Ok(None);
+    }
     Ok(read::view::<PublishedAutonomy>(&published, VIEW)?.cause_of(pane))
+}
+
+pub(crate) type Panes = BTreeMap<String, AutonomyCause>;
+
+/// Settle requests and notify only on effective changes, not on a change of cause.
+pub(crate) fn apply_changes(
+    ledger: &Ledger,
+    shell: &dyn Shell,
+    questions: &crate::web::store::Store,
+    before: Option<&Panes>,
+    after: &Panes,
+    now: u64,
+) -> Result<()> {
+    let enabled: Vec<_> = after
+        .keys()
+        .filter(|pane| before.is_none_or(|old| !old.contains_key(*pane)))
+        .collect();
+    let disabled: Vec<_> = before
+        .into_iter()
+        .flat_map(Panes::keys)
+        .filter(|pane| !after.contains_key(*pane))
+        .collect();
+    if enabled.is_empty() && disabled.is_empty() {
+        return Ok(());
+    }
+    let mut requested = std::collections::BTreeSet::new();
+    let agents = ledger.with_lock(REQUEST_LOCK, || {
+        // List after taking the same lock as create and submit_plan. They cannot insert
+        // a request based on the previous publication after this point.
+        if !enabled.is_empty() {
+            for question in crate::web::store::pending(ledger)? {
+                if enabled.contains(&&question.pane) && questions.release(&question.id, now)? {
+                    requested.insert(question.pane);
+                }
+            }
+        }
+        let reviews = if enabled.is_empty() {
+            Vec::new()
+        } else {
+            crate::web::reviews::pending(ledger)?
+        };
+        if before.is_none() && reviews.is_empty() {
+            return Ok(Vec::new());
+        }
+        let agents = crate::probe::agent_list(shell)?;
+        for review in reviews
+            .iter()
+            .filter(|review| enabled.contains(&&review.pane))
+        {
+            if let Some(agent) = agents.iter().find(|agent| agent.pane == review.pane)
+                && crate::web::reviews::approve_autonomous(ledger, review, agent, now)?
+            {
+                requested.insert(review.pane.clone());
+            }
+        }
+        Ok(agents)
+    })?;
+    if before.is_none() {
+        return Ok(());
+    }
+    for agent in agents {
+        let text = if enabled.contains(&&agent.pane)
+            && (agent.state == "working" || requested.contains(&agent.pane))
+        {
+            format!(
+                "Autonomous mode is now on. {}",
+                crate::context::AUTONOMOUS_RULE
+            )
+        } else if disabled.contains(&&agent.pane) && agent.state == "working" {
+            "Autonomous mode is now off. Ask your owner again when a question is open.".into()
+        } else {
+            continue;
+        };
+        let Some(terminal) = agent.terminal_id else {
+            continue;
+        };
+        let record = inbox::Record {
+            id: crate::ledger::new_id(),
+            terminal,
+            pane: agent.pane.clone(),
+            from: inbox::Sender::dogsled(),
+            kind: "message".into(),
+            text,
+            created_ms: now,
+            state: inbox::State::Pending,
+            lease: crate::backoff::Backoff::default(),
+            reason: None,
+            done_ms: None,
+        };
+        if let Err(error) = inbox::deliver(ledger, shell, record) {
+            eprintln!("dogsled autonomy notice for {}: {error}", agent.pane);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn record(
@@ -238,6 +343,19 @@ fn record_observed(
     now: u64,
     observe: impl FnOnce() -> Result<crate::probe::Agent>,
 ) -> Result<DecisionView> {
+    let (decision, session) = prepare_record(ledger, body, source, review, now, observe)?;
+    store::write(ledger, |tx| save_record(tx, &decision, &session))?;
+    Ok(decision)
+}
+
+pub(crate) fn prepare_record(
+    ledger: &Ledger,
+    body: &DecideBody,
+    source: DecisionSource,
+    review: Option<&str>,
+    now: u64,
+    observe: impl FnOnce() -> Result<crate::probe::Agent>,
+) -> Result<(DecisionView, String)> {
     if let Some(reason) = body.refusal() {
         return Err(Error::Invalid(reason));
     }
@@ -279,27 +397,32 @@ fn record_observed(
         alternatives: body.alternatives.clone(),
         review: review.map(str::to_owned),
     };
-    store::write(ledger, |tx| {
-        tx.execute(
+    Ok((decision, session.to_owned()))
+}
+
+pub(crate) fn save_record(
+    tx: &rusqlite::Transaction<'_>,
+    decision: &DecisionView,
+    session: &str,
+) -> Result<()> {
+    tx.execute(
             "INSERT INTO autonomy_decisions
              (id, pane, session, name, owner_host, owner_pane, created_ms, source, title, decision, why, question, alternatives, review)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 decision.id, decision.pane, session, decision.name, decision.owner_host,
-                decision.owner_pane, rows::integer(now)?, rows::name(&decision.source)?,
+                decision.owner_pane, rows::integer(decision.created_ms)?, rows::name(&decision.source)?,
                 decision.title, decision.decision, decision.why, decision.question,
                 decision.alternatives, decision.review,
             ],
         )?;
-        tx.execute(
-            "DELETE FROM autonomy_decisions WHERE seq <= (
+    tx.execute(
+        "DELETE FROM autonomy_decisions WHERE seq <= (
                  SELECT seq FROM autonomy_decisions ORDER BY seq DESC LIMIT 1 OFFSET 100
              )",
-            [],
-        )?;
-        Ok(())
-    })?;
-    Ok(decision)
+        [],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn decisions(ledger: &Ledger, pane: Option<&str>) -> Result<Vec<DecisionView>> {
@@ -330,6 +453,39 @@ pub(crate) fn decisions(ledger: &Ledger, pane: Option<&str>) -> Result<Vec<Decis
         }
         Ok(decisions)
     })
+}
+
+#[cfg(test)]
+pub(crate) fn test_publication(
+    ledger: &Ledger,
+    pane: &str,
+) -> (
+    crate::observation::ipc::Server,
+    crate::observation::Publisher,
+) {
+    use crate::observation::{Publication, Publisher, ipc};
+    let mut publisher = Publisher::new().unwrap();
+    let mut server = ipc::Server::new(&ledger.dir).unwrap();
+    server.bind(publisher.subscribe()).unwrap();
+    publisher
+        .replace(Publication {
+            published_ms: 1,
+            sources: crate::observation::Sources::default(),
+            local: BTreeMap::new(),
+            views: BTreeMap::from([(
+                VIEW.into(),
+                serde_json::json!({
+                    "data": PublishedAutonomy {
+                        panes: BTreeMap::from([(pane.into(), AutonomyCause::Agent)]),
+                        decisions: Vec::new(),
+                    },
+                    "gaps": [],
+                }),
+            )]),
+            gaps: Vec::new(),
+        })
+        .unwrap();
+    (server, publisher)
 }
 
 #[cfg(test)]
@@ -440,6 +596,7 @@ mod tests {
             answers: None,
             rejection: None,
             answered_ms: None,
+            released: false,
         };
         let answered = Entry {
             pending: Pending {
@@ -453,6 +610,7 @@ mod tests {
             }]),
             rejection: None,
             answered_ms: Some(2),
+            released: false,
         };
         let tx = conn.transaction()?;
         questions::put(&tx, &pending)?;
@@ -525,6 +683,78 @@ mod tests {
         );
         set_agent(&ledger, "p1", "new", false, 7)?;
         assert_eq!(agents(&ledger)?, [("p2".into(), "other".into())]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn autonomy_switch_on_releases_requests_and_queues_one_notice() -> Result<()> {
+        let ledger = Ledger::temporary();
+        let questions = crate::web::store::Store::new(ledger.clone());
+        let shell = crate::shell::Fake::new();
+        shell.on("herdr agent list", r#"{"result":{"agents":[{"pane_id":"w1:p1","terminal_id":"term_a","agent":"pi","agent_status":"idle","agent_session":{"kind":"path","value":"session"}}]}}"#);
+        crate::host_store::put_snapshot(
+            &ledger,
+            &serde_json::from_value(serde_json::json!({
+                "sampled_ms": 1,
+                "probe": {
+                    "host":"local", "label":"local", "load1":0.0, "cores":1,
+                    "memory":{"used_bytes":0,"total_bytes":1}, "disk_free_percent":50.0,
+                    "agents":{"total":1,"by_status":{"idle":1}},
+                    "agent_panes": crate::probe::agent_list(&shell)?, "reservations":[], "panes":[],
+                }
+            }))?,
+        )?;
+        inbox::claim(
+            &ledger,
+            "term_a",
+            &inbox::Reader {
+                harness: "pi".into(),
+                pane: "w1:p1".into(),
+                registered_ms: 1,
+            },
+            1,
+        )?;
+        let body: portal_types::questions::AskBody = serde_json::from_value(serde_json::json!({
+            "pane": "w1:p1", "session": "session", "cwd": "/repo",
+            "questions": { "questions": [{ "id": "q", "type": "text", "question": "Which?" }] },
+        }))?;
+        let startup = questions.create(body.clone()).await?;
+        let on = Panes::from([("w1:p1".into(), AutonomyCause::Agent)]);
+        apply_changes(&ledger, &shell, &questions, None, &on, 2)?;
+        assert_eq!(
+            questions.wait(&startup, std::time::Duration::ZERO).await?,
+            crate::web::store::Poll::Released
+        );
+        assert_eq!(inbox::received(&ledger, "term_a")?, []);
+
+        let id = questions.create(body).await?;
+        let plan = crate::web::reviews::submit_plan(
+            &ledger,
+            &shell,
+            &portal_types::reviews::SubmitBody {
+                pane: "w1:p1".into(),
+                session: "session".into(),
+                cwd: "/repo".into(),
+                path: "plans/one.md".into(),
+                content: "a plan".into(),
+            },
+        )?;
+        let off = Panes::new();
+        apply_changes(&ledger, &shell, &questions, Some(&off), &on, 3)?;
+        apply_changes(&ledger, &shell, &questions, Some(&on), &on, 4)?;
+        assert_eq!(
+            questions.wait(&id, std::time::Duration::ZERO).await?,
+            crate::web::store::Poll::Released
+        );
+        assert_eq!(questions.list().await?, []);
+        assert_eq!(crate::web::reviews::pending(&ledger)?, []);
+        let decisions = decisions(&ledger, Some("w1:p1"))?;
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].review.as_deref(), Some(plan.id.as_str()));
+        let messages = inbox::received(&ledger, "term_a")?;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from.name.as_deref(), Some("dogsled"));
+        assert!(messages[0].text.starts_with("Autonomous mode is now on. "));
         Ok(())
     }
 

@@ -75,6 +75,15 @@ pub fn format(
     ))
 }
 
+pub(crate) const AUTONOMOUS_RULE: &str = concat!(
+    "Your owner is away. ",
+    "Do not ask your owner a question and do not wait for an approval. ",
+    "For each open question, choose the most reasonable option from the plan, the request, and the code. ",
+    "Record each choice with the decide tool before you act on it. ",
+    "Stop only when you need something that only your owner has: credentials, access, or payment. ",
+    "Then end the turn and say what you need.",
+);
+
 fn text(
     harness: Harness,
     event: Event,
@@ -105,14 +114,9 @@ fn text(
         );
     }
     if autonomous {
-        text.push_str(concat!(
-            "Autonomous mode is on. Your owner is away. ",
-            "Do not ask your owner a question and do not wait for an approval. ",
-            "For each open question, choose the most reasonable option from the plan, the request, and the code. ",
-            "Record each choice with the decide tool before you act on it. ",
-            "Stop only when you need something that only your owner has: credentials, access, or payment. ",
-            "Then end the turn and say what you need.\n",
-        ));
+        text.push_str("Autonomous mode is on. ");
+        text.push_str(AUTONOMOUS_RULE);
+        text.push('\n');
     }
     match harness {
         Harness::Pi => text,

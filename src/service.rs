@@ -444,7 +444,8 @@ fn publish(
 
 struct Observation {
     publisher: crate::observation::Publisher,
-    _server: crate::observation::ipc::Server,
+    server: crate::observation::ipc::Server,
+    autonomy: Option<crate::autonomy::Panes>,
     collector: crate::observation::collect::Collector,
     exchange: Exchange,
     _commits: Option<wake::Commits>,
@@ -478,7 +479,8 @@ impl Observation {
         };
         Ok(Self {
             publisher,
-            _server: server,
+            server,
+            autonomy: None,
             collector,
             exchange: Exchange {
                 peers: crate::observation::peers_runtime::Observers::default(),
@@ -592,7 +594,25 @@ impl Observation {
             (domains, once),
             &mut self.exchange,
             &fleet,
-        )
+        )?;
+        let published = self.publisher.current()?;
+        if let Ok(view) = crate::observation::read::view::<crate::autonomy::PublishedAutonomy>(
+            &published,
+            crate::autonomy::VIEW,
+        ) {
+            match crate::autonomy::apply_changes(
+                node.ledger,
+                node.shell,
+                self.server.questions(),
+                self.autonomy.as_ref(),
+                &view.panes,
+                now_ms(),
+            ) {
+                Ok(()) => self.autonomy = Some(view.panes),
+                Err(error) => eprintln!("dogsled autonomy requests: {error}"),
+            }
+        }
+        Ok(())
     }
 }
 

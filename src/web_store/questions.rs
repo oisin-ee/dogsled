@@ -45,6 +45,7 @@ pub(crate) fn get(tx: &Transaction<'_>, id: &str) -> Result<Option<Entry>> {
         answers,
         rejection: text(row, "rejection_reason")?.map(|reason| Rejection { reason }),
         answered_ms: rows::number(row, "answered_ms")?,
+        released: state == "released",
     }))
 }
 
@@ -52,10 +53,13 @@ pub(crate) fn put(tx: &Transaction<'_>, entry: &Entry) -> Result<()> {
     let pending = &entry.pending;
     if !crate::web::store::valid_id(&pending.id)
         || (entry.answers.is_some() && entry.rejection.is_some())
+        || (entry.released && (entry.answers.is_some() || entry.rejection.is_some()))
     {
         return Err(Error::Invalid("invalid question record".into()));
     }
-    let state = if entry.rejection.is_some() {
+    let state = if entry.released {
+        "released"
+    } else if entry.rejection.is_some() {
         "rejected"
     } else if entry.answers.is_some() {
         "answered"
@@ -97,6 +101,13 @@ pub(crate) fn put(tx: &Transaction<'_>, entry: &Entry) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn release(tx: &Transaction<'_>, id: &str, now: u64) -> Result<bool> {
+    Ok(tx.execute(
+        "UPDATE web_questions SET state = 'released', answered_ms = ?2 WHERE id = ?1 AND state = 'pending'",
+        rusqlite::params![id, rows::integer(now)?],
+    )? != 0)
 }
 
 pub(crate) fn remove(tx: &Transaction<'_>, id: &str) -> Result<bool> {
